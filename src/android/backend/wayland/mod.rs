@@ -92,12 +92,15 @@ impl WaylandBackend {
         self.reset_touch_state();
         if self.pointer_pressed {
             let time = self.clock.now().as_millis() as u32;
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.compositor.pointer.button(
                 &mut self.compositor.state,
-                smithay::utils::SERIAL_COUNTER.next_serial(),
-                time,
-                0x110, // BTN_LEFT
-                smithay::backend::input::ButtonState::Released,
+                &smithay::input::pointer::ButtonEvent {
+                    button: 0x110, // BTN_LEFT
+                    state: smithay::backend::input::ButtonState::Released,
+                    serial,
+                    time,
+                },
             );
             self.compositor.pointer.frame(&mut self.compositor.state);
             self.pointer_pressed = false;
