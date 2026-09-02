@@ -26,6 +26,11 @@ not as a process-name heuristic.
    normal release startup; diagnostic builds may set it to `1`. Ptrace/gdb
    denial falls back to the real KWin exactly once and SIGSEGV/SIGABRT text is
    parsed independently of gdb's exit code.
+   Diagnostic provisioning also installs `gdb`/`gcc` when requested and
+   builds `assets/localdesktop-crash-handler.c` as an in-process preload. The
+   handler records attempt/PID, fault registers, loader maps and a best-effort
+   glibc backtrace even when nested gdb cannot attach; its absence is logged
+   as a non-fatal capability limitation.
 6. Use `assets/localdesktop-recovery.sh` and its generated labwc autostart.
    The UI is kdialog-only (retry or view captured logs); it never launches
    Konsole automatically. Install the supplied Konsole profile files for

@@ -34,6 +34,7 @@
     <script>
       const params = new URLSearchParams(location.search);
       const port = params.get("port");
+      const token = params.get("token");
       const progress = document.getElementById("progress");
       const status = document.getElementById("status");
       const error = document.getElementById("error");
@@ -47,7 +48,9 @@
         logs.textContent = `${line}\n${logs.textContent}`.slice(0, 16000);
       }
       function send(action) {
-        if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ action }));
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ action, token }));
+        }
       }
       function handle(data) {
         if (typeof data.progress === "number") progress.value = data.progress;
@@ -59,7 +62,7 @@
       if (port) {
         socket = new WebSocket(`ws://127.0.0.1:${port}`, "rust-websocket");
         socket.onmessage = event => { try { handle(JSON.parse(event.data)); } catch (_) {} };
-        socket.onopen = () => append("Connected to installer");
+        socket.onopen = () => { append("Connected to installer"); send("hello"); };
         socket.onerror = () => { error.hidden = false; error.textContent = "The installer connection was lost. Reopen Local Desktop to retry."; retryButton.hidden = false; };
         socket.onclose = () => append("Installer connection closed");
       }

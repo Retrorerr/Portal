@@ -2,7 +2,8 @@ use crate::android::{
     accessibility,
     backend::wayland::{
         compositor::{send_frames_surface_tree, ClientState, State},
-        write_guest_output_state, CentralizedEvent, TouchMode, WaylandBackend,
+        write_guest_output_state, AndroidFrameTimestampSample, AndroidFrameTimestampSupport,
+        CentralizedEvent, PendingKwinPresentation, TouchMode, WaylandBackend,
     },
 };
 use crate::core::wayland_protocol::{FrameEvent, FrameTrace};
@@ -411,7 +412,120 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
     }
 }
 
+fn complete_kwin_android_presentation(
+    backend: &mut WaylandBackend,
+    sample: AndroidFrameTimestampSample,
+) {
+    let Some(pending) = backend.pending_kwin_presentation else {
+        log::debug!(
+            "Android display-present sample has no KWin readiness candidate: egl_frame_id={} timestamp_ns={}",
+            sample.frame_id,
+            sample.timestamp_ns
+        );
+        return;
+    };
+
+    if sample.frame_id < pending.egl_frame_id {
+        // A non-KWin frame can complete first; keep waiting for the exact
+        // frame id that contained the identified KWin surface.
+        return;
+    }
+    if sample.frame_id > pending.egl_frame_id {
+        // The EGL implementation retired the pending id before it became
+        // queryable. Never let a later frame satisfy the old generation.
+        backend.pending_kwin_presentation = None;
+        crate::android::diagnostics::host_event(
+            "wayland-readiness",
+            &format!(
+                "stage=kwin-frame-timestamp-lost generation={} expected_egl_frame_id={} observed_egl_frame_id={}",
+                pending.generation, pending.egl_frame_id, sample.frame_id
+            ),
+        );
+        return;
+    }
+
+    backend.pending_kwin_presentation = None;
+    if backend.compositor.state.kwin_generation != Some(pending.generation) {
+        log::debug!(
+            "Ignoring Android display-present sample from stale KWin generation={} egl_frame_id={}",
+            pending.generation,
+            sample.frame_id
+        );
+        return;
+    }
+
+    if let Some(generation) = backend
+        .compositor
+        .state
+        .mark_kwin_frame_presented_with_evidence(
+            "egl-android-display-present",
+            Some(sample.timestamp_ns),
+        )
+    {
+        let surface_count = backend
+            .compositor
+            .state
+            .xdg_shell_state
+            .toplevel_surfaces()
+            .len();
+        let client_count = backend.compositor.clients.len();
+        crate::android::diagnostics::mark_plasma_frame_presented_for_generation_with_evidence(
+            surface_count,
+            client_count,
+            generation,
+            "egl-android-display-present",
+            Some(sample.timestamp_ns),
+        );
+    }
+}
+
+fn complete_kwin_presentation_without_android_timestamp(
+    backend: &mut WaylandBackend,
+    generation: u64,
+) {
+    if backend.pending_kwin_presentation.is_some() {
+        return;
+    }
+    if let Some(generation) = backend
+        .compositor
+        .state
+        .mark_kwin_frame_presented_with_evidence(
+            "egl-swap-and-wayland-feedback-no-frame-timestamp",
+            None,
+        )
+    {
+        let surface_count = backend
+            .compositor
+            .state
+            .xdg_shell_state
+            .toplevel_surfaces()
+            .len();
+        let client_count = backend.compositor.clients.len();
+        crate::android::diagnostics::mark_plasma_frame_presented_for_generation_with_evidence(
+            surface_count,
+            client_count,
+            generation,
+            "egl-swap-and-wayland-feedback-no-frame-timestamp",
+            None,
+        );
+    }
+}
+
 fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
+    // Android reports the physical display-present timestamp asynchronously.
+    // Poll every sample rather than just the first one: unrelated frames can
+    // be queued ahead of the KWin frame, and dropping a valid sample would
+    // make the exact EGL/KWin correlation nondeterministic.
+    let timestamp_samples = {
+        let Some(winit) = backend.graphic_renderer.as_mut() else {
+            return Ok(());
+        };
+        winit.poll_android_frame_timestamps()
+    };
+    for sample in timestamp_samples {
+        complete_kwin_android_presentation(backend, sample);
+    }
+
     let Some(winit) = backend.graphic_renderer.as_mut() else {
         return Ok(());
     };
@@ -455,6 +569,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .display
             .flush_clients()
             .map_err(|error| format!("Failed to flush clients: {error}"))?;
+        compositor.observe_kwin_surfaces();
         compositor.sync_data_device_focus();
         record_protocol_event(&mut frame_trace, FrameEvent::Dispatch);
     }
@@ -462,6 +577,8 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     // Keep the render elements alive through submit().  Smithay releases a client wl_buffer
     // when its last render-element reference is dropped; releasing it before the EGL swap can
     // let KWin reuse a shm buffer while the Android renderer is still consuming its texture.
+    let mut kwin_surface_rendered = false;
+    let mut kwin_feedback_requested = false;
     let rendered_elements = {
         let (renderer, mut framebuffer) = winit
             .bind()
@@ -469,22 +586,29 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
 
         let compositor = &mut backend.compositor;
 
-        let mut elements = compositor
+        let toplevels = compositor
             .state
             .xdg_shell_state
             .toplevel_surfaces()
-            .iter()
-            .flat_map(|surface| {
+            .to_vec();
+        let mut elements = Vec::new();
+        for surface in &toplevels {
+            let surface_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
-                    renderer,
-                    surface.wl_surface(),
-                    (0, 0),
-                    1.0,
-                    1.0,
-                    Kind::Unspecified,
-                )
-            })
-            .collect::<Vec<WaylandSurfaceRenderElement<GlesRenderer>>>();
+                renderer,
+                surface.wl_surface(),
+                (0, 0),
+                1.0,
+                1.0,
+                Kind::Unspecified,
+            );
+            if compositor.state.is_known_kwin_surface(surface.wl_surface())
+                && !surface_elements.is_empty()
+            {
+                kwin_surface_rendered = true;
+            }
+            elements.extend(surface_elements);
+        }
 
         let cursor_surface = match &compositor.state.cursor_image {
             CursorImageStatus::Surface(surface) if surface.alive() => Some(surface.clone()),
@@ -525,10 +649,18 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .finish()
             .map_err(|error| format!("Failed to finish frame: {error:?}"))?;
 
-        for surface in compositor.state.xdg_shell_state.toplevel_surfaces() {
-            presentation_feedbacks.extend(take_presentation_feedbacks_surface_tree(
-                surface.wl_surface(),
-            ));
+        for surface in &toplevels {
+            let surface_feedbacks = take_presentation_feedbacks_surface_tree(surface.wl_surface());
+            if compositor.state.is_known_kwin_surface(surface.wl_surface())
+                && !surface_feedbacks.is_empty()
+            {
+                // KWin queues one FrameData entry containing both its
+                // presentation feedback and wl_surface.frame callback before
+                // committing the output root. This bit ties readiness to that
+                // specific KWin output surface, not to a recovery client.
+                kwin_feedback_requested = true;
+            }
+            presentation_feedbacks.extend(surface_feedbacks);
         }
         if let Some(surface) = &cursor_surface {
             // Cursor surfaces are not children of the xdg toplevel tree, but they can also
@@ -543,9 +675,10 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
 
     // It is important that all events on the display have been dispatched and flushed to clients
     // before swapping buffers because this operation may block.
-    winit
+    let submitted_frame_id = winit
         .submit(Some(&[damage]))
         .map_err(|error| format!("Failed to submit frame: {error}"))?;
+    let timestamp_support = winit.android_frame_timestamp_support();
     record_protocol_event(&mut frame_trace, FrameEvent::Submit);
 
     // The host has now submitted the frame represented by rendered_elements.  Do not release
@@ -575,8 +708,55 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                 presentation_time,
                 refresh,
                 backend.presentation_sequence,
-                smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
+                // The Android EGL swap is not, by itself, proof that the
+                // display hardware synchronized or latched this content. Do
+                // not advertise the protocol's hardware/vsync flags until a
+                // real Android frame-timestamp sample is available.
+                smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
             );
+        }
+        if kwin_surface_rendered && kwin_feedback_requested {
+            let generation = backend.compositor.state.kwin_frame_generation();
+            match (
+                submitted_frame_id,
+                generation,
+                timestamp_support,
+            ) {
+                (Some(egl_frame_id), Some(generation), _) => {
+                    if backend.pending_kwin_presentation.is_none() {
+                        backend.pending_kwin_presentation = Some(PendingKwinPresentation {
+                            generation,
+                            egl_frame_id,
+                        });
+                        crate::android::diagnostics::host_event(
+                            "wayland-readiness",
+                            &format!(
+                                "stage=kwin-frame-awaiting-android-present generation={} egl_frame_id={egl_frame_id}",
+                                generation
+                            ),
+                        );
+                    } else {
+                        log::debug!(
+                            "wayland.readiness already awaiting Android presentation for a KWin frame"
+                        );
+                    }
+                }
+                // If the device does not expose the Android timestamp
+                // extension, retain the best protocol-level proof but make it
+                // explicit that this is not a hardware scanout measurement.
+                (None, Some(generation), AndroidFrameTimestampSupport::Unsupported) => {
+                    complete_kwin_presentation_without_android_timestamp(backend, generation);
+                }
+                (_, None, _) => {
+                    // A disconnected or superseded KWin surface cannot make
+                    // the current launch ready, even if EGL accepted a frame.
+                }
+                (None, _, support) => {
+                    log::debug!(
+                        "No Android EGL frame id for KWin readiness candidate; timestamp_support={support:?}"
+                    );
+                }
+            }
         }
         record_protocol_event(&mut frame_trace, FrameEvent::Presented);
     } else {

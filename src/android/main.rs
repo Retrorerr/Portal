@@ -2,10 +2,13 @@ use crate::{
     android::{
         accessibility::{register_event_loop_proxy, AppUserEvent},
         app::build::PolarBearApp,
+        diagnostics,
+        ime,
         utils::{
             application_context::ApplicationContext,
             fullscreen_immersive::{enable_fullscreen_immersive_mode, keep_screen_on},
             ndk::run_in_jvm,
+            webview_handoff,
         },
     },
     core::config,
@@ -19,17 +22,22 @@ use winit::{
 #[no_mangle]
 fn android_main(android_app: AndroidApp) {
     std::env::set_var("RUST_BACKTRACE", "full");
-    let _guard = sentry::init((
-        config::SENTRY_DSN,
-        sentry::ClientOptions {
-            release: sentry::release_name!(),
-            // Capture user IPs and potentially sensitive headers when using HTTP server integrations
-            // see https://docs.sentry.io/platforms/rust/data-management/data-collected for more info
-            send_default_pii: true,
-            enable_logs: true,
-            ..Default::default()
-        },
-    ));
+    // Diagnostics are deliberately local and user-exported. Keep the Sentry
+    // integration available for builds that opt in later, but do not attach a
+    // hard-coded DSN or forward guest/session logs and PII automatically.
+    let _guard = sentry::init(sentry::ClientOptions {
+        dsn: None,
+        release: sentry::release_name!(),
+        send_default_pii: false,
+        enable_logs: false,
+        ..Default::default()
+    });
+
+    // Build the context before touching the persistent diagnostic paths.  The
+    // context owns the app-private directory used by diagnostics, and this
+    // call must happen before any setup/PRoot worker can emit guest events.
+    ApplicationContext::build(&android_app);
+    diagnostics::initialize();
 
     // Wrap the Android logger with Sentry's logger
     let logger = SentryLogger::with_dest(android_logger::AndroidLogger::default()).filter(|md| {
@@ -49,25 +57,38 @@ fn android_main(android_app: AndroidApp) {
     });
 
     #[cfg(debug_assertions)] // Enable verbose logging in debug builds
-    let log_level = log::LevelFilter::Trace;
+    // Keep the persistent host tee useful for startup/crash evidence without
+    // recording every Smithay/EGL frame at trace level. Guest protocol detail
+    // is enabled independently through WAYLAND_DEBUG in the KWin launcher.
+    let log_level = log::LevelFilter::Debug;
     #[cfg(not(debug_assertions))]
     let log_level = log::LevelFilter::Info;
-    if log::set_boxed_logger(Box::new(logger)).is_ok() {
+    // Keep a copy in diagnostics/host.log even when Android logcat is
+    // unavailable (or a release build is running with logcat filtering).
+    if log::set_boxed_logger(Box::new(diagnostics::HostLogTee::new(Box::new(logger)))).is_ok() {
         log::set_max_level(log_level);
     } else {
         android_logger::init_once(android_logger::Config::default().with_max_level(log_level));
     }
 
-    ApplicationContext::build(&android_app);
-
     run_in_jvm(enable_fullscreen_immersive_mode, android_app.clone());
     run_in_jvm(keep_screen_on, android_app.clone());
+
+    // Resolve the bundled bridge once from the NativeActivity-attached thread.  Calling `hide`
+    // is deliberately nonintrusive, but it exercises the same Activity class-loader path used
+    // by later IME events and leaves a useful success/failure marker in logcat and host.log.
+    match ime::hide(&android_app) {
+        Ok(()) => log::info!("SoftKeyboardBridge JNI smoke check passed"),
+        Err(error) => log::warn!("SoftKeyboardBridge JNI smoke check failed: {error}"),
+    }
 
     let event_loop = EventLoop::<AppUserEvent>::with_user_event()
         .with_android_app(android_app.clone())
         .build()
         .expect("Failed to create event loop");
     register_event_loop_proxy(event_loop.create_proxy());
+    ime::register_event_loop_proxy(event_loop.create_proxy());
+    webview_handoff::register_event_loop_proxy(event_loop.create_proxy());
 
     // ControlFlow::Poll continuously runs the event loop, even if the OS hasn't
     // dispatched any events. This is ideal for games and similar applications.

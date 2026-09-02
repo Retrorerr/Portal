@@ -3,6 +3,7 @@ pub mod core {
     pub mod android_integration;
     pub mod clipboard_policy;
     pub mod config;
+    pub mod ime_policy;
     pub mod startup;
     pub mod wayland_protocol;
 }

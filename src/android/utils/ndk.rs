@@ -17,11 +17,22 @@ where
 
     let mut env = vm.attach_current_thread().expect("Failed to attach thread");
 
-    // Call the provided JNI function
+    // Call the provided JNI function. `AttachGuard` owns the attachment and
+    // detaches it on drop when this thread was not already attached. Calling
+    // `JavaVM::detach_current_thread` here is unsafe: for a nested attach it
+    // clears the outer guard owned by the NativeActivity thread and leaves
+    // subsequent callbacks with an invalid JNIEnv.
     let res = jni_function(&mut env, &android_app);
 
-    // Detach the current thread from the JVM
-    unsafe { vm.detach_current_thread() };
+    // Do not let a failed lookup/call leak a pending Java exception into the
+    // next callback on this worker. Individual helpers still return their
+    // contextual error, while this boundary prevents an uncleared exception
+    // from poisoning unrelated JNI calls.
+    if env.exception_check().unwrap_or(false) {
+        log::error!("JNI callback returned with a pending Java exception; clearing it");
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
 
     res
 }

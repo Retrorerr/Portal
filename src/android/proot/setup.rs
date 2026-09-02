@@ -6,10 +6,11 @@ use crate::{
             wayland::{Compositor, TouchMode, WaylandBackend},
             webview::{ErrorVariant, WebviewBackend},
         },
+        diagnostics,
         utils::application_context::get_application_context,
         utils::ndk::{
-            density_dpi, long_press_timeout_ms, recreate_activity, refresh_rate_millihz,
-            run_in_jvm, scale_factor, touch_slop_px,
+            density_dpi, long_press_timeout_ms, refresh_rate_millihz, scale_factor,
+            touch_slop_px,
         },
     },
     core::config::{
@@ -47,10 +48,25 @@ pub struct SetupOptions {
     pub mpsc_sender: Sender<SetupMessage>,
 }
 
+/// Completion hook used by the lifecycle owner to dismiss the provisioning
+/// WebView and send an event through its event-loop proxy. Keeping this hook
+/// outside `WebviewBackend` avoids recreating the NativeActivity just to swap
+/// to the Wayland backend.
+pub type SetupCompletionCallback = Arc<dyn Fn() + Send + Sync + 'static>;
+
+const KWIN_WRAPPER: &str = include_str!("../../../assets/localdesktop-kwin-wrapper-v2.sh");
+const PLASMA_LAUNCHER: &str = include_str!("../../../assets/localdesktop-startplasma.sh");
+const RECOVERY_LAUNCHER: &str = include_str!("../../../assets/localdesktop-recovery.sh");
+const RETRY_PLASMA: &str = include_str!("../../../assets/localdesktop-retry-plasma.sh");
+const KONSOLE_CONFIG: &str = include_str!("../../../assets/konsole/konsolerc");
+const KONSOLE_PROFILE: &str = include_str!("../../../assets/konsole/LocalDesktop.profile");
+const CRASH_HANDLER_SOURCE: &str = include_str!("../../../assets/localdesktop-crash-handler.c");
+
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
 /// Each stage is a function that takes the `SetupOptions` and returns a `StageOutput`.
 type SetupStage = Box<dyn Fn(&SetupOptions) -> StageOutput + Send>;
+type NamedSetupStage = (&'static str, SetupStage);
 
 /// Each stage should indicate whether the associated task is done previously or not.
 /// Thus, it should return a finished status if the task is done, so that the setup process can move on to the next stage.
@@ -74,6 +90,10 @@ const PIPEWIRE_GUEST_LOCK_PACKAGES: &[&str] = &[
     "wireplumber",
 ];
 
+const ARCH_FS_MAX_ATTEMPTS: usize = 3;
+const ARCH_FS_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const ARCH_FS_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
     let context = get_application_context();
     let temp_file = context.data_dir.join("archlinux-fs.tar.xz");
@@ -86,17 +106,46 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
     let need_setup = fs_root.read_dir().map_or(true, |mut d| d.next().is_none());
     if need_setup {
         return Some(thread::spawn(move || {
-            // Download if the archive doesn't exist
+            // Bound both network and extraction retries. An Android network
+            // failure must become an actionable setup error rather than an
+            // unbounded worker that leaves the WebView waiting forever.
+            let client = reqwest::blocking::Client::builder()
+                .connect_timeout(ARCH_FS_CONNECT_TIMEOUT)
+                .timeout(ARCH_FS_REQUEST_TIMEOUT)
+                .build()
+                .expect("Failed to build Arch Linux FS HTTP client");
+            let mut attempt = 0;
             loop {
+                attempt += 1;
                 if !temp_file.exists() {
                     mpsc_sender
                         .send(SetupMessage::Progress(
-                            "Downloading Arch Linux FS...".to_string(),
+                            format!(
+                                "Downloading Arch Linux FS (attempt {attempt}/{ARCH_FS_MAX_ATTEMPTS})..."
+                            ),
                         ))
                         .expect("Failed to send log message");
 
-                    let response = reqwest::blocking::get(ARCH_FS_ARCHIVE)
-                        .expect("Failed to download Arch Linux FS");
+                    let response = match client
+                        .get(ARCH_FS_ARCHIVE)
+                        .send()
+                        .and_then(|response| response.error_for_status())
+                    {
+                        Ok(response) => response,
+                        Err(error) => {
+                            let _ = fs::remove_file(&temp_file);
+                            if attempt >= ARCH_FS_MAX_ATTEMPTS {
+                                panic!(
+                                    "Failed to download Arch Linux FS after {attempt} attempts: {error}"
+                                );
+                            }
+                            let _ = mpsc_sender.send(SetupMessage::Error(format!(
+                                "Arch Linux FS download failed ({error}); retrying attempt {}/{ARCH_FS_MAX_ATTEMPTS}.",
+                                attempt + 1
+                            )));
+                            continue;
+                        }
+                    };
 
                     let total_size = response.content_length().unwrap_or(0);
                     let mut file = File::create(&temp_file)
@@ -155,14 +204,18 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
                     let _ = fs::remove_dir_all(&extracted_dir);
                     let _ = fs::remove_file(&temp_file);
 
-                    mpsc_sender
-                        .send(SetupMessage::Error(format!(
-                            "Failed to extract Arch Linux FS: {}. Restarting download...",
-                            e
-                        )))
-                        .unwrap_or(());
+                    if attempt >= ARCH_FS_MAX_ATTEMPTS {
+                        panic!(
+                            "Failed to extract Arch Linux FS after {attempt} attempts: {e}"
+                        );
+                    }
 
-                    // Continue the outer loop to retry the download
+                    let _ = mpsc_sender.send(SetupMessage::Error(format!(
+                        "Failed to extract Arch Linux FS: {e}. Restarting download (attempt {}/{ARCH_FS_MAX_ATTEMPTS})...",
+                        attempt + 1
+                    )));
+
+                    // Continue the outer loop to retry the download.
                     continue;
                 }
 
@@ -301,19 +354,45 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
     let context = get_application_context();
     let CommandConfig {
         check,
-        install,
+        install: configured_install,
         launch: _,
     } = context.local_config.command;
+    // Diagnostic/debug APKs should be able to collect an actual KWin stack
+    // without requiring a manual package-management step on the device. Keep
+    // release provisioning light: its wrapper default remains gdb=0 and only
+    // the opt-in diagnostic build requests the debugger package.
+    let require_gdb = cfg!(debug_assertions)
+        || std::env::var("LOCALDESKTOP_GDB_BACKTRACE").ok().as_deref() == Some("1");
+    let mut install = configured_install;
+    if require_gdb {
+        for package in ["gdb", "gcc"] {
+            if !install.split_whitespace().any(|token| token == package) {
+                install.push(' ');
+                install.push_str(package);
+            }
+        }
+    }
 
     let installed = move || {
-        ArchProcess {
+        let dependencies_present = ArchProcess {
             command: check.clone(),
             user: None,
             log: None,
         }
         .run()
         .status
-        .success()
+        .success();
+        dependencies_present
+            && (!require_gdb
+                || ArchProcess {
+                    command: "command -v gdb >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1"
+                        .to_string(),
+                    user: None,
+                    log: None,
+                }
+                .run()
+                .status
+                .success())
     };
 
     if installed() {
@@ -850,13 +929,100 @@ fn chroot_home_dir(fs_root: &Path, username: &str) -> PathBuf {
     }
 }
 
+fn normalize_guest_text(contents: &str) -> String {
+    // The Android build often runs from a Windows checkout. Keep generated
+    // guest text deterministic even when Git has materialized an asset with
+    // CRLF line endings.
+    contents.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 fn write_executable(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    fs::write(path, contents).expect("Failed to write executable script");
+    // This source tree is checked out on Windows, where Git may materialize
+    // text assets with CRLF. A guest kernel interprets the shebang literally,
+    // so `#!/bin/bash\r` fails with ENOENT. Normalize at the Android/guest
+    // boundary rather than relying on a developer's Git attributes.
+    fs::write(path, normalize_guest_text(contents)).expect("Failed to write executable script");
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
         .expect("Failed to mark executable script");
+}
+
+/// Install a shipped configuration without clobbering a user's later edits.
+/// Executable launch/recovery scripts are always refreshed above so upgrades
+/// receive fixes, while normal application preferences remain user-owned.
+fn write_default_file(path: &Path, contents: &str) {
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(path, normalize_guest_text(contents))
+        .expect("Failed to write default guest configuration");
+}
+
+/// Update one KConfig key while preserving unrelated groups, comments and
+/// user preferences. Plasma's classic-session switch is an upgrade-sensitive
+/// setting, so unlike an initial default it must be repaired on every setup.
+fn upsert_kconfig_value(path: &Path, group: &str, key: &str, value: &str) {
+    let content = fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let group_header = format!("[{group}]");
+    let group_start = lines
+        .iter()
+        .position(|line| line.trim().eq_ignore_ascii_case(&group_header));
+
+    let Some(group_start) = group_start else {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(group_header);
+        lines.push(format!("{key}={value}"));
+        let mut output = lines.join("\n");
+        output.push('\n');
+        fs::write(path, output).expect("Failed to write KConfig value");
+        return;
+    };
+
+    let group_end = lines
+        .iter()
+        .enumerate()
+        .skip(group_start + 1)
+        .find(|(_, line)| {
+            let trimmed = line.trim();
+            trimmed.starts_with('[') && trimmed.ends_with(']')
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+    let mut key_index = None;
+    for (index, line) in lines.iter().enumerate().take(group_end).skip(group_start + 1) {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        let Some((existing_key, _)) = trimmed
+            .split_once('=')
+            .or_else(|| trimmed.split_once(':'))
+        else {
+            continue;
+        };
+        if existing_key.trim().eq_ignore_ascii_case(key) {
+            key_index = Some(index);
+            break;
+        }
+    }
+    if let Some(index) = key_index {
+        let prefix_len = lines[index].len() - lines[index].trim_start().len();
+        let prefix = &lines[index][..prefix_len];
+        lines[index] = format!("{prefix}{key}={value}");
+    } else {
+        lines.insert(group_start + 1, format!("{key}={value}"));
+    }
+    let mut output = lines.join("\n");
+    output.push('\n');
+    fs::write(path, output).expect("Failed to update KConfig value");
 }
 
 /// Map Android density to a whole-number UI scale factor (same baseline as the old LXQt setup).
@@ -879,113 +1045,119 @@ fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
     );
     upsert_kv_file(&xresources_path, ':', &[("Xft.dpi", xft_dpi.to_string())]);
 
+    // The guest scripts are versioned assets so the classic startup contract,
+    // KWin crash capture and graphical recovery UI cannot drift apart. The
+    // launcher substitutes only the device-specific scale factor.
+    // Debug APKs opt into the wrapper's debugger path so a device run can
+    // collect a real KWin trace when gdb is provisioned. The environment still
+    // wins, and release APKs retain the zero-overhead default.
+    let gdb_backtrace = if cfg!(debug_assertions) { "1" } else { "0" };
+    let launcher = PLASMA_LAUNCHER
+        .replace("@UI_SCALE@", &ui_scale.to_string())
+        .replace("@GDB_BACKTRACE@", gdb_backtrace);
     write_executable(
         &fs_root.join("usr/local/bin/startplasma-localdesktop"),
-        &format!(
-            r#"#!/bin/bash
-set -o pipefail
-
-export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR}
-export PULSE_SERVER={PULSE_GUEST_SERVER}
-export XDG_RUNTIME_DIR=/tmp
-export WAYLAND_DISPLAY=wayland-0
-export XDG_SESSION_TYPE=wayland
-export XDG_CURRENT_DESKTOP=KDE
-export DESKTOP_SESSION=plasma
-export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
-export QT_SCALE_FACTOR={ui_scale}
-export PLASMA_USE_QT_SCALING=1
-export KWIN_COMPOSE=Q
-export KWIN_WAYLAND_NO_PERMISSION_CHECKS=1
-export ELECTRON_DISABLE_SANDBOX=1
-
-state_dir=/var/lib/localdesktop
-failure_marker="$state_dir/plasma-failed"
-session_log="$state_dir/plasma.log"
-mkdir -p "$state_dir"
-
-if [ -e "$failure_marker" ]; then
-    exec /usr/local/bin/start-localdesktop-recovery
-fi
-
-rm -f "$session_log"
-started=$(date +%s)
-/usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland > >(tee "$session_log") 2>&1 &
-session_pid=$!
-
-ready=0
-for _ in $(seq 1 60); do
-    if ! kill -0 "$session_pid" 2>/dev/null; then
-        break
-    fi
-    if pgrep -x plasmashell >/dev/null; then
-        ready=1
-        break
-    fi
-    sleep 1
-done
-
-if [ "$ready" -ne 1 ]; then
-    printf 'reason=startup-timeout-or-exit runtime=%s\n' "$(( $(date +%s) - started ))" > "$failure_marker"
-    kill "$session_pid" 2>/dev/null || true
-    pkill -TERM -x kwin_wayland 2>/dev/null || true
-    pkill -TERM -x plasmashell 2>/dev/null || true
-    wait "$session_pid" 2>/dev/null || true
-    exec /usr/local/bin/start-localdesktop-recovery
-fi
-
-wait "$session_pid"
-status=$?
-runtime=$(( $(date +%s) - started ))
-
-if [ "$status" -ne 0 ] || [ "$runtime" -lt 30 ]; then
-    printf 'status=%s runtime=%s\n' "$status" "$runtime" > "$failure_marker"
-    exec /usr/local/bin/start-localdesktop-recovery
-fi
-
-exit "$status"
-"#
-        ),
+        &launcher,
     );
-
+    write_executable(
+        &fs_root.join("usr/local/bin/kwin_wayland"),
+        KWIN_WRAPPER,
+    );
     write_executable(
         &fs_root.join("usr/local/bin/start-localdesktop-recovery"),
-        r#"#!/bin/bash
-export XDG_RUNTIME_DIR=/tmp
-export WAYLAND_DISPLAY=wayland-0
-export XDG_SESSION_TYPE=wayland
-export XDG_CURRENT_DESKTOP=KDE
-export KWIN_COMPOSE=Q
-export ELECTRON_DISABLE_SANDBOX=1
-failure_marker=/var/lib/localdesktop/plasma-failed
-labwc 2>&1 | tee /var/lib/localdesktop/recovery.log
-if [ ! -e "$failure_marker" ]; then
-    exec /usr/local/bin/startplasma-localdesktop
-fi
-exit 1
-"#,
+        RECOVERY_LAUNCHER,
     );
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-retry-plasma"),
-        r#"#!/bin/sh
-rm -f /var/lib/localdesktop/plasma-failed
-pkill -x labwc
-"#,
+        RETRY_PLASMA,
     );
 
-    let labwc_dir = home_dir.join(".config/labwc");
-    let _ = fs::create_dir_all(&labwc_dir);
-    write_executable(
-        &labwc_dir.join("autostart"),
-        r#"#!/bin/sh
-( kdialog --title "Local Desktop recovery" --yesno "Plasma exited during startup. Retry Plasma now?" && /usr/local/bin/localdesktop-retry-plasma ) &
-konsole --fullscreen >/tmp/localdesktop-recovery-konsole.log 2>&1 &
-"#,
-    );
+    // Debug/diagnostic builds provision a tiny in-process signal handler.  A
+    // nested gdb frequently dies before it can attach under Android's PRoot;
+    // this preload still records the fault PC/LR/SP, loader maps and a best-
+    // effort glibc backtrace from inside KWin.  Keep the source in the guest
+    // so the archive identifies exactly which handler produced the trace.
+    let crash_handler_source = fs_root.join("usr/local/lib/localdesktop-crash-handler.c");
+    if let Some(parent) = crash_handler_source.parent() {
+        fs::create_dir_all(parent).expect("Failed to create crash handler directory");
+    }
+    fs::write(&crash_handler_source, normalize_guest_text(CRASH_HANDLER_SOURCE))
+        .expect("Failed to write crash handler source");
+    fs::set_permissions(&crash_handler_source, fs::Permissions::from_mode(0o644))
+        .expect("Failed to set crash handler source permissions");
+
+    let compile_result = std::panic::catch_unwind(|| {
+        ArchProcess {
+            command: "if command -v gcc >/dev/null 2>&1; then rm -f /usr/local/lib/localdesktop-crash-handler.so.tmp && gcc -shared -fPIC -fno-omit-frame-pointer -O2 -Wall -Wextra -o /usr/local/lib/localdesktop-crash-handler.so.tmp /usr/local/lib/localdesktop-crash-handler.c -ldl && chmod 0755 /usr/local/lib/localdesktop-crash-handler.so.tmp && mv -f /usr/local/lib/localdesktop-crash-handler.so.tmp /usr/local/lib/localdesktop-crash-handler.so; else exit 127; fi".to_string(),
+            user: None,
+            log: None,
+        }
+        .run()
+    });
+    match compile_result {
+        Ok(output) if output.status.success() => {
+            diagnostics::guest_event(
+                "crash-handler",
+                "compiled path=/usr/local/lib/localdesktop-crash-handler.so",
+            );
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            diagnostics::guest_event(
+                "crash-handler",
+                &format!(
+                    "unavailable status={:?} stderr={}",
+                    output.status.code(),
+                    stderr.trim()
+                ),
+            );
+            log::warn!(
+                "Guest crash handler was not compiled (status {:?}); continuing without preload",
+                output.status.code()
+            );
+        }
+        Err(_) => {
+            diagnostics::guest_event(
+                "crash-handler",
+                "unavailable reason=guest compiler invocation panicked",
+            );
+            log::warn!("Guest crash handler invocation failed; continuing without preload");
+        }
+    }
+
+    // Recovery creates its labwc autostart at runtime, after writing the
+    // actionable kdialog message. Do not pre-seed an autostart that launches
+    // a terminal or bypasses that recovery flow.
+
+    let konsole_profile_dir = home_dir.join(".local/share/konsole");
+    write_default_file(&home_dir.join(".config/konsolerc"), KONSOLE_CONFIG);
+    let konsole_profile_path = konsole_profile_dir.join("LocalDesktop.profile");
+    // Konsole reads this path after PRoot has switched into the guest.  Do
+    // not leak the host-side `/data/.../archlinux-*` prefix into the profile;
+    // that path is not meaningful inside the guest namespace.
+    let guest_home = if username == "root" {
+        "/root".to_owned()
+    } else {
+        format!("/home/{username}")
+    };
+    let konsole_profile = KONSOLE_PROFILE.replace("@HOME@", &guest_home);
+    write_default_file(&konsole_profile_path, &konsole_profile);
+    // Existing upgrades may have received the old empty-command profile.
+    // Repair only the launch keys, preserving appearance and other user edits.
+    upsert_kconfig_value(&konsole_profile_path, "General", "Command", "/bin/bash");
+    upsert_kconfig_value(&konsole_profile_path, "General", "Directory", &guest_home);
 
     let config_dir = home_dir.join(".config");
     let autostart_dir = config_dir.join("autostart");
     let _ = fs::create_dir_all(&autostart_dir);
+    // Plasma 6's launcher reads this KConfig gate; the similarly named
+    // environment variables are not sufficient on current Plasma releases.
+    // Keep the setting in the user's config so startplasma-wayland takes the
+    // classic dbus-run-session path and never asks a missing user systemd to
+    // own the session bus.
+    let startkde_config = config_dir.join("startkderc");
+    write_default_file(&startkde_config, "[General]\nsystemdBoot=false\n");
+    upsert_kconfig_value(&startkde_config, "General", "systemdBoot", "false");
     fs::write(
         config_dir.join("ksmserverrc"),
         "[General]\nloginMode=emptySession\nconfirmLogout=false\n",
@@ -1066,7 +1238,150 @@ fn fix_xkb_symlink(options: &SetupOptions) -> StageOutput {
     None
 }
 
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+fn send_setup_error(
+    index: usize,
+    name: &str,
+    payload: &(dyn std::any::Any + Send),
+    sender: &Sender<SetupMessage>,
+) {
+    let message = format!(
+        "Setup stage {index} ({name}) failed: {}. Reopen Local Desktop to retry, or export diagnostics for support.",
+        panic_text(payload)
+    );
+    log::error!("{message}");
+    let _ = sender.send(SetupMessage::Error(message));
+}
+
+/// Invoke a stage behind a panic boundary and emit the durable stage events
+/// consumed by diagnostics exports. Stage functions historically used
+/// `expect` for filesystem/package failures; converting those panics into an
+/// explicit WebView error keeps the installer actionable instead of blank.
+fn invoke_stage(
+    index: usize,
+    name: &'static str,
+    stage: &SetupStage,
+    options: &SetupOptions,
+    sender: &Sender<SetupMessage>,
+) -> Result<StageOutput, ()> {
+    diagnostics::setup_stage(index, name, "start");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage(options)));
+    match result {
+        Ok(output) => Ok(output),
+        Err(payload) => {
+            diagnostics::setup_stage(index, name, "failed");
+            send_setup_error(index, name, payload.as_ref(), sender);
+            Err(())
+        }
+    }
+}
+
+fn complete_stage(index: usize, name: &'static str) {
+    diagnostics::setup_stage(index, name, "complete");
+}
+
+fn update_progress(progress: &Arc<Mutex<u16>>, index: usize, stage_count: usize) {
+    let value = ((index * 100) / stage_count.max(1)).min(100) as u16;
+    if let Ok(mut current) = progress.lock() {
+        *current = value;
+    }
+}
+
+fn run_remaining_stages(
+    first_index: usize,
+    first_name: &'static str,
+    first_handle: JoinHandle<()>,
+    stages: Vec<NamedSetupStage>,
+    options: SetupOptions,
+    progress: Arc<Mutex<u16>>,
+    sender: Sender<SetupMessage>,
+    on_complete: Option<SetupCompletionCallback>,
+) {
+    let stage_count = stages.len();
+    if let Err(payload) = first_handle.join() {
+        diagnostics::setup_stage(first_index + 1, first_name, "failed");
+        send_setup_error(first_index + 1, first_name, payload.as_ref(), &sender);
+        return;
+    }
+    complete_stage(first_index + 1, first_name);
+    update_progress(&progress, first_index + 1, stage_count);
+
+    for (index, (name, stage)) in stages.into_iter().enumerate().skip(first_index + 1) {
+        update_progress(&progress, index, stage_count);
+        let output = match invoke_stage(index + 1, name, &stage, &options, &sender) {
+            Ok(output) => output,
+            Err(()) => return,
+        };
+        if let Some(handle) = output {
+            if let Err(payload) = handle.join() {
+                diagnostics::setup_stage(index + 1, name, "failed");
+                send_setup_error(index + 1, name, payload.as_ref(), &sender);
+                return;
+            }
+        }
+        complete_stage(index + 1, name);
+        update_progress(&progress, index + 1, stage_count);
+    }
+
+    if let Ok(mut current) = progress.lock() {
+        *current = 100;
+    }
+    let _ = sender.send(SetupMessage::Progress(
+        "Installation finished. Starting Plasma…".to_string(),
+    ));
+    diagnostics::host_event("setup-complete", "all guest provisioning stages completed");
+    if let Some(on_complete) = on_complete {
+        on_complete();
+    }
+}
+
+fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
+    let mut compositor = Compositor::build().expect("Failed to build compositor");
+    compositor.enable_android_clipboard(android_app.clone());
+    PolarBearBackend::Wayland(WaylandBackend {
+        compositor,
+        graphic_renderer: None,
+        clock: Clock::new(),
+        key_counter: 0,
+        guest_scale_factor: scale_factor(&android_app),
+        touch_points: std::collections::HashMap::new(),
+        scroll_centroid: None,
+        touch_mode: TouchMode::Undecided,
+        touch_down_position: None,
+        touch_down_time: None,
+        touch_slop_px: touch_slop_px(&android_app),
+        long_press_timeout_ms: long_press_timeout_ms(&android_app),
+            pointer_pressed: false,
+            presentation_sequence: 0,
+            pending_kwin_presentation: None,
+            refresh_rate_millihz: refresh_rate_millihz(&android_app),
+        android_app,
+    })
+}
+
+/// Backwards-compatible setup entry point. Lifecycle owners that can dismiss
+/// the provisioning popup in-process should use `setup_with_completion`.
 pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
+    setup_with_completion(android_app, None)
+}
+
+/// Provision the guest and invoke `on_complete` after the final stage without
+/// recreating the NativeActivity. The lifecycle owner can use that callback to
+/// send an event through its event-loop proxy and construct the Wayland backend
+/// in the current activity.
+pub fn setup_with_completion(
+    android_app: AndroidApp,
+    on_complete: Option<SetupCompletionCallback>,
+) -> PolarBearBackend {
     let (sender, receiver) = mpsc::channel();
     let progress = Arc::new(Mutex::new(0));
 
@@ -1078,6 +1393,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
             .unwrap_or(());
     } else {
         log::info!("PRoot support check failed, showing Device Unsupported page");
+        diagnostics::host_event("setup-unsupported", "PRoot support probe failed");
         return PolarBearBackend::WebView(WebviewBackend {
             socket_port: 0,
             progress,
@@ -1090,110 +1406,65 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         mpsc_sender: sender.clone(),
     };
 
-    let stages: Vec<SetupStage> = vec![
-        Box::new(setup_arch_fs),                // Step 1. Setup Arch FS (extract)
-        Box::new(simulate_linux_sysdata_stage), // Step 2. Simulate Linux system data
-        Box::new(install_dependencies),         // Step 3. Install dependencies
-        Box::new(setup_machine_id),             // Step 4. Seed /etc/machine-id for D-Bus clients
-        Box::new(setup_pipewire_package_lock), // Step 5. Hold guest PipeWire packages for the Android-side PipeWire POC
-        Box::new(setup_firefox_config),        // Step 6. Setup Firefox config
-        Box::new(setup_fake_bwrap), // Step 7. Replace bwrap with a no-sandbox shim (Android has no user namespaces)
-        Box::new(setup_chromium_no_sandbox), // Step 8. Make Chromium/Electron apps launchable without a terminal
-        Box::new(setup_onboard_signal_fix), // Step 9. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
-        Box::new(setup_plasma_wayland), // Step 10. Setup Plasma Wayland launch, HiDPI and recovery
-        Box::new(fix_xkb_symlink),      // Step 11. Fix xkb symlink
+    let stages: Vec<NamedSetupStage> = vec![
+        ("arch-fs", Box::new(setup_arch_fs)),
+        ("linux-sysdata", Box::new(simulate_linux_sysdata_stage)),
+        ("dependencies", Box::new(install_dependencies)),
+        ("machine-id", Box::new(setup_machine_id)),
+        ("pipewire-lock", Box::new(setup_pipewire_package_lock)),
+        ("firefox-config", Box::new(setup_firefox_config)),
+        ("bwrap-shim", Box::new(setup_fake_bwrap)),
+        ("chromium-no-sandbox", Box::new(setup_chromium_no_sandbox)),
+        ("onboard-signal-fix", Box::new(setup_onboard_signal_fix)),
+        ("plasma-wayland", Box::new(setup_plasma_wayland)),
+        ("xkb-symlink", Box::new(fix_xkb_symlink)),
     ];
 
-    let handle_stage_error = |e: Box<dyn std::any::Any + Send>, sender: &Sender<SetupMessage>| {
-        let error_msg = if let Some(e) = e.downcast_ref::<String>() {
-            format!("Stage execution failed: {}", e)
-        } else if let Some(e) = e.downcast_ref::<&str>() {
-            format!("Stage execution failed: {}", e)
-        } else {
-            "Stage execution failed: Unknown error".to_string()
+    for (index, (name, stage)) in stages.iter().enumerate() {
+        let stage_name = *name;
+        update_progress(&progress, index, stages.len());
+        let output = match invoke_stage(index + 1, stage_name, stage, &options, &sender) {
+            Ok(output) => output,
+            Err(()) => return PolarBearBackend::WebView(WebviewBackend::build(receiver, progress)),
         };
-        sender
-            .send(SetupMessage::Error(error_msg.clone()))
-            .unwrap_or(());
-    };
+        let Some(handle) = output else {
+            complete_stage(index + 1, stage_name);
+            update_progress(&progress, index + 1, stages.len());
+            continue;
+        };
 
-    let fully_installed = 'outer: loop {
-        for (i, stage) in stages.iter().enumerate() {
-            if let Some(handle) = stage(&options) {
-                let progress_clone = progress.clone();
-                let sender_clone = sender.clone();
-                thread::spawn(move || {
-                    let progress = progress_clone;
-                    let progress_value = ((i) as u16 * 100 / stages.len() as u16) as u16;
-                    *progress.lock().unwrap() = progress_value;
+        let progress_clone = progress.clone();
+        let sender_clone = sender.clone();
+        let options_clone = SetupOptions {
+            android_app: options.android_app.clone(),
+            mpsc_sender: options.mpsc_sender.clone(),
+        };
+        let on_complete = on_complete.clone();
+        thread::spawn(move || {
+            run_remaining_stages(
+                index,
+                stage_name,
+                handle,
+                stages,
+                options_clone,
+                progress_clone,
+                sender_clone,
+                on_complete,
+            );
+        });
+        return PolarBearBackend::WebView(WebviewBackend::build(receiver, progress));
+    }
 
-                    // Wait for the current stage to finish
-                    if let Err(e) = handle.join() {
-                        handle_stage_error(e, &sender_clone);
-                        return;
-                    }
+    build_wayland_backend(android_app)
+}
 
-                    // Process the remaining stages in the same loop
-                    for (j, next_stage) in stages.iter().enumerate().skip(i + 1) {
-                        let progress_value = ((j) as u16 * 100 / stages.len() as u16) as u16;
-                        *progress.lock().unwrap() = progress_value;
-                        if let Some(next_handle) = next_stage(&options) {
-                            if let Err(e) = next_handle.join() {
-                                handle_stage_error(e, &sender_clone);
-                                return;
-                            }
+#[cfg(test)]
+mod tests {
+    use super::normalize_guest_text;
 
-                            // Increment progress and send it
-                            let next_progress_value =
-                                ((j + 1) as u16 * 100 / stages.len() as u16) as u16;
-                            *progress.lock().unwrap() = next_progress_value;
-                        }
-                    }
-
-                    // All stages are done, we need to replace the WebviewBackend with the WaylandBackend
-                    // Or, easier, just restart the whole app
-                    *progress.lock().unwrap() = 100;
-                    sender_clone
-                        .send(SetupMessage::Progress(
-                            "Installation finished. Starting Plasma...".to_string(),
-                        ))
-                        .expect("Failed to send installation finished message");
-                    thread::sleep(Duration::from_millis(500));
-                    run_in_jvm(recreate_activity, options.android_app.clone());
-                });
-
-                // Setup is still running in the background, but we need to return control
-                // so that the main thread can continue to report progress to the user
-                break 'outer false;
-            }
-        }
-
-        // All stages were done previously, no need to wait for anything
-        break 'outer true;
-    };
-
-    if fully_installed {
-        let mut compositor = Compositor::build().expect("Failed to build compositor");
-        compositor.enable_android_clipboard(android_app.clone());
-        PolarBearBackend::Wayland(WaylandBackend {
-            compositor,
-            graphic_renderer: None,
-            clock: Clock::new(),
-            key_counter: 0,
-            guest_scale_factor: scale_factor(&android_app),
-            touch_points: std::collections::HashMap::new(),
-            scroll_centroid: None,
-            touch_mode: TouchMode::Undecided,
-            touch_down_position: None,
-            touch_down_time: None,
-            touch_slop_px: touch_slop_px(&android_app),
-            long_press_timeout_ms: long_press_timeout_ms(&android_app),
-            pointer_pressed: false,
-            presentation_sequence: 0,
-            refresh_rate_millihz: refresh_rate_millihz(&android_app),
-            android_app,
-        })
-    } else {
-        PolarBearBackend::WebView(WebviewBackend::build(receiver, progress))
+    #[test]
+    fn guest_scripts_are_written_with_unix_line_endings() {
+        assert_eq!(normalize_guest_text("#!/bin/bash\r\nready\r\n"), "#!/bin/bash\nready\n");
+        assert_eq!(normalize_guest_text("line\rnext\n"), "line\next\n");
     }
 }

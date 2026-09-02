@@ -12,7 +12,9 @@ pub use output_state::write_guest_output_state;
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
 pub use event_handler::handle;
-pub use winit_backend::{bind, WinitGraphicsBackend};
+pub use winit_backend::{
+    bind, AndroidFrameTimestampSample, AndroidFrameTimestampSupport, WinitGraphicsBackend,
+};
 
 use smithay::{
     backend::renderer::gles::GlesRenderer,
@@ -60,8 +62,19 @@ pub struct WaylandBackend {
     pub pointer_pressed: bool,
     /// Monotonic sequence sent with wp_presentation feedback.
     pub presentation_sequence: u64,
+    /// An EGL frame that contained the identified KWin surface and its
+    /// presentation-feedback request, awaiting Android's physical display
+    /// timestamp. The frame id prevents a later recovery or KWin generation
+    /// from satisfying this attempt.
+    pub pending_kwin_presentation: Option<PendingKwinPresentation>,
     /// Android display refresh rate in Wayland mode units (millihertz).
     pub refresh_rate_millihz: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingKwinPresentation {
+    pub generation: u64,
+    pub egl_frame_id: u64,
 }
 
 impl WaylandBackend {
