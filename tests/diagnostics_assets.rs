@@ -45,6 +45,8 @@ fn plasma_launcher_waits_for_host_presented_marker() {
     assert!(PLASMA_LAUNCHER.contains("plasma-ready"));
     assert!(PLASMA_LAUNCHER.contains("dbus-run-session -- /usr/bin/startplasma-wayland"));
     assert!(PLASMA_LAUNCHER.contains("KDE_USE_SYSTEMD=0"));
+    assert!(PLASMA_LAUNCHER.contains("systemdBoot false"));
+    assert!(PLASMA_LAUNCHER.contains("loginMode emptySession"));
     assert!(!PLASMA_LAUNCHER.contains("pgrep plasmashell"));
     assert!(PLASMA_LAUNCHER.contains("rm -f \"$ready_marker\" \"$failure_marker\" \"$crash_marker\""));
     assert!(PLASMA_LAUNCHER.contains("attempt=$attempt_id"));
@@ -63,6 +65,11 @@ fn recovery_is_graphical_and_never_autostarts_a_terminal() {
     assert!(RETRY.contains("labwc.pid"));
     assert!(!RETRY.contains("pkill"));
     assert!(RECOVERY.contains("while true; do"));
+    assert!(RECOVERY.contains("output_mode"));
+    assert!(RECOVERY.contains("output_scale"));
+    assert!(RECOVERY.contains("QT_SCALE_FACTOR"));
+    assert!(RECOVERY.contains("<mode>${output_mode}</mode>"));
+    assert!(RECOVERY.contains("<scale>${output_scale}</scale>"));
 }
 
 #[test]

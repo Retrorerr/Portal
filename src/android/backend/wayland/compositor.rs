@@ -317,6 +317,8 @@ impl XdgShellHandler for State {
         surface.with_pending_state(|state| {
             state.size.replace(self.size);
             state.states.set(xdg_toplevel::State::Activated);
+            state.states.set(xdg_toplevel::State::Fullscreen);
+            state.states.set(xdg_toplevel::State::Maximized);
         });
         surface.send_configure();
         self.observe_kwin_toplevel(&surface);
@@ -583,8 +585,52 @@ delegate_presentation!(State);
 delegate_single_pixel_buffer!(State);
 delegate_viewporter!(State);
 
+pub trait IntoCompositorSize {
+    fn into_compositor_size(self) -> Size<i32, Logical>;
+}
+
+impl IntoCompositorSize for Size<i32, Logical> {
+    fn into_compositor_size(self) -> Size<i32, Logical> {
+        self
+    }
+}
+
+impl IntoCompositorSize for (i32, i32) {
+    fn into_compositor_size(self) -> Size<i32, Logical> {
+        self.into()
+    }
+}
+
+impl IntoCompositorSize for (u32, u32) {
+    fn into_compositor_size(self) -> Size<i32, Logical> {
+        (self.0 as i32, self.1 as i32).into()
+    }
+}
+
+impl IntoCompositorSize for winit::dpi::PhysicalSize<u32> {
+    fn into_compositor_size(self) -> Size<i32, Logical> {
+        (self.width as i32, self.height as i32).into()
+    }
+}
+
+impl IntoCompositorSize for &winit::window::Window {
+    fn into_compositor_size(self) -> Size<i32, Logical> {
+        self.inner_size().into_compositor_size()
+    }
+}
+
+impl IntoCompositorSize for smithay::utils::Size<i32, smithay::utils::Physical> {
+    fn into_compositor_size(self) -> Size<i32, Logical> {
+        (self.w, self.h).into()
+    }
+}
+
 impl Compositor {
-    pub fn build() -> Result<Compositor, Box<dyn Error>> {
+    /// Create a new compositor with physical/logical dimensions.
+    ///
+    /// Supports `(width, height)`, `winit::dpi::PhysicalSize<u32>` (e.g. from `window.inner_size()`),
+    /// `&Window`, or `smithay::utils::Size`.
+    pub fn new(size: impl IntoCompositorSize) -> Result<Compositor, Box<dyn Error>> {
         let display = Display::new()?;
         let dh = display.handle();
 
@@ -617,7 +663,7 @@ impl Compositor {
             single_pixel_buffer_state: SinglePixelBufferState::new::<State>(&dh),
             viewporter_state: ViewporterState::new::<State>(&dh),
             fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
-            size: (1920, 1080).into(),
+            size: size.into_compositor_size(),
             output: None,
             cursor_image: CursorImageStatus::default_named(),
             readiness: StartupReadiness::new(),
@@ -640,6 +686,11 @@ impl Compositor {
             output: None,
             output_global: None,
         })
+    }
+
+    /// Legacy constructor defaulting to 1920x1080 for backwards compatibility.
+    pub fn build() -> Result<Compositor, Box<dyn Error>> {
+        Self::new((1920, 1080))
     }
 
     /// Start clipboard polling after the Android NativeActivity and the nested compositor exist.
