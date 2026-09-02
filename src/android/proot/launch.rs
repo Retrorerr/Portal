@@ -3,6 +3,7 @@ use crate::android::utils::application_context::get_application_context;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 
 static LAUNCH_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -43,11 +44,17 @@ pub fn launch() {
         let local_config = get_application_context().local_config;
         let username = local_config.user.username;
 
-        ArchProcess {
+        let started = Instant::now();
+        let output = ArchProcess {
             command: local_config.command.launch,
             user: Some(username),
-            log: Some(Arc::new(|it| log::trace!("{}", it))),
+            log: Some(Arc::new(|it| log::info!("guest-session: {}", it))),
         }
         .run();
+        log::warn!(
+            "Desktop session exited after {:?} with status {:?}",
+            started.elapsed(),
+            output.status.code()
+        );
     });
 }

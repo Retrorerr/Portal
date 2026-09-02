@@ -301,12 +301,31 @@ impl CargoBuild {
         self.set_sysroot(&path);
         self.add_cxxflag("-stdlib=libc++");
         let lib_dir = path.join("usr").join("lib").join(ndk_triple);
-        let sdk_lib_dir = lib_dir.join(target_sdk_version.to_string());
+        let native_sdk_version = std::fs::read_dir(&lib_dir)?
+            .filter_map(|entry| {
+                entry
+                    .ok()?
+                    .file_name()
+                    .to_str()?
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|version| *version <= target_sdk_version)
+            })
+            .max()
+            .context("ndk doesn't contain a compatible Android API library directory")?;
+        let sdk_lib_dir = lib_dir.join(native_sdk_version.to_string());
         anyhow::ensure!(
             sdk_lib_dir.exists(),
             "ndk doesn't support sdk version {}",
-            target_sdk_version
+            native_sdk_version
         );
+        if native_sdk_version != target_sdk_version {
+            tracing::warn!(
+                target_sdk_version,
+                native_sdk_version,
+                "compiling native code against the newest compatible NDK API; targetSdk is unchanged"
+            );
+        }
         self.use_ld("lld");
         if let Some(triple) = self.triple {
             self.add_link_arg(&format!("--target={}", triple));

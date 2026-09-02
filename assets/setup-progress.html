@@ -145,7 +145,12 @@
             this.hasError = isError;
 
             if (this.progress === 100 && !this.hasError) {
-              alert("Installation finished, please restart the app!");
+              this.logs.unshift({
+                id: this.logCounter++,
+                timestamp: Date.now(),
+                message: "Installation finished. Starting Plasma...",
+                isError: false,
+              });
             }
 
             this.logs.unshift({

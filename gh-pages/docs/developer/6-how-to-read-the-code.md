@@ -32,7 +32,7 @@ flowchart TD
 ```
 
 - `lib.rs`: This file behaves more like a contact book. You only register the modules here, no actual logic goes here.
-- `core/config.rs`: Default config values, guest output state, and Xfce scaling helpers.
+- `core/config.rs`: Plasma-first default commands and guest output state.
 - `android/main.rs`: Did you see that `#[no_mangle] fn android_main` function? Android apps do not have a `main` function, instead:
   - When you open an Android app (by clicking the app icon), Android will launch an activity.
   - An activity is a Java class that extends `android.app.Activity`. Local Desktop is written in pure Rust, so we registered a special `NativeActivity`.
@@ -71,7 +71,7 @@ flowchart TD
 
         WaylandStart["🖼️ Start the Wayland compositor built with Smithay and EGL, listen on /tmp/wayland-0"]
         GuestLaunch["🐧 Proot runs the launch command inside Arch"]
-        XfceWayland["🧩 startxfce4 --wayland (labwc nested compositor) connects to wayland-0"]
+        PlasmaWayland["🧩 startplasma-wayland (KWin nested backend) connects to wayland-0"]
     end
 
     Start --> Native --> Load --> Main --> PolarBearApp
@@ -81,5 +81,5 @@ flowchart TD
     Webview --> WebviewBg
 
     Wayland --> WaylandStart
-    WaylandStart --> GuestLaunch --> XfceWayland
+    WaylandStart --> GuestLaunch --> PlasmaWayland
 ```

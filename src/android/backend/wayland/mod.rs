@@ -58,6 +58,10 @@ pub struct WaylandBackend {
     pub long_press_timeout_ms: u64,
     /// Whether a synthesized button press is currently held (an in-progress drag).
     pub pointer_pressed: bool,
+    /// Monotonic sequence sent with wp_presentation feedback.
+    pub presentation_sequence: u64,
+    /// Android display refresh rate in Wayland mode units (millihertz).
+    pub refresh_rate_millihz: i32,
 }
 
 impl WaylandBackend {

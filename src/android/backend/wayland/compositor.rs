@@ -1,9 +1,13 @@
 use super::bind::bind_socket;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
-    input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
+    delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
+    delegate_pointer_constraints, delegate_presentation, delegate_seat, delegate_shm,
+    delegate_single_pixel_buffer, delegate_viewporter, delegate_xdg_shell,
+    input::{
+        keyboard::KeyboardHandle, pointer::CursorImageStatus, touch::TouchHandle, Seat,
+        SeatHandler, SeatState,
+    },
     output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -16,7 +20,10 @@ use smithay::{
             with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
             SurfaceAttributes, TraversalAction,
         },
+        fractional_scale::{self, FractionalScaleHandler, FractionalScaleManagerState},
         output::OutputHandler,
+        pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
+        presentation::PresentationState,
         selection::{
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -27,6 +34,8 @@ use smithay::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
         },
         shm::{ShmHandler, ShmState},
+        single_pixel_buffer::SinglePixelBufferState,
+        viewporter::ViewporterState,
     },
 };
 use smithay::{
@@ -59,7 +68,16 @@ pub struct State {
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<Self>,
+    // KWin 6.7 treats these protocol globals as mandatory for its nested Wayland backend.
+    // Keep the state values alive for as long as the display is alive.
+    pub pointer_constraints_state: PointerConstraintsState,
+    pub presentation_state: PresentationState,
+    pub single_pixel_buffer_state: SinglePixelBufferState,
+    pub viewporter_state: ViewporterState,
+    pub fractional_scale_state: FractionalScaleManagerState,
     pub size: Size<i32, Logical>,
+    pub output: Option<Output>,
+    pub cursor_image: CursorImageStatus,
 }
 
 impl BufferHandler for State {
@@ -72,6 +90,9 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        if let Some(output) = &self.output {
+            output.enter(surface.wl_surface());
+        }
         surface.with_pending_state(|state| {
             state.size.replace(self.size);
             state.states.set(xdg_toplevel::State::Activated);
@@ -142,7 +163,34 @@ impl SeatHandler for State {
     }
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: input::pointer::CursorImageStatus) {}
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor_image = image;
+    }
+}
+
+impl PointerConstraintsHandler for State {
+    fn new_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {
+        // KWin requires the protocol to exist, but pointer locking remains opt-in. Android touch,
+        // mouse and keyboard input continue to use the existing absolute-pointer path.
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _location: smithay::utils::Point<f64, Logical>,
+    ) {
+    }
+}
+
+impl FractionalScaleHandler for State {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        smithay::wayland::compositor::with_states(&surface, |states| {
+            fractional_scale::with_fractional_scale(states, |scale| {
+                scale.set_preferred_scale(1.0);
+            });
+        });
+    }
 }
 
 pub fn send_frames_surface_tree(surface: &WlSurface, time: u32) {
@@ -186,7 +234,12 @@ delegate_compositor!(State);
 delegate_shm!(State);
 delegate_seat!(State);
 delegate_data_device!(State);
+delegate_fractional_scale!(State);
 delegate_output!(State);
+delegate_pointer_constraints!(State);
+delegate_presentation!(State);
+delegate_single_pixel_buffer!(State);
+delegate_viewporter!(State);
 
 impl Compositor {
     pub fn build() -> Result<Compositor, Box<dyn Error>> {
@@ -214,7 +267,17 @@ impl Compositor {
             shm_state: ShmState::new::<State>(&dh, vec![]),
             data_device_state: DataDeviceState::new::<State>(&dh),
             seat_state,
+            pointer_constraints_state: PointerConstraintsState::new::<State>(&dh),
+            presentation_state: PresentationState::new::<State>(
+                &dh,
+                smithay::utils::Clock::<smithay::utils::Monotonic>::new().id() as u32,
+            ),
+            single_pixel_buffer_state: SinglePixelBufferState::new::<State>(&dh),
+            viewporter_state: ViewporterState::new::<State>(&dh),
+            fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
             size: (1920, 1080).into(),
+            output: None,
+            cursor_image: CursorImageStatus::default_named(),
         };
 
         Ok(Compositor {

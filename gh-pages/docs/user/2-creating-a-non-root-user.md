@@ -11,7 +11,7 @@ However, some applications are **recommended** or **required** to run as a norma
 
 :::info
 
-Please follow the instructions below carefully, or you can continue to use XFCE with root if you prefer.
+Please follow the instructions below carefully, or continue using the default Plasma session as root.
 
 :::
 

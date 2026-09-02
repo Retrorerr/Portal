@@ -7,11 +7,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 use winit::platform::android::activity::AndroidApp;
 
 pub type Log = Arc<dyn Fn(String) + Send + Sync>;
 
 const SUPPORT_CHECK_BINARY: &str = "ld-linux-aarch64.so.1";
+const SUPPORT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Runs a shell command inside the Arch Linux PRoot environment.
 ///
@@ -50,34 +53,71 @@ impl ArchProcess {
             .env("PROOT_LOADER", &proot_loader)
             .env("PROOT_TMP_DIR", &context.data_dir);
 
-        process
+        let mut child = match process
             .arg("-r")
             .arg(rootfs)
             .arg("-w")
             .arg("/")
             .arg(guest_program)
             .args(args)
-            .output()
-            .map(|o| {
-                log::info!(
-                    "try_proot_probe rootfs={}, program={}, status={:?}, stdout: {}, stderr: {}",
-                    rootfs.display(),
-                    guest_program,
-                    o.status.code(),
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr)
-                );
-                o.status.success()
-            })
-            .unwrap_or_else(|e| {
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
                 log::info!(
                     "try_proot_probe rootfs={}, program={} error: {}",
                     rootfs.display(),
                     guest_program,
-                    e
+                    error
                 );
-                false
-            })
+                return false;
+            }
+        };
+
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    return child.wait_with_output().map_or_else(
+                        |error| {
+                            log::info!("Failed to collect support probe output: {error}");
+                            false
+                        },
+                        |output| {
+                            log::info!(
+                                "try_proot_probe rootfs={}, program={}, status={:?}, stdout: {}, stderr: {}",
+                                rootfs.display(),
+                                guest_program,
+                                output.status.code(),
+                                String::from_utf8_lossy(&output.stdout),
+                                String::from_utf8_lossy(&output.stderr)
+                            );
+                            output.status.success()
+                        },
+                    );
+                }
+                Ok(None) if started.elapsed() < SUPPORT_PROBE_TIMEOUT => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Ok(None) => {
+                    log::error!(
+                        "PRoot support probe timed out after {:?}; terminating it",
+                        SUPPORT_PROBE_TIMEOUT
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                Err(error) => {
+                    log::error!("Failed to poll PRoot support probe: {error}");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
     }
 
     pub fn is_supported(android_app: &AndroidApp) -> bool {

@@ -7,7 +7,10 @@ use crate::{
             webview::{ErrorVariant, WebviewBackend},
         },
         utils::application_context::get_application_context,
-        utils::ndk::{density_dpi, long_press_timeout_ms, scale_factor, touch_slop_px},
+        utils::ndk::{
+            density_dpi, long_press_timeout_ms, recreate_activity, refresh_rate_millihz,
+            run_in_jvm, scale_factor, touch_slop_px,
+        },
     },
     core::config::{
         CommandConfig, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR,
@@ -27,7 +30,7 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tar::Archive;
 use winit::platform::android::activity::AndroidApp;
@@ -168,6 +171,13 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
             }
 
             // Move the extracted files to the final destination
+            if fs_root
+                .read_dir()
+                .is_ok_and(|mut entries| entries.next().is_none())
+            {
+                fs::remove_dir(fs_root)
+                    .expect("Failed to remove stale empty Arch Linux root directory");
+            }
             fs::rename(&extracted_dir, fs_root)
                 .expect("Failed to rename extracted files to final destination");
 
@@ -739,7 +749,7 @@ fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
 
     // Chromium's sandbox needs CLONE_NEWUSER, which Android SELinux blocks, so every
     // Chromium/Electron app has to be started with --no-sandbox. Electron apps pick that up
-    // from ELECTRON_DISABLE_SANDBOX (exported by startxfce4-localdesktop), but Chromium itself
+    // from ELECTRON_DISABLE_SANDBOX (exported by the Plasma launcher), but Chromium itself
     // only takes the flag, and its desktop entry hardcodes an absolute path that a
     // /usr/local/bin wrapper cannot intercept. So shadow the affected application entries in
     // the user's own XDG directory, re-running every session to catch newly installed apps.
@@ -854,17 +864,13 @@ fn android_ui_scale(density_dpi: i32) -> i32 {
     ((density_dpi as f32) / 160.0 * 1.1).max(1.0).round() as i32
 }
 
-fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
+fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
     let username = get_application_context().local_config.user.username;
     let home_dir = chroot_home_dir(fs_root, &username);
-    let labwc_dir = home_dir.join(".config/xfce4/labwc");
-
     let ui_scale = android_ui_scale(density_dpi(&options.android_app));
-    // Xft uses 96 as the default logical DPI; multiply by scale for HiDPI fonts.
     let xft_dpi = ui_scale * 96;
 
-    // Still useful for Xwayland clients started by labwc.
     let xresources_path = home_dir.join(".Xresources");
     let _ = fs::create_dir_all(
         xresources_path
@@ -873,252 +879,147 @@ fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
     );
     upsert_kv_file(&xresources_path, ':', &[("Xft.dpi", xft_dpi.to_string())]);
 
-    // xfconf is read when xfce4-session starts; agent toggles must exist before launch
-    // (https://docs.xfce.org/xfce/xfce4-session/advanced — SSH and GPG Agents).
-    let xfconf_dir = home_dir.join(".config/xfce4/xfconf/xfce-perchannel-xml");
-    let _ = fs::create_dir_all(&xfconf_dir);
-    fs::write(
-        xfconf_dir.join("xfce4-session.xml"),
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-
-<channel name="xfce4-session" version="1.0">
-  <property name="startup" type="empty">
-    <property name="ssh-agent" type="empty">
-      <property name="enabled" type="bool" value="false"/>
-    </property>
-    <property name="gpg-agent" type="empty">
-      <property name="enabled" type="bool" value="false"/>
-    </property>
-  </property>
-</channel>
-"#,
-    )
-    .expect("Failed to write xfce4-session xfconf defaults");
-    fs::write(
-        xfconf_dir.join("xsettings.xml"),
-        &format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-
-<channel name="xsettings" version="1.0">
-  <property name="Xft" type="empty">
-    <property name="DPI" type="int" value="{xft_dpi}"/>
-  </property>
-</channel>
-"#
-        ),
-    )
-    .expect("Failed to write xsettings xfconf defaults");
-
-    // https://docs.xfce.org/xfce/getting-started — `startxfce4 --wayland` starts the
-    // session manager, panel, compositor (labwc), and desktop manager.
     write_executable(
-        &fs_root.join("usr/local/bin/startxfce4-localdesktop"),
+        &fs_root.join("usr/local/bin/startplasma-localdesktop"),
         &format!(
-            r#"#!/bin/sh
+            r#"#!/bin/bash
+set -o pipefail
+
 export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR}
 export PULSE_SERVER={PULSE_GUEST_SERVER}
-: "${{XDG_RUNTIME_DIR:={PIPEWIRE_GUEST_RUNTIME_DIR}}}"
-export XDG_RUNTIME_DIR
-# Electron adds --no-sandbox when this is set; Android has no user namespaces for it to use.
+export XDG_RUNTIME_DIR=/tmp
+export WAYLAND_DISPLAY=wayland-0
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=KDE
+export DESKTOP_SESSION=plasma
+export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
+export QT_SCALE_FACTOR={ui_scale}
+export PLASMA_USE_QT_SCALING=1
+export KWIN_COMPOSE=Q
+export KWIN_WAYLAND_NO_PERMISSION_CHECKS=1
 export ELECTRON_DISABLE_SANDBOX=1
-exec startxfce4 --wayland "$@"
-"#
-        ),
-    );
 
-    // Runs from ~/.config/autostart once xfsettingsd is up; reinforces pre-seeded /Xft/DPI and
-    // refreshes the --no-sandbox application entries for anything installed since last session.
-    write_executable(
-        &fs_root.join("usr/local/bin/localdesktop-xfce-session-init"),
-        &format!(
-            r#"#!/bin/sh
-for _ in $(seq 1 50); do
-    xfconf-query -c xsettings -lv >/dev/null 2>&1 && break
-    sleep 0.1
-done
+state_dir=/var/lib/localdesktop
+failure_marker="$state_dir/plasma-failed"
+session_log="$state_dir/plasma.log"
+mkdir -p "$state_dir"
 
-xfconf-query -c xsettings -p /Xft/DPI -n -t int -s {xft_dpi} 2>/dev/null || \
-xfconf-query -c xsettings -p /Xft/DPI -t int -s {xft_dpi}
-
-/usr/local/bin/localdesktop-no-sandbox-entries
-"#
-        ),
-    );
-
-    let desktop_dir = home_dir.join("Desktop");
-    let _ = fs::create_dir_all(&desktop_dir);
-
-    // Desktop items are seeded create-if-missing (the run-once mechanism described
-    // on `StageOutput`): write only when absent, so we never clobber the user's
-    // edits or re-create on every launch. Deleting an item re-seeds it next launch,
-    // same as the rest of the managed environment.
-    let online_docs = desktop_dir.join("localdesktop-online-docs.desktop");
-    if !online_docs.exists() {
-        let _ = fs::write(
-            &online_docs,
-            format!(
-                r#"[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Local Desktop - Online Docs
-Comment=Open the Local Desktop documentation website
-Exec=firefox {DOCS_HOME_URL}
-Icon=firefox
-Terminal=false
-StartupNotify=true
-"#
-            ),
-        );
-    }
-    // Remove the launcher's former name so existing installs pick up the rename.
-    let _ = fs::remove_file(desktop_dir.join("localdesktop-documentation.desktop"));
-
-    // Open PDFs (e.g. the manual below) in Evince instead of Firefox. Create-if-missing
-    // so we don't stomp a user's own default-app choices.
-    let mimeapps = home_dir.join(".config/mimeapps.list");
-    if !mimeapps.exists() {
-        let _ = fs::write(
-            &mimeapps,
-            "[Default Applications]\napplication/pdf=org.gnome.Evince.desktop\n",
-        );
-    }
-
-    let autostart_dir = home_dir.join(".config/autostart");
-    let _ = fs::create_dir_all(&autostart_dir);
-
-    fs::write(
-        autostart_dir.join("localdesktop-xfce-session-init.desktop"),
-        r#"[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Local Desktop Xfce Session Init
-Comment=Apply HiDPI font scaling and refresh sandbox-free application entries
-Exec=/usr/local/bin/localdesktop-xfce-session-init
-Terminal=false
-OnlyShowIn=XFCE;
-X-GNOME-Autostart-enabled=true
-"#,
-    )
-    .expect("Failed to write Xfce session init autostart entry");
-
-    // xfce4-power-manager expects host power interfaces that proot cannot provide.
-    fs::write(
-        autostart_dir.join("xfce4-power-manager.desktop"),
-        r#"[Desktop Entry]
-Type=Application
-Name=Power Manager
-Hidden=true
-OnlyShowIn=XFCE;
-"#,
-    )
-    .expect("Failed to disable xfce4-power-manager autostart");
-
-    let _ = fs::remove_file(autostart_dir.join("localdesktop-xfce-scale.desktop"));
-    let _ = fs::remove_file(autostart_dir.join("localdesktop-wlroots-output.desktop"));
-    let _ = fs::remove_file(fs_root.join("usr/local/bin/localdesktop-xfce-scale"));
-
-    // labwc runs wlr-randr from its autostart script once the compositor owns the output
-    // (labwc-config.5). Xfce stores labwc config under ~/.config/xfce4/labwc/.
-    //
-    // Host geometry is written to /tmp/localdesktop-output by the Android compositor before
-    // launch; the script waits for that file instead of applying a hardcoded fallback mode.
-    write_executable(
-        &fs_root.join("usr/local/bin/localdesktop-wlroots-output"),
-        &format!(
-            r#"#!/bin/sh
-# Keep labwc's wlroots output aligned with the Android host window.
-state_file="/tmp/localdesktop-output"
-lock_file="/tmp/localdesktop-wlroots-output.pid"
-fallback_scale="{ui_scale}"
-
-if [ -r "$lock_file" ]; then
-    old_pid=$(cat "$lock_file" 2>/dev/null)
-    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-        exit 0
-    fi
+if [ -e "$failure_marker" ]; then
+    exec /usr/local/bin/start-localdesktop-recovery
 fi
-echo "$$" > "$lock_file"
-trap 'rm -f "$lock_file"' EXIT INT TERM
 
-first_output() {{
-    wlr-randr 2>/dev/null | awk 'NF > 0 && $1 !~ /^Modes:/ && $1 !~ /^Current:/ && $1 !~ /^Position:/ && $1 !~ /^Transform:/ && $1 !~ /^Scale:/ {{ print $1; exit }}'
-}}
+rm -f "$session_log"
+started=$(date +%s)
+/usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland > >(tee "$session_log") 2>&1 &
+session_pid=$!
 
-read_output_state() {{
-    target_mode=""
-    target_scale="$fallback_scale"
-    if [ -r "$state_file" ]; then
-        . "$state_file"
-        target_mode="${{LOCALDESKTOP_OUTPUT_MODE:-}}"
-        target_scale="${{LOCALDESKTOP_OUTPUT_SCALE:-$target_scale}}"
+ready=0
+for _ in $(seq 1 60); do
+    if ! kill -0 "$session_pid" 2>/dev/null; then
+        break
     fi
-    case "$target_mode" in
-        *x*) ;;
-        *) return 1 ;;
-    esac
-    case "$target_scale" in
-        ''|*[!0-9]*) target_scale="$fallback_scale" ;;
-    esac
-}}
-
-apply_output() {{
-    output="$1"
-    wlr-randr --output "$output" --custom-mode "${{target_mode}}@60Hz" --scale "$target_scale" >/dev/null 2>&1 && return 0
-    wlr-randr --output "$output" --custom-mode "$target_mode" --scale "$target_scale" >/dev/null 2>&1 && return 0
-    wlr-randr --output "$output" --mode "$target_mode" --scale "$target_scale" >/dev/null 2>&1 && return 0
-    wlr-randr --output "$output" --scale "$target_scale" >/dev/null 2>&1 && return 0
-    return 1
-}}
-
-last_config=""
-while true; do
-    if ! read_output_state; then
-        sleep 0.2
-        continue
-    fi
-    output=$(first_output)
-    if [ -n "$output" ]; then
-        config="$output $target_mode $target_scale"
-        if [ "$config" != "$last_config" ] && apply_output "$output"; then
-            last_config="$config"
-        fi
+    if pgrep -x plasmashell >/dev/null; then
+        ready=1
+        break
     fi
     sleep 1
 done
+
+if [ "$ready" -ne 1 ]; then
+    printf 'reason=startup-timeout-or-exit runtime=%s\n' "$(( $(date +%s) - started ))" > "$failure_marker"
+    kill "$session_pid" 2>/dev/null || true
+    pkill -TERM -x kwin_wayland 2>/dev/null || true
+    pkill -TERM -x plasmashell 2>/dev/null || true
+    wait "$session_pid" 2>/dev/null || true
+    exec /usr/local/bin/start-localdesktop-recovery
+fi
+
+wait "$session_pid"
+status=$?
+runtime=$(( $(date +%s) - started ))
+
+if [ "$status" -ne 0 ] || [ "$runtime" -lt 30 ]; then
+    printf 'status=%s runtime=%s\n' "$status" "$runtime" > "$failure_marker"
+    exec /usr/local/bin/start-localdesktop-recovery
+fi
+
+exit "$status"
 "#
         ),
     );
 
-    let _ = fs::create_dir_all(&labwc_dir);
-    // Nested on our compositor: reuse the parent wl_output mode when possible (labwc-config.5).
-    fs::write(
-        labwc_dir.join("rc.xml"),
-        r#"<?xml version="1.0"?>
-<labwc_config>
-  <core>
-    <reuseOutputMode>yes</reuseOutputMode>
-  </core>
-</labwc_config>
-"#,
-    )
-    .expect("Failed to write labwc rc.xml defaults");
     write_executable(
-        &labwc_dir.join("autostart"),
+        &fs_root.join("usr/local/bin/start-localdesktop-recovery"),
+        r#"#!/bin/bash
+export XDG_RUNTIME_DIR=/tmp
+export WAYLAND_DISPLAY=wayland-0
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=KDE
+export KWIN_COMPOSE=Q
+export ELECTRON_DISABLE_SANDBOX=1
+failure_marker=/var/lib/localdesktop/plasma-failed
+labwc 2>&1 | tee /var/lib/localdesktop/recovery.log
+if [ ! -e "$failure_marker" ]; then
+    exec /usr/local/bin/startplasma-localdesktop
+fi
+exit 1
+"#,
+    );
+    write_executable(
+        &fs_root.join("usr/local/bin/localdesktop-retry-plasma"),
         r#"#!/bin/sh
-/usr/local/bin/localdesktop-wlroots-output >/tmp/localdesktop-wlroots-output.log 2>&1 &
+rm -f /var/lib/localdesktop/plasma-failed
+pkill -x labwc
 "#,
     );
 
-    // Arch wiki: lock prevents startxfce4 from overwriting custom labwc environment.
-    // https://wiki.archlinux.org/title/Xfce#Using_labwc_custom_keymaps
-    fs::write(
-        labwc_dir.join("environment"),
-        "XDG_SESSION_TYPE=wayland\nXDG_CURRENT_DESKTOP=XFCE\n",
-    )
-    .expect("Failed to write labwc environment file");
-    fs::write(labwc_dir.join("lock"), "").expect("Failed to write labwc environment lock file");
+    let labwc_dir = home_dir.join(".config/labwc");
+    let _ = fs::create_dir_all(&labwc_dir);
+    write_executable(
+        &labwc_dir.join("autostart"),
+        r#"#!/bin/sh
+( kdialog --title "Local Desktop recovery" --yesno "Plasma exited during startup. Retry Plasma now?" && /usr/local/bin/localdesktop-retry-plasma ) &
+konsole --fullscreen >/tmp/localdesktop-recovery-konsole.log 2>&1 &
+"#,
+    );
 
-    let _ = fs::remove_file(home_dir.join(".config/labwc/autostart"));
+    let config_dir = home_dir.join(".config");
+    let autostart_dir = config_dir.join("autostart");
+    let _ = fs::create_dir_all(&autostart_dir);
+    fs::write(
+        config_dir.join("ksmserverrc"),
+        "[General]\nloginMode=emptySession\nconfirmLogout=false\n",
+    )
+    .expect("Failed to write Plasma session defaults");
+    fs::write(
+        autostart_dir.join("localdesktop-session-init.desktop"),
+        r#"[Desktop Entry]
+Type=Application
+Name=Local Desktop Session Integration
+Exec=/usr/local/bin/localdesktop-no-sandbox-entries
+OnlyShowIn=KDE;
+X-KDE-autostart-after=panel
+"#,
+    )
+    .expect("Failed to write Plasma session integration autostart entry");
+    fs::write(
+        autostart_dir.join("powerdevil.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Power Management\nHidden=true\nOnlyShowIn=KDE;\n",
+    )
+    .expect("Failed to disable guest power management autostart");
+
+    let desktop_dir = home_dir.join("Desktop");
+    let _ = fs::create_dir_all(&desktop_dir);
+    let online_docs = desktop_dir.join("localdesktop-online-docs.desktop");
+    if !online_docs.exists() {
+        fs::write(
+            online_docs,
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Local Desktop - Online Docs\nExec=firefox {DOCS_HOME_URL}\nIcon=firefox\nTerminal=false\n"
+            ),
+        )
+        .expect("Failed to write documentation desktop entry");
+    }
 
     None
 }
@@ -1199,8 +1100,8 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(setup_fake_bwrap), // Step 7. Replace bwrap with a no-sandbox shim (Android has no user namespaces)
         Box::new(setup_chromium_no_sandbox), // Step 8. Make Chromium/Electron apps launchable without a terminal
         Box::new(setup_onboard_signal_fix), // Step 9. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
-        Box::new(setup_xfce_wayland),       // Step 10. Setup Xfce Wayland launch and HiDPI scaling
-        Box::new(fix_xkb_symlink),          // Step 11. Fix xkb symlink
+        Box::new(setup_plasma_wayland), // Step 10. Setup Plasma Wayland launch, HiDPI and recovery
+        Box::new(fix_xkb_symlink),      // Step 11. Fix xkb symlink
     ];
 
     let handle_stage_error = |e: Box<dyn std::any::Any + Send>, sender: &Sender<SetupMessage>| {
@@ -1254,9 +1155,11 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
                     *progress.lock().unwrap() = 100;
                     sender_clone
                         .send(SetupMessage::Progress(
-                            "Installation finished, please restart the app".to_string(),
+                            "Installation finished. Starting Plasma...".to_string(),
                         ))
                         .expect("Failed to send installation finished message");
+                    thread::sleep(Duration::from_millis(500));
+                    run_in_jvm(recreate_activity, options.android_app.clone());
                 });
 
                 // Setup is still running in the background, but we need to return control
@@ -1284,6 +1187,8 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
             touch_slop_px: touch_slop_px(&android_app),
             long_press_timeout_ms: long_press_timeout_ms(&android_app),
             pointer_pressed: false,
+            presentation_sequence: 0,
+            refresh_rate_millihz: refresh_rate_millihz(&android_app),
             android_app,
         })
     } else {

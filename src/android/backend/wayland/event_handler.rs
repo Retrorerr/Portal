@@ -14,10 +14,15 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::draw_render_elements;
 use smithay::backend::renderer::{Color32F, Frame, Renderer};
 use smithay::input::keyboard::FilterResult;
-use smithay::input::pointer;
+use smithay::input::pointer::{self, CursorImageStatus, CursorImageSurfaceData};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_pointer::ButtonState as WlButtonState;
-use smithay::utils::{Point, Rectangle, Transform, SERIAL_COUNTER};
+use smithay::utils::{IsAlive, Point, Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::shell::xdg::ToplevelSurface;
+use smithay::wayland::{
+    compositor::with_states,
+    presentation::{PresentationFeedbackCachedState, Refresh},
+};
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, Event, InputEvent, KeyboardKeyEvent, PointerAxisEvent,
@@ -33,9 +38,7 @@ const BTN_LEFT: u32 = 0x110;
 /// Linux input event code for the right mouse button (`BTN_RIGHT`).
 const BTN_RIGHT: u32 = 0x111;
 
-/**
- * As we currently use Xwayland, there is only 1 surface
- */
+/// The nested session compositor presents one full-screen toplevel to Android.
 fn get_surface(state: &State) -> Option<ToplevelSurface> {
     state
         .xdg_shell_state
@@ -383,11 +386,13 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             backend.compositor.state.size = (size.w, size.h).into();
 
             if let Some(output) = &backend.compositor.output {
+                let mode = Mode {
+                    size: size.into(),
+                    refresh: backend.refresh_rate_millihz,
+                };
+                output.set_preferred(mode);
                 output.change_current_state(
-                    Some(Mode {
-                        size: size.into(),
-                        refresh: 60000,
-                    }),
+                    Some(mode),
                     Some(Transform::Normal),
                     Some(Scale::Integer(1)),
                     Some((0, 0).into()),
@@ -398,7 +403,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             write_guest_output_state(size.w, size.h, guest_scale);
 
             if let Some(surface) = get_surface(&backend.compositor.state) {
-                surface.xdg_toplevel().configure(size.w, size.h, vec![]);
+                configure_toplevel(&surface, (size.w, size.h).into());
             }
         }
         _ => (),
@@ -412,6 +417,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
 
     let size = winit.window_size();
     let damage = Rectangle::from_size(size);
+    let mut presentation_feedbacks = Vec::new();
     {
         let (renderer, mut framebuffer) = winit
             .bind()
@@ -419,7 +425,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
 
         let compositor = &mut backend.compositor;
 
-        let elements = compositor
+        let mut elements = compositor
             .state
             .xdg_shell_state
             .toplevel_surfaces()
@@ -436,6 +442,32 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             })
             .collect::<Vec<WaylandSurfaceRenderElement<GlesRenderer>>>();
 
+        let cursor_surface = match &compositor.state.cursor_image {
+            CursorImageStatus::Surface(surface) if surface.alive() => Some(surface.clone()),
+            _ => None,
+        };
+        if let Some(surface) = &cursor_surface {
+            let hotspot = with_states(surface, |states| {
+                states
+                    .data_map
+                    .get::<CursorImageSurfaceData>()
+                    .and_then(|attributes| {
+                        attributes.lock().ok().map(|attributes| attributes.hotspot)
+                    })
+                    .unwrap_or_default()
+            });
+            let location =
+                (compositor.pointer.current_location() - hotspot.to_f64()).to_i32_round();
+            elements.extend(render_elements_from_surface_tree(
+                renderer,
+                surface,
+                (location.x, location.y),
+                1.0,
+                1.0,
+                Kind::Cursor,
+            ));
+        }
+
         let mut frame = renderer
             .render(&mut framebuffer, size, Transform::Flipped180)
             .map_err(|error| format!("Failed to render frame: {error:?}"))?;
@@ -450,10 +482,15 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .map_err(|error| format!("Failed to finish frame: {error:?}"))?;
 
         for surface in compositor.state.xdg_shell_state.toplevel_surfaces() {
-            send_frames_surface_tree(
-                surface.wl_surface(),
-                compositor.start_time.elapsed().as_millis() as u32,
-            );
+            presentation_feedbacks.extend(with_states(surface.wl_surface(), |states| {
+                std::mem::take(
+                    &mut states
+                        .cached_state
+                        .get::<PresentationFeedbackCachedState>()
+                        .current()
+                        .callbacks,
+                )
+            }));
         }
 
         match compositor.listener.accept() {
@@ -485,5 +522,53 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         .submit(Some(&[damage]))
         .map_err(|error| format!("Failed to submit frame: {error}"))?;
 
+    let frame_time = backend.compositor.start_time.elapsed().as_millis() as u32;
+    for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
+        send_frames_surface_tree(surface.wl_surface(), frame_time);
+    }
+    if let CursorImageStatus::Surface(surface) = &backend.compositor.state.cursor_image {
+        if surface.alive() {
+            send_frames_surface_tree(surface, frame_time);
+        }
+    }
+
+    if let Some(output) = &backend.compositor.output {
+        let presentation_time: std::time::Duration = backend.clock.now().into();
+        let refresh = Refresh::fixed(std::time::Duration::from_nanos(
+            1_000_000_000_000u64 / backend.refresh_rate_millihz.max(1) as u64,
+        ));
+        backend.presentation_sequence = backend.presentation_sequence.wrapping_add(1);
+        for feedback in presentation_feedbacks {
+            feedback.presented(
+                output,
+                presentation_time,
+                refresh,
+                backend.presentation_sequence,
+                smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
+            );
+        }
+    } else {
+        for feedback in presentation_feedbacks {
+            feedback.discarded();
+        }
+    }
+
+    backend
+        .compositor
+        .display
+        .flush_clients()
+        .map_err(|error| format!("Failed to flush presentation feedback: {error}"))?;
+
     Ok(())
+}
+
+fn configure_toplevel(
+    surface: &ToplevelSurface,
+    size: smithay::utils::Size<i32, smithay::utils::Logical>,
+) {
+    surface.with_pending_state(|state| {
+        state.size = Some(size);
+        state.states.set(xdg_toplevel::State::Activated);
+    });
+    surface.send_pending_configure();
 }

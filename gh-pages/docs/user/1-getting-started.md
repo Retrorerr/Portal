@@ -9,7 +9,7 @@ Welcome to Local Desktop!
 If you are seeing this page, the application is performing several tasks in the background:
 
 - It is extracting an Arch Linux ARM64 filesystem.
-- It is installing Xfce4 and other important packages.
+- It is installing KDE Plasma 6 and the other required packages.
 
 You can click the progress bar to show/hide the log panel. This process can take up to 10 minutes. In the meantime, let's spend your precious time to understand some important concepts.
 
@@ -51,7 +51,7 @@ The hardest part is installing `yay` or `paru`. You have to follow the `README.m
 
 ## I don't have a physical keyboard.
 
-After Xfce launches, go to _"Applications"_ > _"Accessories"_ > _"Onboard"_. This is an on-screen keyboard. But you are highly recommended to get a physical keyboard.
+After Plasma launches, use the application launcher to open your apps. A physical keyboard is strongly recommended for a desktop workflow; Android's accessibility keyboard bridge remains available for software-keyboard input.
 
 ![Onboard](/img/onboard.webp#boxed)
 

@@ -1,5 +1,5 @@
 use jni::objects::{JObject, JValue};
-use jni::sys::{JNIInvokeInterface_, _jobject};
+use jni::sys::{_jobject, JNIInvokeInterface_};
 use jni::{JNIEnv, JavaVM};
 use winit::platform::android::activity::AndroidApp;
 
@@ -25,6 +25,52 @@ where
     unsafe { vm.detach_current_thread() };
 
     res
+}
+
+/// Recreate the NativeActivity after first-run provisioning so the same launch continues into
+/// the Wayland backend without asking the user to close or restart the app.
+pub fn recreate_activity(env: &mut JNIEnv, android_app: &AndroidApp) {
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _jobject) };
+    if let Err(error) = env.call_method(activity, "recreate", "()V", &[]) {
+        log::error!("Failed to recreate activity after setup: {error}");
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+}
+
+/// Current Android display refresh rate expressed in Wayland mode units (millihertz).
+pub fn refresh_rate_millihz(android_app: &AndroidApp) -> i32 {
+    run_in_jvm(
+        |env, app| {
+            let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            let window_manager = env
+                .call_method(
+                    activity,
+                    "getWindowManager",
+                    "()Landroid/view/WindowManager;",
+                    &[],
+                )
+                .and_then(|value| value.l())
+                .ok()?;
+            #[allow(deprecated)]
+            let display = env
+                .call_method(
+                    window_manager,
+                    "getDefaultDisplay",
+                    "()Landroid/view/Display;",
+                    &[],
+                )
+                .and_then(|value| value.l())
+                .ok()?;
+            env.call_method(display, "getRefreshRate", "()F", &[])
+                .and_then(|value| value.f())
+                .ok()
+        },
+        android_app.clone(),
+    )
+    .map(|hz| (hz * 1000.0).round() as i32)
+    .filter(|millihz| *millihz > 0)
+    .unwrap_or(60_000)
 }
 
 /// Screen density in dpi, read from `Resources.getDisplayMetrics()`.

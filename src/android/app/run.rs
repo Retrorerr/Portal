@@ -38,7 +38,14 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     // default on the first launch and only becomes accurate after a configuration change.
     let guest_scale_factor = ndk::scale_factor(&backend.android_app);
     backend.guest_scale_factor = guest_scale_factor;
+    backend.refresh_rate_millihz = ndk::refresh_rate_millihz(&backend.android_app);
     backend.compositor.state.size = size.into();
+
+    let density = ndk::density_dpi(&backend.android_app).max(1) as f64;
+    let physical_size_mm = (
+        (window_size.w as f64 * 25.4 / density).round().max(1.0) as i32,
+        (window_size.h as f64 * 25.4 / density).round().max(1.0) as i32,
+    );
 
     let output = backend
         .compositor
@@ -47,7 +54,7 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
             Output::new(
                 "Local Desktop Wayland Compositor".into(),
                 PhysicalProperties {
-                    size: size.into(),
+                    size: physical_size_mm.into(),
                     subpixel: Subpixel::HorizontalRgb,
                     make: "Local Desktop".into(),
                     model: config::VERSION.into(),
@@ -56,25 +63,29 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
         })
         .clone();
 
+    backend.compositor.state.output = Some(output.clone());
+
     if backend.compositor.output_global.is_none() {
         let dh = backend.compositor.display.handle();
         backend.compositor.output_global = Some(output.create_global::<State>(&dh));
     }
 
+    let mode = Mode {
+        size: size.into(),
+        refresh: backend.refresh_rate_millihz,
+    };
+    output.set_preferred(mode);
     output.change_current_state(
-        Some(Mode {
-            size: size.into(),
-            refresh: 60000,
-        }),
+        Some(mode),
         Some(Transform::Normal),
         Some(Scale::Integer(1)),
         Some((0, 0).into()),
     );
-
     let guest_scale = guest_scale_factor.round().max(1.0) as i32;
     write_guest_output_state(window_size.w, window_size.h, guest_scale);
 
     for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
+        output.enter(surface.wl_surface());
         configure_toplevel(surface, window_size.w, window_size.h);
     }
 }

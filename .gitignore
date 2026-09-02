@@ -5,3 +5,5 @@ localdesktop.apk
 /build/
 /manuals/
 /dist/
+/artifacts/
+/.release-signing/

@@ -5,7 +5,7 @@ title: How it works
 1. An Arch Linux ARM64 filesystem is set up inside the app's internal storage.
 2. Proot mounts the filesystem and provides a chroot-like environment.
 3. A minimal built-in Wayland compositor runs in Android NDK.
-4. Xfce 4 on Wayland launches inside the chroot as a Wayland client of the built-in compositor and renders back to the Android native activity.
+4. KDE Plasma 6 and nested KWin launch inside the chroot as native Wayland clients of the built-in compositor and render back to the Android native activity.
 
 ## Proot
 
@@ -80,7 +80,8 @@ How Xwayland did this, you may ask? It is more obvious than you think: it acts a
 The magic behind Local Desktop is that:
 
 - It implements a minimal Wayland compositor that runs on an Android native activity and listens on `/tmp/wayland-0`.
-- The default Xfce session starts with `startxfce4 --wayland`, which brings up labwc as a nested compositor and connects to that socket.
-- Applications (Firefox, Thunar, the Xfce panel, and so on) render through that nested Wayland stack back to the Android window. Xwayland remains available for legacy X11-only apps when needed.
+- The default Plasma session starts with `/usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland`. KWin connects directly to the built-in `/tmp/wayland-0` compositor and uses its shared-memory/QPainter path on Android.
+- Applications (Firefox, Dolphin, Konsole, the Plasma shell, and so on) render through that native Wayland stack back to the Android window. Xwayland remains available only for legacy X11-only apps when needed.
+- If Plasma exits during its first 30 seconds, Local Desktop records the failure and starts a labwc recovery session on the same native Wayland socket. Recovery can retry Plasma without deleting the guest filesystem.
 
 Fun fact: [Termux:X11](https://github.com/termux/termux-x11) also implements a display server, but it is based on X11. Just like how Xwayland is an X11 server running on top of Wayland, Termux:X11 is an X11 server running on top of an Android activity. (And Xorg is an X11 server running on top of the Linux kernel, remember that?)

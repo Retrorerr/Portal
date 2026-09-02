@@ -9,10 +9,12 @@ Local Desktop helps you run a desktop Linux environment on your Android device.
 1. An Arch Linux ARM64 filesystem is set up inside the app's internal storage.
 2. Proot mounts the filesystem and provides a chroot-like environment.
 3. A minimal built-in Wayland compositor runs in Android NDK.
-4. An Xfce Wayland session launches inside the chroot and renders back to the Android native activity.
+4. KDE Plasma 6 launches as a native Wayland session inside the chroot and renders directly to the Android native activity. Xwayland is present only for legacy applications.
 
 ![POC](./gh-pages/static/img/proof-of-concept.png)
-_Proof of Concept: A Pixel Tablet running the XFCE desktop environment inside a Proot-based ARM64 Linux. No configuration is required; just install and go._
+_Proof of Concept: a Pixel Tablet running a desktop environment inside a Proot-based ARM64 Linux. The Plasma build requires no terminal setup: install, launch, and let the app provision the guest._
+
+Plasma uses Local Desktop's built-in Wayland compositor directly. If Plasma exits during early startup, a native-Wayland labwc recovery session records the failure and offers an explicit retry; the app never silently switches the default session to XFCE or X11.
 
 ## Getting Started
 

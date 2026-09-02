@@ -143,10 +143,6 @@ jobs:
           # Verify keystore
           keytool -list -v -keystore target/x/release/android/gradle/app/release-key.jks -storepass $ANDROID_KEYSTORE_PASSWORD
 
-      - name: Update manifest.yaml to target API 35
-        run: |
-          sed -i 's/target_sdk_version: 33/target_sdk_version: 35/' manifest.yaml
-
       - name: Install LLVM
         run: sudo apt-get update && sudo apt-get install -y llvm
 

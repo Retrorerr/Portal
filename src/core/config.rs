@@ -79,17 +79,17 @@ pub struct CommandConfig {
 }
 
 fn default_check() -> String {
-    "pacman -Q noto-fonts && pacman -Q xfce4-session && pacman -Q xfce4-panel && pacman -Q xfce4-settings && pacman -Q xfce4-terminal && pacman -Q thunar && pacman -Q xfdesktop && pacman -Q xfconf && pacman -Q labwc && pacman -Q wlr-randr && pacman -Q xorg-xwayland && pacman -Q xdg-desktop-portal && pacman -Q xdg-desktop-portal-gtk && pacman -Q onboard && pacman -Q firefox && pacman -Q evince && pacman -Q pipewire && pacman -Q pipewire-audio && pacman -Q pipewire-alsa"
+    "pacman -Q plasma-desktop && pacman -Q plasma-workspace && pacman -Q kwin && pacman -Q qt6-wayland && pacman -Q kwayland-integration && pacman -Q kde-cli-tools && pacman -Q konsole && pacman -Q dolphin && pacman -Q kate && pacman -Q okular && pacman -Q kdialog && pacman -Q plasma-pa && pacman -Q xdg-desktop-portal && pacman -Q xdg-desktop-portal-kde && pacman -Q xorg-xwayland && pacman -Q labwc && pacman -Q noto-fonts && pacman -Q firefox && pacman -Q pipewire && pacman -Q pipewire-audio && pacman -Q pipewire-alsa"
         .to_string()
 }
 
 fn default_install() -> String {
-    "stdbuf -oL pacman -Syu --needed --noconfirm --noprogressbar noto-fonts xfce4 labwc wlr-randr xorg-xwayland xdg-desktop-portal xdg-desktop-portal-gtk onboard firefox evince pipewire pipewire-audio pipewire-alsa"
+    "stdbuf -oL pacman -Syu --needed --noconfirm --noprogressbar plasma-desktop plasma-workspace kwin qt6-wayland kwayland-integration kde-cli-tools konsole dolphin kate okular kdialog plasma-pa xdg-desktop-portal xdg-desktop-portal-kde xorg-xwayland labwc noto-fonts firefox pipewire pipewire-audio pipewire-alsa"
         .to_string()
 }
 /// Direct the desktop session to the compositor and the host PipeWire socket.
 fn default_launch() -> String {
-    format!("export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR} PULSE_SERVER={PULSE_GUEST_SERVER}; XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=XFCE /usr/local/bin/startxfce4-localdesktop 2>&1")
+    format!("export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR} PULSE_SERVER={PULSE_GUEST_SERVER}; XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE /usr/local/bin/startplasma-localdesktop 2>&1")
         .to_string()
 }
 
@@ -178,7 +178,12 @@ fn process_config_file(full_config_path: String) -> Vec<String> {
 pub fn parse_config(full_config_path: String) -> LocalConfig {
     let lines = process_config_file(full_config_path);
     let content = lines.join("\n");
-    if let Ok(config) = toml::from_str::<LocalConfig>(&content) {
+    if let Ok(mut config) = toml::from_str::<LocalConfig>(&content) {
+        // Migrate only the legacy built-in XFCE launch path. User-defined sessions that do not
+        // reference Local Desktop's old wrapper remain untouched.
+        if config.command.launch.contains("startxfce4-localdesktop") {
+            config.command = CommandConfig::default();
+        }
         return config;
     }
     // Config malformed, use the default config and the user can modify it again
@@ -269,6 +274,43 @@ mod tests {
                     content.contains("# try_check = \"try\""),
                     "❌ `try_check` is not commented out after being  applied"
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn defaults_boot_plasma_on_native_wayland() {
+        let config = CommandConfig::default();
+
+        assert!(config.check.contains("plasma-desktop"));
+        assert!(config.check.contains("kwin"));
+        assert!(config.install.contains("xdg-desktop-portal-kde"));
+        assert!(config.launch.contains("startplasma-localdesktop"));
+        assert!(config.launch.contains("WAYLAND_DISPLAY=wayland-0"));
+        assert!(config.launch.contains("XDG_CURRENT_DESKTOP=KDE"));
+
+        let defaults = format!("{} {} {}", config.check, config.install, config.launch);
+        assert!(!defaults.to_ascii_lowercase().contains("xfce"));
+        assert!(!defaults.contains("startplasma-x11"));
+        assert!(!defaults.contains("DISPLAY=:"));
+    }
+
+    #[test]
+    fn migrates_legacy_builtin_xfce_commands_in_memory() {
+        with_config_file(
+            r#"
+                [user]
+                username = "root"
+
+                [command]
+                check = "pacman -Q xfce4-session"
+                install = "pacman -S xfce4"
+                launch = "XDG_CURRENT_DESKTOP=XFCE /usr/local/bin/startxfce4-localdesktop"
+            "#,
+            |full_config_path| {
+                let config = parse_config(full_config_path);
+                assert!(config.command.launch.contains("startplasma-localdesktop"));
+                assert!(!config.command.install.contains("xfce"));
             },
         );
     }
