@@ -16,6 +16,8 @@ export KDE_FULL_SESSION=true
 export KDE_SESSION_VERSION=6
 export KDE_USE_SYSTEMD=0
 export PLASMA_USE_SYSTEMD=0
+export KDE_NO_PORTAL=1
+export GTK_USE_PORTAL=0
 export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
 export QT_SCALE_FACTOR=@UI_SCALE@
 export PLASMA_USE_QT_SCALING=1
@@ -135,6 +137,20 @@ else
     fi
 fi
 rm -f "$config_dir/autostart/konsole.desktop" "$config_dir/autostart/org.kde.konsole.desktop"
+
+# Disable ksplash to avoid hanging on splash animation under PRoot
+ksplashrc="$config_dir/ksplashrc"
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file "$ksplashrc" --group KSplash --key Theme None
+else
+    if [ ! -f "$ksplashrc" ]; then
+        printf '[KSplash]\nTheme=None\n' > "$ksplashrc"
+    elif ! grep -q '^Theme=' "$ksplashrc"; then
+        printf '\n[KSplash]\nTheme=None\n' >> "$ksplashrc"
+    else
+        sed -i 's/^Theme=.*/Theme=None/' "$ksplashrc"
+    fi
+fi
 
 # A normal dbus-run-session owns the bus for the complete Plasma process tree;
 # no user systemd daemon is started in PRoot.
