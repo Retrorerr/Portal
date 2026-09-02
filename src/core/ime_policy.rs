@@ -123,4 +123,40 @@ mod tests {
         assert!(!queue.push(String::new()));
         assert_eq!(queue.len(), 0);
     }
+
+    #[test]
+    fn oversized_commit_with_3byte_and_4byte_utf8_truncates_safely() {
+        let mut queue = CommitQueue::default();
+        // 3-byte character '中' (0xE4 0xB8 0xAD)
+        let count_3byte = (MAX_COMMIT_BYTES / 3) + 10;
+        let text_3byte = "中".repeat(count_3byte);
+        assert!(queue.push(text_3byte));
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 1);
+        assert!(drained[0].len() <= MAX_COMMIT_BYTES);
+        assert!(drained[0].is_char_boundary(drained[0].len()));
+
+        // 4-byte emoji '🦀' (0xF0 0x9F 0xA6 0x80)
+        let count_4byte = (MAX_COMMIT_BYTES / 4) + 10;
+        let text_4byte = "🦀".repeat(count_4byte);
+        assert!(queue.push(text_4byte));
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 1);
+        assert!(drained[0].len() <= MAX_COMMIT_BYTES);
+        assert!(drained[0].is_char_boundary(drained[0].len()));
+    }
+
+    #[test]
+    fn clear_resets_queue_state_and_bytes() {
+        let mut queue = CommitQueue::default();
+        queue.push("abc".into());
+        queue.push("def".into());
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.total_bytes(), 6);
+
+        queue.clear();
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.total_bytes(), 0);
+        assert!(queue.drain().is_empty());
+    }
 }

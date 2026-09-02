@@ -64,6 +64,16 @@ pub fn normalized_coordinate(value: f64) -> f64 {
     }
 }
 
+/// Clamp a physical screen coordinate to the valid pixel range `[0.0, max_bound]`.
+/// Infinite or NaN coordinates default to 0.0.
+pub fn clamp_physical_coordinate(coord: f64, max_bound: i32) -> f64 {
+    if !coord.is_finite() {
+        return 0.0;
+    }
+    let max = (max_bound.max(0)) as f64;
+    coord.clamp(0.0, max)
+}
+
 /// Return a valid physical window size, or `None` when Android has not supplied one yet.
 pub fn physical_window_size(width: i32, height: i32) -> Option<(i32, i32)> {
     (width > 0 && height > 0).then_some((width, height))
@@ -115,6 +125,22 @@ mod tests {
         assert_eq!(normalized_coordinate(f64::NAN), 0.0);
         assert_eq!(physical_window_size(0, 100), None);
         assert_eq!(physical_window_size(2560, 1600), Some((2560, 1600)));
+        assert_eq!(physical_window_size(3392, 2400), Some((3392, 2400)));
+    }
+
+    #[test]
+    fn clamps_physical_coordinates_for_high_res_displays() {
+        // OnePlus Pad 3 physical bounds: 3392 x 2400
+        assert_eq!(clamp_physical_coordinate(1500.0, 3392), 1500.0);
+        assert_eq!(clamp_physical_coordinate(-10.0, 3392), 0.0);
+        assert_eq!(clamp_physical_coordinate(3400.0, 3392), 3392.0);
+        assert_eq!(clamp_physical_coordinate(f64::NAN, 3392), 0.0);
+        assert_eq!(clamp_physical_coordinate(f64::INFINITY, 3392), 0.0);
+        assert_eq!(clamp_physical_coordinate(f64::NEG_INFINITY, 3392), 0.0);
+
+        assert_eq!(clamp_physical_coordinate(2400.0, 2400), 2400.0);
+        assert_eq!(clamp_physical_coordinate(2400.1, 2400), 2400.0);
+        assert_eq!(clamp_physical_coordinate(-0.1, 2400), 0.0);
     }
 
     #[test]

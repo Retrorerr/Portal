@@ -13,10 +13,14 @@ mod clipboard_policy;
 
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
-    density_scale_factor, normalized_coordinate, normalized_rotation_degrees, physical_window_size,
-    qt_scale_factor, refresh_period_nanos, xft_dpi,
+    clamp_physical_coordinate, density_scale_factor, normalized_coordinate,
+    normalized_rotation_degrees, physical_window_size, qt_scale_factor, refresh_period_nanos,
+    xft_dpi,
 };
-use clipboard_policy::{choose_text_mime, supports_mime_type, TEXT_MIME, UTF8_TEXT_MIME};
+use clipboard_policy::{
+    choose_text_mime, is_valid_clip_text, supports_mime_type, validate_clip_text,
+    MAX_CLIPBOARD_BYTES, TEXT_MIME, UTF8_TEXT_MIME,
+};
 
 #[test]
 fn oneplus_pad_like_metrics_keep_fractional_scale_and_refresh_period() {
@@ -26,6 +30,33 @@ fn oneplus_pad_like_metrics_keep_fractional_scale_and_refresh_period() {
     assert_eq!(xft_dpi(scale), 168);
     assert_eq!(refresh_period_nanos(144_000), 6_944_444);
     assert_eq!(physical_window_size(2560, 1600), Some((2560, 1600)));
+}
+
+#[test]
+fn oneplus_pad_3_physical_bounds_and_coordinate_clamping() {
+    // OnePlus Pad 3 has a 3392 x 2400 physical display at 144Hz
+    let (w, h) = (3392, 2400);
+    assert_eq!(physical_window_size(w, h), Some((3392, 2400)));
+    assert_eq!(refresh_period_nanos(144_000), 6_944_444);
+
+    // In-bounds touch coordinates pass through unaltered
+    assert_eq!(clamp_physical_coordinate(0.0, w), 0.0);
+    assert_eq!(clamp_physical_coordinate(3392.0, w), 3392.0);
+    assert_eq!(clamp_physical_coordinate(1696.0, w), 1696.0);
+    assert_eq!(clamp_physical_coordinate(0.0, h), 0.0);
+    assert_eq!(clamp_physical_coordinate(2400.0, h), 2400.0);
+    assert_eq!(clamp_physical_coordinate(1200.0, h), 1200.0);
+
+    // Out-of-bounds coordinates (e.g. touches beyond display or edge gestures) are clamped
+    assert_eq!(clamp_physical_coordinate(-25.0, w), 0.0);
+    assert_eq!(clamp_physical_coordinate(3500.0, w), 3392.0);
+    assert_eq!(clamp_physical_coordinate(-1.0, h), 0.0);
+    assert_eq!(clamp_physical_coordinate(2450.0, h), 2400.0);
+
+    // Malformed coordinates (NaN / Inf) are clamped safely to 0
+    assert_eq!(clamp_physical_coordinate(f64::NAN, w), 0.0);
+    assert_eq!(clamp_physical_coordinate(f64::INFINITY, w), 0.0);
+    assert_eq!(clamp_physical_coordinate(f64::NEG_INFINITY, h), 0.0);
 }
 
 #[test]
@@ -56,6 +87,59 @@ fn software_keyboard_ascii_commit_maps_to_physical_keys() {
 }
 
 #[test]
+fn software_keyboard_tab_and_terminal_shortcuts() {
+    // Tab key is essential for terminal completion in Konsole
+    assert_eq!(committed_ascii_to_key_events("\t"), vec![(15, false)]);
+    assert_eq!(
+        committed_ascii_to_key_events("cd /sdcard\t\n"),
+        vec![
+            (46, false), // c
+            (32, false), // d
+            (57, false), // space
+            (53, false), // /
+            (31, false), // s
+            (32, false), // d
+            (46, false), // c
+            (30, false), // a
+            (19, false), // r
+            (32, false), // d
+            (15, false), // tab
+            (28, false), // enter
+        ]
+    );
+}
+
+#[test]
+fn software_keyboard_mixed_and_edge_case_commits() {
+    // Unsupported Unicode characters (e.g. CJK, emoji) are dropped without crashing,
+    // while the valid ASCII characters are cleanly extracted
+    assert_eq!(
+        committed_ascii_to_key_events("echo 🦀 > out.txt\r\n"),
+        vec![
+            (18, false), // e
+            (46, false), // c
+            (35, false), // h
+            (24, false), // o
+            (57, false), // space
+            (57, false), // space (after dropped emoji)
+            (52, true),  // > (shift + .)
+            (57, false), // space
+            (24, false), // o
+            (22, false), // u
+            (20, false), // t
+            (52, false), // .
+            (20, false), // t
+            (45, false), // x
+            (20, false), // t
+            (28, false), // \r
+            (28, false), // \n
+        ]
+    );
+    assert!(committed_ascii_to_key_events("").is_empty());
+    assert!(committed_ascii_to_key_events("你好世界").is_empty());
+}
+
+#[test]
 fn software_keyboard_delete_commit_maps_to_backspace() {
     assert_eq!(committed_ascii_to_key_events("\u{8}"), vec![(14, false)]);
 }
@@ -64,9 +148,36 @@ fn software_keyboard_delete_commit_maps_to_backspace() {
 fn clipboard_bridge_accepts_text_only_and_prefers_utf8() {
     assert!(supports_mime_type(TEXT_MIME));
     assert!(supports_mime_type(UTF8_TEXT_MIME));
+    assert!(supports_mime_type("text/plain; charset=utf-8"));
+    assert!(supports_mime_type("UTF8_STRING"));
+    assert!(supports_mime_type("STRING"));
+    assert!(supports_mime_type("TEXT"));
     assert!(!supports_mime_type("text/html"));
+    assert!(!supports_mime_type("application/octet-stream"));
     assert_eq!(
         choose_text_mime(["text/html", TEXT_MIME, UTF8_TEXT_MIME]),
         Some(UTF8_TEXT_MIME)
     );
+    assert_eq!(
+        choose_text_mime(["text/plain", "text/plain; charset=utf-8"]),
+        Some("text/plain; charset=utf-8")
+    );
+    assert_eq!(
+        choose_text_mime(["STRING", "UTF8_STRING"]),
+        Some("UTF8_STRING")
+    );
+}
+
+#[test]
+fn clipboard_bridge_ignores_empty_or_invalid_clips() {
+    assert!(!is_valid_clip_text(""));
+    assert_eq!(validate_clip_text(""), None);
+
+    let valid_text = "Portal Wayland clipboard content";
+    assert!(is_valid_clip_text(valid_text));
+    assert_eq!(validate_clip_text(valid_text), Some(valid_text));
+
+    let oversized = "a".repeat(MAX_CLIPBOARD_BYTES + 1);
+    assert!(!is_valid_clip_text(&oversized));
+    assert_eq!(validate_clip_text(&oversized), None);
 }
