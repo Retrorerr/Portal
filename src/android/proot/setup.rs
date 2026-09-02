@@ -1073,6 +1073,14 @@ fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
         &fs_root.join("usr/local/bin/localdesktop-retry-plasma"),
         RETRY_PLASMA,
     );
+    write_executable(
+        &fs_root.join("usr/local/bin/ksplashqml"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    write_executable(
+        &fs_root.join("usr/local/bin/plasma_waitforname"),
+        "#!/bin/sh\nif [ \"$1\" = \"org.kde.KSplash\" ]; then\n    exit 0\nfi\nexec /usr/bin/plasma_waitforname \"$@\"\n",
+    );
 
     // Deploy the patched KWin shared object that tolerates missing netlink udev monitors.
     let local_lib = fs_root.join("usr/local/lib");
