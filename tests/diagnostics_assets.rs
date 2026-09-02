@@ -9,6 +9,7 @@ const DIAGNOSTICS: &str = include_str!("../src/android/diagnostics.rs");
 const GIT_ATTRIBUTES: &str = include_str!("../.gitattributes");
 const SETUP_PAGE: &str = include_str!("../assets/setup-progress-v2.html");
 const ERROR_PAGE: &str = include_str!("../assets/runtime-error.html");
+const ANDROID_MAIN: &str = include_str!("../src/android/main.rs");
 
 #[test]
 fn kwin_wrapper_does_not_make_gdb_a_release_requirement() {
@@ -113,4 +114,14 @@ fn setup_and_error_pages_offer_one_tap_export() {
     assert!(SETUP_PAGE.contains("export_diagnostics"));
     assert!(ERROR_PAGE.contains("Export diagnostics"));
     assert!(ERROR_PAGE.contains("export_diagnostics"));
+}
+
+#[test]
+fn android_logging_is_local_and_info_by_default() {
+    assert!(!ANDROID_MAIN.contains("sentry::init"));
+    assert!(!ANDROID_MAIN.contains("SentryLogger"));
+    assert!(ANDROID_MAIN.contains("android_logger::AndroidLogger::default()"));
+    assert!(ANDROID_MAIN.contains("let log_level = log::LevelFilter::Info;"));
+    assert!(!ANDROID_MAIN.contains("LevelFilter::Debug"));
+    assert!(!ANDROID_MAIN.contains("LevelFilter::Trace"));
 }

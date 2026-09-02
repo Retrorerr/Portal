@@ -13,7 +13,6 @@ use crate::{
     },
     core::config,
 };
-use sentry::integrations::log::{LogFilter, SentryLogger};
 use winit::{
     event_loop::{ControlFlow, EventLoop},
     platform::android::{activity::AndroidApp, EventLoopBuilderExtAndroid},
@@ -22,16 +21,6 @@ use winit::{
 #[no_mangle]
 fn android_main(android_app: AndroidApp) {
     std::env::set_var("RUST_BACKTRACE", "full");
-    // Diagnostics are deliberately local and user-exported. Keep the Sentry
-    // integration available for builds that opt in later, but do not attach a
-    // hard-coded DSN or forward guest/session logs and PII automatically.
-    let _guard = sentry::init(sentry::ClientOptions {
-        dsn: None,
-        release: sentry::release_name!(),
-        send_default_pii: false,
-        enable_logs: false,
-        ..Default::default()
-    });
 
     // Build the context before touching the persistent diagnostic paths.  The
     // context owns the app-private directory used by diagnostics, and this
@@ -39,30 +28,11 @@ fn android_main(android_app: AndroidApp) {
     ApplicationContext::build(&android_app);
     diagnostics::initialize();
 
-    // Wrap the Android logger with Sentry's logger
-    let logger = SentryLogger::with_dest(android_logger::AndroidLogger::default()).filter(|md| {
-        // How to use log::*() macros in this project:
-        // - log::error!() for critical errors that maintainers should be NOTIFIED about via email
-        // - log::trace!() for very detailed debugging information that need NOT to be captured with telemetry
-        // - log::info!() for everything else, maintainers can check this with Sentry's Logs
-        match md.level() {
-            // Capture error records as Sentry events
-            // These are grouped into issues, representing high-severity errors to act upon
-            log::Level::Error => LogFilter::Event,
-            // Ignore trace level records, as they're too verbose
-            log::Level::Trace => LogFilter::Ignore,
-            // Capture everything else as a log
-            _ => LogFilter::Log,
-        }
-    });
-
-    #[cfg(debug_assertions)] // Enable verbose logging in debug builds
-    // Keep the persistent host tee useful for startup/crash evidence without
-    // recording every Smithay/EGL frame at trace level. Guest protocol detail
-    // is enabled independently through WAYLAND_DEBUG in the KWin launcher.
-    let log_level = log::LevelFilter::Debug;
-    #[cfg(not(debug_assertions))]
+    // Keep Android logcat and the user-exported host log bounded in debug builds too. The
+    // per-frame Smithay/EGL records are DEBUG-level; they remain available only when a future
+    // explicitly bounded diagnostic mode opts into them.
     let log_level = log::LevelFilter::Info;
+    let logger = android_logger::AndroidLogger::default();
     // Keep a copy in diagnostics/host.log even when Android logcat is
     // unavailable (or a release build is running with logcat filtering).
     if log::set_boxed_logger(Box::new(diagnostics::HostLogTee::new(Box::new(logger)))).is_ok() {
