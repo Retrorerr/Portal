@@ -103,6 +103,39 @@ reap_session() {
     wait "$session_pid" 2>/dev/null || true
 }
 
+# Enforce systemdBoot=false in startkderc so Plasma 6 never hangs waiting for systemd user manager
+home_dir="${HOME:-/root}"
+config_dir="$home_dir/.config"
+mkdir -p "$config_dir"
+startkderc="$config_dir/startkderc"
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file "$startkderc" --group General --key systemdBoot false
+else
+    if [ ! -f "$startkderc" ]; then
+        printf '[General]\nsystemdBoot=false\n' > "$startkderc"
+    elif ! grep -q '^systemdBoot=' "$startkderc"; then
+        printf '\n[General]\nsystemdBoot=false\n' >> "$startkderc"
+    else
+        sed -i 's/^systemdBoot=.*/systemdBoot=false/' "$startkderc"
+    fi
+fi
+
+# Ensure clean UX without unwanted Konsole or debug terminal popups on startup
+ksmserverrc="$config_dir/ksmserverrc"
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file "$ksmserverrc" --group General --key loginMode emptySession
+    kwriteconfig6 --file "$ksmserverrc" --group General --key confirmLogout false
+else
+    if [ ! -f "$ksmserverrc" ]; then
+        printf '[General]\nloginMode=emptySession\nconfirmLogout=false\n' > "$ksmserverrc"
+    elif ! grep -q '^loginMode=' "$ksmserverrc"; then
+        printf '\n[General]\nloginMode=emptySession\nconfirmLogout=false\n' >> "$ksmserverrc"
+    else
+        sed -i 's/^loginMode=.*/loginMode=emptySession/' "$ksmserverrc"
+    fi
+fi
+rm -f "$config_dir/autostart/konsole.desktop" "$config_dir/autostart/org.kde.konsole.desktop"
+
 # A normal dbus-run-session owns the bus for the complete Plasma process tree;
 # no user systemd daemon is started in PRoot.
 dbus-run-session -- /usr/bin/startplasma-wayland >> "$session_log" 2>&1 &
