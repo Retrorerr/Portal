@@ -1064,9 +1064,10 @@ fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
         &fs_root.join("usr/local/bin/kwin_wayland"),
         KWIN_WRAPPER,
     );
+    let recovery_launcher = RECOVERY_LAUNCHER.replace("@UI_SCALE@", &ui_scale.to_string());
     write_executable(
         &fs_root.join("usr/local/bin/start-localdesktop-recovery"),
-        RECOVERY_LAUNCHER,
+        &recovery_launcher,
     );
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-retry-plasma"),
@@ -1368,7 +1369,11 @@ fn run_remaining_stages(
 }
 
 fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
-    let mut compositor = Compositor::build().expect("Failed to build compositor");
+    let size = android_app
+        .native_window()
+        .map(|nw| (nw.width(), nw.height()))
+        .unwrap_or((1920, 1080));
+    let mut compositor = Compositor::new(size).expect("Failed to build compositor");
     compositor.enable_android_clipboard(android_app.clone());
     PolarBearBackend::Wayland(WaylandBackend {
         compositor,

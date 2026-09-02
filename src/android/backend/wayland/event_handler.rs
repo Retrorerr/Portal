@@ -831,6 +831,8 @@ fn configure_toplevel(
     surface.with_pending_state(|state| {
         state.size = Some(size);
         state.states.set(xdg_toplevel::State::Activated);
+        state.states.set(xdg_toplevel::State::Fullscreen);
+        state.states.set(xdg_toplevel::State::Maximized);
     });
     surface.send_pending_configure();
 }

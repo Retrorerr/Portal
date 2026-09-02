@@ -86,4 +86,23 @@ impl WaylandBackend {
         self.touch_down_position = None;
         self.touch_down_time = None;
     }
+
+    /// Release any synthesized pointer grab and clear pending presentation state on suspend.
+    pub fn suspend_input_and_presentation(&mut self) {
+        self.reset_touch_state();
+        if self.pointer_pressed {
+            let time = self.clock.now().as_millis() as u32;
+            self.compositor.pointer.button(
+                &mut self.compositor.state,
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+                time,
+                0x110, // BTN_LEFT
+                smithay::backend::input::ButtonState::Released,
+            );
+            self.compositor.pointer.frame(&mut self.compositor.state);
+            self.pointer_pressed = false;
+        }
+        self.pending_kwin_presentation = None;
+        self.key_counter = 0;
+    }
 }
