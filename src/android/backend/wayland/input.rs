@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use super::TouchMode;
+use crate::core::android_integration::normalized_coordinate;
 use winit::{
     dpi::PhysicalPosition,
     event::{ElementState, MouseButton as WinitMouseButton, MouseScrollDelta},
@@ -112,11 +113,11 @@ impl AbsolutePositionEvent<WinitInput> for WinitMouseMovedEvent {
     }
 
     fn x_transformed(&self, width: i32) -> f64 {
-        f64::max(self.position.x * width as f64, 0.0)
+        normalized_coordinate(self.position.x) * width.max(0) as f64
     }
 
     fn y_transformed(&self, height: i32) -> f64 {
-        f64::max(self.position.y * height as f64, 0.0)
+        normalized_coordinate(self.position.y) * height.max(0) as f64
     }
 }
 
@@ -251,11 +252,11 @@ impl AbsolutePositionEvent<WinitInput> for WinitTouchStartedEvent {
     }
 
     fn x_transformed(&self, width: i32) -> f64 {
-        f64::max(self.position.x * width as f64, 0.0)
+        normalized_coordinate(self.position.x) * width.max(0) as f64
     }
 
     fn y_transformed(&self, height: i32) -> f64 {
-        f64::max(self.position.y * height as f64, 0.0)
+        normalized_coordinate(self.position.y) * height.max(0) as f64
     }
 }
 
@@ -296,11 +297,11 @@ impl AbsolutePositionEvent<WinitInput> for WinitTouchMovedEvent {
     }
 
     fn x_transformed(&self, width: i32) -> f64 {
-        f64::max(self.position.x * width as f64, 0.0)
+        normalized_coordinate(self.position.x) * width.max(0) as f64
     }
 
     fn y_transformed(&self, height: i32) -> f64 {
-        f64::max(self.position.y * height as f64, 0.0)
+        normalized_coordinate(self.position.y) * height.max(0) as f64
     }
 }
 
@@ -370,7 +371,10 @@ pub(crate) struct RelativePosition {
 
 impl RelativePosition {
     pub(crate) fn new(x: f64, y: f64) -> Self {
-        Self { x, y }
+        Self {
+            x: normalized_coordinate(x),
+            y: normalized_coordinate(y),
+        }
     }
 }
 

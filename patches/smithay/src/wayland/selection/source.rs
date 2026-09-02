@@ -26,6 +26,16 @@ impl SelectionSource {
     pub fn mime_types(&self) -> Vec<String> {
         self.provider.mime_types()
     }
+
+    /// Send one offered MIME type to the client-owned selection.
+    ///
+    /// Compositors that bridge selections to another clipboard need to enqueue the Wayland
+    /// `send` request while handling `new_selection`, before Smithay stores the source in its
+    /// seat data. Keep this forwarding method on the public wrapper so those bridges do not need
+    /// access to the provider's private enum.
+    pub fn send(&self, mime_type: String, fd: OwnedFd) {
+        self.provider.send(mime_type, fd);
+    }
 }
 
 /// Provider of the selection data.

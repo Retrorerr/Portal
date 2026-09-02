@@ -1,4 +1,7 @@
 use super::bind::bind_socket;
+use crate::android::clipboard::{
+    ClipboardBridge, ClipboardEvent, ClipboardSelectionData, TEXT_MIME, UTF8_TEXT_MIME,
+};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
@@ -26,9 +29,10 @@ use smithay::{
         presentation::PresentationState,
         selection::{
             data_device::{
+                clear_data_device_selection, set_data_device_focus, set_data_device_selection,
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
             },
-            SelectionHandler,
+            SelectionHandler, SelectionSource, SelectionTarget,
         },
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
@@ -43,10 +47,11 @@ use smithay::{
     reexports::wayland_server::{
         backend::{ClientData, ClientId, DisconnectReason, GlobalId},
         protocol::{wl_buffer, wl_surface::WlSurface},
-        Client, ListeningSocket,
+        Client, ListeningSocket, Resource,
     },
 };
 use std::{error::Error, os::unix::io::OwnedFd, time::Instant};
+use winit::platform::android::activity::AndroidApp;
 
 pub struct Compositor {
     pub state: State,
@@ -78,6 +83,9 @@ pub struct State {
     pub size: Size<i32, Logical>,
     pub output: Option<Output>,
     pub cursor_image: CursorImageStatus,
+    /// Android clipboard bridge. It is initialized only after provisioning has produced the
+    /// Wayland backend, so setup/webview stages never touch Android clipboard state.
+    pub clipboard_bridge: Option<ClipboardBridge>,
 }
 
 impl BufferHandler for State {
@@ -119,7 +127,55 @@ impl XdgShellHandler for State {
 }
 
 impl SelectionHandler for State {
-    type SelectionUserData = ();
+    type SelectionUserData = ClipboardSelectionData;
+
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if ty != SelectionTarget::Clipboard {
+            return;
+        }
+        let Some(bridge) = self.clipboard_bridge.as_ref() else {
+            return;
+        };
+
+        match source {
+            Some(source) => {
+                let mime_types = source.mime_types();
+                let Some(mime_type) = crate::core::clipboard_policy::choose_text_mime(
+                    mime_types.iter().map(String::as_str),
+                )
+                .map(str::to_owned) else {
+                    log::debug!("Guest clipboard offered no supported text MIME type");
+                    return;
+                };
+                if let Err(error) = bridge.forward_guest_selection(source, mime_type) {
+                    log::debug!("Failed to start guest-to-Android clipboard transfer: {error}");
+                }
+            }
+            None => bridge.clear_guest_selection(),
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        user_data: &ClipboardSelectionData,
+    ) {
+        if ty != SelectionTarget::Clipboard {
+            return;
+        }
+        let Some(bridge) = self.clipboard_bridge.as_ref() else {
+            return;
+        };
+        bridge.send_selection(user_data, &mime_type, fd);
+    }
 }
 
 impl DataDeviceHandler for State {
@@ -278,6 +334,7 @@ impl Compositor {
             size: (1920, 1080).into(),
             output: None,
             cursor_image: CursorImageStatus::default_named(),
+            clipboard_bridge: None,
         };
 
         Ok(Compositor {
@@ -293,5 +350,58 @@ impl Compositor {
             output: None,
             output_global: None,
         })
+    }
+
+    /// Start clipboard polling after the Android NativeActivity and the nested compositor exist.
+    pub fn enable_android_clipboard(&mut self, android_app: AndroidApp) {
+        self.state.clipboard_bridge = Some(ClipboardBridge::new(android_app));
+    }
+
+    /// Apply completed Android -> Wayland clipboard changes without doing JNI or FD I/O on the
+    /// render thread.
+    pub fn process_android_clipboard(&mut self) {
+        let events = self
+            .state
+            .clipboard_bridge
+            .as_ref()
+            .map(ClipboardBridge::drain_events)
+            .unwrap_or_default();
+        if events.is_empty() {
+            return;
+        }
+
+        let dh = self.display.handle();
+        for event in events {
+            match event {
+                ClipboardEvent::AndroidChanged(Some(text)) => {
+                    set_data_device_selection::<State>(
+                        &dh,
+                        &self.seat,
+                        vec![TEXT_MIME.to_owned(), UTF8_TEXT_MIME.to_owned()],
+                        ClipboardSelectionData::from_text(text),
+                    );
+                }
+                ClipboardEvent::AndroidChanged(None) => {
+                    clear_data_device_selection::<State>(&dh, &self.seat);
+                }
+            }
+        }
+    }
+
+    /// Keep wl_data_device focus aligned with the full-screen Plasma/KWin client. This is cheap
+    /// and idempotent, and also covers the first toplevel appearing after the initial dispatch.
+    pub fn sync_data_device_focus(&self) {
+        let client = self
+            .state
+            .xdg_shell_state
+            .toplevel_surfaces()
+            .iter()
+            .next()
+            .and_then(|surface| surface.wl_surface().client());
+        if client.is_none() {
+            return;
+        }
+        let dh = self.display.handle();
+        set_data_device_focus::<State>(&dh, &self.seat, client);
     }
 }

@@ -5,6 +5,7 @@ use crate::android::{
         write_guest_output_state, CentralizedEvent, TouchMode, WaylandBackend,
     },
 };
+use crate::core::wayland_protocol::{FrameEvent, FrameTrace};
 use smithay::backend::input::ButtonState;
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
@@ -20,8 +21,8 @@ use smithay::reexports::wayland_server::protocol::wl_pointer::ButtonState as WlB
 use smithay::utils::{IsAlive, Point, Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::wayland::{
-    compositor::with_states,
-    presentation::{PresentationFeedbackCachedState, Refresh},
+    compositor::{with_states, with_surface_tree_downward, TraversalAction},
+    presentation::{PresentationFeedbackCachedState, PresentationFeedbackCallback, Refresh},
 };
 use smithay::{
     backend::input::{
@@ -415,10 +416,53 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         return Ok(());
     };
 
+    // Android clipboard polling and transfer workers never touch the render thread; apply only
+    // completed, immutable changes here before dispatching the next batch of Wayland requests.
+    backend.compositor.process_android_clipboard();
+
     let size = winit.window_size();
     let damage = Rectangle::from_size(size);
     let mut presentation_feedbacks = Vec::new();
+    let mut frame_trace = FrameTrace::new();
+
+    // Process requests before taking the renderer snapshot.  The previous ordering rendered
+    // the old committed state, dispatched the next wl_surface.commit, then acknowledged that
+    // commit's wl_surface.frame callback after the swap.  KWin uses the callback as the host
+    // compositor's compositing/presentation point, so that ordering could make it submit the
+    // next frame while its acknowledged buffer was still not on the Android surface.  Keeping
+    // dispatch before rendering makes frame.done and wp_presentation refer to the state rendered
+    // by this iteration.
     {
+        let compositor = &mut backend.compositor;
+        match compositor.listener.accept() {
+            Ok(Some(stream)) => match compositor
+                .display
+                .handle()
+                .insert_client(stream, Arc::new(ClientState::default()))
+            {
+                Ok(client) => compositor.clients.push(client),
+                Err(error) => log::error!("Failed to insert Wayland client: {error}"),
+            },
+            Ok(None) => {}
+            Err(error) => log::error!("Failed to accept Wayland client: {error}"),
+        }
+
+        compositor
+            .display
+            .dispatch_clients(&mut compositor.state)
+            .map_err(|error| format!("Failed to dispatch clients: {error}"))?;
+        compositor
+            .display
+            .flush_clients()
+            .map_err(|error| format!("Failed to flush clients: {error}"))?;
+        compositor.sync_data_device_focus();
+        record_protocol_event(&mut frame_trace, FrameEvent::Dispatch);
+    }
+
+    // Keep the render elements alive through submit().  Smithay releases a client wl_buffer
+    // when its last render-element reference is dropped; releasing it before the EGL swap can
+    // let KWin reuse a shm buffer while the Android renderer is still consuming its texture.
+    let rendered_elements = {
         let (renderer, mut framebuffer) = winit
             .bind()
             .map_err(|error| format!("Failed to bind EGL surface: {error}"))?;
@@ -482,45 +526,31 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .map_err(|error| format!("Failed to finish frame: {error:?}"))?;
 
         for surface in compositor.state.xdg_shell_state.toplevel_surfaces() {
-            presentation_feedbacks.extend(with_states(surface.wl_surface(), |states| {
-                std::mem::take(
-                    &mut states
-                        .cached_state
-                        .get::<PresentationFeedbackCachedState>()
-                        .current()
-                        .callbacks,
-                )
-            }));
+            presentation_feedbacks.extend(take_presentation_feedbacks_surface_tree(
+                surface.wl_surface(),
+            ));
+        }
+        if let Some(surface) = &cursor_surface {
+            // Cursor surfaces are not children of the xdg toplevel tree, but they can also
+            // request wp_presentation_feedback and are rendered in this frame.
+            presentation_feedbacks.extend(take_presentation_feedbacks_surface_tree(surface));
         }
 
-        match compositor.listener.accept() {
-            Ok(Some(stream)) => match compositor
-                .display
-                .handle()
-                .insert_client(stream, Arc::new(ClientState::default()))
-            {
-                Ok(client) => compositor.clients.push(client),
-                Err(error) => log::error!("Failed to insert Wayland client: {error}"),
-            },
-            Ok(None) => {}
-            Err(error) => log::error!("Failed to accept Wayland client: {error}"),
-        }
+        record_protocol_event(&mut frame_trace, FrameEvent::Render);
 
-        compositor
-            .display
-            .dispatch_clients(&mut compositor.state)
-            .map_err(|error| format!("Failed to dispatch clients: {error}"))?;
-        compositor
-            .display
-            .flush_clients()
-            .map_err(|error| format!("Failed to flush clients: {error}"))?;
-    }
+        elements
+    };
 
     // It is important that all events on the display have been dispatched and flushed to clients
     // before swapping buffers because this operation may block.
     winit
         .submit(Some(&[damage]))
         .map_err(|error| format!("Failed to submit frame: {error}"))?;
+    record_protocol_event(&mut frame_trace, FrameEvent::Submit);
+
+    // The host has now submitted the frame represented by rendered_elements.  Do not release
+    // client buffers until after submit() has returned (see the invariant above).
+    drop(rendered_elements);
 
     let frame_time = backend.compositor.start_time.elapsed().as_millis() as u32;
     for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
@@ -531,11 +561,12 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             send_frames_surface_tree(surface, frame_time);
         }
     }
+    record_protocol_event(&mut frame_trace, FrameEvent::FrameDone);
 
     if let Some(output) = &backend.compositor.output {
         let presentation_time: std::time::Duration = backend.clock.now().into();
         let refresh = Refresh::fixed(std::time::Duration::from_nanos(
-            1_000_000_000_000u64 / backend.refresh_rate_millihz.max(1) as u64,
+            crate::core::android_integration::refresh_period_nanos(backend.refresh_rate_millihz),
         ));
         backend.presentation_sequence = backend.presentation_sequence.wrapping_add(1);
         for feedback in presentation_feedbacks {
@@ -547,10 +578,12 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                 smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
             );
         }
+        record_protocol_event(&mut frame_trace, FrameEvent::Presented);
     } else {
         for feedback in presentation_feedbacks {
             feedback.discarded();
         }
+        record_protocol_event(&mut frame_trace, FrameEvent::Discarded);
     }
 
     backend
@@ -560,6 +593,45 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         .map_err(|error| format!("Failed to flush presentation feedback: {error}"))?;
 
     Ok(())
+}
+
+/// Drain presentation feedback from the same tree that is handed to the renderer.
+///
+/// A feedback request belongs to the surface on which it was made.  Restricting the drain to
+/// xdg roots strands feedback requested by a subsurface (or by the cursor surface), and KWin's
+/// output backend expects every committed feedback to receive exactly one presented/discarded
+/// event.  Traversing downward mirrors `render_elements_from_surface_tree` and keeps the two
+/// lifecycles aligned.
+fn take_presentation_feedbacks_surface_tree(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> Vec<PresentationFeedbackCallback> {
+    let mut feedbacks = Vec::new();
+    with_surface_tree_downward(
+        surface,
+        (),
+        |_, _, &()| TraversalAction::DoChildren(()),
+        |_surface, states, &()| {
+            feedbacks.extend(std::mem::take(
+                &mut states
+                    .cached_state
+                    .get::<PresentationFeedbackCachedState>()
+                    .current()
+                    .callbacks,
+            ));
+        },
+        |_, _, &()| true,
+    );
+    feedbacks
+}
+
+fn record_protocol_event(trace: &mut FrameTrace, event: FrameEvent) {
+    if let Err(error) = trace.record(event) {
+        log::error!("Wayland frame lifecycle violation at {event:?}: {error}");
+    }
+    log::debug!(
+        "wayland.protocol frame_event={event:?} order={:?}",
+        trace.events()
+    );
 }
 
 fn configure_toplevel(

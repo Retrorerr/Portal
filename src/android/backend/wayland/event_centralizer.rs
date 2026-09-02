@@ -106,7 +106,12 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             is_synthetic,
             ..
         } if !is_synthetic && !event.repeat => {
-            let scancode = physicalkey_to_scancode(event.physical_key).unwrap_or(0);
+            let Some(scancode) = physicalkey_to_scancode(event.physical_key) else {
+                // Never forward the sentinel evdev code 0. It is interpreted as an unknown
+                // key by libinput/KWin and can leave modifiers or key counters inconsistent.
+                log::debug!("Dropping keyboard event without a physical evdev mapping: {event:?}");
+                return CentralizedEvent::Unsupported;
+            };
             centralize_keyboard(scancode, event.state, time, backend)
         }
         WindowEvent::CursorMoved { position, .. } => {
@@ -282,8 +287,8 @@ fn relative_position(
         .window()
         .inner_size();
     RelativePosition::new(
-        location.x / size.width as f64,
-        location.y / size.height as f64,
+        location.x / size.width.max(1) as f64,
+        location.y / size.height.max(1) as f64,
     )
 }
 

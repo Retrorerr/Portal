@@ -1173,8 +1173,10 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
     };
 
     if fully_installed {
+        let mut compositor = Compositor::build().expect("Failed to build compositor");
+        compositor.enable_android_clipboard(android_app.clone());
         PolarBearBackend::Wayland(WaylandBackend {
-            compositor: Compositor::build().expect("Failed to build compositor"),
+            compositor,
             graphic_renderer: None,
             clock: Clock::new(),
             key_counter: 0,

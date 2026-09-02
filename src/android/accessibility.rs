@@ -3,6 +3,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+use crate::core::android_input::android_keycode_to_scancode;
 use jni::{
     objects::JObject,
     sys::{jboolean, jint, jlong, JNI_FALSE, JNI_TRUE},
@@ -93,9 +94,25 @@ fn enqueue_key_event(action: jint, key_code: jint, scan_code: jint, event_time_m
         _ => return false,
     };
 
-    if scan_code <= 0 {
-        return false;
-    }
+    // Android's AccessibilityService legitimately reports scanCode == 0 for virtual and
+    // Bluetooth keyboards. Do not inject evdev code 0 (it is not a real key); use Android's
+    // stable key-code table as a fallback so those keyboards still reach the Wayland seat.
+    let scancode = if scan_code > 0 {
+        scan_code as u32
+    } else {
+        match android_keycode_to_scancode(key_code.max(0) as u32) {
+            Some(scancode) => {
+                log::debug!(
+                    "Accessibility keycode {key_code} had no scan code; using evdev {scancode}"
+                );
+                scancode
+            }
+            None => {
+                log::debug!("Dropping accessibility keycode {key_code} with no scan-code mapping");
+                return false;
+            }
+        }
+    };
 
     let mut bridge = bridge()
         .lock()
@@ -105,7 +122,7 @@ fn enqueue_key_event(action: jint, key_code: jint, scan_code: jint, event_time_m
     }
 
     bridge.pending_events.push_back(AccessibilityKeyEvent {
-        scancode: scan_code as u32,
+        scancode,
         state,
         event_time_ms: event_time_ms.max(0) as u64,
     });

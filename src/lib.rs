@@ -1,10 +1,18 @@
 pub mod core {
+    pub mod android_input;
+    pub mod android_integration;
+    pub mod clipboard_policy;
     pub mod config;
+    pub mod startup;
+    pub mod wayland_protocol;
 }
 
 #[cfg(target_os = "android")]
 pub mod android {
     pub mod accessibility;
+    pub mod clipboard;
+    pub mod diagnostics;
+    pub mod ime;
 
     pub mod main;
     pub mod app {
@@ -26,5 +34,6 @@ pub mod android {
         pub mod fullscreen_immersive;
         pub mod ndk;
         pub mod webview;
+        pub mod webview_handoff;
     }
 }

@@ -3,8 +3,7 @@ use jni::sys::{_jobject, JNIInvokeInterface_};
 use jni::{JNIEnv, JavaVM};
 use winit::platform::android::activity::AndroidApp;
 
-/// Logical density baseline: 160 dpi is Android's 1x bucket.
-const BASELINE_DPI: f64 = 160.0;
+use crate::core::android_integration::density_scale_factor;
 
 /// A higher-order function to run a provided JNI function within the JVM context.
 pub fn run_in_jvm<F, T>(jni_function: F, android_app: AndroidApp) -> T
@@ -106,12 +105,12 @@ pub fn density_dpi(android_app: &AndroidApp) -> i32 {
         },
         android_app.clone(),
     )
-    .unwrap_or(BASELINE_DPI as i32)
+    .unwrap_or(crate::core::android_integration::BASELINE_DPI as i32)
 }
 
 /// Guest UI scale factor derived from the device density, never below 1x.
 pub fn scale_factor(android_app: &AndroidApp) -> f64 {
-    (density_dpi(android_app) as f64 / BASELINE_DPI).max(1.0)
+    density_scale_factor(density_dpi(android_app))
 }
 
 /// How far a finger may travel before the gesture counts as a scroll rather than a tap
