@@ -52,6 +52,9 @@ for name in HOME USER LOGNAME WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
     printf 'env %s=%q\n' "$name" "$value" >> "$log_file"
 done
 ulimit -c unlimited 2>/dev/null || true
+export LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export QT_FORCE_STDERR_LOGGING=1
+export QT_LOGGING_RULES="kwin_core.warning=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
 
 # Prefer the app-provisioned crash handler. It is an in-process signal handler,
 # so it can still print PC/register/map evidence when nested gdb is denied by
@@ -84,6 +87,8 @@ fi
 printf 'stack_capture=%s path=%s\n' "$stack_capture" "${segfault_lib:-unavailable}" >> "$log_file"
 
 run_real_kwin() {
+    export LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export QT_FORCE_STDERR_LOGGING=1
     if [ -n "$segfault_lib" ]; then
         export LD_PRELOAD="$segfault_lib${LD_PRELOAD:+:$LD_PRELOAD}"
         export SEGFAULT_SIGNALS=all

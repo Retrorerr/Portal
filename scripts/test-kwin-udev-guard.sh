@@ -41,6 +41,8 @@ XDG_RUNTIME_DIR="$runtime_dir" \
 LD_PRELOAD="$shim" \
 LD_LIBRARY_PATH="$kwin_stage/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 KWIN_COMPOSE=Q \
+QT_FORCE_STDERR_LOGGING=1 \
+QT_LOGGING_RULES="kwin_core.warning=true;kwin_core.debug=true" \
 timeout --foreground --kill-after=2s 8s \
   "$kwin_bin" --virtual --no-lockscreen --no-global-shortcuts \
   --socket "$socket_name" >"$runtime_log" 2>&1
