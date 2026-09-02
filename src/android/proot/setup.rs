@@ -61,6 +61,7 @@ const RETRY_PLASMA: &str = include_str!("../../../assets/localdesktop-retry-plas
 const KONSOLE_CONFIG: &str = include_str!("../../../assets/konsole/konsolerc");
 const KONSOLE_PROFILE: &str = include_str!("../../../assets/konsole/LocalDesktop.profile");
 const CRASH_HANDLER_SOURCE: &str = include_str!("../../../assets/localdesktop-crash-handler.c");
+const PATCHED_LIBKWIN: &[u8] = include_bytes!("../../../assets/kwin-arm64/libkwin.so.6.7.4");
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -1071,6 +1072,28 @@ fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
         &fs_root.join("usr/local/bin/localdesktop-retry-plasma"),
         RETRY_PLASMA,
     );
+
+    // Deploy the patched KWin shared object that tolerates missing netlink udev monitors.
+    let local_lib = fs_root.join("usr/local/lib");
+    let _ = fs::create_dir_all(&local_lib);
+    let staged_kwin = local_lib.join("libkwin.so.6.7.4");
+    if let Ok(()) = fs::write(&staged_kwin, PATCHED_LIBKWIN) {
+        let _ = fs::set_permissions(&staged_kwin, fs::Permissions::from_mode(0o755));
+        let _ = fs::remove_file(local_lib.join("libkwin.so.6"));
+        let _ = fs::remove_file(local_lib.join("libkwin.so"));
+        let _ = symlink("libkwin.so.6.7.4", local_lib.join("libkwin.so.6"));
+        let _ = symlink("libkwin.so.6", local_lib.join("libkwin.so"));
+        log::info!("Staged patched libkwin.so.6.7.4 into /usr/local/lib");
+    }
+    let usr_lib = fs_root.join("usr/lib");
+    let usr_kwin = usr_lib.join("libkwin.so.6.7.4");
+    if usr_kwin.exists() {
+        if !usr_lib.join("libkwin.so.6.7.4.orig").exists() {
+            let _ = fs::copy(&usr_kwin, usr_lib.join("libkwin.so.6.7.4.orig"));
+        }
+        let _ = fs::write(&usr_kwin, PATCHED_LIBKWIN);
+        let _ = fs::set_permissions(&usr_kwin, fs::Permissions::from_mode(0o755));
+    }
 
     // Debug/diagnostic builds provision a tiny in-process signal handler.  A
     // nested gdb frequently dies before it can attach under Android's PRoot;
