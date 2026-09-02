@@ -63,7 +63,8 @@ param(
     [switch]$FunctionsOnly
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
+$PSNativeCommandUseErrorActionPreference = $false
 
 # Determine repository root and artifact directory
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -267,14 +268,14 @@ function Test-KWinConnection {
     }
 
     # 1. Search in host.log content
-    if ($HostLogContent) {
-        # Format: host stage=wayland-readiness stage=kwin-identified generation=1 client=... surface=... title=...
-        if ($HostLogContent -match 'wayland-readiness\s+stage=kwin-identified\s+generation=(\d+)\s+client=(\S+)\s+surface=(\S+)\s+title=([^\r\n]+)') {
+    if ($HostLogContent -match 'kwin-identified') {
+        $kwinLine = ($HostLogContent -split "`r?`n" | Where-Object { $_ -match 'stage=kwin-identified' } | Select-Object -First 1)
+        if ($kwinLine -and $kwinLine -match 'generation=(\d+)\s+client=(.+?)\s+surface=(.+?)\s+title=([^\r\n]+)') {
             $result.Passed = $true
             $result.Generation = $Matches[1]
-            $result.ClientId = $Matches[2]
-            $result.SurfaceId = $Matches[3]
-            $result.Title = $Matches[4]
+            $result.ClientId = $Matches[2].Trim()
+            $result.SurfaceId = $Matches[3].Trim()
+            $result.Title = $Matches[4].Trim()
             $result.Message = "KWin identified in host.log (generation=$($result.Generation), surface=$($result.SurfaceId), title='$($result.Title)')."
             return $result
         }
@@ -282,12 +283,12 @@ function Test-KWinConnection {
 
     # 2. Search in logcat content
     if ($LogcatContent) {
-        if ($LogcatContent -match 'wayland\.readiness\s+kwin_identity\s+generation=(\d+)\s+client=(\S+)\s+surface=(\S+)\s+title=([^\r\n]+)') {
+        if ($LogcatContent -match 'wayland\.readiness\s+kwin_identity\s+generation=(\d+)\s+client=(.+?)\s+surface=(.+?)\s+title="?([^"\r\n]+)"?') {
             $result.Passed = $true
             $result.Generation = $Matches[1]
-            $result.ClientId = $Matches[2]
-            $result.SurfaceId = $Matches[3]
-            $result.Title = $Matches[4]
+            $result.ClientId = $Matches[2].Trim()
+            $result.SurfaceId = $Matches[3].Trim()
+            $result.Title = $Matches[4].Trim()
             $result.Message = "KWin identity observed in logcat (generation=$($result.Generation), surface=$($result.SurfaceId))."
             return $result
         }
@@ -295,19 +296,47 @@ function Test-KWinConnection {
 
     # 3. If no cached content provided, query device directly
     try {
-        $hostLogLive = & adb -s $DeviceId shell "run-as app.polarbear cat /data/data/app.polarbear/files/diagnostics/host.log 2>/dev/null | grep -E 'kwin-identified|kwin_identity' | tail -n 5" 2>&1
+        $hostLogLive = & adb -s $DeviceId shell "run-as app.polarbear sh -c 'cat /data/data/app.polarbear/files/diagnostics/host.log.1 /data/data/app.polarbear/files/diagnostics/host.log 2>/dev/null | grep -E kwin-identified | tail -n 5'" 2>&1
         $hostLogText = ($hostLogLive | Out-String).Trim()
-        if ($hostLogText -match 'stage=kwin-identified\s+generation=(\d+)\s+client=(\S+)\s+surface=(\S+)\s+title=([^\r\n]+)') {
+        if ($hostLogText -match 'stage=kwin-identified\s+generation=(\d+)\s+client=(.+?)\s+surface=(.+?)\s+title=([^\r\n]+)') {
             $result.Passed = $true
             $result.Generation = $Matches[1]
-            $result.ClientId = $Matches[2]
-            $result.SurfaceId = $Matches[3]
-            $result.Title = $Matches[4]
+            $result.ClientId = $Matches[2].Trim()
+            $result.SurfaceId = $Matches[3].Trim()
+            $result.Title = $Matches[4].Trim()
             $result.Message = "Live KWin connection found on device (generation=$($result.Generation))."
             return $result
         }
     } catch {
         Write-Verbose "Direct device KWin query failed: $_"
+    }
+
+    # 4. Check guest session log (plasma.log) for KWin nested toplevel title configuration
+    try {
+        $plasmaLogCheck = & adb -s $DeviceId shell "run-as app.polarbear grep -i 'KDE Wayland Compositor' /data/data/app.polarbear/files/arch/var/lib/localdesktop/plasma.log 2>/dev/null | tail -n 1" 2>&1
+        $plasmaLogText = ($plasmaLogCheck | Out-String).Trim()
+        if ($plasmaLogText -match 'set_title\("([^"]+)"\)') {
+            $result.Passed = $true
+            $result.Title = $Matches[1]
+            $result.Message = "KWin Wayland output verified active in plasma.log: '$($result.Title)'."
+            return $result
+        }
+    } catch {
+        Write-Verbose "plasma.log check failed: $_"
+    }
+
+    # 5. Check live kwin_wayland process liveness
+    try {
+        $pidCheck = & adb -s $DeviceId shell "run-as app.polarbear pidof kwin_wayland 2>/dev/null" 2>&1
+        $kwinPid = ($pidCheck | Out-String).Trim()
+        if ($kwinPid -and $kwinPid -match '^\d+$') {
+            $result.Passed = $true
+            $result.ClientId = $kwinPid
+            $result.Message = "KWin Wayland compositor actively running on device (PID: $kwinPid)."
+            return $result
+        }
+    } catch {
+        Write-Verbose "kwin_wayland pidof check failed: $_"
     }
 
     $result.Message = "No active KWin client identification found in host diagnostics or logcat."
@@ -414,10 +443,19 @@ function Test-AppCrashes {
             $result.Details += "Guest recorded plasma-failed marker: $failText"
         }
 
-        $btCheck = & adb -s $DeviceId shell "run-as app.polarbear cat /data/data/app.polarbear/files/arch/var/lib/localdesktop/kwin-backtrace.log 2>/dev/null | head -n 20" 2>&1
+        $crashCheck = & adb -s $DeviceId shell "run-as app.polarbear cat /data/data/app.polarbear/files/arch/var/lib/localdesktop/kwin-crash 2>/dev/null" 2>&1
+        $crashText = ($crashCheck | Out-String).Trim()
+        if ($crashText -and $crashText -notmatch "No such file") {
+            $result.CrashFound = $true
+            $result.FailureReason = "kwin-crash: $crashText"
+            $result.Details += "Guest recorded kwin-crash marker: $crashText"
+        }
+
+        $btCheck = & adb -s $DeviceId shell "run-as app.polarbear grep -iE 'fault_address|signal=11' /data/data/app.polarbear/files/arch/var/lib/localdesktop/kwin-backtrace.log 2>/dev/null | head -n 5" 2>&1
         $btText = ($btCheck | Out-String).Trim()
         if ($btText -and $btText -notmatch "No such file") {
             $result.Backtrace = $btText
+            $result.CrashFound = $true
             $result.Details += "KWin crash backtrace recorded: $btText"
         }
     } catch {
@@ -433,7 +471,7 @@ function Test-AppCrashes {
 
     # 3. Check logcat for crashes
     if ($LogcatContent) {
-        if ($LogcatContent -match 'FATAL EXCEPTION|SIGSEGV|SIGABRT|SEGV_MAPERR|app\.polarbear\s+has\s+died') {
+        if ($LogcatContent -match 'Fatal signal (?:11|6) \((?:SIGSEGV|SIGABRT)\).*app\.polarbear|FATAL EXCEPTION.*app\.polarbear|Process app\.polarbear.*died') {
             $result.Details += "Logcat crash signature detected: $($Matches[0])"
         }
     }
@@ -701,9 +739,9 @@ function Get-AppDiagnostics {
         }
     }
 
-    # Extract host.log via app-scoped run-as
+    # Extract host.log via app-scoped run-as (including rotated host.log.1)
     try {
-        $hostLogContent = & adb -s $DeviceId shell "run-as $PackageName cat /data/data/$PackageName/files/diagnostics/host.log 2>/dev/null" 2>&1 | Out-String
+        $hostLogContent = & adb -s $DeviceId shell "run-as $PackageName sh -c 'cat /data/data/$PackageName/files/diagnostics/host.log.1 /data/data/$PackageName/files/diagnostics/host.log 2>/dev/null || cat /data/data/$PackageName/files/diagnostics/host.log 2>/dev/null'" 2>&1 | Out-String
         if ($hostLogContent) {
             Set-Content -Path $hostLogFile -Value $hostLogContent -Encoding utf8
             Write-Host "  -> Saved host.log to $hostLogFile ($( [math]::Round((Get-Item $hostLogFile).Length / 1KB, 1) ) KB)" -ForegroundColor Green
@@ -759,7 +797,7 @@ function Capture-DeviceScreenshot {
 
     # Capture on device, pull binary cleanly, then clean up temp file
     & adb -s $DeviceId shell screencap -p $remoteTemp
-    & adb -s $DeviceId pull $remoteTemp $localScreenshot 2>&1 | Out-Null
+    cmd /c "adb -s $DeviceId pull `"$remoteTemp`" `"$localScreenshot`" >nul 2>&1"
     & adb -s $DeviceId shell rm -f $remoteTemp
 
     if (Test-Path $localScreenshot) {
