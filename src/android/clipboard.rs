@@ -25,15 +25,10 @@ use std::{
 use winit::platform::android::activity::AndroidApp;
 
 use crate::android::utils::ndk::run_in_jvm;
-
-/// MIME types understood by Android's plain-text `ClipData` representation.
-pub const TEXT_MIME: &str = "text/plain";
-pub const UTF8_TEXT_MIME: &str = "text/plain;charset=utf-8";
-
-/// Maximum clipboard payload accepted from a Wayland client. This protects the background
-/// transfer worker from an accidentally unbounded `wl_data_offer.receive` stream while keeping
-/// normal copied documents and shell commands usable.
-const MAX_CLIPBOARD_BYTES: usize = 4 * 1024 * 1024;
+pub use crate::core::clipboard_policy::{
+    choose_text_mime, is_valid_clip_text, supports_mime_type, validate_clip_text,
+    MAX_CLIPBOARD_BYTES, TEXT_MIME, UTF8_TEXT_MIME,
+};
 
 /// Data backing a compositor-provided Android clipboard selection.
 ///
@@ -175,6 +170,9 @@ fn read_text_inner<'local>(
         .map_err(|error| jni_error("decode Android clip string", error))?
         .to_string_lossy()
         .into_owned();
+    if text.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(text))
 }
 
@@ -315,6 +313,10 @@ impl ClipboardBridge {
                 log::warn!("Ignoring guest clipboard selection that is not UTF-8");
                 return;
             };
+            if text.is_empty() {
+                log::debug!("Ignoring empty guest clipboard selection");
+                return;
+            }
 
             // Mark before the binder write so the poller cannot echo this own write if it races
             // the Android clipboard notification. Clear the marker when the write fails.
@@ -422,28 +424,6 @@ fn spawn_android_poller(
     });
 }
 
-/// Return whether a MIME type can be represented by the Android text bridge.
-pub fn supports_mime_type(mime_type: &str) -> bool {
-    mime_type.eq_ignore_ascii_case(TEXT_MIME) || mime_type.eq_ignore_ascii_case(UTF8_TEXT_MIME)
-}
-
-/// Pick the strongest supported text MIME type offered by a Wayland client.
-pub fn choose_text_mime<'a, I>(mime_types: I) -> Option<&'a str>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let mut plain = None;
-    for mime_type in mime_types {
-        if mime_type.eq_ignore_ascii_case(UTF8_TEXT_MIME) {
-            return Some(mime_type);
-        }
-        if plain.is_none() && mime_type.eq_ignore_ascii_case(TEXT_MIME) {
-            plain = Some(mime_type);
-        }
-    }
-    plain
-}
-
 /// Small state machine for polling Android -> Wayland clipboard changes.
 #[derive(Debug, Default)]
 pub struct ClipboardPoller {
@@ -470,26 +450,5 @@ impl ClipboardPoller {
         if let Ok(mut last) = self.last.lock() {
             *last = None;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recognizes_plain_text_mime_types() {
-        assert!(supports_mime_type("text/plain"));
-        assert!(supports_mime_type("TEXT/PLAIN;CHARSET=UTF-8"));
-        assert!(!supports_mime_type("text/html"));
-    }
-
-    #[test]
-    fn prefers_utf8_text_when_offered() {
-        assert_eq!(
-            choose_text_mime(["text/html", UTF8_TEXT_MIME]),
-            Some(UTF8_TEXT_MIME)
-        );
-        assert_eq!(choose_text_mime(["text/html"]), None);
     }
 }

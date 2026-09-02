@@ -182,6 +182,7 @@ pub fn committed_ascii_to_key_events(text: &str) -> Vec<(u32, bool)> {
                 '/' => (53, false),
                 '?' => (53, true),
                 ' ' => (57, false),
+                '\t' => (15, false),
                 '\u{8}' => (14, false),
                 '\n' | '\r' => (28, false),
                 _ => return None,
@@ -206,9 +207,35 @@ mod tests {
     #[test]
     fn converts_ascii_ime_commits_with_shift_information() {
         assert_eq!(
-            committed_ascii_to_key_events("aA 1!"),
-            vec![(30, false), (30, true), (57, false), (2, false), (2, true)]
+            committed_ascii_to_key_events("aA 1!\t\n"),
+            vec![
+                (30, false),
+                (30, true),
+                (57, false),
+                (2, false),
+                (2, true),
+                (15, false),
+                (28, false)
+            ]
         );
         assert!(committed_ascii_to_key_events("é").is_empty());
+        assert_eq!(
+            committed_ascii_to_key_events("hello\tworld\r\n"),
+            vec![
+                (35, false),
+                (18, false),
+                (38, false),
+                (38, false),
+                (24, false),
+                (15, false),
+                (17, false),
+                (24, false),
+                (19, false),
+                (38, false),
+                (32, false),
+                (28, false),
+                (28, false),
+            ]
+        );
     }
 }
