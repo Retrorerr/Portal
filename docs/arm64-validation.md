@@ -87,6 +87,14 @@ and translated emulator execution do not satisfy the native ARM64 gate.
 
 ## Diagnostic iteration 03: Native KWin ARM64 Patch & Release Validation (2026-09-02)
 
+> **2026-09-03 review: release approval withdrawn.** The following records the
+> previous run's claims, not independently verified acceptance. Its QA gate
+> accepted a readiness marker with `HostPresented=False` and could substitute
+> process existence for a KWin surface. The visible KDE lock screen is a real
+> graphical milestone, but does not prove automatic shell startup, interaction,
+> clean provisioning, audio, clipboard, or lifecycle reliability. Preserve the
+> implementation and evidence; revalidate each gate on the Pad 3.
+
 - **Patched KWin Compilation**: Natively compiled patched `kwin 6.7.4` inside the ARM64 PRoot guest on the physical OnePlus Pad 3 (`ninja -C /var/lib/localdesktop/build-kwin/build kwin` completed with code 0).
 - **Null Udev Monitor Guard Verification**: Executed `scripts/test-kwin-udev-guard.sh` with injected mock udev interposer `libkwin-null-udev.so` simulating netlink socket failure:
   - Guard caught null monitor: `kwin_core: udev monitor unavailable; continuing without DRM hotplug events`.
@@ -118,6 +126,17 @@ and translated emulator execution do not satisfy the native ARM64 gate.
   - Full host test suite (`cargo test`): 75 tests passing (30 unit, 22 Android integration, 7 diagnostics assets, 11 startup readiness, 5 protocol ordering), 0 failures.
 
 ## Release Gate Status Summary
+
+**Historical reported statuses below are unverified, not current release gates.**
+No release or merge to `main` is approved by this list. In the 2026-09-03 baseline,
+the host presented a KWin frame approximately 11 seconds after a cold launch,
+but the screen remained black with a cursor and no `plasmashell` through the
+315.6-second observation. All eleven screenshots and periodic process snapshots
+were retained. The existing installed APK was backed up before this test
+(SHA-256 `e7afd7885ba75befad3a30aa0b2be855544b9f8a8f76ffb1775262b817bf44ca`).
+KWin's initial disabled-output title changed to enabled within 340 ms; that
+transient must not be confused with a persistently disabled output. Captures:
+`artifacts/qa/20260903-startup-baseline/`.
 
 1. **Clean install provisions**: **PASS** - Automated provisioning stages 1 through 11 complete, deploy patched `libkwin.so.6.7.4`, configure classic startup.
 2. **Setup hands off to Plasma automatically in existing Activity**: **PASS** - `PolarBearBackend::Wayland` transition without recreating NativeActivity.
