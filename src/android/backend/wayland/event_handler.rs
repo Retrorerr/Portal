@@ -59,6 +59,13 @@ fn pointer_focus(
     get_surface(state).map(|surface| (surface.wl_surface().clone(), (0f64, 0f64).into()))
 }
 
+fn clamp_coordinates(state: &State, x: f64, y: f64) -> (f64, f64) {
+    (
+        crate::core::android_integration::clamp_physical_coordinate(x, state.size.w),
+        crate::core::android_integration::clamp_physical_coordinate(y, state.size.h),
+    )
+}
+
 fn emit_pointer_motion(
     compositor: &mut crate::android::backend::wayland::Compositor,
     x: f64,
@@ -67,13 +74,14 @@ fn emit_pointer_motion(
 ) {
     let pointer = compositor.pointer.clone();
     let state = &mut compositor.state;
+    let (clamped_x, clamped_y) = clamp_coordinates(state, x, y);
     if let Some(focus) = pointer_focus(state) {
         let serial = SERIAL_COUNTER.next_serial();
         pointer.motion(
             state,
             Some(focus),
             &pointer::MotionEvent {
-                location: (x, y).into(),
+                location: (clamped_x, clamped_y).into(),
                 serial,
                 time,
             },
@@ -287,13 +295,15 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 let compositor = &mut backend.compositor;
                 let pointer = compositor.pointer.clone();
                 let serial = SERIAL_COUNTER.next_serial();
+                let (clamped_x, clamped_y) =
+                    clamp_coordinates(&compositor.state, event.x(), event.y());
 
                 if let Some(surface) = get_surface(&compositor.state) {
                     pointer.motion(
                         &mut compositor.state,
                         Some((surface.wl_surface().clone(), (0f64, 0f64).into())),
                         &pointer::MotionEvent {
-                            location: (event.x(), event.y()).into(),
+                            location: (clamped_x, clamped_y).into(),
                             serial,
                             time: event.time_msec(),
                         },

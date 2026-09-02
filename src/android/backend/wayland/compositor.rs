@@ -664,6 +664,10 @@ impl Compositor {
         for event in events {
             match event {
                 ClipboardEvent::AndroidChanged(Some(text)) => {
+                    if text.is_empty() {
+                        log::debug!("Ignoring empty Android clipboard selection");
+                        continue;
+                    }
                     set_data_device_selection::<State>(
                         &dh,
                         &self.seat,
