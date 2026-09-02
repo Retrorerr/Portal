@@ -60,6 +60,14 @@ fn oneplus_pad_3_physical_bounds_and_coordinate_clamping() {
 }
 
 #[test]
+fn tablet_native_resolution_and_density_conversions() {
+    let scale = density_scale_factor(300);
+    assert_eq!(physical_window_size(3392, 2400), Some((3392, 2400)));
+    assert_eq!(xft_dpi(scale), 180);
+    assert_eq!(qt_scale_factor(scale), "1.875");
+}
+
+#[test]
 fn malformed_android_events_are_safe_to_forward_or_drop() {
     assert_eq!(normalized_coordinate(f64::NAN), 0.0);
     assert_eq!(normalized_coordinate(2.0), 1.0);

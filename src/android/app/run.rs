@@ -138,6 +138,8 @@ fn configure_toplevel(surface: &ToplevelSurface, width: i32, height: i32) {
     surface.with_pending_state(|state| {
         state.size.replace((width, height).into());
         state.states.set(xdg_toplevel::State::Activated);
+        state.states.set(xdg_toplevel::State::Fullscreen);
+        state.states.set(xdg_toplevel::State::Maximized);
     });
     surface.send_configure();
 }
@@ -270,6 +272,30 @@ impl PolarBearApp {
             self.enter_runtime_error("Wayland could not be resumed after Retry Plasma");
         }
     }
+
+    /// Transition from completed provisioning WebView to Wayland backend in-process.
+    /// Returns true if a transition occurred.
+    fn handle_setup_complete(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if !webview_handoff::take_setup_complete() {
+            return false;
+        }
+        // The final setup callback has already closed the popup. Re-run the idempotent
+        // dispatcher synchronously on this event-loop turn; all stages now report
+        // complete, so this constructs the Wayland backend in the current Activity.
+        let android_app = self.frontend.android_app.clone();
+        let mut backend = crate::android::proot::setup::setup(android_app.clone());
+        if let PolarBearBackend::WebView(webview) = &mut backend {
+            webview.attach_android_app(android_app);
+            log::error!(
+                "Setup completion event arrived before the guest was ready; retaining the WebView error screen"
+            );
+        }
+        self.backend = backend;
+        if let PolarBearBackend::Wayland(backend) = &mut self.backend {
+            let _ = resume_wayland(backend, event_loop, &self.frontend.android_app);
+        }
+        true
+    }
 }
 
 impl ApplicationHandler<AppUserEvent> for PolarBearApp {
@@ -281,6 +307,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             }
         }
         if matches!(&self.backend, PolarBearBackend::WebView(_)) {
+            if self.handle_setup_complete(event_loop) {
+                return;
+            }
             self.show_webview();
             return;
         }
@@ -322,22 +351,8 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             if !matches!(&self.backend, PolarBearBackend::WebView(_)) {
                 return;
             }
-            if webview_handoff::take_setup_complete() {
-                // The final setup callback has already closed the popup. Re-run the idempotent
-                // dispatcher synchronously on this event-loop turn; all stages now report
-                // complete, so this constructs the Wayland backend in the current Activity.
-                let android_app = self.frontend.android_app.clone();
-                let mut backend = crate::android::proot::setup::setup(android_app.clone());
-                if let PolarBearBackend::WebView(webview) = &mut backend {
-                    webview.attach_android_app(android_app);
-                    log::error!(
-                        "Setup completion event arrived before the guest was ready; retaining the WebView error screen"
-                    );
-                }
-                self.backend = backend;
-                if let PolarBearBackend::Wayland(backend) = &mut self.backend {
-                    let _ = resume_wayland(backend, event_loop, &self.frontend.android_app);
-                }
+            if self.handle_setup_complete(event_loop) {
+                return;
             }
             return;
         }
@@ -427,9 +442,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 log::debug!("Software keyboard bridge could not be hidden on suspend: {error}");
             }
             backend.graphic_renderer = None;
-            backend.key_counter = 0;
-            backend.reset_touch_state();
-            backend.pointer_pressed = false;
+            backend.suspend_input_and_presentation();
             // Kill the standalone-client PipeWire/AAudio backend if it was started.
             pipewire_standalone_aaudio::shutdown();
         }
