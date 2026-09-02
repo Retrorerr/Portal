@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Local Desktop maintainers <localdesktop@example.invalid>
+Date: Wed, 2 Sep 2026 20:00:00 +0100
+Subject: [PATCH] core: tolerate an unavailable udev monitor
+
+KWin's nested Wayland startup creates the GPU manager before it creates the
+Wayland backend.  On Android/PRoot, libudev can be present while its netlink
+monitor cannot be created.  Udev::createMonitor() reports that condition by
+returning nullptr, but the constructor used to dereference that pointer while
+constructing QSocketNotifier.
+
+Keep render-node enumeration (including an explicit KWIN_RENDER_NODES list)
+and let the selected backend decide whether it can render.  Only disable the
+hotplug notifier when no monitor exists.
+
+This patch is pinned to KDE KWin v6.7.4, commit
+8438567a741826da8b7536a8b10eb3af8fc8820d.  The ARM64 null-monitor smoke test
+documented in patches/kwin/README.md injects the failure before starting the
+matching kwin_wayland binary; it is not a substitute for a full Plasma run.
+
+---
+ src/core/gpumanager.cpp | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/src/core/gpumanager.cpp b/src/core/gpumanager.cpp
+--- a/src/core/gpumanager.cpp
++++ b/src/core/gpumanager.cpp
+@@ -70,12 +70,16 @@ GpuManager::GpuManager()
+     : m_udmabuf(::open("/dev/udmabuf", O_RDWR | O_CLOEXEC))
+     , m_udmabufDevId(getDevId(m_udmabuf))
+     , m_udev(std::make_unique<Udev>())
+     , m_udevMonitor(m_udev->createMonitor())
+-    , m_udevNotifier(std::make_unique<QSocketNotifier>(m_udevMonitor->fd(), QSocketNotifier::Read))
++    , m_udevNotifier(m_udevMonitor ? std::make_unique<QSocketNotifier>(m_udevMonitor->fd(), QSocketNotifier::Read) : nullptr)
+     , m_explicitRenderNodes(qEnvironmentVariableIsSet("KWIN_RENDER_NODES") ? splitPathList(qEnvironmentVariable("KWIN_RENDER_NODES")) : std::optional<QStringList>())
+ {
+-    m_udevMonitor->filterSubsystemDevType("drm");
+-    connect(m_udevNotifier.get(), &QSocketNotifier::activated, this, &GpuManager::handleUdevEvent);
+-    m_udevMonitor->enable();
++    if (m_udevMonitor) {
++        m_udevMonitor->filterSubsystemDevType("drm");
++        connect(m_udevNotifier.get(), &QSocketNotifier::activated, this, &GpuManager::handleUdevEvent);
++        m_udevMonitor->enable();
++    } else {
++        qCWarning(KWIN_CORE) << "udev monitor unavailable; continuing without DRM hotplug events";
++    }
+     scanForRenderDevices();
+ }
+@@ -217,5 +221,8 @@ void GpuManager::handleUdevEvent()
+ void GpuManager::handleUdevEvent()
+ {
++    if (!m_udevMonitor) {
++        return;
++    }
+     while (auto udevDevice = m_udevMonitor->getDevice()) {
+         int devNum = -1;
+         const bool isPrimaryNode = sscanf(udevDevice->sysName().data(), DRM_PRIMARY_MINOR_NAME "%d", &devNum) == 1;
+-- 
+2.45.2

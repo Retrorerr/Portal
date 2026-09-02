@@ -7,3 +7,5 @@ localdesktop.apk
 /dist/
 /artifacts/
 /.release-signing/
+.tmp-android-dex/
+test_apply_probe.tmp

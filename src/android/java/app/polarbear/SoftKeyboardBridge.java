@@ -3,8 +3,8 @@ package app.polarbear;
 import android.app.Activity;
 import android.content.Context;
 import android.graphics.Color;
+import android.text.InputType;
 import android.view.Gravity;
-import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.inputmethod.BaseInputConnection;
@@ -14,17 +14,17 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 
-import java.lang.ref.WeakReference;
-
 /**
  * A tiny editor used solely to give Android's IME an InputConnection while the native Wayland
- * surface remains the visible UI.  It is kept transparent and off the content area so it does
- * not steal pointer input from the nested desktop.
+ * surface remains the visible UI. All view access is serialized on the Activity UI thread. The
+ * editor is one pixel, transparent, and marked not-important-for-accessibility so it cannot
+ * steal pointer input or appear as a second control in the accessibility tree.
  */
 public final class SoftKeyboardBridge {
     private static final String TAG = "LocalDesktopIme";
-    private static WeakReference<Activity> activityRef = new WeakReference<>(null);
+    private static final int MAX_COMMIT_CHARS = 64 * 1024;
     private static BridgeEditText editor;
+    private static Activity editorActivity;
 
     static {
         System.loadLibrary("localdesktop");
@@ -32,45 +32,70 @@ public final class SoftKeyboardBridge {
 
     private SoftKeyboardBridge() {}
 
+    /** Show the IME on the Android UI thread without a timing-dependent sleep. */
     public static void show(final Activity activity) {
-        if (activity == null) {
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
             return;
         }
-        activity.runOnUiThread(() -> {
-            activityRef = new WeakReference<>(activity);
-            BridgeEditText input = ensureEditor(activity);
-            input.setVisibility(View.VISIBLE);
-            input.requestFocus();
-            InputMethodManager manager =
-                (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
-            if (manager != null) {
-                input.postDelayed(() -> manager.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT), 50);
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (activity.isFinishing() || activity.isDestroyed()) {
+                    return;
+                }
+                BridgeEditText input = ensureEditor(activity);
+                input.setVisibility(View.VISIBLE);
+                input.setFocusableInTouchMode(true);
+                input.requestFocus();
+                InputMethodManager manager =
+                    (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (manager != null) {
+                    // Posting to the UI queue waits for focus/window attachment deterministically;
+                    // unlike postDelayed it does not guess an emulator-specific timing budget.
+                    input.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            manager.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+                        }
+                    });
+                }
             }
         });
     }
 
+    /** Hide the IME and release the editor focus on the Android UI thread. */
     public static void hide(final Activity activity) {
         if (activity == null) {
             return;
         }
-        activity.runOnUiThread(() -> {
-            BridgeEditText input = editor;
-            if (input == null) {
-                return;
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                BridgeEditText input = editor;
+                if (input == null) {
+                    return;
+                }
+                InputMethodManager manager =
+                    (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (manager != null) {
+                    manager.hideSoftInputFromWindow(input.getWindowToken(), 0);
+                }
+                input.clearFocus();
+                input.setVisibility(View.INVISIBLE);
             }
-            InputMethodManager manager =
-                (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
-            if (manager != null) {
-                manager.hideSoftInputFromWindow(input.getWindowToken(), 0);
-            }
-            input.clearFocus();
-            input.setVisibility(View.INVISIBLE);
         });
     }
 
     private static BridgeEditText ensureEditor(Activity activity) {
-        if (editor != null && editor.getContext() == activity) {
+        if (editor != null && editorActivity == activity && editor.getParent() != null) {
             return editor;
+        }
+
+        // NativeActivity recreation gives us a new content FrameLayout. Detach the old editor
+        // from its old parent before retaining a reference to the new activity, otherwise the
+        // old Activity/View tree remains reachable for the rest of the process.
+        if (editor != null && editor.getParent() instanceof FrameLayout) {
+            ((FrameLayout) editor.getParent()).removeView(editor);
         }
 
         View root = activity.findViewById(android.R.id.content);
@@ -84,6 +109,7 @@ public final class SoftKeyboardBridge {
         input.setCursorVisible(false);
         input.setSingleLine(false);
         input.setFocusableInTouchMode(true);
+        input.setShowSoftInputOnFocus(true);
         input.setVisibility(View.INVISIBLE);
         input.setAlpha(0.01f);
         input.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -94,15 +120,17 @@ public final class SoftKeyboardBridge {
         params.bottomMargin = 1;
         ((FrameLayout) root).addView(input, params);
         editor = input;
+        editorActivity = activity;
         return input;
     }
 
     private static final class BridgeEditText extends EditText {
         BridgeEditText(Context context) {
             super(context);
-            setInputType(android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
         }
 
         @Override
@@ -112,23 +140,38 @@ public final class SoftKeyboardBridge {
 
         @Override
         public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-            outAttrs.inputType = android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            outAttrs.inputType = InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
             outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI;
             return new BaseInputConnection(this, true) {
+                private void commit(CharSequence text) {
+                    if (text != null && text.length() > 0) {
+                        String value = text.length() > MAX_COMMIT_CHARS
+                            ? text.subSequence(0, MAX_COMMIT_CHARS).toString()
+                            : text.toString();
+                        nativeOnTextCommit(value);
+                    }
+                }
+
                 @Override
                 public boolean commitText(CharSequence text, int newCursorPosition) {
-                    if (text != null && text.length() > 0) {
-                        nativeOnTextCommit(text.toString());
-                    }
+                    commit(text);
                     return true;
                 }
 
                 @Override
                 public boolean deleteSurroundingText(int beforeLength, int afterLength) {
                     // Backspace is represented as an ASCII control commit; the native side maps
-                    // it to the evdev Delete/Backspace key rather than changing this editor's text.
+                    // it to the evdev Backspace key rather than changing this editor's text.
+                    if (beforeLength > 0) {
+                        nativeOnTextCommit("\b");
+                    }
+                    return true;
+                }
+
+                @Override
+                public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
                     if (beforeLength > 0) {
                         nativeOnTextCommit("\b");
                     }
@@ -151,6 +194,12 @@ public final class SoftKeyboardBridge {
                         }
                     }
                     return super.sendKeyEvent(event);
+                }
+
+                @Override
+                public boolean performEditorAction(int actionCode) {
+                    nativeOnTextCommit("\n");
+                    return true;
                 }
             };
         }

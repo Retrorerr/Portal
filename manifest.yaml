@@ -2,6 +2,8 @@ icon: assets/icon.png
 android:
   assets:
     - assets/setup-progress.html
+    - assets/setup-progress-v2.html
+    - assets/runtime-error.html
     - assets/unsupported.html
     - assets/ld-linux-aarch64.so.1
     - assets/wireplumber-share.tar

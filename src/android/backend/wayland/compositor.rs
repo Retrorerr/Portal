@@ -2,8 +2,9 @@ use super::bind::bind_socket;
 use crate::android::clipboard::{
     ClipboardBridge, ClipboardEvent, ClipboardSelectionData, TEXT_MIME, UTF8_TEXT_MIME,
 };
+use crate::core::startup::{is_kwin_wayland_title, StartupReadiness};
 use smithay::{
-    backend::renderer::utils::on_commit_buffer_handler,
+    backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state},
     delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
     delegate_pointer_constraints, delegate_presentation, delegate_seat, delegate_shm,
     delegate_single_pixel_buffer, delegate_viewporter, delegate_xdg_shell,
@@ -20,8 +21,8 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
-            SurfaceAttributes, TraversalAction,
+            with_states, with_surface_tree_downward, BufferAssignment, CompositorClientState,
+            CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
         },
         fractional_scale::{self, FractionalScaleHandler, FractionalScaleManagerState},
         output::OutputHandler,
@@ -35,7 +36,8 @@ use smithay::{
             SelectionHandler, SelectionSource, SelectionTarget,
         },
         shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            Configure, PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler,
+            XdgShellState, XdgToplevelSurfaceData,
         },
         shm::{ShmHandler, ShmState},
         single_pixel_buffer::SinglePixelBufferState,
@@ -83,9 +85,220 @@ pub struct State {
     pub size: Size<i32, Logical>,
     pub output: Option<Output>,
     pub cursor_image: CursorImageStatus,
+    /// Readiness evidence for the currently identified KWin output surface.
+    pub readiness: StartupReadiness,
+    /// The one KWin nested output surface whose lifecycle is allowed to
+    /// satisfy readiness. Recovery clients are deliberately not interchangeable
+    /// with this object, even if they also create xdg-toplevels.
+    pub kwin_surface: Option<WlSurface>,
+    pub kwin_client_id: Option<ClientId>,
+    pub kwin_generation: Option<u64>,
     /// Android clipboard bridge. It is initialized only after provisioning has produced the
     /// Wayland backend, so setup/webview stages never touch Android clipboard state.
     pub clipboard_bridge: Option<ClipboardBridge>,
+}
+
+impl State {
+    /// Read the xdg-toplevel title from Smithay's role data. KWin sets this
+    /// before its first no-buffer commit, so the title is available during the
+    /// initial dispatch even though the surface is not mapped yet.
+    fn toplevel_title(surface: &ToplevelSurface) -> Option<String> {
+        with_states(surface.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().ok().and_then(|data| data.title.clone()))
+        })
+    }
+
+    /// Observe a toplevel and, only when its title matches KWin's nested output
+    /// identity, make it the surface for a fresh readiness generation.
+    ///
+    /// Wayland does not provide a trusted process identity to the compositor.
+    /// Pairing KWin's upstream title prefix with the owning `ClientId` and
+    /// `wl_surface` object id keeps unrelated recovery surfaces out of the
+    /// readiness path while retaining protocol-visible evidence.
+    pub fn observe_kwin_toplevel(&mut self, surface: &ToplevelSurface) -> bool {
+        let Some(title) = Self::toplevel_title(surface) else {
+            return false;
+        };
+        if !is_kwin_wayland_title(&title) {
+            return false;
+        }
+
+        let Some(client_id) = surface.wl_surface().client().map(|client| client.id()) else {
+            return false;
+        };
+        let wl_surface = surface.wl_surface().clone();
+        let is_new_identity = self
+            .kwin_surface
+            .as_ref()
+            .map_or(true, |known| known != &wl_surface)
+            || self.kwin_client_id.as_ref() != Some(&client_id);
+
+        if is_new_identity {
+            let generation = self.readiness.begin_generation();
+            self.kwin_surface = Some(wl_surface.clone());
+            self.kwin_client_id = Some(client_id.clone());
+            self.kwin_generation = Some(generation);
+            let _ = self.readiness.mark_kwin_connected_for(generation);
+            let _ = self.readiness.mark_surface_created_for(generation);
+            log::info!(
+                "wayland.readiness kwin_identity generation={} client={:?} surface={:?} title={:?}",
+                generation,
+                client_id,
+                wl_surface.id(),
+                title
+            );
+            crate::android::diagnostics::host_event(
+                "wayland-readiness",
+                &format!(
+                    "stage=kwin-identified generation={} client={:?} surface={:?} title={}",
+                    generation,
+                    self.kwin_client_id,
+                    wl_surface.id(),
+                    title
+                ),
+            );
+        }
+
+        let Some(generation) = self.kwin_generation else {
+            return true;
+        };
+
+        // The title request and xdg_surface.ack_configure can arrive in the
+        // same dispatch batch. If the ack was already processed before this
+        // title was observed, synchronize strict readiness from role data.
+        let configured = with_states(&wl_surface, |states| {
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().ok().map(|data| data.configured))
+                .unwrap_or(false)
+        });
+        if configured {
+            let _ = self.readiness.mark_configure_acked_for(generation);
+        }
+        true
+    }
+
+    /// Return whether a surface is exactly the identified KWin surface for the
+    /// current client generation.
+    pub fn is_known_kwin_surface(&self, surface: &WlSurface) -> bool {
+        let Some(known) = self.kwin_surface.as_ref() else {
+            return false;
+        };
+        if known != surface {
+            return false;
+        }
+        match (&self.kwin_client_id, surface.client()) {
+            (Some(expected), Some(client)) => expected == &client.id(),
+            _ => false,
+        }
+    }
+
+    /// Capture a buffer commit before Smithay consumes the assignment, or
+    /// synchronize an already-consumed renderer buffer after title discovery.
+    pub fn observe_kwin_buffer(&mut self, surface: &WlSurface, newly_committed: bool) -> bool {
+        if !self.is_known_kwin_surface(surface) {
+            return false;
+        }
+        let has_buffer = newly_committed
+            || with_renderer_surface_state(surface, |state| state.buffer().is_some())
+                .unwrap_or(false);
+        if !has_buffer {
+            return false;
+        }
+        let Some(generation) = self.kwin_generation else {
+            return false;
+        };
+        let advanced = self.readiness.mark_buffer_committed_for(generation);
+        if advanced {
+            log::info!(
+                "wayland.readiness stage=buffer-committed generation={} surface={:?}",
+                generation,
+                surface.id()
+            );
+            crate::android::diagnostics::host_event(
+                "wayland-readiness",
+                &format!(
+                    "stage=buffer-committed generation={} surface={:?}",
+                    generation,
+                    surface.id()
+                ),
+            );
+        }
+        advanced
+    }
+
+    /// Return the current KWin generation when a rendered frame and feedback
+    /// request are ready to be correlated with an EGL frame id.
+    pub fn kwin_frame_generation(&self) -> Option<u64> {
+        let generation = self.kwin_generation?;
+        if self.readiness.generation() == generation
+            && self.readiness.configure_acked
+            && self.readiness.buffer_committed
+            && !self.readiness.frame_presented
+        {
+            Some(generation)
+        } else {
+            None
+        }
+    }
+
+    /// Record that an identified KWin frame has reached the requested proof
+    /// point. Physical Android display-present timestamps use a stronger
+    /// evidence label than the no-timestamp fallback.
+    pub fn mark_kwin_frame_presented_with_evidence(
+        &mut self,
+        evidence: &str,
+        presentation_timestamp_ns: Option<i64>,
+    ) -> Option<u64> {
+        let generation = self.kwin_generation?;
+        if self.readiness.mark_frame_presented_for(generation) {
+            log::info!(
+                "wayland.readiness stage=android-frame-presented generation={} surface={:?} evidence={} android_present_ns={:?}",
+                generation,
+                self.kwin_surface.as_ref().map(|surface| surface.id()),
+                evidence,
+                presentation_timestamp_ns,
+            );
+            crate::android::diagnostics::host_event(
+                "wayland-readiness",
+                &format!(
+                    "stage=android-frame-presented generation={} surface={:?} evidence={} android_present_ns={:?}",
+                    generation,
+                    self.kwin_surface.as_ref().map(|surface| surface.id()),
+                    evidence,
+                    presentation_timestamp_ns,
+                ),
+            );
+            Some(generation)
+        } else {
+            None
+        }
+    }
+
+    /// Compatibility helper for callers that only have submit/feedback
+    /// evidence and no Android timestamp sample.
+    pub fn mark_kwin_frame_presented(&mut self) -> Option<u64> {
+        self.mark_kwin_frame_presented_with_evidence(
+            "egl-swap-and-wayland-feedback",
+            None,
+        )
+    }
+
+    fn observe_kwin_surface_id(&mut self, surface: &WlSurface) {
+        let toplevel = self
+            .xdg_shell_state
+            .toplevel_surfaces()
+            .iter()
+            .find(|candidate| candidate.wl_surface() == surface)
+            .cloned();
+        if let Some(toplevel) = toplevel {
+            self.observe_kwin_toplevel(&toplevel);
+        }
+    }
 }
 
 impl BufferHandler for State {
@@ -106,6 +319,7 @@ impl XdgShellHandler for State {
             state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
+        self.observe_kwin_toplevel(&surface);
     }
 
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {
@@ -123,6 +337,63 @@ impl XdgShellHandler for State {
         _token: u32,
     ) {
         // Handle popup reposition here
+    }
+
+    fn ack_configure(&mut self, surface: WlSurface, configure: Configure) {
+        // Keep the strict startup state tied to the same titled KWin surface.
+        // The xdg-shell delegate has already validated the serial before this
+        // callback runs.
+        self.observe_kwin_surface_id(&surface);
+        if self.is_known_kwin_surface(&surface) {
+            if let Some(generation) = self.kwin_generation {
+                if self.readiness.mark_configure_acked_for(generation) {
+                    let serial = match configure {
+                        Configure::Toplevel(configure) => u32::from(configure.serial),
+                        Configure::Popup(configure) => u32::from(configure.serial),
+                    };
+                    log::info!(
+                        "wayland.readiness stage=configure-acked generation={} serial={} surface={:?}",
+                        generation,
+                        serial,
+                        surface.id()
+                    );
+                    crate::android::diagnostics::host_event(
+                        "wayland-readiness",
+                        &format!(
+                            "stage=configure-acked generation={} serial={} surface={:?}",
+                            generation,
+                            serial,
+                            surface.id()
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        self.observe_kwin_toplevel(&surface);
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        if self.is_known_kwin_surface(surface.wl_surface()) {
+            let generation = self.kwin_generation;
+            log::warn!(
+                "wayland.readiness kwin_surface_destroyed generation={generation:?} surface={:?}",
+                surface.wl_surface().id()
+            );
+            crate::android::diagnostics::host_event(
+                "wayland-readiness",
+                &format!(
+                    "stage=kwin-disconnected generation={generation:?} surface={:?}",
+                    surface.wl_surface().id()
+                ),
+            );
+            self.kwin_surface = None;
+            self.kwin_client_id = None;
+            self.kwin_generation = None;
+            self.readiness.invalidate();
+        }
     }
 }
 
@@ -199,7 +470,22 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        // `on_commit_buffer_handler` consumes the current BufferAssignment and
+        // keeps only the renderer-owned buffer. Capture the protocol event
+        // first so readiness cannot miss the only NewBuffer commit.
+        let newly_committed = with_states(surface, |states| {
+            matches!(
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .buffer
+                    .as_ref(),
+                Some(BufferAssignment::NewBuffer(_))
+            )
+        });
         on_commit_buffer_handler::<Self>(surface);
+        self.observe_kwin_buffer(surface, newly_committed);
     }
 }
 
@@ -334,6 +620,10 @@ impl Compositor {
             size: (1920, 1080).into(),
             output: None,
             cursor_image: CursorImageStatus::default_named(),
+            readiness: StartupReadiness::new(),
+            kwin_surface: None,
+            kwin_client_id: None,
+            kwin_generation: None,
             clipboard_bridge: None,
         };
 
@@ -403,5 +693,18 @@ impl Compositor {
         }
         let dh = self.display.handle();
         set_data_device_focus::<State>(&dh, &self.seat, client);
+    }
+
+    /// Re-scan all currently known xdg toplevels after dispatch. This catches
+    /// the common KWin sequence where the title and the first buffer commit are
+    /// delivered in one batch, while still allowing the title_changed and
+    /// ack_configure callbacks to establish the identity earlier.
+    pub fn observe_kwin_surfaces(&mut self) {
+        let surfaces = self.state.xdg_shell_state.toplevel_surfaces().to_vec();
+        for surface in surfaces {
+            if self.state.observe_kwin_toplevel(&surface) {
+                self.state.observe_kwin_buffer(surface.wl_surface(), false);
+            }
+        }
     }
 }

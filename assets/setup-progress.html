@@ -167,10 +167,12 @@
         mounted() {
           const params = new URLSearchParams(window.location.search);
           const port = params.get("port");
+          const token = params.get("token");
           const ws = new WebSocket(`ws://127.0.0.1:${port}`, "rust-websocket");
 
           ws.onopen = () => {
             console.log("WebSocket connection established");
+            ws.send(JSON.stringify({ action: "hello", token }));
           };
 
           ws.onmessage = (event) => {

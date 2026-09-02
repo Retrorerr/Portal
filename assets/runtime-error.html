@@ -30,10 +30,12 @@
       const reason = params.get("reason");
       if (reason) document.getElementById("reason").textContent = reason;
       const port = params.get("port");
+      const token = params.get("token");
       let socket;
       function connect() {
         if (!port) return;
         socket = new WebSocket(`ws://127.0.0.1:${port}`, "rust-websocket");
+        socket.onopen = () => send("hello");
         socket.onmessage = event => {
           try {
             const data = JSON.parse(event.data);
@@ -41,9 +43,14 @@
           } catch (_) {}
         };
       }
+      function send(action) {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ action, token }));
+        }
+      }
       document.getElementById("export").onclick = () => {
         if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ action: "export_diagnostics" }));
+          send("export_diagnostics");
           document.getElementById("result").textContent = "Preparing diagnostics…";
         } else {
           document.getElementById("result").textContent = "Diagnostics server is not ready; reopen Local Desktop and try again.";
@@ -51,7 +58,7 @@
       };
       document.getElementById("retry").onclick = () => {
         if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ action: "retry_plasma" }));
+          send("retry_plasma");
           document.getElementById("result").textContent = "Retry requested…";
         } else {
           document.getElementById("result").textContent = "Retry is available from the graphical recovery session.";

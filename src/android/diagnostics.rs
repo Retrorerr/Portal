@@ -13,7 +13,7 @@ use crate::{
     core::config::{ARCH_FS_ROOT, VERSION},
 };
 use jni::{
-    objects::{JObject, JValue},
+    objects::{JObject, JString, JValue},
     sys::_jobject,
     JNIEnv,
 };
@@ -152,10 +152,67 @@ pub fn setup_stage(index: usize, name: &str, event: &str) {
     host_event("setup", &format!("index={index} stage={name} event={event}"));
 }
 
-/// Record a successful host presentation of a guest surface.  The marker is
-/// consumed by the Plasma launcher to gate readiness; unlike `pgrep`, it
-/// proves that the nested session made it through commit, render and swap.
+/// Record a successful host presentation of a guest surface.
+///
+/// This compatibility entry point is retained for callers that do not have a
+/// readiness generation. New Wayland callers should use
+/// [`mark_plasma_frame_presented_for_generation`] so a stale marker cannot be
+/// confused with a later KWin connection attempt.
 pub fn mark_plasma_frame_presented(surface_count: usize, client_count: usize) {
+    mark_plasma_frame_presented_with_evidence(
+        surface_count,
+        client_count,
+        None,
+        "egl-swap-buffers",
+        None,
+    );
+}
+
+/// Record readiness evidence tied to one identified KWin client/surface
+/// generation. The marker is consumed by the Plasma launcher; it is written
+/// only after the Android EGL swap succeeds and the same KWin surface supplied
+/// a Wayland presentation-feedback request.
+pub fn mark_plasma_frame_presented_for_generation(
+    surface_count: usize,
+    client_count: usize,
+    generation: u64,
+) {
+    mark_plasma_frame_presented_for_generation_with_evidence(
+        surface_count,
+        client_count,
+        generation,
+        "egl-swap-and-wayland-feedback",
+        None,
+    );
+}
+
+/// Record readiness evidence with an explicit proof source. A physical
+/// Android display-present timestamp is stronger than a successful EGL swap;
+/// callers must label fallback evidence accordingly rather than claiming
+/// hardware completion.
+pub fn mark_plasma_frame_presented_for_generation_with_evidence(
+    surface_count: usize,
+    client_count: usize,
+    generation: u64,
+    evidence: &str,
+    presentation_timestamp_ns: Option<i64>,
+) {
+    mark_plasma_frame_presented_with_evidence(
+        surface_count,
+        client_count,
+        Some(generation),
+        evidence,
+        presentation_timestamp_ns,
+    );
+}
+
+fn mark_plasma_frame_presented_with_evidence(
+    surface_count: usize,
+    client_count: usize,
+    generation: Option<u64>,
+    evidence: &str,
+    presentation_timestamp_ns: Option<i64>,
+) {
     let marker = Path::new(ARCH_FS_ROOT).join("var/lib/localdesktop/plasma-ready");
     if let Some(parent) = marker.parent() {
         let _ = fs::create_dir_all(parent);
@@ -163,15 +220,30 @@ pub fn mark_plasma_frame_presented(surface_count: usize, client_count: usize) {
     let _ = fs::write(
         marker,
         format!(
-            "timestamp_ms={} surfaces={} clients={}\n",
+            "timestamp_ms={} generation={} evidence={} android_present_ns={} surfaces={} clients={}\n",
             now_ms(),
+            generation
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_owned()),
+            evidence,
+            presentation_timestamp_ns
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_owned()),
             surface_count,
-            client_count
+            client_count,
         ),
     );
     host_event(
         "plasma-ready",
-        &format!("surface_count={surface_count} client_count={client_count}"),
+        &format!(
+            "surface_count={surface_count} client_count={client_count} generation={} evidence={evidence} android_present_ns={}",
+            generation
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_owned()),
+            presentation_timestamp_ns
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        ),
     );
 }
 
@@ -273,7 +345,11 @@ fn add_file(
     archive_name: &str,
     total: &mut u64,
 ) -> io::Result<()> {
-    let meta = fs::metadata(source)?;
+    let meta = match fs::metadata(source) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
     if !meta.is_file() || meta.len() > MAX_FILE_BYTES || *total + meta.len() > MAX_ARCHIVE_BYTES {
         return Ok(());
     }
@@ -291,6 +367,13 @@ fn add_file(
     }
     *total += meta.len();
     Ok(())
+}
+
+fn rotated_log_path(path: &Path) -> PathBuf {
+    // `append_line` uses this fixed suffix so a bounded live log never loses
+    // the immediately preceding launch's evidence. Keep the archive naming
+    // in lock-step with that policy rather than relying on a glob.
+    path.with_extension("log.1")
 }
 
 fn add_tree(
@@ -343,12 +426,38 @@ pub fn export_archive() -> Result<PathBuf, String> {
 
     add_file(&mut writer, &paths.host_log, "host/host.log", &mut total)
         .map_err(|error| error.to_string())?;
+    add_file(
+        &mut writer,
+        &rotated_log_path(&paths.host_log),
+        "host/host.log.1",
+        &mut total,
+    )
+    .map_err(|error| error.to_string())?;
     add_file(&mut writer, &paths.guest_log, "host/guest.log", &mut total)
         .map_err(|error| error.to_string())?;
+    add_file(
+        &mut writer,
+        &rotated_log_path(&paths.guest_log),
+        "host/guest.log.1",
+        &mut total,
+    )
+    .map_err(|error| error.to_string())?;
     add_file(&mut writer, &paths.stages_log, "host/stages.jsonl", &mut total)
         .map_err(|error| error.to_string())?;
+    add_file(
+        &mut writer,
+        &rotated_log_path(&paths.stages_log),
+        "host/stages.log.1",
+        &mut total,
+    )
+    .map_err(|error| error.to_string())?;
 
     let guest_state = Path::new(ARCH_FS_ROOT).join("var/lib/localdesktop");
+    let guest_state_status = if guest_state.is_dir() {
+        "present"
+    } else {
+        "absent"
+    };
     add_tree(
         &mut writer,
         &guest_state,
@@ -359,7 +468,7 @@ pub fn export_archive() -> Result<PathBuf, String> {
     .map_err(|error| error.to_string())?;
 
     let metadata = format!(
-        "Local Desktop diagnostics\nversion={VERSION}\ntimestamp_ms={}\narch={}\nrootfs={}\nbytes={}\n",
+        "Local Desktop diagnostics\nversion={VERSION}\ntimestamp_ms={}\narch={}\nrootfs={}\nguest_state={guest_state_status}\nbytes={}\n",
         now_ms(),
         std::env::consts::ARCH,
         ARCH_FS_ROOT,
@@ -376,10 +485,11 @@ pub fn export_archive() -> Result<PathBuf, String> {
     Ok(archive)
 }
 
-/// Export and invoke the Android Sharesheet.  A public-file/content-provider
-/// integration can be added by the APK builder later; the `file://` fallback
-/// remains useful on Android versions and share targets that permit it, and is
-/// explicitly best-effort so a failed chooser never crashes the desktop.
+/// Export and invoke the Android Sharesheet. The archive is copied through
+/// Android's media/content resolver so recipients receive a scoped
+/// `content://` grant; no private `file://` URI or StrictMode relaxation is
+/// needed. The exported Downloads item is user-visible and can be removed by
+/// the user after sharing.
 pub fn export_and_share(android_app: &AndroidApp) -> Result<PathBuf, String> {
     let archive = export_archive()?;
     let path = archive.clone();
@@ -388,6 +498,119 @@ pub fn export_and_share(android_app: &AndroidApp) -> Result<PathBuf, String> {
         android_app.clone(),
     )?;
     Ok(archive)
+}
+
+fn copy_archive_to_content_uri<'local>(
+    env: &mut JNIEnv<'local>,
+    resolver: &JObject<'local>,
+    uri: &JObject<'local>,
+    path: &Path,
+) -> Result<(), String> {
+    let source_path = env
+        .new_string(path.to_string_lossy().as_ref())
+        .map_err(|error| error.to_string())?;
+    let input = env
+        .new_object(
+            "java/io/FileInputStream",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&source_path)],
+        )
+        .map_err(|error| error.to_string())?;
+    let output = env
+        .call_method(
+            resolver,
+            "openOutputStream",
+            "(Landroid/net/Uri;)Ljava/io/OutputStream;",
+            &[JValue::Object(uri)],
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| error.to_string())?;
+    if output.is_null() {
+        let _ = env.call_method(&input, "close", "()V", &[]);
+        return Err("Android content resolver returned no output stream".into());
+    }
+
+    let mut buffer = env
+        .byte_array_from_slice(&[0u8; 64 * 1024])
+        .map_err(|error| error.to_string())?;
+    let copy_result = (|| -> Result<(), String> {
+        loop {
+            let read = env
+                .call_method(
+                    &input,
+                    "read",
+                    "([B)I",
+                    &[JValue::Object(buffer.as_ref())],
+                )
+                .and_then(|value| value.i())
+                .map_err(|error| error.to_string())?;
+            if read <= 0 {
+                break;
+            }
+            env.call_method(
+                &output,
+                "write",
+                "([BII)V",
+                &[
+                    JValue::Object(buffer.as_ref()),
+                    JValue::Int(0),
+                    JValue::Int(read),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })();
+    let input_close = env.call_method(&input, "close", "()V", &[]);
+    let output_close = env.call_method(&output, "close", "()V", &[]);
+    copy_result?;
+    input_close.map_err(|error| error.to_string())?;
+    output_close.map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn put_content_string<'local>(
+    env: &mut JNIEnv<'local>,
+    values: &JObject<'local>,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let key = env.new_string(key).map_err(|error| error.to_string())?;
+    let value = env.new_string(value).map_err(|error| error.to_string())?;
+    env.call_method(
+        values,
+        "put",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        &[JValue::Object(&key), JValue::Object(&value)],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn put_content_int<'local>(
+    env: &mut JNIEnv<'local>,
+    values: &JObject<'local>,
+    key: &str,
+    value: i32,
+) -> Result<(), String> {
+    let key = env.new_string(key).map_err(|error| error.to_string())?;
+    let value = env
+        .call_static_method(
+            "java/lang/Integer",
+            "valueOf",
+            "(I)Ljava/lang/Integer;",
+            &[JValue::Int(value)],
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| error.to_string())?;
+    env.call_method(
+        values,
+        "put",
+        "(Ljava/lang/String;Ljava/lang/Integer;)V",
+        &[JValue::Object(&key), JValue::Object(&value)],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn share_file(env: &mut JNIEnv, android_app: &AndroidApp, path: &Path) -> Result<(), String> {
