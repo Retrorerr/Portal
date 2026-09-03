@@ -16,9 +16,52 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <ucontext.h>
 #include <unistd.h>
+
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+
+int fstat(int fd, struct stat *buf) {
+    static int (*real_fstat)(int, struct stat *) = NULL;
+    if (real_fstat == NULL) {
+        real_fstat = (int (*)(int, struct stat *))dlsym(RTLD_NEXT, "fstat");
+    }
+    int ret = real_fstat ? real_fstat(fd, buf) : -1;
+    if (ret < 0 && errno == ENOENT) {
+#if defined(SYS_newfstatat)
+        ret = syscall(SYS_newfstatat, fd, "", buf, AT_EMPTY_PATH);
+#elif defined(SYS_fstatat64)
+        ret = syscall(SYS_fstatat64, fd, "", buf, AT_EMPTY_PATH);
+#endif
+        if (ret == 0) {
+            errno = 0;
+        }
+    }
+    return ret;
+}
+
+int fstat64(int fd, struct stat64 *buf) {
+    static int (*real_fstat64)(int, struct stat64 *) = NULL;
+    if (real_fstat64 == NULL) {
+        real_fstat64 = (int (*)(int, struct stat64 *))dlsym(RTLD_NEXT, "fstat64");
+    }
+    int ret = real_fstat64 ? real_fstat64(fd, buf) : -1;
+    if (ret < 0 && errno == ENOENT) {
+#if defined(SYS_newfstatat)
+        ret = syscall(SYS_newfstatat, fd, "", buf, AT_EMPTY_PATH);
+#elif defined(SYS_fstatat64)
+        ret = syscall(SYS_fstatat64, fd, "", buf, AT_EMPTY_PATH);
+#endif
+        if (ret == 0) {
+            errno = 0;
+        }
+    }
+    return ret;
+}
 
 static char crash_path[512] = "/tmp/localdesktop-kwin-backtrace.log";
 static char attempt_id[128] = "unknown";

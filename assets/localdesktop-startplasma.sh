@@ -18,6 +18,10 @@ export KDE_USE_SYSTEMD=0
 export PLASMA_USE_SYSTEMD=0
 export KDE_NO_PORTAL=1
 export GTK_USE_PORTAL=0
+# Qt can probe the desktop portal while QGuiApplication is constructed.
+# The session has no portal-ready desktop yet, so that probe can block
+# kcminit_startup before it publishes its readiness pipe byte.
+export QT_NO_XDG_DESKTOP_PORTAL=1
 export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
 export QT_SCALE_FACTOR=@UI_SCALE@
 export PLASMA_USE_QT_SCALING=1
@@ -64,7 +68,8 @@ done
 # verbose session. Only the launch-relevant values are persisted.
 for name in HOME USER LOGNAME WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
     XDG_CURRENT_DESKTOP DESKTOP_SESSION KDE_FULL_SESSION KDE_SESSION_VERSION \
-    KDE_USE_SYSTEMD PLASMA_USE_SYSTEMD QT_SCALE_FACTOR WAYLAND_DEBUG; do
+    KDE_USE_SYSTEMD PLASMA_USE_SYSTEMD QT_NO_XDG_DESKTOP_PORTAL \
+    QT_SCALE_FACTOR WAYLAND_DEBUG; do
     eval "value=\${$name-}"
     printf 'env %s=%q\n' "$name" "$value" >> "$session_log"
 done
