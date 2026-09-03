@@ -45,6 +45,15 @@ impl PRootRuntime {
         Self::new(path)
     }
 
+    pub fn active() -> Self {
+        #[cfg(not(test))]
+        let base = "/data/data/app.polarbear/files";
+        #[cfg(test)]
+        let base = "/data/local/tmp";
+        let layout = crate::core::runtime::RuntimeLayout::new(base);
+        Self::new(layout.active_slot().rootfs_path)
+    }
+
     pub fn is_supported(android_app: &AndroidApp) -> bool {
         let context = get_application_context();
         let supported = if Self::ensure_support_probe_rootfs(android_app).is_some() {

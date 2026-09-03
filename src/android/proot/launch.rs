@@ -4,7 +4,7 @@ use crate::android::{
     utils::application_context::get_application_context,
     utils::webview_handoff,
 };
-use crate::core::config::ARCH_FS_ROOT;
+use crate::core::runtime::LinuxRuntime;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,7 +67,8 @@ pub fn take_failure() -> Option<String> {
 }
 
 fn clear_failure_markers() {
-    let state_dir = Path::new(ARCH_FS_ROOT).join("var/lib/localdesktop");
+    let runtime = crate::android::runtime::proot::PRootRuntime::active();
+    let state_dir = runtime.rootfs_path().join("var/lib/localdesktop");
     for marker in ["plasma-failed", "kwin-crash", "plasma-ready"] {
         let _ = fs::remove_file(state_dir.join(marker));
     }
@@ -95,7 +96,8 @@ fn marker_reason(path: &Path, name: &str) -> String {
 /// blank/suspended surface cannot hide the actionable Android error page.
 fn spawn_failure_monitor(cancel: Arc<AtomicBool>) -> JoinHandle<()> {
     thread::spawn(move || {
-        let state_dir = Path::new(ARCH_FS_ROOT).join("var/lib/localdesktop");
+        let runtime = crate::android::runtime::proot::PRootRuntime::active();
+        let state_dir = runtime.rootfs_path().join("var/lib/localdesktop");
         while !cancel.load(Ordering::Acquire) {
             for name in ["plasma-failed", "kwin-crash"] {
                 let path = state_dir.join(name);

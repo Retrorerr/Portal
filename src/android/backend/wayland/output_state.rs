@@ -1,5 +1,4 @@
-use crate::core::config;
-use std::path::PathBuf;
+use crate::core::runtime::LinuxRuntime;
 
 /// Persist host window geometry for guest-side labwc autostart (`localdesktop-wlroots-output`).
 ///
@@ -10,7 +9,8 @@ pub fn write_guest_output_state(width: i32, height: i32, scale: i32) {
         return;
     }
 
-    let path = PathBuf::from(config::ARCH_FS_ROOT).join("tmp/localdesktop-output");
+    let runtime = crate::android::runtime::proot::PRootRuntime::active();
+    let path = runtime.rootfs_path().join("tmp/localdesktop-output");
     let content =
         format!("LOCALDESKTOP_OUTPUT_MODE={width}x{height}\nLOCALDESKTOP_OUTPUT_SCALE={scale}\n");
     if let Err(error) = std::fs::write(&path, content) {

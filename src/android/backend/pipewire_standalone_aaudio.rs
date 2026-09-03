@@ -115,6 +115,13 @@ pub fn spawn_after_ready(android_app: AndroidApp) {
     });
 }
 
+fn pipewire_runtime_dir() -> PathBuf {
+    use crate::core::runtime::LinuxRuntime;
+    crate::android::runtime::proot::PRootRuntime::active()
+        .rootfs_path()
+        .join("tmp")
+}
+
 /// Stop the proof-of-concept processes, if they were started.
 pub fn shutdown() {
     let children = if let Ok(mut slot) = AAUDIO_CHILDREN.lock() {
@@ -127,7 +134,7 @@ pub fn shutdown() {
         stop_children(children);
     }
 
-    let runtime_dir = PathBuf::from(config::ARCH_FS_ROOT).join("tmp");
+    let runtime_dir = pipewire_runtime_dir();
     cleanup_socket(&runtime_dir);
 }
 
@@ -154,7 +161,7 @@ fn ensure_running(android_app: &AndroidApp) -> Result<(), String> {
 
     if let Some(children) = stale_children {
         stop_children(children);
-        let runtime_dir = PathBuf::from(config::ARCH_FS_ROOT).join("tmp");
+        let runtime_dir = pipewire_runtime_dir();
         cleanup_socket(&runtime_dir);
     }
 
@@ -397,7 +404,7 @@ fn device_api_level() -> c_int {
 }
 
 fn build_pipewire_env(data_dir: &Path, lib_dir: &Path) -> Result<PipewireAaudioEnv, String> {
-    let runtime_dir = PathBuf::from(config::ARCH_FS_ROOT).join("tmp");
+    let runtime_dir = pipewire_runtime_dir();
     let config_dir = data_dir.join("pipewire-standalone-aaudio/config");
     // Local Desktop's APK packagers extract top-level `.so` files from
     // `assets/libs/<abi>` into nativeLibraryDir. PipeWire modules can stay flat

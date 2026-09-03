@@ -122,6 +122,13 @@ pub fn host_event(stage: &str, detail: &str) {
     );
 }
 
+fn guest_state_dir() -> PathBuf {
+    use crate::core::runtime::LinuxRuntime;
+    crate::android::runtime::proot::PRootRuntime::active()
+        .rootfs_path()
+        .join("var/lib/localdesktop")
+}
+
 /// Append a guest-side event and mirror it into the guest rootfs.  Mirroring
 /// means a report still contains guest activity if an export is triggered
 /// after the host process has already started recovery.
@@ -131,7 +138,7 @@ pub fn guest_event(stage: &str, detail: &str) {
     if let Some(paths) = paths() {
         append_line(&paths.guest_log, &line);
     }
-    let guest_path = Path::new(ARCH_FS_ROOT).join("var/lib/localdesktop/guest.log");
+    let guest_path = guest_state_dir().join("guest.log");
     append_line(&guest_path, &line);
 }
 
@@ -213,7 +220,7 @@ fn mark_plasma_frame_presented_with_evidence(
     evidence: &str,
     presentation_timestamp_ns: Option<i64>,
 ) {
-    let marker = Path::new(ARCH_FS_ROOT).join("var/lib/localdesktop/plasma-ready");
+    let marker = guest_state_dir().join("plasma-ready");
     if let Some(parent) = marker.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -267,7 +274,7 @@ pub fn desktop_exit(status: Option<i32>, elapsed_ms: u128) {
         &format!("status={status_text} elapsed_ms={elapsed_ms}"),
     );
     if status.is_some_and(|value| value == 139 || value == 134 || value >= 128) {
-        let marker = Path::new(ARCH_FS_ROOT).join("var/lib/localdesktop/kwin-crash");
+        let marker = guest_state_dir().join("kwin-crash");
         if let Some(parent) = marker.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -283,7 +290,7 @@ pub fn desktop_exit(status: Option<i32>, elapsed_ms: u128) {
 /// real debugger trace when `gdb`/`coredumpctl` are available; this fallback
 /// preserves the command, environment and signal even on minimal guests.
 pub fn kwin_crash_metadata(args: &str, status: i32, pid: Option<i32>) {
-    let path = Path::new(ARCH_FS_ROOT).join("var/lib/localdesktop/kwin-backtrace.log");
+    let path = guest_state_dir().join("kwin-backtrace.log");
     let text = format!(
         "timestamp_ms={} status={} pid={} args={}\nbacktrace=best-effort wrapper metadata; no debugger available\n",
         now_ms(),
