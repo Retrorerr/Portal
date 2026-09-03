@@ -299,6 +299,15 @@ try {
         -RunStartTimestampMs $runStart
     Assert-QaFalse $unknownStatusEvidence.StabilityPassed "missing status is not stability proof"
 
+    $partial = Assert-ReleaseGates `
+        -ExpectedWidth 32 `
+        -ExpectedHeight 32 `
+        -ScreenshotPath $goodPng `
+        -HostLogContent (New-QaFixtureLog) `
+        -RunStartTimestampMs $runStart
+    Assert-QaTrue $partial.PartialPassed "resolution/KWin/crash checks remain an explicit partial result"
+    Assert-QaFalse $partial.ReleasePassed "partial checks cannot be promoted to release"
+
     $noBoundary = Test-StrictPlasmaReleaseEvidence `
         -HostLogContent (New-QaFixtureLog) `
         -ScreenshotPath $goodPng
