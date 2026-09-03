@@ -4,6 +4,7 @@ pub mod core {
     pub mod clipboard_policy;
     pub mod config;
     pub mod ime_policy;
+    pub mod runtime;
     pub mod startup;
     pub mod wayland_protocol;
 }
@@ -29,6 +30,9 @@ pub mod android {
         pub mod launch;
         pub mod process;
         pub mod setup;
+    }
+    pub mod runtime {
+        pub mod proot;
     }
     pub mod utils {
         pub mod application_context;
