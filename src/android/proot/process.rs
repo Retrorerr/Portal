@@ -23,7 +23,7 @@ impl ArchProcess {
 
     /// Run a guest process and return its complete bounded output.
     pub fn run(self) -> Output {
-        let runtime = PRootRuntime::default_arch();
+        let runtime = PRootRuntime::active();
         let mut spec = ProcessSpec::new(self.command);
         if let Some(user) = self.user {
             spec = spec.with_user(user);
@@ -33,7 +33,7 @@ impl ArchProcess {
 
     /// Run a guest process that can be cancelled by its lifecycle owner.
     pub fn run_with_cancel(self, cancel: Arc<AtomicBool>) -> Output {
-        let runtime = PRootRuntime::default_arch();
+        let runtime = PRootRuntime::active();
         let mut spec = ProcessSpec::new(self.command);
         if let Some(user) = self.user {
             spec = spec.with_user(user);

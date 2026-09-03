@@ -13,9 +13,12 @@ use crate::{
             touch_slop_px,
         },
     },
-    core::config::{
-        CommandConfig, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR,
-        PULSE_GUEST_SERVER,
+    core::{
+        config::{
+            CommandConfig, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR,
+            PULSE_GUEST_SERVER,
+        },
+        runtime::LinuxRuntime,
     },
 };
 use pathdiff::diff_paths;
@@ -375,6 +378,13 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
     }
 
     let installed = move || {
+        let runtime = crate::android::runtime::proot::PRootRuntime::active();
+        if runtime.rootfs_path().join("usr/bin/kwin_wayland").exists()
+            && runtime.rootfs_path().join("usr/bin/plasmashell").exists()
+        {
+            return true;
+        }
+
         let dependencies_present = ArchProcess {
             command: check.clone(),
             user: None,
@@ -523,24 +533,18 @@ fn setup_pipewire_package_lock(_: &SetupOptions) -> StageOutput {
 }
 
 fn setup_firefox_config(_: &SetupOptions) -> StageOutput {
-    // Create the Firefox root directory if it doesn't exist
-    let firefox_root = format!("{}/usr/lib/firefox", ARCH_FS_ROOT);
-    let _ = fs::create_dir_all(&firefox_root).expect("Failed to create Firefox root directory");
+    use crate::core::runtime::LinuxRuntime;
+    let rootfs = crate::android::runtime::proot::PRootRuntime::active().rootfs_path();
+    let candidates = [
+        rootfs.join("usr/lib/firefox"),
+        rootfs.join("usr/lib/firefox-esr"),
+    ];
 
-    // Create the defaults/pref directory
-    let pref_dir = format!("{}/defaults/pref", firefox_root);
-    let _ = fs::create_dir_all(&pref_dir).expect("Failed to create Firefox pref directory");
-
-    // Create autoconfig.js in defaults/pref
     let autoconfig_js = r#"pref("general.config.filename", "localdesktop.cfg");
 pref("general.config.obscure_value", 0);
 pref("general.config.sandbox_enabled", false);
 "#;
 
-    let _ = fs::write(format!("{}/autoconfig.js", pref_dir), autoconfig_js)
-        .expect("Failed to write Firefox autoconfig.js");
-
-    // Create localdesktop.cfg in the Firefox root directory
     let firefox_cfg = r#"// Auto updated by Local Desktop on each startup, do not edit manually
 defaultPref("media.cubeb.sandbox", false);
 defaultPref("security.sandbox.content.level", 0);
@@ -552,10 +556,16 @@ try {
   SandboxUtils.maybeWarnAboutDisabledContentSandbox = () => {};
   SandboxUtils.observeContentSandboxPref = () => {};
 } catch (_) {}
-"#; // It is required that the first line of this file is a comment, even if you have nothing to comment. Docs: https://support.mozilla.org/en-US/kb/customizing-firefox-using-autoconfig
+"#;
 
-    let _ = fs::write(format!("{}/localdesktop.cfg", firefox_root), firefox_cfg)
-        .expect("Failed to write Firefox configuration");
+    for dir in candidates {
+        if dir.exists() || dir.parent().map_or(false, |p| p.exists()) {
+            let pref_dir = dir.join("defaults/pref");
+            let _ = fs::create_dir_all(&pref_dir);
+            let _ = fs::write(pref_dir.join("autoconfig.js"), autoconfig_js);
+            let _ = fs::write(dir.join("localdesktop.cfg"), firefox_cfg);
+        }
+    }
 
     None
 }
