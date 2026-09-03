@@ -1,0 +1,143 @@
+[
+  {
+    "label": "Idle Desktop",
+    "active_processes": 34,
+    "kernel_pss_mb": 171.84,
+    "total_rss_mb": 1937.72,
+    "total_anon_mb": 597.79,
+    "app_cpu_percent": 16.87,
+    "system_cpu_percent": 92.53,
+    "top_processes": [
+      {
+        "pid": 21278,
+        "name": "plasmashell",
+        "rss": 685896,
+        "anon": 398244
+      },
+      {
+        "pid": 21154,
+        "name": "kwin_wayland",
+        "rss": 313984,
+        "anon": 48180
+      },
+      {
+        "pid": 17074,
+        "name": "app.polarbear",
+        "rss": 295004,
+        "anon": 63276
+      },
+      {
+        "pid": 21221,
+        "name": "kded6",
+        "rss": 70704,
+        "anon": 10928
+      },
+      {
+        "pid": 21248,
+        "name": "ksecretd",
+        "rss": 53068,
+        "anon": 7616
+      },
+      {
+        "pid": 21244,
+        "name": "ksmserver",
+        "rss": 52916,
+        "anon": 7380
+      }
+    ]
+  },
+  {
+    "label": "App In Background",
+    "active_processes": 30,
+    "kernel_pss_mb": 109.85,
+    "total_rss_mb": 1876.85,
+    "total_anon_mb": 585.66,
+    "app_cpu_percent": 3.28,
+    "system_cpu_percent": 27.17,
+    "top_processes": [
+      {
+        "pid": 21278,
+        "name": "plasmashell",
+        "rss": 685916,
+        "anon": 398264
+      },
+      {
+        "pid": 21154,
+        "name": "kwin_wayland",
+        "rss": 313984,
+        "anon": 48180
+      },
+      {
+        "pid": 17074,
+        "name": "app.polarbear",
+        "rss": 296364,
+        "anon": 64200
+      },
+      {
+        "pid": 21221,
+        "name": "kded6",
+        "rss": 70712,
+        "anon": 10936
+      },
+      {
+        "pid": 21248,
+        "name": "ksecretd",
+        "rss": 53068,
+        "anon": 7616
+      },
+      {
+        "pid": 21244,
+        "name": "ksmserver",
+        "rss": 52916,
+        "anon": 7380
+      }
+    ]
+  },
+  {
+    "label": "App Resumed Foreground",
+    "active_processes": 34,
+    "kernel_pss_mb": 175.94,
+    "total_rss_mb": 1940.57,
+    "total_anon_mb": 599.52,
+    "app_cpu_percent": 20.31,
+    "system_cpu_percent": 87.06,
+    "top_processes": [
+      {
+        "pid": 21278,
+        "name": "plasmashell",
+        "rss": 684996,
+        "anon": 398156
+      },
+      {
+        "pid": 21154,
+        "name": "kwin_wayland",
+        "rss": 314048,
+        "anon": 48244
+      },
+      {
+        "pid": 17074,
+        "name": "app.polarbear",
+        "rss": 299684,
+        "anon": 66228
+      },
+      {
+        "pid": 21221,
+        "name": "kded6",
+        "rss": 70724,
+        "anon": 10948
+      },
+      {
+        "pid": 21248,
+        "name": "ksecretd",
+        "rss": 53068,
+        "anon": 7616
+      },
+      {
+        "pid": 21244,
+        "name": "ksmserver",
+        "rss": 52916,
+        "anon": 7380
+      }
+    ]
+  }
+]
