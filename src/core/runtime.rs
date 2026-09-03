@@ -125,6 +125,74 @@ pub trait LinuxRuntime: Send + Sync {
     fn terminate(&self);
 }
 
+/// Layout of versioned runtime slots and shared storage.
+#[derive(Debug, Clone)]
+pub struct RuntimeLayout {
+    pub base_dir: PathBuf,
+    pub shared_home: PathBuf,
+    pub platform_state: PathBuf,
+}
+
+impl RuntimeLayout {
+    pub fn new(base_dir: impl Into<PathBuf>) -> Self {
+        let base = base_dir.into();
+        Self {
+            shared_home: base.join("home"),
+            platform_state: base.join("platform-state"),
+            base_dir: base,
+        }
+    }
+
+    pub fn slot_a(&self) -> RuntimeSlot {
+        let arch_path = self.base_dir.join("arch");
+        let slot_a_path = if arch_path.exists() {
+            arch_path
+        } else {
+            self.base_dir.join("runtime-A")
+        };
+        RuntimeSlot {
+            id: "slot-a".to_string(),
+            rootfs_path: slot_a_path,
+            distro_name: "Arch Linux ARM64".to_string(),
+            is_active: true,
+        }
+    }
+
+    pub fn slot_b(&self) -> RuntimeSlot {
+        RuntimeSlot {
+            id: "slot-b".to_string(),
+            rootfs_path: self.base_dir.join("runtime-B"),
+            distro_name: "Debian 13 (Trixie) ARM64".to_string(),
+            is_active: false,
+        }
+    }
+
+    pub fn active_slot(&self) -> RuntimeSlot {
+        let state_file = self.platform_state.join("active-slot");
+        if let Ok(active_id) = std::fs::read_to_string(&state_file) {
+            let active_id = active_id.trim();
+            if active_id == "slot-b" {
+                let mut slot = self.slot_b();
+                slot.is_active = true;
+                return slot;
+            }
+        }
+        self.slot_a()
+    }
+
+    pub fn set_active_slot(&self, slot_id: &str) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.platform_state)?;
+        let state_file = self.platform_state.join("active-slot");
+        std::fs::write(state_file, slot_id)
+    }
+
+    pub fn standard_bind_mounts(&self) -> Vec<BindMount> {
+        vec![
+            BindMount::new(&self.shared_home, "/home"),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +219,33 @@ mod tests {
     fn bind_mount_readonly_flag() {
         let b = BindMount::readonly("/sys", "/sys");
         assert!(b.readonly);
+    }
+
+    #[test]
+    fn runtime_layout_defaults_to_slot_a() {
+        let temp_dir = std::env::temp_dir().join(format!("portal-test-{}", std::process::id()));
+        let layout = RuntimeLayout::new(&temp_dir);
+        let active = layout.active_slot();
+        assert_eq!(active.id, "slot-a");
+        assert_eq!(active.distro_name, "Arch Linux ARM64");
+
+        let binds = layout.standard_bind_mounts();
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0].guest_path, PathBuf::from("/home"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn runtime_layout_switches_to_slot_b() {
+        let temp_dir = std::env::temp_dir().join(format!("portal-test-b-{}", std::process::id()));
+        let layout = RuntimeLayout::new(&temp_dir);
+        layout.set_active_slot("slot-b").expect("Failed to write active slot");
+        let active = layout.active_slot();
+        assert_eq!(active.id, "slot-b");
+        assert_eq!(active.distro_name, "Debian 13 (Trixie) ARM64");
+        assert!(active.is_active);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
