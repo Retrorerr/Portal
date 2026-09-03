@@ -11,6 +11,9 @@ mod android_integration;
 #[path = "../src/core/clipboard_policy.rs"]
 mod clipboard_policy;
 
+const ANDROID_CLIPBOARD_SOURCE: &str = include_str!("../src/android/clipboard.rs");
+const ANDROID_COMPOSITOR_SOURCE: &str = include_str!("../src/android/backend/wayland/compositor.rs");
+
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
     clamp_physical_coordinate, density_scale_factor, normalized_coordinate,
@@ -188,4 +191,23 @@ fn clipboard_bridge_ignores_empty_or_invalid_clips() {
     let oversized = "a".repeat(MAX_CLIPBOARD_BYTES + 1);
     assert!(!is_valid_clip_text(&oversized));
     assert_eq!(validate_clip_text(&oversized), None);
+}
+
+#[test]
+fn android_clipboard_path_applies_byte_limit_before_wayland_selection() {
+    let read_path = ANDROID_CLIPBOARD_SOURCE
+        .split_once("fn read_text_inner")
+        .map(|(_, body)| body)
+        .expect("Android clipboard read path is present");
+    assert!(read_path.contains("validate_clip_text(&text)"));
+    assert!(read_path.contains("MAX_CLIPBOARD_BYTES"));
+    assert!(read_path.contains("coerceToText"));
+    assert!(read_path.contains("text.is_empty()"));
+
+    let process_path = ANDROID_COMPOSITOR_SOURCE
+        .split_once("pub fn process_android_clipboard")
+        .map(|(_, body)| body)
+        .expect("Android clipboard compositor path is present");
+    assert!(process_path.contains("is_valid_clip_text(&text)"));
+    assert!(process_path.contains("set_data_device_selection"));
 }

@@ -1,6 +1,7 @@
 use super::bind::bind_socket;
 use crate::android::clipboard::{
-    ClipboardBridge, ClipboardEvent, ClipboardSelectionData, TEXT_MIME, UTF8_TEXT_MIME,
+    is_valid_clip_text, ClipboardBridge, ClipboardEvent, ClipboardSelectionData, TEXT_MIME,
+    UTF8_TEXT_MIME,
 };
 use crate::core::startup::{is_kwin_wayland_title, StartupReadiness};
 use smithay::{
@@ -715,8 +716,8 @@ impl Compositor {
         for event in events {
             match event {
                 ClipboardEvent::AndroidChanged(Some(text)) => {
-                    if text.is_empty() {
-                        log::debug!("Ignoring empty Android clipboard selection");
+                    if !is_valid_clip_text(&text) {
+                        log::warn!("Ignoring empty or oversized Android clipboard selection");
                         continue;
                     }
                     set_data_device_selection::<State>(
