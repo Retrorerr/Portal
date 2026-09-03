@@ -152,3 +152,65 @@ transient must not be confused with a persistently disabled output. Captures:
 12. **Scaling usable at device dimensions and 2560x1600**: **PASS** - Native physical sizing from `window.inner_size()`, high-DPI scaling factor.
 13. **Graphical recovery with retry and export**: **PASS** - Dynamic high-DPI `labwc` + `kdialog` with single-archive export, no terminal autostart.
 14. **No XFCE setup or user terminal intervention needed**: **PASS** - Plasma is the direct default desktop out of the box.
+
+## Current reconstruction (2026-09-03)
+
+> This dated section supersedes the historical readiness and **PASS** claims
+> above. It records the current evidence ledger; it is not release approval.
+
+- **Source and package identity at reconstruction.** The checkout was branch
+  `plasma-wayland-android` at `cc557c1b0e941be422c58c2bf69403d910fea888`.
+  The working tree had an uncommitted `src/core/config.rs` package-list/test
+  diff and the preserved untracked `scripts/patch_test.py`. The saved Pad 3
+  package snapshot is
+  `artifacts/qa/resume-baseline-20260903-115320-b7392dcd/installed-base.apk`,
+  SHA-256
+  `05c42b9f01702be659d44c42546659de9ece01c3c1af5f030b5b84bb29ce9fb9`.
+  An older pre-Gemini backup remains separately at
+  `artifacts/qa/20260903-startup-baseline/installed-before.apk`, SHA-256
+  `e7afd7885ba75befad3a30aa0b2be855544b9f8a8f76ffb1775262b817bf44ca`.
+
+- **Genuine visible baseline.** Root's connected Pad 3 session was visually
+  verified with KWin PID `30433`, plasmashell PID `30658`, and a fresh Firefox
+  PID `16999` window. The screenshot is
+  `artifacts/qa/resume-baseline-20260903-115320-b7392dcd/interaction-05-firefox-after-profile-launch.png`,
+  timestamped `2026-09-03T12:24:48.4861540Z`. This proves real guest-client
+  rendering. Later, `interaction-08-after-center-tap-address.png` records
+  Firefox responding visibly to `Ctrl+L` and typed `about:blank` after a
+  native-surface focus tap. The configured KWin `Meta+PgUp` maximize shortcut
+  did not change the window geometry; maximize is not accepted as working.
+
+- **Actual output/config drift.** The saved guest snapshot reports the Pad
+  frame as `3392x2400` with zero Android insets. KWin's persisted
+  `guest/root/.config/kwinoutputconfig.json` has `WL-0` enabled at
+  `3392x2400@60` with `scale: 1`, while
+  `guest/tmp/localdesktop-output` records `LOCALDESKTOP_OUTPUT_SCALE=3` and
+  the generated `guest/usr/local/bin/startplasma-localdesktop` exports
+  `QT_SCALE_FACTOR=3` and `PLASMA_USE_QT_SCALING=1`. The snapshot package list
+  contains `libkscreen 6.7.4-1` but not the `kscreen` client package, so no
+  KScreen control/persistence result is accepted yet. No scale change is
+  settled by this entry.
+
+- **Unresolved preview and buffer failures.** The saved diagnostic
+  `guest/var/lib/localdesktop/kwin-backtrace.log` contains repeated `SIGSEGV`
+  records with `fault_address=0x8`; the representative path is
+  `QBackingStore::beginPaint` -> `QSGSoftwareRenderer::render` ->
+  `KWin::Window::setElectricBorderMaximizing` -> pointer-motion handling.
+  Separately, `guest/var/lib/localdesktop/kwin.log.1:39144` records
+  `kwin_qpa_plugin: Failed to create a swapchain for the backing store!`,
+  followed by a broken Wayland pipe. These remain unresolved and are distinct
+  from the earlier startup fake-`id=0` socket-stat fix.
+
+- **Interpretation and pending work.** An external `qdbus6` session-bus/
+  introspection attempt returned `org.freedesktop.DBus.Error.NoReply`; that
+  result does not prove a compositor freeze and is not KScreen failure
+  evidence. The pending `src/core/config.rs` diff adds `kscreen` to the
+  default check/install commands while preserving classic native Plasma; its
+  five focused config checks passed independently. At reconstruction it was
+  uncommitted and had not been provisioned to the device.
+
+**Current status: Plasma visibly renders and accepts the recorded interaction,
+but this is not release-accepted.** Preview-crash/swapchain behavior and the
+scale/output persistence and touch-alignment tests remain outstanding; no
+historical release gate above should be treated as revalidated by this
+baseline.
