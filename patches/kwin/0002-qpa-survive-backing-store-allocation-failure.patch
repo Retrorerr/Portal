@@ -1,0 +1,312 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Local Desktop maintainers <localdesktop@example.invalid>
+Date: Thu, 3 Sep 2026 00:00:00 +0100
+Subject: [PATCH] qpa: survive backing-store allocation failures
+
+The KWin QPA backing store used to return from beginPaint() after a
+swapchain, acquire, or map failure while paintDevice() and flush() still
+assumed that a mapped buffer existed.  QtGui can call those methods during
+the same expose/paint cycle, so a transient SHM allocation failure became a
+null dereference in QBackingStore::beginPaint().
+
+Keep a valid 1x1 QImage as a paint-device fallback, suppress presentation
+while the fallback is active, and clear stale buffer state before retrying.
+The QPA window also rejects invalid sizes before scaling and records the
+requested logical/native dimensions when an allocator rejects a buffer.
+The SHM allocator rejects integer-overflow sizes and records the failing
+syscall and errno.  This patch does not change the QPA scale policy,
+compositing backend, or ElectricBorderMaximize behavior.
+
+This patch is pinned to KDE KWin v6.7.4, commit
+8438567a741826da8b7536a8b10eb3af8fc8820d.  It is independent of and must be
+applied after 0001-core-gpumanager-tolerate-missing-udev-monitor.patch.  The
+existing patched libkwin.so.6.7.4 (including the Android/PRoot udev guard)
+must remain staged when kwin_wayland is rebuilt.
+
+---
+ src/core/shmgraphicsbufferallocator.cpp | 55 +++++++++++++++++++++++--
+ src/plugins/qpa/backingstore.cpp        | 30 +++++++++++--
+ src/plugins/qpa/backingstore.h          |  6 +++
+ src/plugins/qpa/window.cpp              | 39 ++++++++++++++++-
+ 4 files changed, 119 insertions(+), 11 deletions(-)
+
+diff --git a/src/core/shmgraphicsbufferallocator.cpp b/src/core/shmgraphicsbufferallocator.cpp
+--- a/src/core/shmgraphicsbufferallocator.cpp
++++ b/src/core/shmgraphicsbufferallocator.cpp
+@@ -8,8 +8,12 @@
+ 
+ #include "core/graphicsbuffer.h"
++#include "utils/common.h"
+ #include "utils/memorymap.h"
+ 
+ #include <drm_fourcc.h>
++#include <cerrno>
++#include <cstring>
+ #include <fcntl.h>
++#include <limits>
+ #include <sys/mman.h>
+ #include <unistd.h>
+@@ -94,15 +98,40 @@ GraphicsBuffer *ShmGraphicsBufferAllocator::allocate(const GraphicsBufferOptions &options)
+         return nullptr;
+     }
+ 
+-    const int stride = options.size.width() * 4;
+-    const int bufferSize = options.size.height() * stride;
++    if (options.size.width() <= 0 || options.size.height() <= 0) {
++        qCWarning(KWIN_CORE) << "SHM allocator rejected empty size" << options.size;
++        return nullptr;
++    }
++
++    const qint64 maxBufferSize = std::numeric_limits<int>::max();
++    const qint64 stride64 = qint64(options.size.width()) * 4;
++    if (stride64 > maxBufferSize || options.size.height() > maxBufferSize / stride64) {
++        qCWarning(KWIN_CORE) << "SHM allocator rejected oversized buffer"
++                             << "size" << options.size
++                             << "stride" << stride64;
++        return nullptr;
++    }
++
++    const qint64 bufferSize64 = qint64(options.size.height()) * stride64;
++    const int stride = int(stride64);
++    const int bufferSize = int(bufferSize64);
+ 
+ #if HAVE_MEMFD
+     FileDescriptor fd = FileDescriptor(memfd_create("shm", MFD_CLOEXEC | MFD_ALLOW_SEALING));
+     if (!fd.isValid()) {
++        const int error = errno;
++        qCWarning(KWIN_CORE) << "SHM allocator memfd_create failed"
++                             << "size" << options.size
++                             << "bytes" << bufferSize64
++                             << "error" << strerror(error);
+         return nullptr;
+     }
+ 
+     if (ftruncate(fd.get(), bufferSize) < 0) {
++        const int error = errno;
++        qCWarning(KWIN_CORE) << "SHM allocator ftruncate failed"
++                             << "size" << options.size
++                             << "bytes" << bufferSize64
++                             << "error" << strerror(error);
+         return nullptr;
+     }
+@@ -106,15 +131,38 @@ GraphicsBuffer *ShmGraphicsBufferAllocator::allocate(const GraphicsBufferOptions &options)
+     char templateName[] = "/tmp/kwin-shm-XXXXXX";
+     FileDescriptor fd{mkstemp(templateName)};
+     if (!fd.isValid()) {
++        const int error = errno;
++        qCWarning(KWIN_CORE) << "SHM allocator mkstemp failed"
++                             << "size" << options.size
++                             << "bytes" << bufferSize64
++                             << "error" << strerror(error);
+         return nullptr;
+     }
+ 
+     unlink(templateName);
+     int flags = fcntl(fd.get(), F_GETFD);
+-    if (flags == -1 || fcntl(fd.get(), F_SETFD, flags | FD_CLOEXEC) == -1) {
++    if (flags == -1) {
++        const int error = errno;
++        qCWarning(KWIN_CORE) << "SHM allocator fcntl(F_GETFD) failed"
++                             << "size" << options.size
++                             << "bytes" << bufferSize64
++                             << "error" << strerror(error);
++        return nullptr;
++    }
++    if (fcntl(fd.get(), F_SETFD, flags | FD_CLOEXEC) == -1) {
++        const int error = errno;
++        qCWarning(KWIN_CORE) << "SHM allocator fcntl(F_SETFD) failed"
++                             << "size" << options.size
++                             << "bytes" << bufferSize64
++                             << "error" << strerror(error);
+         return nullptr;
+     }
+ 
+     if (ftruncate(fd.get(), bufferSize) < 0) {
++        const int error = errno;
++        qCWarning(KWIN_CORE) << "SHM allocator ftruncate failed"
++                             << "size" << options.size
++                             << "bytes" << bufferSize64
++                             << "error" << strerror(error);
+         return nullptr;
+     }
+@@ -131,5 +186,11 @@ GraphicsBuffer *ShmGraphicsBufferAllocator::allocate(const GraphicsBufferOptions &options)
+     MemoryMap memoryMap(attributes.stride * attributes.size.height(), PROT_READ | PROT_WRITE, MAP_SHARED, attributes.fd.get(), attributes.offset);
+     if (!memoryMap.isValid()) {
++        const int error = errno;
++        qCWarning(KWIN_CORE) << "SHM allocator mmap failed"
++                             << "size" << options.size
++                             << "stride" << stride
++                             << "bytes" << bufferSize64
++                             << "error" << strerror(error);
+         return nullptr;
+     }
+ 
+diff --git a/src/plugins/qpa/backingstore.cpp b/src/plugins/qpa/backingstore.cpp
+--- a/src/plugins/qpa/backingstore.cpp
++++ b/src/plugins/qpa/backingstore.cpp
+@@ -25,25 +25,44 @@ namespace QPA
+ 
+ BackingStore::BackingStore(QWindow *window)
+     : QPlatformBackingStore(window)
++    , m_fallbackImage(1, 1, QImage::Format_ARGB32_Premultiplied)
+ {
+ }
+ 
+ QPaintDevice *BackingStore::paintDevice()
+ {
++    if (m_usingFallback || !m_bufferView || m_bufferView->isNull()) {
++        return &m_fallbackImage;
++    }
+     return m_bufferView->image();
+ }
+ 
+ void BackingStore::resize(const QSize &size, const QRegion &staticContents)
+ {
+-    QPlatformWindow *platformWindow = static_cast<QPlatformWindow *>(window()->handle());
+-    platformWindow->invalidateSurface();
++    m_bufferView.reset();
++    m_buffer.clear();
++    if (QPlatformWindow *platformWindow = window()->handle()) {
++        platformWindow->invalidateSurface();
++    }
++    m_usingFallback = false;
+ }
+ 
+ void BackingStore::beginPaint(const QRegion &region)
+ {
+     Window *platformWindow = static_cast<Window *>(window()->handle());
++    m_bufferView.reset();
++    m_usingFallback = false;
++    if (!platformWindow) {
++        qCCritical(KWIN_QPA) << "Cannot begin painting without a platform window";
++        m_buffer.clear();
++        m_usingFallback = true;
++        return;
++    }
++
+     Swapchain *swapchain = platformWindow->swapchain(nullptr, {{DRM_FORMAT_ARGB8888, {DRM_FORMAT_MOD_LINEAR}}});
+     if (!swapchain) {
+         qCCritical(KWIN_QPA, "Failed to create a swapchain for the backing store!");
++        m_buffer.clear();
++        m_usingFallback = true;
+         return;
+     }
+@@ -47,11 +62,15 @@ void BackingStore::beginPaint(const QRegion &region)
+     m_buffer = swapchain->acquire();
+     if (!m_buffer) {
+         qCCritical(KWIN_QPA, "Failed to acquire a graphics buffer for the backing store");
++        m_usingFallback = true;
+         return;
+     }
+ 
+     m_bufferView = std::make_unique<GraphicsBufferView>(m_buffer, GraphicsBuffer::Read | GraphicsBuffer::Write);
+     if (m_bufferView->isNull()) {
+         qCCritical(KWIN_QPA) << "Failed to map a graphics buffer for the backing store";
++        m_bufferView.reset();
++        m_buffer.clear();
++        m_usingFallback = true;
+         return;
+     }
++@@ -63,6 +86,8 @@ void BackingStore::beginPaint(const QRegion &region)
++ 
++     if (oldBuffer && oldBuffer != m_buffer && oldBuffer->size() == m_buffer->size()) {
++         const GraphicsBufferView oldView(oldBuffer, GraphicsBuffer::Read);
+-        std::memcpy(m_bufferView->image()->bits(), oldView.image()->constBits(), oldView.image()->sizeInBytes());
++        if (!oldView.isNull()) {
++            std::memcpy(m_bufferView->image()->bits(), oldView.image()->constBits(), oldView.image()->sizeInBytes());
++        }
++     }
++ 
++@@ -86,5 +105,9 @@ void BackingStore::flush(QWindow *window, const QRegion &region, const QPoint &offset)
+ {
+     Window *platformWindow = static_cast<Window *>(window->handle());
++    if (!platformWindow || m_usingFallback || !m_buffer) {
++        return;
++    }
++
+     InternalWindow *internalWindow = platformWindow->internalWindow();
+     if (!internalWindow) {
+         return;
+diff --git a/src/plugins/qpa/backingstore.h b/src/plugins/qpa/backingstore.h
+--- a/src/plugins/qpa/backingstore.h
++++ b/src/plugins/qpa/backingstore.h
+@@ -8,7 +8,8 @@
+     SPDX-License-Identifier: GPL-2.0-or-later
+ */
+ #pragma once
+ 
++#include <QImage>
+ #include <QPointer>
+ 
+ #include <qpa/qplatformbackingstore.h>
+@@ -35,5 +36,10 @@ private:
+ private:
+     QPointer<GraphicsBuffer> m_buffer;
+     std::unique_ptr<GraphicsBufferView> m_bufferView;
++    // Qt may still request a paint device after beginPaint() cannot acquire
++    // a real graphics buffer. Keep a valid device so that a transient
++    // allocation failure cannot turn into a null dereference in QtGui.
++    QImage m_fallbackImage;
++    bool m_usingFallback = false;
+ };
+ 
+diff --git a/src/plugins/qpa/window.cpp b/src/plugins/qpa/window.cpp
+--- a/src/plugins/qpa/window.cpp
++++ b/src/plugins/qpa/window.cpp
+@@ -20,7 +20,10 @@
+ 
+ #include <logging.h>
+ 
++#include <cmath>
+ #include <libdrm/drm_fourcc.h>
++#include <limits>
++#include <QSizeF>
+ #include <qpa/qwindowsysteminterface.h>
+ 
+ namespace KWin
+@@ -43,6 +46,29 @@ Window::~Window()
+ 
+ Swapchain *Window::swapchain(const std::shared_ptr<EglContext> &context, const FormatModifierMap &formats)
+ {
+-    const QSize nativeSize = geometry().size() * devicePixelRatio();
++    const QSize logicalSize = geometry().size();
++    const qreal scale = devicePixelRatio();
++    const QSizeF scaledSize = QSizeF(logicalSize) * scale;
++    if (logicalSize.width() <= 0 || logicalSize.height() <= 0
++        || !std::isfinite(scale) || scale <= 0
++        || !std::isfinite(scaledSize.width()) || !std::isfinite(scaledSize.height())
++        || scaledSize.width() > std::numeric_limits<int>::max()
++        || scaledSize.height() > std::numeric_limits<int>::max()) {
++        qCWarning(KWIN_QPA) << "Refusing an invalid backing-store size"
++                            << "logical-size" << logicalSize
++                            << "scale" << scale
++                            << "scaled-size" << scaledSize;
++        return nullptr;
++    }
++
++    const QSize nativeSize = scaledSize.toSize();
++    if (nativeSize.width() <= 0 || nativeSize.height() <= 0) {
++        qCWarning(KWIN_QPA) << "Refusing an empty backing-store size"
++                            << "logical-size" << logicalSize
++                            << "scale" << scale
++                            << "scaled-size" << scaledSize;
++        return nullptr;
++    }
++
+     const bool software = window()->surfaceType() == QSurface::RasterSurface; // RasterGLSurface is unsupported by us
+     if (!m_swapchain || m_swapchain->size() != nativeSize
+@@ -73,5 +96,12 @@ Swapchain *Window::swapchain(const std::shared_ptr<EglContext> &context, const FormatModifierMap &formats)
+                 };
+                 auto buffer = allocator->allocate(options);
+                 if (!buffer) {
++                    qCWarning(KWIN_QPA) << "Failed to allocate backing-store buffer"
++                                        << "logical-size" << logicalSize
++                                        << "native-size" << nativeSize
++                                        << "scale" << scale
++                                        << "software" << software
++                                        << "format" << FormatInfo::drmFormatName(it.key())
++                                        << "modifiers" << it.value();
+                     continue;
+                 }
+-- 
+2.45.2
