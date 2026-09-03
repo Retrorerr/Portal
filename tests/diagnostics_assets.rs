@@ -6,6 +6,7 @@ const KONSOLE_PROFILE: &str = include_str!("../assets/konsole/LocalDesktop.profi
 const CRASH_HANDLER: &str = include_str!("../assets/localdesktop-crash-handler.c");
 const SETUP: &str = include_str!("../src/android/proot/setup.rs");
 const DIAGNOSTICS: &str = include_str!("../src/android/diagnostics.rs");
+const DIAGNOSTICS_DOC: &str = include_str!("../docs/diagnostics-integration.md");
 const GIT_ATTRIBUTES: &str = include_str!("../.gitattributes");
 const SETUP_PAGE: &str = include_str!("../assets/setup-progress-v2.html");
 const ERROR_PAGE: &str = include_str!("../assets/runtime-error.html");
@@ -106,6 +107,26 @@ fn diagnostics_export_keeps_rotated_logs_and_guest_absence_metadata() {
     assert!(DIAGNOSTICS.contains("host/host.log.1"));
     assert!(DIAGNOSTICS.contains("host/guest.log.1"));
     assert!(DIAGNOSTICS.contains("mark_plasma_frame_presented_for_generation"));
+}
+
+#[test]
+fn diagnostics_export_uses_scoped_content_grants_and_cleans_up_failures() {
+    let share_file = DIAGNOSTICS
+        .split_once("fn share_file")
+        .map(|(_, body)| body)
+        .expect("share_file implementation is present");
+    assert!(share_file.contains("Build$VERSION"));
+    assert!(share_file.contains("MediaStore$Downloads"));
+    assert!(share_file.contains("copy_archive_to_content_uri"));
+    assert!(share_file.contains("is_pending"));
+    assert!(share_file.contains("setClipData"));
+    assert!(share_file.contains("FLAG_GRANT_READ_URI_PERMISSION"));
+    assert!(share_file.contains("delete_content_uri"));
+    assert!(!DIAGNOSTICS.contains("StrictMode"));
+    assert!(!DIAGNOSTICS.contains("file://"));
+    assert!(!DIAGNOSTICS_DOC.contains("Sentry"));
+    assert!(DIAGNOSTICS_DOC.contains("MediaStore"));
+    assert!(DIAGNOSTICS_DOC.contains("API 29"));
 }
 
 #[test]

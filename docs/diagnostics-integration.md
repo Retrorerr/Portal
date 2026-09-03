@@ -7,7 +7,7 @@ not as a process-name heuristic.
 
 1. Expose `android::diagnostics` from `src/lib.rs` and call
    `diagnostics::initialize()` immediately after `ApplicationContext::build`.
-   Wrap the Sentry/Android logger in `diagnostics::HostLogTee` so
+   Wrap the Android logger in `diagnostics::HostLogTee` so
    `diagnostics/host.log` persists even when logcat is unavailable.
 2. Route every `ArchProcess` stdout/stderr line through
    `diagnostics::guest_process_line`. The guest mirror is
@@ -44,6 +44,18 @@ not as a process-name heuristic.
    Wayland backend in the current activity. If an activity recreation fallback
    is unavoidable on a platform build, it must be event-triggered after this
    handoff and must not use a fixed sleep.
+
+## Export contract
+
+`diagnostics::export_and_share` supports Android 10 (API 29) and newer. It
+inserts the archive into the public Downloads collection through
+`ContentResolver`/`MediaStore`, copies the private archive into the pending
+row, and publishes the row only after the copy completes. The Sharesheet intent
+uses a read grant and `ClipData` so the selected receiver can open the scoped
+URI. Any copy, publication, or Sharesheet failure deletes the inserted row
+before returning an error. Older Android versions receive an explicit
+unsupported-API error; the export path never exposes the app-private archive
+as a direct file URI or changes the process-wide VM policy.
 
 `src/core/startup_v2.rs` is the host-testable generation-safe readiness state
 machine. A new KWin connection clears surface/buffer/frame evidence, and
