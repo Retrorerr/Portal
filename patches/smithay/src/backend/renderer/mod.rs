@@ -17,6 +17,9 @@ use cgmath::Matrix3;
 use crate::wayland::{compositor::SurfaceData, shm::fourcc_to_shm_format};
 #[cfg(feature = "wayland_frontend")]
 use wayland_server::protocol::{wl_buffer, wl_shm};
+#[cfg(feature = "wayland_frontend")]
+use wayland_server::Resource;
+
 
 #[cfg(feature = "renderer_gl")]
 pub mod gles;
@@ -503,7 +506,18 @@ pub trait ImportDmaWl: ImportDma {
             .expect("import_dma_buffer without checking buffer type?");
         self.import_dmabuf(dmabuf, Some(damage))
     }
+
+    /// Import a custom external buffer into the renderer.
+    fn import_external_buffer(
+        &mut self,
+        _buffer: &wl_buffer::WlBuffer,
+        _surface: Option<&crate::wayland::compositor::SurfaceData>,
+        _damage: &[Rectangle<i32, BufferCoord>],
+    ) -> Result<Self::TextureId, Self::Error> {
+        panic!("Renderer does not support external buffer import");
+    }
 }
+
 
 /// Trait for Renderers supporting importing dmabufs.
 pub trait ImportDma: Renderer {
@@ -585,6 +599,7 @@ impl<R: Renderer + ImportMemWl + ImportEgl + ImportDmaWl> ImportAll for R {
             Some(BufferType::Shm) => Some(self.import_shm_buffer(buffer, surface, damage)),
             Some(BufferType::Egl) => Some(self.import_egl_buffer(buffer, surface, damage)),
             Some(BufferType::Dma) => Some(self.import_dma_buffer(buffer, surface, damage)),
+            Some(BufferType::External) => Some(self.import_external_buffer(buffer, surface, damage)),
             _ => None,
         }
     }
@@ -604,10 +619,12 @@ impl<R: Renderer + ImportMemWl + ImportDmaWl> ImportAll for R {
         match buffer_type(buffer) {
             Some(BufferType::Shm) => Some(self.import_shm_buffer(buffer, surface, damage)),
             Some(BufferType::Dma) => Some(self.import_dma_buffer(buffer, surface, damage)),
+            Some(BufferType::External) => Some(self.import_external_buffer(buffer, surface, damage)),
             _ => None,
         }
     }
 }
+
 
 /// Trait for renderers supporting exporting contents of framebuffers or textures into memory.
 pub trait ExportMem: Renderer {
@@ -760,7 +777,70 @@ pub enum BufferType {
     Dma,
     /// Buffer represents a singe pixel
     SinglePixel,
+    /// Buffer represents an external custom buffer (e.g. AHardwareBuffer)
+    External,
 }
+
+/// Type-erased wrapper for custom external buffer implementations (e.g. AHardwareBuffer).
+#[cfg(feature = "wayland_frontend")]
+pub struct ExternalBufferData(Box<dyn ExternalBuffer>);
+
+#[cfg(feature = "wayland_frontend")]
+impl fmt::Debug for ExternalBufferData {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("ExternalBufferData").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "wayland_frontend")]
+impl ExternalBufferData {
+    /// Wrap a custom external buffer as Wayland resource data.
+    pub fn new<T: ExternalBuffer>(buffer: T) -> Self {
+        Self(Box::new(buffer))
+    }
+
+    /// Downcast the wrapped buffer to its concrete implementation type.
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        self.0.as_any().downcast_ref()
+    }
+}
+
+#[cfg(feature = "wayland_frontend")]
+impl std::ops::Deref for ExternalBufferData {
+    type Target = dyn ExternalBuffer;
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+#[cfg(feature = "wayland_frontend")]
+/// Error returned while importing a custom external buffer.
+pub type ExternalBufferImportError = Box<dyn std::error::Error + Send + Sync>;
+
+#[cfg(feature = "wayland_frontend")]
+/// Renderer-facing interface implemented by custom Wayland buffer types.
+pub trait ExternalBuffer: Send + Sync + 'static {
+    /// Buffer dimensions in buffer coordinates.
+    fn dimensions(&self) -> Size<i32, BufferCoord>;
+    /// Whether the buffer format carries meaningful alpha.
+    fn has_alpha(&self) -> Option<bool>;
+    /// Whether the buffer contents are vertically inverted.
+    fn y_inverted(&self) -> Option<bool>;
+    /// Access the concrete implementation for downcasting.
+    fn as_any(&self) -> &dyn std::any::Any;
+    #[cfg(feature = "renderer_gl")]
+    /// Import the buffer into a GLES renderer, if supported.
+    fn import_gles(
+        &self,
+        renderer: &mut gles::GlesRenderer,
+        surface: Option<&SurfaceData>,
+        damage: &[Rectangle<i32, BufferCoord>],
+    ) -> Option<Result<gles::GlesTexture, ExternalBufferImportError>> {
+        let _ = (renderer, surface, damage);
+        None
+    }
+}
+
 
 /// Returns the *type* of a wl_buffer
 ///
@@ -783,6 +863,10 @@ pub fn buffer_type(buffer: &wl_buffer::WlBuffer) -> Option<BufferType> {
 
     if crate::wayland::single_pixel_buffer::get_single_pixel_buffer(buffer).is_ok() {
         return Some(BufferType::SinglePixel);
+    }
+
+    if buffer.data::<ExternalBufferData>().is_some() {
+        return Some(BufferType::External);
     }
 
     // Not managed, check if this is an EGLBuffer
@@ -812,6 +896,10 @@ pub fn buffer_type(buffer: &wl_buffer::WlBuffer) -> Option<BufferType> {
 pub fn buffer_has_alpha(buffer: &wl_buffer::WlBuffer) -> Option<bool> {
     use super::allocator::format::has_alpha;
     use crate::wayland::shm::shm_format_to_fourcc;
+
+    if let Some(ext) = buffer.data::<ExternalBufferData>() {
+        return ext.has_alpha();
+    }
 
     if let Ok(dmabuf) = crate::wayland::dmabuf::get_dmabuf(buffer) {
         return Some(crate::backend::allocator::format::has_alpha(dmabuf.0.format));
@@ -853,6 +941,10 @@ pub fn buffer_dimensions(buffer: &wl_buffer::WlBuffer) -> Option<Size<i32, Buffe
         wayland::shm::{self, BufferAccessError},
     };
 
+    if let Some(ext) = buffer.data::<ExternalBufferData>() {
+        return Some(ext.dimensions());
+    }
+
     if let Ok(buf) = crate::wayland::dmabuf::get_dmabuf(buffer) {
         return Some((buf.width() as i32, buf.height() as i32).into());
     }
@@ -890,9 +982,14 @@ pub fn buffer_dimensions(buffer: &wl_buffer::WlBuffer) -> Option<Size<i32, Buffe
 #[cfg(feature = "wayland_frontend")]
 #[profiling::function]
 pub fn buffer_y_inverted(buffer: &wl_buffer::WlBuffer) -> Option<bool> {
+    if let Some(ext) = buffer.data::<ExternalBufferData>() {
+        return ext.y_inverted();
+    }
+
     if let Ok(dmabuf) = crate::wayland::dmabuf::get_dmabuf(buffer) {
         return Some(dmabuf.y_inverted());
     }
+
 
     #[cfg(all(feature = "backend_egl", feature = "use_system_lib"))]
     if let Some(Ok(egl_buffer)) = BUFFER_READER

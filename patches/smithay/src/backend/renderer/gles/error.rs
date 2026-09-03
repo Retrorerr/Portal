@@ -57,6 +57,10 @@ pub enum GlesError {
     #[error("Error accessing the buffer ({0:?})")]
     #[cfg(feature = "wayland_frontend")]
     EGLBufferAccessError(crate::backend::egl::BufferAccessError),
+    /// An error occurred importing an external buffer
+    #[error("Error importing external buffer: {0}")]
+    #[cfg(feature = "wayland_frontend")]
+    ExternalBufferError(String),
     /// There was an error mapping the buffer
     #[error("Error mapping the buffer")]
     MappingError,
@@ -115,7 +119,9 @@ impl From<GlesError> for SwapBuffersError {
             | x @ GlesError::UniformTypeMismatch { .. }
             | x @ GlesError::UnknownUniform(_)
             | x @ GlesError::EGLBufferAccessError(_)
+            | x @ GlesError::ExternalBufferError(_)
             | x @ GlesError::SyncInterrupted => SwapBuffersError::TemporaryFailure(Box::new(x)),
+
         }
     }
     #[cfg(not(feature = "wayland_frontend"))]

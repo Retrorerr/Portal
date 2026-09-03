@@ -97,6 +97,7 @@ pub struct State {
     /// Android clipboard bridge. It is initialized only after provisioning has produced the
     /// Wayland backend, so setup/webview stages never touch Android clipboard state.
     pub clipboard_bridge: Option<ClipboardBridge>,
+    pub ahb_importer: Option<crate::android::backend::wayland::gl_import::AhbTextureImporter>,
 }
 
 impl State {
@@ -586,6 +587,74 @@ delegate_presentation!(State);
 delegate_single_pixel_buffer!(State);
 delegate_viewporter!(State);
 
+impl smithay::reexports::wayland_server::GlobalDispatch<
+    crate::android::backend::wayland::protocol::android_wlegl::server::android_wlegl::AndroidWlegl,
+    crate::android::backend::wayland::wlegl::WleglGlobalData,
+> for State {
+    fn bind(
+        _state: &mut Self,
+        _handle: &smithay::reexports::wayland_server::DisplayHandle,
+        _client: &smithay::reexports::wayland_server::Client,
+        resource: smithay::reexports::wayland_server::New<
+            crate::android::backend::wayland::protocol::android_wlegl::server::android_wlegl::AndroidWlegl,
+        >,
+        global_data: &crate::android::backend::wayland::wlegl::WleglGlobalData,
+        data_init: &mut smithay::reexports::wayland_server::DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, global_data.importer);
+    }
+}
+
+impl smithay::reexports::wayland_server::Dispatch<
+    crate::android::backend::wayland::protocol::android_wlegl::server::android_wlegl::AndroidWlegl,
+    crate::android::backend::wayland::gl_import::AhbTextureImporter,
+> for State {
+    fn request(
+        _state: &mut Self,
+        _client: &smithay::reexports::wayland_server::Client,
+        resource: &crate::android::backend::wayland::protocol::android_wlegl::server::android_wlegl::AndroidWlegl,
+        request: crate::android::backend::wayland::protocol::android_wlegl::server::android_wlegl::Request,
+        importer: &crate::android::backend::wayland::gl_import::AhbTextureImporter,
+        _dhandle: &smithay::reexports::wayland_server::DisplayHandle,
+        data_init: &mut smithay::reexports::wayland_server::DataInit<'_, Self>,
+    ) {
+        crate::android::backend::wayland::wlegl::handle_wlegl_request(resource, request, importer, data_init);
+    }
+}
+
+impl smithay::reexports::wayland_server::Dispatch<
+    crate::android::backend::wayland::protocol::android_wlegl::server::android_wlegl_handle::AndroidWleglHandle,
+    crate::android::backend::wayland::wlegl::WleglHandleData,
+> for State {
+    fn request(
+        _state: &mut Self,
+        _client: &smithay::reexports::wayland_server::Client,
+        resource: &crate::android::backend::wayland::protocol::android_wlegl::server::android_wlegl_handle::AndroidWleglHandle,
+        request: crate::android::backend::wayland::protocol::android_wlegl::server::android_wlegl_handle::Request,
+        data: &crate::android::backend::wayland::wlegl::WleglHandleData,
+        _dhandle: &smithay::reexports::wayland_server::DisplayHandle,
+        _data_init: &mut smithay::reexports::wayland_server::DataInit<'_, Self>,
+    ) {
+        crate::android::backend::wayland::wlegl::handle_handle_request(resource, request, data);
+    }
+}
+
+impl smithay::reexports::wayland_server::Dispatch<
+    smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+    smithay::backend::renderer::ExternalBufferData,
+> for State {
+    fn request(
+        _state: &mut Self,
+        _client: &smithay::reexports::wayland_server::Client,
+        _resource: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+        _request: smithay::reexports::wayland_server::protocol::wl_buffer::Request,
+        _data: &smithay::backend::renderer::ExternalBufferData,
+        _dhandle: &smithay::reexports::wayland_server::DisplayHandle,
+        _data_init: &mut smithay::reexports::wayland_server::DataInit<'_, Self>,
+    ) {
+    }
+}
+
 pub trait IntoCompositorSize {
     fn into_compositor_size(self) -> Size<i32, Logical>;
 }
@@ -672,6 +741,20 @@ impl Compositor {
             kwin_client_id: None,
             kwin_generation: None,
             clipboard_bridge: None,
+            ahb_importer: match crate::android::backend::wayland::gl_import::AhbTextureImporter::new() {
+                Ok(imp) => {
+                    dh.create_global::<State, crate::android::backend::wayland::protocol::android_wlegl::server::android_wlegl::AndroidWlegl, _>(
+                        1,
+                        crate::android::backend::wayland::wlegl::WleglGlobalData { importer: imp },
+                    );
+                    log::info!("Registered android_wlegl global with AHardwareBuffer hardware acceleration support");
+                    Some(imp)
+                }
+                Err(err) => {
+                    log::warn!("Failed to initialize AhbTextureImporter: {}", err);
+                    None
+                }
+            },
         };
 
         Ok(Compositor {
