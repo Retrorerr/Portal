@@ -173,6 +173,13 @@ fn read_text_inner<'local>(
     if text.is_empty() {
         return Ok(None);
     }
+    if validate_clip_text(&text).is_none() {
+        log::warn!(
+            "Ignoring Android clipboard selection larger than {} bytes",
+            MAX_CLIPBOARD_BYTES
+        );
+        return Ok(None);
+    }
     Ok(Some(text))
 }
 
