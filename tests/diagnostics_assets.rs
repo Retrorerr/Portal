@@ -43,6 +43,16 @@ fn crash_handler_captures_registers_before_unwinding() {
 }
 
 #[test]
+fn crash_handler_intercepts_fstat_and_fstat64_for_proot_sockets() {
+    assert!(CRASH_HANDLER.contains("int fstat(int fd, struct stat *buf)"));
+    assert!(CRASH_HANDLER.contains("int fstat64(int fd, struct stat64 *buf)"));
+    assert!(CRASH_HANDLER.contains("dlsym(RTLD_NEXT, \"fstat\")"));
+    assert!(CRASH_HANDLER.contains("dlsym(RTLD_NEXT, \"fstat64\")"));
+    assert!(CRASH_HANDLER.contains("AT_EMPTY_PATH"));
+    assert!(CRASH_HANDLER.contains("ret < 0 && errno == ENOENT"));
+}
+
+#[test]
 fn plasma_launcher_waits_for_host_presented_marker() {
     assert!(PLASMA_LAUNCHER.contains("plasma-ready"));
     assert!(PLASMA_LAUNCHER.contains("dbus-run-session -- /usr/bin/startplasma-wayland"));
