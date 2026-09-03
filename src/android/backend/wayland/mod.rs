@@ -2,10 +2,14 @@ pub mod bind;
 mod compositor;
 mod event_centralizer;
 mod event_handler;
+pub mod gl_import;
 mod input;
 mod keymap;
 mod output_state;
+pub mod protocol;
 mod winit_backend;
+pub mod wlegl;
+
 
 pub use output_state::write_guest_output_state;
 

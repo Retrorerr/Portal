@@ -1572,7 +1572,8 @@ function Build-AppApk {
 
     Push-Location $RepoRoot
     try {
-        & $XbuildPath build --debug --platform android --arch arm64 --format apk
+        & $XbuildPath build --debug --platform android --arch arm64 --format apk |
+            ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) {
             throw "xbuild execution failed with exit code $LASTEXITCODE"
         }
@@ -1616,7 +1617,7 @@ function Build-AppApk {
     }
     if ($hasKeystore -and $hasCredentials) {
         Write-Host "  -> Signing APK with release certificate to ensure update compatibility..." -ForegroundColor Cyan
-        $creds = Get-Content $credsEnv | ConvertFrom-StringData
+        $creds = Get-Content -Raw $credsEnv | ConvertFrom-StringData
         $storePass = $creds["KEYSTORE_PASSWORD"]
         $keyPass = $creds["KEY_PASSWORD"]
         $keyAlias = $creds["KEY_ALIAS"]
@@ -1639,11 +1640,13 @@ function Build-AppApk {
         try {
             Set-Item -Path "Env:$storeEnvName" -Value $storePass
             Set-Item -Path "Env:$keyEnvName" -Value $keyPass
-            & $apksigner.FullName sign --ks $keystore --ks-pass "env:$storeEnvName" --ks-key-alias $keyAlias --key-pass "env:$keyEnvName" $builtApk
+            & $apksigner.FullName sign --ks $keystore --ks-pass "env:$storeEnvName" --ks-key-alias $keyAlias --key-pass "env:$keyEnvName" $builtApk |
+                ForEach-Object { Write-Host $_ }
             if ($LASTEXITCODE -ne 0) {
                 throw "apksigner sign failed with exit code $LASTEXITCODE"
             }
-            & $apksigner.FullName verify --verbose --print-certs $builtApk
+            & $apksigner.FullName verify --verbose --print-certs $builtApk |
+                ForEach-Object { Write-Host $_ }
             if ($LASTEXITCODE -ne 0) {
                 throw "apksigner verify failed with exit code $LASTEXITCODE"
             }

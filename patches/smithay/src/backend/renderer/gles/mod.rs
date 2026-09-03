@@ -1187,7 +1187,23 @@ impl ImportDma for GlesRenderer {
 }
 
 #[cfg(feature = "wayland_frontend")]
-impl ImportDmaWl for GlesRenderer {}
+impl ImportDmaWl for GlesRenderer {
+    fn import_external_buffer(
+        &mut self,
+        buffer: &wl_buffer::WlBuffer,
+        surface: Option<&crate::wayland::compositor::SurfaceData>,
+        damage: &[Rectangle<i32, BufferCoord>],
+    ) -> Result<Self::TextureId, Self::Error> {
+        use wayland_server::Resource;
+        let ext = buffer
+            .data::<super::ExternalBufferData>()
+            .ok_or_else(|| GlesError::ExternalBufferError("no ExternalBufferData".into()))?;
+        ext.import_gles(self, surface, damage)
+            .ok_or_else(|| GlesError::ExternalBufferError("import_gles returned None".into()))?
+            .map_err(|e| GlesError::ExternalBufferError(e.to_string()))
+    }
+}
+
 
 impl GlesRenderer {
     #[profiling::function]

@@ -36,7 +36,9 @@ winit = { version = "0.30.11", features = [
     "wayland",
 ] }
 wayland-protocols = "0.32.6"
+wayland-scanner = "0.31"
 khronos-egl = { version = "6.0.0", features = ["dynamic"] }
+
 libloading = "0.8.6"
 libc = "0.2"
 websocket = { version = "0.27.1", default-features = false, features = [
@@ -96,6 +98,9 @@ tempfile = "3.20.0"
 toml = "0.8.12"
 xz2 = { version = "0.1.7", features = ["static"] }
 zip = { version = "0.6.3", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+cc = "1.2"
 
 [patch.crates-io]
 smithay = { path = "patches/smithay" }

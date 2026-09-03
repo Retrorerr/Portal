@@ -602,6 +602,11 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .toplevel_surfaces()
             .to_vec();
         let mut elements = Vec::new();
+        let mut non_kwin_elements = Vec::new();
+        let mut kwin_elements = Vec::new();
+        if toplevels.len() > 1 {
+            log::debug!("event_handler: toplevels count={}", toplevels.len());
+        }
         for surface in &toplevels {
             let surface_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
@@ -612,13 +617,23 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                 1.0,
                 Kind::Unspecified,
             );
-            if compositor.state.is_known_kwin_surface(surface.wl_surface())
-                && !surface_elements.is_empty()
-            {
-                kwin_surface_rendered = true;
+            if toplevels.len() > 1 {
+                log::debug!("surface {:?} produced {} elements", surface.wl_surface(), surface_elements.len());
             }
-            elements.extend(surface_elements);
+
+            if compositor.state.is_known_kwin_surface(surface.wl_surface()) {
+                if !surface_elements.is_empty() {
+                    kwin_surface_rendered = true;
+                }
+                kwin_elements.extend(surface_elements);
+            } else {
+                non_kwin_elements.extend(surface_elements);
+            }
         }
+        // Front-to-back ordering: non-KWin clients/overlays in front of nested KWin desktop
+        elements.extend(non_kwin_elements);
+        elements.extend(kwin_elements);
+
 
         let cursor_surface = match &compositor.state.cursor_image {
             CursorImageStatus::Surface(surface) if surface.alive() => Some(surface.clone()),
