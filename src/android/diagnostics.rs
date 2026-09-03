@@ -13,7 +13,7 @@ use crate::{
     core::config::{ARCH_FS_ROOT, VERSION},
 };
 use jni::{
-    objects::{JObject, JString, JValue},
+    objects::{JObject, JValue},
     sys::_jobject,
     JNIEnv,
 };
@@ -299,7 +299,7 @@ pub fn kwin_crash_metadata(args: &str, status: i32, pid: Option<i32>) {
 }
 
 /// A `log` facade wrapper that persists every host log line before forwarding
-/// to Android logcat/Sentry.  The wrapper is intentionally small and does not
+/// to Android logcat.  The wrapper is intentionally small and does not
 /// recursively call `log::*` if the private file cannot be written.
 pub struct HostLogTee {
     inner: Box<dyn log::Log + Send + Sync>,
@@ -487,9 +487,11 @@ pub fn export_archive() -> Result<PathBuf, String> {
 
 /// Export and invoke the Android Sharesheet. The archive is copied through
 /// Android's media/content resolver so recipients receive a scoped
-/// `content://` grant; no private `file://` URI or StrictMode relaxation is
-/// needed. The exported Downloads item is user-visible and can be removed by
-/// the user after sharing.
+/// content grant; no private file URI or process-wide VM policy
+/// relaxation is needed. The exported Downloads item is user-visible and can
+/// be removed by
+/// the user after sharing. Android 10 (API 29) is the minimum API for this
+/// MediaStore publication path; older devices receive an actionable error.
 pub fn export_and_share(android_app: &AndroidApp) -> Result<PathBuf, String> {
     let archive = export_archive()?;
     let path = archive.clone();
@@ -516,7 +518,7 @@ fn copy_archive_to_content_uri<'local>(
             &[JValue::Object(&source_path)],
         )
         .map_err(|error| error.to_string())?;
-    let output = env
+    let output = match env
         .call_method(
             resolver,
             "openOutputStream",
@@ -524,18 +526,31 @@ fn copy_archive_to_content_uri<'local>(
             &[JValue::Object(uri)],
         )
         .and_then(|value| value.l())
-        .map_err(|error| error.to_string())?;
+    {
+        Ok(output) => output,
+        Err(error) => {
+            clear_pending_exception(env, "open diagnostics export output stream");
+            let _ = close_jni_stream(env, &input, "diagnostics export input stream");
+            return Err(error.to_string());
+        }
+    };
     if output.is_null() {
-        let _ = env.call_method(&input, "close", "()V", &[]);
+        let _ = close_jni_stream(env, &input, "diagnostics export input stream");
         return Err("Android content resolver returned no output stream".into());
     }
 
-    let mut buffer = env
-        .byte_array_from_slice(&[0u8; 64 * 1024])
-        .map_err(|error| error.to_string())?;
+    let buffer = match env.byte_array_from_slice(&[0u8; 64 * 1024]) {
+        Ok(buffer) => buffer,
+        Err(error) => {
+            clear_pending_exception(env, "allocate diagnostics export buffer");
+            let _ = close_jni_stream(env, &input, "diagnostics export input stream");
+            let _ = close_jni_stream(env, &output, "diagnostics export output stream");
+            return Err(error.to_string());
+        }
+    };
     let copy_result = (|| -> Result<(), String> {
         loop {
-            let read = env
+            let read = match env
                 .call_method(
                     &input,
                     "read",
@@ -543,11 +558,17 @@ fn copy_archive_to_content_uri<'local>(
                     &[JValue::Object(buffer.as_ref())],
                 )
                 .and_then(|value| value.i())
-                .map_err(|error| error.to_string())?;
+            {
+                Ok(read) => read,
+                Err(error) => {
+                    clear_pending_exception(env, "read diagnostics export archive");
+                    return Err(error.to_string());
+                }
+            };
             if read <= 0 {
                 break;
             }
-            env.call_method(
+            if let Err(error) = env.call_method(
                 &output,
                 "write",
                 "([BII)V",
@@ -556,17 +577,43 @@ fn copy_archive_to_content_uri<'local>(
                     JValue::Int(0),
                     JValue::Int(read),
                 ],
-            )
-            .map_err(|error| error.to_string())?;
+            ) {
+                clear_pending_exception(env, "write diagnostics export archive");
+                return Err(error.to_string());
+            }
         }
         Ok(())
     })();
-    let input_close = env.call_method(&input, "close", "()V", &[]);
-    let output_close = env.call_method(&output, "close", "()V", &[]);
+    let input_close = close_jni_stream(env, &input, "diagnostics export input stream");
+    let output_close = close_jni_stream(env, &output, "diagnostics export output stream");
     copy_result?;
-    input_close.map_err(|error| error.to_string())?;
-    output_close.map_err(|error| error.to_string())?;
+    input_close?;
+    output_close?;
     Ok(())
+}
+
+fn clear_pending_exception(env: &mut JNIEnv<'_>, context: &str) {
+    if env.exception_check().unwrap_or(false) {
+        log::warn!("JNI exception while {context}; clearing it");
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+}
+
+fn close_jni_stream(
+    env: &mut JNIEnv<'_>,
+    stream: &JObject<'_>,
+    context: &str,
+) -> Result<(), String> {
+    let result = env
+        .call_method(stream, "close", "()V", &[])
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    let had_error = result.is_err();
+    if had_error || env.exception_check().unwrap_or(false) {
+        clear_pending_exception(env, context);
+    }
+    result
 }
 
 fn put_content_string<'local>(
@@ -613,101 +660,193 @@ fn put_content_int<'local>(
     Ok(())
 }
 
+fn delete_content_uri(env: &mut JNIEnv<'_>, resolver: &JObject<'_>, uri: &JObject<'_>) {
+    let null_selection = JObject::null();
+    let null_args = JObject::null();
+    if let Err(error) = env.call_method(
+        resolver,
+        "delete",
+        "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I",
+        &[
+            JValue::Object(uri),
+            JValue::Object(&null_selection),
+            JValue::Object(&null_args),
+        ],
+    ) {
+        log::warn!("Failed to clean up diagnostics content URI: {error}");
+    }
+    clear_pending_exception(env, "clean up diagnostics content URI");
+}
+
+const FLAG_GRANT_READ_URI_PERMISSION: i32 = 0x0000_0001;
+
 fn share_file(env: &mut JNIEnv, android_app: &AndroidApp, path: &Path) -> Result<(), String> {
     let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _jobject) };
-    // Android 7+ rejects file:// URIs from a strict VM policy.  The archive is
-    // app-private and user-triggered; temporarily allowing this URI lets the
-    // system Sharesheet hand it to compatible targets without requiring a new
-    // Java dependency in the tiny native APK builder.
-    let strict_mode = env
-        .find_class("android/os/StrictMode")
+    let sdk_int = env
+        .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
+        .and_then(|value| value.i())
         .map_err(|error| error.to_string())?;
-    let builder = env
-        .new_object(
-            "android/os/StrictMode$VmPolicy$Builder",
-            "()V",
-            &[],
-        )
-        .map_err(|error| error.to_string())?;
-    let policy = env
-        .call_method(
-            &builder,
-            "build",
-            "()Landroid/os/StrictMode$VmPolicy;",
-            &[],
-        )
-        .and_then(|value| value.l())
-        .map_err(|error| error.to_string())?;
-    env.call_static_method(
-        strict_mode,
-        "setVmPolicy",
-        "(Landroid/os/StrictMode$VmPolicy;)V",
-        &[JValue::Object(&policy)],
-    )
-    .map_err(|error| error.to_string())?;
+    if sdk_int < 29 {
+        return Err("Diagnostics sharing requires Android 10 (API 29) or newer".into());
+    }
 
-    let action = env.new_string("android.intent.action.SEND").map_err(|e| e.to_string())?;
-    let intent = env
-        .new_object(
-            "android/content/Intent",
-            "(Ljava/lang/String;)V",
-            &[JValue::Object(&action)],
+    let resolver = env
+        .call_method(
+            &activity,
+            "getContentResolver",
+            "()Landroid/content/ContentResolver;",
+            &[],
         )
+        .and_then(|value| value.l())
         .map_err(|error| error.to_string())?;
-    let mime = env.new_string("application/zip").map_err(|e| e.to_string())?;
-    env.call_method(
-        &intent,
-        "setType",
-        "(Ljava/lang/String;)Landroid/content/Intent;",
-        &[JValue::Object(&mime)],
-    )
-    .map_err(|error| error.to_string())?;
-    let uri_text = env
-        .new_string(format!("file://{}", path.display()))
-        .map_err(|e| e.to_string())?;
+    let downloads_uri = env
+        .get_static_field(
+            "android/provider/MediaStore$Downloads",
+            "EXTERNAL_CONTENT_URI",
+            "Landroid/net/Uri;",
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| error.to_string())?;
+    let values = env
+        .new_object("android/content/ContentValues", "()V", &[])
+        .map_err(|error| error.to_string())?;
+    let display_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "localdesktop-diagnostics.zip".to_string());
+    put_content_string(env, &values, "_display_name", &display_name)?;
+    put_content_string(env, &values, "mime_type", "application/zip")?;
+    put_content_string(env, &values, "relative_path", "Download/Local Desktop")?;
+    put_content_int(env, &values, "is_pending", 1)?;
     let uri = env
-        .call_static_method(
-            "android/net/Uri",
-            "parse",
-            "(Ljava/lang/String;)Landroid/net/Uri;",
-            &[JValue::Object(&uri_text)],
+        .call_method(
+            &resolver,
+            "insert",
+            "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
+            &[JValue::Object(&downloads_uri), JValue::Object(&values)],
         )
         .and_then(|value| value.l())
         .map_err(|error| error.to_string())?;
-    let extra = env
-        .new_string("android.intent.extra.STREAM")
-        .map_err(|e| e.to_string())?;
-    env.call_method(
-        &intent,
-        "putExtra",
-        "(Ljava/lang/String;Landroid/os/Parcelable;)Landroid/content/Intent;",
-        &[JValue::Object(&extra), JValue::Object(&uri)],
-    )
-    .map_err(|error| error.to_string())?;
-    env.call_method(
-        &intent,
-        "addFlags",
-        "(I)Landroid/content/Intent;",
-        &[JValue::Int(0x00000001)], // FLAG_GRANT_READ_URI_PERMISSION
-    )
-    .map_err(|error| error.to_string())?;
-    let chooser_title = env.new_string("Share Local Desktop diagnostics").map_err(|e| e.to_string())?;
-    let chooser = env
-        .call_static_method(
-            "android/content/Intent",
-            "createChooser",
-            "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;",
-            &[JValue::Object(&intent), JValue::Object(&chooser_title)],
+    if uri.is_null() {
+        return Err("Android media store rejected the diagnostics export".into());
+    }
+
+    let publish_result = (|| -> Result<(), String> {
+        copy_archive_to_content_uri(env, &resolver, &uri, path)?;
+        let published_values = env
+            .new_object("android/content/ContentValues", "()V", &[])
+            .map_err(|error| error.to_string())?;
+        put_content_int(env, &published_values, "is_pending", 0)?;
+        let null_selection = JObject::null();
+        let null_args = JObject::null();
+        let updated = env
+            .call_method(
+                &resolver,
+                "update",
+                "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I",
+                &[
+                    JValue::Object(&uri),
+                    JValue::Object(&published_values),
+                    JValue::Object(&null_selection),
+                    JValue::Object(&null_args),
+                ],
+            )
+            .and_then(|value| value.i())
+            .map_err(|error| error.to_string())?;
+        if updated <= 0 {
+            return Err("Android media store could not publish the diagnostics export".into());
+        }
+        Ok(())
+    })();
+    if let Err(error) = publish_result {
+        clear_pending_exception(env, "publish diagnostics export");
+        delete_content_uri(env, &resolver, &uri);
+        return Err(error);
+    }
+
+    let share_result = (|| -> Result<(), String> {
+        let action = env
+            .new_string("android.intent.action.SEND")
+            .map_err(|error| error.to_string())?;
+        let intent = env
+            .new_object(
+                "android/content/Intent",
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&action)],
+            )
+            .map_err(|error| error.to_string())?;
+        let mime = env
+            .new_string("application/zip")
+            .map_err(|error| error.to_string())?;
+        env.call_method(
+            &intent,
+            "setType",
+            "(Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&mime)],
         )
-        .and_then(|value| value.l())
         .map_err(|error| error.to_string())?;
-    env.call_method(
-        activity,
-        "startActivity",
-        "(Landroid/content/Intent;)V",
-        &[JValue::Object(&chooser)],
-    )
-    .map_err(|error| error.to_string())?;
+        let extra = env
+            .new_string("android.intent.extra.STREAM")
+            .map_err(|error| error.to_string())?;
+        env.call_method(
+            &intent,
+            "putExtra",
+            "(Ljava/lang/String;Landroid/os/Parcelable;)Landroid/content/Intent;",
+            &[JValue::Object(&extra), JValue::Object(&uri)],
+        )
+        .map_err(|error| error.to_string())?;
+        let clip_label = env
+            .new_string("Local Desktop diagnostics")
+            .map_err(|error| error.to_string())?;
+        let clip_data = env
+            .call_static_method(
+                "android/content/ClipData",
+                "newRawUri",
+                "(Ljava/lang/CharSequence;Landroid/net/Uri;)Landroid/content/ClipData;",
+                &[JValue::Object(&clip_label), JValue::Object(&uri)],
+            )
+            .and_then(|value| value.l())
+            .map_err(|error| error.to_string())?;
+        env.call_method(
+            &intent,
+            "setClipData",
+            "(Landroid/content/ClipData;)Landroid/content/Intent;",
+            &[JValue::Object(&clip_data)],
+        )
+        .map_err(|error| error.to_string())?;
+        env.call_method(
+            &intent,
+            "addFlags",
+            "(I)Landroid/content/Intent;",
+            &[JValue::Int(FLAG_GRANT_READ_URI_PERMISSION)],
+        )
+        .map_err(|error| error.to_string())?;
+        let chooser_title = env
+            .new_string("Share Local Desktop diagnostics")
+            .map_err(|error| error.to_string())?;
+        let chooser = env
+            .call_static_method(
+                "android/content/Intent",
+                "createChooser",
+                "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;",
+                &[JValue::Object(&intent), JValue::Object(&chooser_title)],
+            )
+            .and_then(|value| value.l())
+            .map_err(|error| error.to_string())?;
+        env.call_method(
+            activity,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&chooser)],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    if let Err(error) = share_result {
+        clear_pending_exception(env, "launch diagnostics share sheet");
+        delete_content_uri(env, &resolver, &uri);
+        return Err(error);
+    }
     Ok(())
 }
 
