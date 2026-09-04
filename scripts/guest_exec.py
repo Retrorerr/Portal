@@ -81,6 +81,7 @@ def main():
         "-b /proc/self/fd/1:/dev/stdout "
         "-b /proc/self/fd/2:/dev/stderr "
         "-b /data/data/app.polarbear/files/runtime-B/tmp:/dev/shm "
+        "-b /data/local/tmp:/data/local/tmp "
         "-w /root /bin/sh /tmp/exec.sh"
     )
 
@@ -88,6 +89,10 @@ def main():
         "adb", "-s", "f105b146", "shell",
         f"run-as app.polarbear sh -c '{remote_cmd}'"
     ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(errors="replace")
     if res.stdout:
         print("STDOUT:", res.stdout)
     if res.stderr:

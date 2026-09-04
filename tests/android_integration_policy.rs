@@ -185,6 +185,21 @@ fn nested_android_owned_settings_are_truthful() {
     assert!(ANDROID_SETUP_SOURCE.contains("with_extension(\"so.portal-disabled\")"));
     assert!(ANDROID_SETUP_SOURCE.contains("org.kde.dolphin.desktop"));
     assert!(ANDROID_SETUP_SOURCE.contains("Profile 1.profile"));
+    assert!(ANDROID_SETUP_SOURCE.contains("sync_debian_package_management"));
+    assert!(ANDROID_SETUP_SOURCE.contains("APT::Sandbox::User \\\"root\\\""));
+    assert!(ANDROID_SETUP_SOURCE.contains("policy-rc.d"));
+    assert!(ANDROID_SETUP_SOURCE.contains("exit 101"));
+    assert!(ANDROID_SETUP_SOURCE.contains("var/lib/dpkg/info"));
+    assert!(ANDROID_SETUP_SOURCE.contains("format"));
+}
+
+#[test]
+fn debian_package_management_and_tablet_mode_policy() {
+    const PLASMA_LAUNCHER_SOURCE: &str = include_str!("../assets/localdesktop-startplasma.sh");
+    assert!(PLASMA_LAUNCHER_SOURCE.contains("TabletMode auto"));
+    assert!(PLASMA_LAUNCHER_SOURCE.contains("update-mime-database"));
+    assert!(PLASMA_LAUNCHER_SOURCE.contains("update-desktop-database"));
+    assert!(PLASMA_LAUNCHER_SOURCE.contains("kbuildsycoca6 --noincremental"));
 }
 
 #[test]
