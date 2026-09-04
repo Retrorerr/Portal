@@ -1,4 +1,4 @@
-//! Local Desktop PipeWire standalone-client AAudio proof-of-concept sink.
+//! Portal PipeWire standalone-client AAudio sink.
 //!
 //! This is the native half of the standalone-client PipeWire/AAudio experiment:
 //! a normal PipeWire client process, not a PipeWire/SPA plugin. It registers an
@@ -640,7 +640,7 @@ mod android {
         let props = pw::properties::properties! {
             *pw::keys::MEDIA_CLASS => "Audio/Sink",
             *pw::keys::NODE_NAME => node_name,
-            *pw::keys::NODE_DESCRIPTION => "Local Desktop AAudio Output",
+            *pw::keys::NODE_DESCRIPTION => "Portal AAudio Output",
             *pw::keys::NODE_DRIVER => "true",
             *pw::keys::NODE_SUSPEND_ON_IDLE => "false",
             *pw::keys::AUDIO_RATE => sink.rate.to_string(),

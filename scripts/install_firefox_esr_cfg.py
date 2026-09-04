@@ -5,7 +5,7 @@ pref("general.config.obscure_value", 0);
 pref("general.config.sandbox_enabled", false);
 """
 
-localdesktop_cfg = """// Auto updated by Local Desktop on each startup, do not edit manually
+localdesktop_cfg = """// Auto updated by Portal on each startup, do not edit manually
 defaultPref("media.cubeb.sandbox", false);
 defaultPref("security.sandbox.content.level", 0);
 defaultPref("media.allow-audio-non-utility", true);

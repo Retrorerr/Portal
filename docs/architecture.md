@@ -1,133 +1,90 @@
-<!--
-  This is the SPINE of the generated architecture PDF (see src/bin/build_docs.rs).
-  The prose is curated; the code is not. Each snippet directive (the HTML-comment
-  lines beginning with "snippet", expanded by build_docs) is replaced at build
-  time with the named function pulled fresh from source, so the walkthrough can
-  never drift out of sync with the code it describes.
+# Portal architecture
 
-  The order is deliberate: the program is flattened along its call stack rather
-  than scanned file-by-file. We start at the one entry point the OS calls,
-  android_main, follow the fork into the two backends, then cross over to the two
-  ways the APK that contains all of this gets built.
--->
+Portal runs a local Linux desktop across two security and runtime domains: an Android-native host and an unprivileged Debian guest. The boundary between them is deliberate. Android owns hardware and application lifecycle; Debian owns the desktop session and Linux applications.
 
-# `android_main` — the one entry point
+## Process model
 
-Local Desktop is an Android [`NativeActivity`](https://developer.android.com/ndk/reference/group/native-activity): there is no Java `main`, no `onCreate` we write. The NDK glue calls a single exported symbol, `android_main`, on a dedicated thread, and everything in this document hangs off that call.
+```text
+Android
+└─ app.polarbear / NativeActivity
+   ├─ winit event loop
+   ├─ Smithay Wayland compositor
+   ├─ setup and diagnostics WebView
+   ├─ Android integration bridges
+   └─ PRoot supervisor
+      └─ Debian 13 guest
+         ├─ KDE Plasma 6 / KWin
+         ├─ PipeWire and Pulse compatibility
+         └─ user applications
+```
 
-`android_main` does four things in order: wire up logging and crash reporting, capture the Android handles we need later, build the winit event loop, and hand control to it. The last two lines are the whole program in miniature — **Phase 1: Setup** decides *what* we are (installer or desktop), **Phase 2: Run** drives it forever.
+The Android process is the long-lived owner. Guest processes are supervised children, not independent services, and must tolerate Android pausing, resizing, recreating, or terminating the activity.
 
-<!--snippet file=src/android/main.rs fn=android_main-->
+## Startup phases
 
-`PolarBearApp::build` is where the fork is decided. It calls `setup`, which returns a *backend* — and the backend it returns is the entire branch this run will take.
+### 1. Host initialization
 
-<!--snippet file=src/android/app/build.rs fn=build-->
+`android_main` initializes logging, diagnostics, Android handles, the accessibility bridge, and the winit event loop. `PolarBearApp` then selects either the setup backend or the Wayland backend.
 
-The two backends are the two halves of this chapter. There is no third option: a run is either still *installing the Linux environment* (WebView) or *running the desktop* (Wayland).
+### 2. Runtime provisioning
 
-<!--snippet file=src/android/app/build.rs enum=PolarBearBackend-->
+The setup backend prepares a versioned Debian runtime in app-private storage. Stages are idempotent: completed work is recorded, and interrupted setup resumes from the next incomplete boundary.
 
-`setup` is the dispatcher. It first rejects unsupported devices outright, then runs the install pipeline. The crucial design choice is that `setup` **never blocks**: each stage reports whether its work was already done on a previous launch. If every stage was already done, the device is ready and we return the `Wayland` backend immediately. If any stage still has work to do, that work is spawned onto a background thread and we return the `WebView` backend so the main thread is free to render install progress.
+Runtime images use A/B slots. A candidate slot can be assembled and validated without destroying the last known runtime. Switching the active-slot marker is the commit point.
 
-<!--snippet file=src/android/proot/setup.rs fn=setup-->
+### 3. Desktop launch
 
-Once a backend exists, Phase 2 takes over. winit calls `resumed` every time the activity becomes visible, and this is the runtime fork that mirrors the setup fork: the WebView backend shows an HTML progress page; the Wayland backend brings up the GPU renderer and launches the desktop.
+When provisioning is complete, Portal creates the Android/EGL renderer and Smithay state, publishes the Wayland socket to the guest, and starts the Plasma session under PRoot. KWin is a nested Wayland client of Portal's compositor.
 
-<!--snippet file=src/android/app/run.rs fn=resumed-->
+Portal does not use X11 or VNC as its normal display transport. Xwayland exists inside the guest only for applications that do not support Wayland.
 
-## The WebView path — first-run installer
+## Rendering boundary
 
-This path runs once in a device's life: the first time the app opens, before the Linux environment exists. Almost all of the *work* lives here — downloading a root filesystem, unpacking it, running `pacman`, and writing dozens of config files — but none of it is the product. It exists only to get the device to the point where the Wayland path can take over.
+The compositor translates between Android's surface lifecycle and Wayland's persistent client model.
 
-The user sees a local HTML page (`setup-progress.html`) in an Android WebView. The `resumed` arm above points that WebView at the page and passes it a port; the page opens a WebSocket back to the app to receive live progress.
+- Android provides the native window, physical dimensions, rotation, density, and refresh rate.
+- Smithay owns Wayland globals, surfaces, configure sequencing, frame callbacks, and presentation feedback.
+- EGL/GLES renders into the Android surface.
+- Android `AHardwareBuffer` and `android_wlegl` support compatible guest buffers without a readback path.
+- Surface loss suspends the renderer; resume recreates it without launching a second guest session.
 
-`setup` builds an ordered list of stages and walks it. Each stage is idempotent and returns `None` if its work was already done, or a `JoinHandle` if it spawned work. The orchestration loop runs the first unfinished stage, then chains the rest on a background thread, pushing a percentage to the progress channel as it goes — which is why the main thread stayed free to draw the page.
+Readiness is stricter than process liveness. Portal requires the expected KWin identity, an acknowledged configure, a committed guest buffer, and a host-presented frame from the same startup generation before declaring the desktop ready.
 
-The stages, in order:
+## Input and clipboard
 
-1. `setup_arch_fs` — download and extract the Arch Linux ARM64 root filesystem.
-2. `simulate_linux_sysdata_stage` — fabricate the `/proc` and `/sys` files proot can't provide.
-3. `install_dependencies` — `pacman -S` the desktop, retrying through a flaky network.
-4. `setup_firefox_config` — pre-seed Firefox prefs so it runs unsandboxed under proot.
-5. `setup_fake_bwrap` — replace Bubblewrap with a shim (Android has no user namespaces).
-6. `setup_onboard_signal_fix` — wrap the on-screen keyboard around a proot `fstat` quirk.
-7. `setup_xfce_wayland` — write the Xfce/labwc session config and HiDPI scaling.
-8. `fix_xkb_symlink` — repoint an absolute xkb symlink to a relative one (it's resolved from NDK, not the chroot root).
+Android input is normalized before it reaches Wayland:
 
-The first stage is the heaviest and the most illustrative — note that it is one big retry loop: a corrupt download deletes the archive and starts over rather than failing the install.
+- touch and pointer coordinates share the same display transform used by rendering;
+- physical key events map to Linux input codes;
+- Android IME commits are queued and delivered through the supported text-input path;
+- attached keyboard, mouse, and touchpad state informs Plasma's tablet-mode policy;
+- clipboard exchange accepts bounded text MIME types and suppresses echo loops.
 
-<!--snippet file=src/android/proot/setup.rs fn=setup_arch_fs-->
+The optional accessibility service exists because Android can consume hardware shortcuts before the activity receives them. It forwards key events; it does not inspect the Android window hierarchy.
 
-Installing the desktop is the other stage worth reading. `pacman` over a phone's network is unreliable, so `install_dependencies` clears any stale lock and retries up to ten times, streaming each line of pacman output to the progress page, and only gives up — loudly — after the last attempt.
+## Audio and files
 
-<!--snippet file=src/android/proot/setup.rs fn=install_dependencies-->
+The guest exposes normal PipeWire/Pulse interfaces to Linux applications. Portal's native sink bridges the resulting stream to AAudio on Android.
 
-Behind the progress page is `WebviewBackend::build`. It binds an ephemeral localhost port, then spins up two threads: one forwards `SetupMessage`s from the install pipeline to the connected browser, the other accepts the browser's WebSocket connection. The port it picked is the one handed to the WebView URL up in `resumed`.
+The Debian filesystem remains in app-private storage. Shared Android storage is mounted separately and only when the corresponding Android permission is granted.
 
-<!--snippet file=src/android/backend/webview.rs fn=build-->
+## Failure and recovery
 
-When the pipeline reaches 100%, it asks the user to restart. On the next launch every stage reports "already done", `setup` returns the `Wayland` backend, and the device never visits this path again.
+Every recovery path should preserve evidence and user data.
 
-## The Wayland path — the product
+- setup failures remain on the local progress UI and can export diagnostics;
+- early Plasma failures enter a graphical native-Wayland recovery session;
+- host and guest logs rotate within bounded storage;
+- diagnostics include Portal-owned state and exclude unrelated personal files;
+- uninstalling the Android package is not a recovery step because it removes app-private guest data.
 
-This is what Local Desktop *is*: a Wayland compositor running inside the Android NDK, with an Xfce desktop running as its client inside proot, rendered back into the native activity. The `Wayland` arm of `resumed` is its entry point. On every resume it (re)creates the GPU renderer, configures the output to match the Android window, marks the runtime active, draws one frame, and launches the desktop session.
+## Compatibility boundaries
 
-The backend struct is the compositor's live state — the smithay `Compositor`, the winit GPU renderer (dropped on suspend, rebuilt on resume), the input clock, and the touch-gesture bookkeeping that turns finger gestures into pointer events.
+The visible product name is Portal. The following identifiers remain stable because existing Android installs and Debian guests depend on them:
 
-<!--snippet file=src/android/backend/wayland/mod.rs struct=WaylandBackend-->
+- package `app.polarbear`;
+- crate and native-library name `localdesktop`;
+- guest paths under `/etc/localdesktop`;
+- selected asset and artifact basenames.
 
-`bind` constructs the winit + smithay GLES renderer against the activity's surface. It returns a `Result` because GPU init can fail (notably on resume races), and `resumed` degrades gracefully when it does.
-
-<!--snippet file=src/android/backend/wayland/winit_backend.rs fn=bind-->
-
-`configure_output` reconciles the compositor with the physical Android window every time the surface changes: it sets the compositor size, creates or updates the smithay `Output` (mode and transform, with the parent output scale fixed at 1 because rendering uses physical pixels), writes the host geometry and guest UI scale to a file the in-chroot `wlr-randr` script watches, and resizes any existing toplevel windows to fill the screen.
-
-<!--snippet file=src/android/app/run.rs fn=configure_output-->
-
-With the compositor live, `launch` starts the desktop. It guards against double-launch with an atomic flag, clears stale X11 lock files, then runs `startxfce4 --wayland` as the configured user *inside proot* on a background thread. From here, Xfce is a normal Wayland client of our compositor.
-
-<!--snippet file=src/android/proot/launch.rs fn=launch-->
-
-The other half of the product is input. Android delivers events to winit; `window_event` is the per-frame entry. It funnels every raw event through `centralize` (which normalises winit/touch events into our own `CentralizedEvent`, including two-finger-scroll detection) and then `handle` (which feeds them into the smithay compositor and requests redraws). Physical-keyboard events injected by the accessibility service take a parallel route through `user_event` → `centralize_injected_keyboard`.
-
-<!--snippet file=src/android/app/run.rs fn=window_event-->
-
-That is the whole runtime loop: resume → bind renderer → configure output → launch desktop → translate input → render, suspend tears the renderer down, and the next resume rebuilds it. Everything below this line is about producing the `.apk` that ships all of the above.
-
-# `xbuild` — the cross-compiling build path
-
-The shipped APK is built with [`xbuild`](https://github.com/rust-mobile/xbuild), vendored and patched under `patches/xbuild/` (the patches add Android-*host* support — building on-device in Termux — plus AGP/KGP compatibility). This is the path the desktop pipeline and `scripts/build-termux.sh` use; the canonical invocation is one line:
-
-<!--snippet file=src/bin/build_apk.rs lines=1-1-->
-
-(For reference, that single command is `x build --release --platform android --arch arm64 --format apk`.)
-
-The CLI is a `clap` subcommand enum. `Build` flattens straight into `BuildEnv::new` followed by `command::build`; `Run`, `Test`, and `Lldb` are the same build step plus a device action, which is why they all share `BuildArgs`.
-
-<!--snippet file=patches/xbuild/xbuild/src/main.rs fn=run-->
-
-`command::build` is the engine. It runs as three tasks: fetch any precompiled artifacts, build the Rust crate for each target arch (note `--lib` — for Android we build the `cdylib`, not a binary), then package the result into the requested format. For our platform that final step constructs an `Apk` from the freshly built `lib*.so`. The head of the function shows the shape:
-
-<!--snippet file=patches/xbuild/xbuild/src/command/build.rs fn=build-->
-
-The packaging `xbuild` does here is the same job the next chapter does standalone — which is the point of having both.
-
-# `build_apk` — the no-cross-compile build path
-
-On an arm64 device there is nothing to cross-compile, so the project ships its own APK builder and makes it the default binary (`default-run = "build_apk"` in `Cargo.toml`). A bare `cargo run` on-device builds, packages, and signs the APK with no `xbuild`, no Gradle, and no Android Studio — it is a self-contained reimplementation of the packaging half of the previous chapter.
-
-The whole thing is `apk::build`. It parses `manifest.yaml`, synthesises a complete `AndroidManifest` (filling in sane defaults for SDK levels, the launcher activity, the `android.app.lib_name` meta-data that points Android at our `cdylib`, and the `MAIN`/`LAUNCHER` intent filter), runs `cargo build --lib` to produce the `.so`, then assembles the APK: resources and icon, declared assets, the native library for the host arch, and the prebuilt `classes.dex` — finishing with a signing pass.
-
-<!--snippet file=src/bin/build_apk.rs fn=build-->
-
-The packaging primitives it leans on are small and worth knowing by name:
-
-- `Apk::add_res` compiles `resources.arsc`, scales the icon to every density, and serialises the binary `AndroidManifest.xml`.
-- `Apk::add_lib` drops the `cdylib` into `lib/<abi>/`.
-- `Apk::finish` closes the zip and hands it to the RSA/SHA-256 `Signer`.
-
-`add_res` is the most involved — it is where the human-readable `manifest.yaml` becomes the binary resource table Android actually reads:
-
-<!--snippet file=src/bin/build_apk.rs fn=add_res-->
-
-Both build paths converge on the same artifact — a signed APK whose `cdylib` exports the `android_main` we started this document with. The call stack closes on itself.
+Changing one of these requires an explicit migration and upgrade test, not a cosmetic rename.

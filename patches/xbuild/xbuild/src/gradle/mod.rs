@@ -14,8 +14,7 @@ use std::process::Command;
 // To refresh: run `sdkmanager --licenses` on a PC and copy the contents of
 // $ANDROID_HOME/licenses/android-sdk-license and android-sdk-preview-license,
 // or override via the ANDROID_SDK_LICENSE / ANDROID_SDK_PREVIEW_LICENSE env vars.
-static ANDROID_SDK_LICENSE: &str =
-    "24333f8a63b6825ea9c5514f83c2829b004d1fee\n\
+static ANDROID_SDK_LICENSE: &str = "24333f8a63b6825ea9c5514f83c2829b004d1fee\n\
      8933bad161af4178b1185d1a37fbf41ea5269c55\n\
      d56f5187479451eabf01fb78af6dfcb131a6481e\n";
 
@@ -25,7 +24,6 @@ static BUILD_GRADLE: &[u8] = include_bytes!("./build.gradle");
 static GRADLE_PROPERTIES: &[u8] = include_bytes!("./gradle.properties");
 static SETTINGS_GRADLE: &[u8] = include_bytes!("./settings.gradle");
 static IC_LAUNCHER: &[u8] = include_bytes!("./ic_launcher.xml");
-
 
 fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
     if !src.exists() {
@@ -123,7 +121,9 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
         }
         // Disable AGP's SDK component validation: the official sdkmanager is x86_64-only
         // on Android, so SDK components are pre-downloaded via android_sdkmanager instead.
-        gradle_props.extend_from_slice(b"\n# Termux: skip SDK license/component validation\nandroid.sdk.channel=0\n");
+        gradle_props.extend_from_slice(
+            b"\n# Termux: skip SDK license/component validation\nandroid.sdk.channel=0\n",
+        );
         // Write local.properties with sdk.dir so Gradle can locate the Android SDK.
         // Gradle does not read ANDROID_HOME directly; it requires sdk.dir in this file.
         if let Ok(sdk_dir) = std::env::var("ANDROID_HOME") {
@@ -138,7 +138,10 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
             let sdk_preview_license = std::env::var("ANDROID_SDK_PREVIEW_LICENSE")
                 .unwrap_or_else(|_| ANDROID_SDK_PREVIEW_LICENSE.to_string());
             let _ = std::fs::write(licenses_dir.join("android-sdk-license"), sdk_license);
-            let _ = std::fs::write(licenses_dir.join("android-sdk-preview-license"), sdk_preview_license);
+            let _ = std::fs::write(
+                licenses_dir.join("android-sdk-preview-license"),
+                sdk_preview_license,
+            );
         }
     }
     std::fs::write(gradle.join("gradle.properties"), &gradle_props)?;
@@ -227,6 +230,29 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
     if let Some(icon_path) = env.icon.as_ref() {
         let mut scaler = xcommon::Scaler::open(icon_path)?;
         scaler.optimize();
+        let companion = |variant: &str| {
+            let stem = icon_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("icon");
+            icon_path.with_file_name(format!("{stem}-{variant}.png"))
+        };
+        let foreground_path = companion("foreground");
+        let monochrome_path = companion("monochrome");
+        let mut foreground_scaler = foreground_path
+            .is_file()
+            .then(|| xcommon::Scaler::open(&foreground_path))
+            .transpose()?;
+        let mut monochrome_scaler = monochrome_path
+            .is_file()
+            .then(|| xcommon::Scaler::open(&monochrome_path))
+            .transpose()?;
+        if let Some(scaler) = foreground_scaler.as_mut() {
+            scaler.optimize();
+        }
+        if let Some(scaler) = monochrome_scaler.as_mut() {
+            scaler.optimize();
+        }
         let anydpi = res.join("mipmap-anydpi-v26");
         std::fs::create_dir_all(&anydpi)?;
         std::fs::write(anydpi.join("ic_launcher.xml"), IC_LAUNCHER)?;
@@ -250,7 +276,12 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
             for variant in ["foreground", "monochrome"] {
                 let mut icon =
                     std::fs::File::create(dir.join(format!("ic_launcher_{}.png", variant)))?;
-                scaler.write(&mut icon, opts)?;
+                match variant {
+                    "foreground" => foreground_scaler.as_mut().unwrap_or(&mut scaler),
+                    "monochrome" => monochrome_scaler.as_mut().unwrap_or(&mut scaler),
+                    _ => unreachable!(),
+                }
+                .write(&mut icon, opts)?;
             }
         }
         manifest.application.icon = Some("@mipmap/ic_launcher".into());

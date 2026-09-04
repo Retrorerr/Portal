@@ -14,7 +14,7 @@ pub const ARCH_FS_ROOT: &str = "/data/local/tmp/arch";
 pub const ARCH_FS_ARCHIVE: &str = "https://github.com/termux/proot-distro/releases/download/v4.29.0/archlinux-aarch64-pd-v4.29.0.tar.xz";
 
 /// Project homepage, also the online documentation entry point.
-pub const DOCS_HOME_URL: &str = "https://retrorerr.github.io/Portal/";
+pub const DOCS_HOME_URL: &str = "https://github.com/Retrorerr/Portal#readme";
 
 /// Download URL for the offline User Manual PDF matching the running version.
 /// The release asset is dot-free/hyphenated (GitHub turns spaces into dots).
@@ -180,7 +180,7 @@ pub fn parse_config(full_config_path: String) -> LocalConfig {
     let content = lines.join("\n");
     if let Ok(mut config) = toml::from_str::<LocalConfig>(&content) {
         // Migrate only the legacy built-in XFCE launch path. User-defined sessions that do not
-        // reference Local Desktop's old wrapper remain untouched.
+        // reference the legacy wrapper remain untouched.
         if config.command.launch.contains("startxfce4-localdesktop") {
             config.command = CommandConfig::default();
         }

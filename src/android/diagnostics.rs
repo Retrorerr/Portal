@@ -433,7 +433,7 @@ fn add_tree(
 }
 
 /// Build one bounded, shareable diagnostics archive.  Only app diagnostics
-/// and the guest's Local Desktop state directory are included; unrelated user
+/// and the guest's Portal state directory are included; unrelated user
 /// files in the guest are never traversed.
 pub fn export_archive() -> Result<PathBuf, String> {
     let paths = paths().ok_or_else(|| "Diagnostics are not initialized yet".to_string())?;

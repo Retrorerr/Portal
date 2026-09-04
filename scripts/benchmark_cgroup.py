@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Repeatable benchmark script that accurately measures the complete Local Desktop
+Repeatable benchmark script that accurately measures the complete Portal
 cgroup on the OnePlus Pad 3 (f105b146), aggregating true VmRSS and RssAnon across
 all guest processes (KWin, Plasma, D-Bus, XWayland, PipeWire, apps) and the
 host app, total PSS from Android's memory subsystem, and distinguishing process-tree
@@ -143,7 +143,7 @@ def get_cgroup_cpu(sample_sec=2.0):
 
 def run_benchmark(label=""):
     print(f"============================================================")
-    print(f"Local Desktop Benchmark: [{label}]")
+    print(f"Portal Benchmark: [{label}]")
     print(f"============================================================")
     mem = get_cgroup_memory()
     print(f"Active Cgroup Processes: {mem['count']}")
@@ -157,7 +157,7 @@ def run_benchmark(label=""):
         
     print("\nSampling CPU utilization (2s)...")
     cpu = get_cgroup_cpu(2.0)
-    print(f"Local Desktop CPU Load:  {cpu['app_cpu_pct']}% of 1 core (out of 800% capacity)")
+    print(f"Portal CPU Load:  {cpu['app_cpu_pct']}% of 1 core (out of 800% capacity)")
     print(f"Total Device CPU Load:   {cpu['total_sys_cpu_pct']}% of 1 core (Device Idle: {800.0 - cpu['total_sys_cpu_pct']:.1f}%)")
     print(f"============================================================\n")
     return {"mem": mem, "cpu": cpu}
