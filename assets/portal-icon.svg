@@ -1,6 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
   <title id="title">Portal</title>
-  <desc id="desc">A flat cyan P shaped like an open portal on a deep graphite field.</desc>
-  <rect width="1024" height="1024" fill="#0b0e14"/>
-  <path fill="#43d7f2" fill-rule="evenodd" d="M280 824V260c0-44 36-80 80-80h210c154 0 254 96 254 246S724 672 570 672H440v152H280Zm160-492v188h118c67 0 106-34 106-94s-39-94-106-94H440Z"/>
+  <desc id="desc">An ivory oblique aperture with an ember orange threshold on charcoal.</desc>
+  <rect width="1024" height="1024" fill="#191B1C"/>
+  <g transform="translate(512 512) scale(1.22) translate(-512 -512)">
+    <path d="M524 718 C485 732 448 718 421 683 C363 609 374 466 423 371 C460 299 522 272 572 302 C638 342 654 453 623 553" fill="none" stroke="#F1EBDD" stroke-width="54"/>
+    <path d="M617 598 C603 635 585 664 561 683" fill="none" stroke="#F07949" stroke-width="54"/>
+  </g>
 </svg>
