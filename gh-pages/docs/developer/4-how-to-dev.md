@@ -28,7 +28,7 @@ Recommended setup:
 
 ### How to view the error logs
 
-If Local Desktop hangs at launch, stuck on the app icon, it is likely that the native main thread has crashed. To check:
+If Portal hangs at launch, stuck on the app icon, the native main thread may have crashed. To check:
 
 1. Search for `> Tasks: Run Task` in the Command Palette.
 2. Run the `[Android] Logcat` task. Then you will see the log:

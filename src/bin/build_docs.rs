@@ -104,9 +104,9 @@ impl Opts {
 
     fn out_path(&self) -> PathBuf {
         let mut name = String::from(if self.manual == Manual::User {
-            "Local Desktop - User Manual"
+            "Portal - User Manual"
         } else {
-            "Local Desktop - Developer Manual"
+            "Portal - Developer Manual"
         });
         let mut quals: Vec<&str> = Vec::new();
         if self.manual == Manual::Developer && self.callgraph {
@@ -1332,9 +1332,9 @@ fn cover_and_toc(opts: &Opts, version: &str) -> Result<String> {
         ));
     }
     let title = if opts.manual == Manual::User {
-        "Local Desktop — User Manual"
+        "Portal — User Manual"
     } else {
-        "Local Desktop — Developer Manual"
+        "Portal — Developer Manual"
     };
     let subtitle = if opts.manual == Manual::User {
         format!("Running Linux on Android · v{version}")
@@ -1405,7 +1405,7 @@ fn assemble(opts: &Opts) -> Result<String> {
         }
     } else {
         // Developer manual: README, gh-pages docs + blog, then architecture.
-        doc.push_str(&part("Local Desktop"));
+        doc.push_str(&part("Portal"));
         let readme = repo_root().join("README.md");
         let md = clean_markdown(&readme)?;
         doc.push_str(&MdToTypst::new(repo_root(), 1, &mut images).convert(&md));

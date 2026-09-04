@@ -2,7 +2,7 @@
 title: Creating a Non-root User
 ---
 
-For a simple setup process, Local Desktop won't prompt for a user registration form, that's why **it is login as root by default**.
+For a simple setup process, Portal won't prompt for a user registration form, so **it logs in as root by default**.
 
 However, some applications are **recommended** or **required** to run as a normal user. For example:
 
@@ -68,9 +68,9 @@ su teddy # Change to your username
 sudo ls /root # Make sure it does not output something like: "teddy is not in the sudoers file"
 ```
 
-## [Important] Tell Local Desktop
+## [Important] Tell Portal
 
-You must tell Local Desktop who to log in as, or it will log in as root. To (create and) edit the config file:
+You must tell Portal who to log in as, or it will log in as root. To (create and) edit the config file:
 
 ```
 nano /etc/localdesktop/localdesktop.toml
@@ -85,4 +85,4 @@ username = "teddy"
 
 _(Replace `teddy` with the username you created [previously](#create-your-user))_
 
-The changes will take effect the next time you launch Local Desktop. If something goes wrong, you can always delete this config file and restart as root.
+The changes will take effect the next time you launch Portal. If something goes wrong, you can always delete this config file and restart as root.

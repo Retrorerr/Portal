@@ -51,7 +51,7 @@ trim_log() {
 }
 
 cat > "$state_dir/recovery-message.txt" <<EOF
-Local Desktop could not start Plasma.
+Portal could not start Plasma.
 
 Your Linux files are safe. Choose Retry Plasma to try again, or View logs to
 inspect the captured startup and KWin diagnostics. Export diagnostics is
@@ -110,7 +110,7 @@ fi
     # only opens the logs and returns to the prompt; it must not strand the
     # user in an otherwise empty compositor with no retry path.
     while true; do
-        if kdialog --title "Local Desktop recovery" --yes-label "Retry Plasma" --no-label "View logs" --warningyesno "Plasma did not start. Retry Plasma now?"; then
+        if kdialog --title "Portal recovery" --yes-label "Retry Plasma" --no-label "View logs" --warningyesno "Plasma did not start. Retry Plasma now?"; then
             rm -f "$failure_marker" "$state_dir/kwin-crash" "$state_dir/plasma-ready"
             labwc_pid=$(cat "$state_dir/labwc.pid" 2>/dev/null || true)
             case "$labwc_pid" in
@@ -119,8 +119,8 @@ fi
             esac
             exit 0
         fi
-        kdialog --title "Local Desktop recovery logs" --textbox "$message" 760 520 2>/dev/null || true
-        kdialog --title "Local Desktop recovery logs" --textbox "$state_dir/plasma.log" 980 680 2>/dev/null || true
+        kdialog --title "Portal recovery logs" --textbox "$message" 760 520 2>/dev/null || true
+        kdialog --title "Portal recovery logs" --textbox "$state_dir/plasma.log" 980 680 2>/dev/null || true
     done
 ) &
 AUTOSTART

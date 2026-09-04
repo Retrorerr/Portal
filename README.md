@@ -1,134 +1,87 @@
-# Local Desktop
+<p align="center">
+  <img src="assets/portal-icon.png" width="144" alt="Portal icon" />
+</p>
 
-Local Desktop helps you run a desktop Linux environment on your Android device.
+<h1 align="center">Portal</h1>
 
-**Note**: It is expected that you already have a usable desktop experience, i.e., a large enough display (tablet or DEX), a physical keyboard, and optionally a mouse/trackpad. **Local Desktop aims to bridge the gap between the two platforms, not trying to "simulate" the desktop experience by introducing inconvenient interactions**.
+<p align="center">
+  <strong>A real Debian 13 + KDE Plasma 6 workspace, running rootlessly on Android.</strong>
+</p>
 
-## How it works
+<p align="center">
+  <a href="https://github.com/Retrorerr/Portal/actions/workflows/build.yml"><img alt="Build" src="https://github.com/Retrorerr/Portal/actions/workflows/build.yml/badge.svg" /></a>
+  <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-6d7cff" /></a>
+  <img alt="Android ARM64" src="https://img.shields.io/badge/Android-ARM64-52e4ff" />
+</p>
 
-1. An Arch Linux ARM64 filesystem is set up inside the app's internal storage.
-2. Proot mounts the filesystem and provides a chroot-like environment.
-3. A minimal built-in Wayland compositor runs in Android NDK.
-4. KDE Plasma 6 launches as a native Wayland session inside the chroot and renders directly to the Android native activity. Xwayland is present only for legacy applications.
+Portal turns a capable Android tablet into a self-contained Linux workstation. It boots a Debian userspace, launches KDE Plasma on native Wayland, and bridges the Android hardware, lifecycle, input, clipboard, audio, storage, and display into the desktop session—all without root access or a remote computer.
 
-![POC](./gh-pages/static/img/proof-of-concept.png)
-_Proof of Concept: a Pixel Tablet running a desktop environment inside a Proot-based ARM64 Linux. The Plasma build requires no terminal setup: install, launch, and let the app provision the guest._
+> [!IMPORTANT]
+> Portal is currently developed and hardware-verified on the **OnePlus Pad 3 (ARM64)**. Other devices are experimental. A large display and physical keyboard are strongly recommended.
 
-Plasma uses Local Desktop's built-in Wayland compositor directly. If Plasma exits during early startup, a native-Wayland labwc recovery session records the failure and offers an explicit retry; the app never silently switches the default session to XFCE or X11.
+## What makes Portal different
 
-## Getting Started
+- **Native Wayland:** Plasma renders through Portal's Rust compositor rather than an X server, VNC stream, or cloud VM.
+- **A complete Debian desktop:** Debian 13 (Trixie), KDE Plasma 6, desktop applications, package management, and shell access live on-device.
+- **Rootless:** the Android device does not need to be unlocked, rooted, or flashed.
+- **Tablet-aware:** high-density display scaling, physical keyboard forwarding, pointer input, Android clipboard integration, and AAudio are first-class paths.
+- **Recoverable:** A/B runtime slots, diagnostics export, and a native-Wayland recovery session make failures inspectable and reversible.
+- **One app:** setup, runtime management, compositor, and Android integration ship together.
 
-### How to build an APK
+## Architecture
 
-#### Termux
-
-You can build the Local Desktop APK directly on your Android device. This is simple because no cross-compilation is needed. However, we only ship prebuilt libs for arm64, so this option only works on ARM64.
-
-For Termux, there are two supported approaches:
-
-1. **Simple build (no `xbuild`)**
-
-   Install Rust:
-
-   ```
-   pkg i rust
-   ```
-
-   Then run:
-
-   ```bash
-   cargo run
-   ```
-
-   This uses the built-in Rust APK builder and writes `localdesktop.apk` in the project root.
-
-2. **`xbuild`-based build**
-
-   This matches the desktop cross-build pipeline more closely and is better for repeated APK builds:
-
-   ```bash
-   bash scripts/build-termux.sh
-   ```
-
-   This script installs the required Termux packages, bootstraps the patched `xbuild` toolchain, downloads the Android SDK build-tools, and writes the APK to `target/x/release/android/localdesktop.apk`.
-
-For the simple `cargo run` flow, you can install the APK with `termux-open localdesktop.apk`, but in some cases you may need to `mv localdesktop.apk ~/storage/downloads` and install it from there. Make sure you have run `termux-setup-storage` before moving it outside Termux.
-
-#### Linux/Mac/Windows
-
-The above option is suitable for quick development on Android. However, if you need to build an AAB (for distribution to Google Play), debug with Visual Studio Code, or compile for unsupported targets (like x64 Android), then you need to cross-build it from your PC.
-Along with Rust, please make sure you have these components installed:
-
-```
-brew install llvm lld gradle@8
+```text
+┌──────────────────────────────── Android ────────────────────────────────┐
+│  Activity · lifecycle · touch · keyboard · clipboard · AAudio · files  │
+│                                │                                       │
+│                    Portal host (Rust / Smithay)                         │
+│                                │ native Wayland                        │
+│             Debian 13 rootfs → KDE Plasma 6 → Linux apps              │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-Then install our local version of xbuild:
+The Linux guest is isolated with PRoot and managed in two runtime slots. Portal's compositor is the display boundary; the guest remains a standard Debian environment above it.
+
+## Build
+
+The supported release target is Android ARM64. From a configured Linux, WSL, or Termux environment:
 
 ```bash
+git clone https://github.com/Retrorerr/Portal.git
+cd Portal
 cargo install --path patches/xbuild/xbuild --force
 x build --release --platform android --arch arm64 --format apk
 ```
 
-Alternatively, trigger the default build task by pressing `Ctrl+Shift+B`.
+The release APK is written to:
 
-You can find the output APK in:
+```text
+target/x/release/android/localdesktop.apk
+```
+
+The internal crate, APK filename, Android package (`app.polarbear`), and guest paths under `/etc/localdesktop` intentionally retain their historical identifiers. Keeping them stable preserves in-place Android upgrades and existing guest data while the product name is Portal.
+
+For toolchain details and on-device builds, see the [developer guide](https://retrorerr.github.io/Portal/docs/developer/how-to-build).
+
+## Verification
 
 ```bash
-open target/x/release/android/gradle/app/build/outputs/apk/debug/app-debug.apk
+cargo test --tests
+cargo fmt --all -- --check
 ```
 
-#### Docker
+For a device build, also verify the APK signature, 16 KiB zip alignment, package identity, install, launch, and Android logs. A green host test suite is not a substitute for real ARM64 hardware validation.
 
-If you have issues setting up your local development environment as detailed above, you can make use of the included Dockerfile to build an APK on a single command. This will take a long time so it's not recommended if you can make use of any of the other methods
+## Project status
 
-```bash
-make build-docker
-```
+- Debian GNU/Linux 13 (Trixie)
+- KDE Plasma 6 native-Wayland session
+- Android 5.0+ API compatibility target; current validation focuses on modern ARM64 tablets
+- 107 Rust host tests in the current consolidated tree
+- Active development; releases may change runtime images and device compatibility
 
-You can find the output APK in:
+## Lineage and license
 
-```bash
-open target/x/release/android/localdesktop.apk
-```
+Portal began as a substantially modified continuation of [Local Desktop](https://github.com/localdesktop/localdesktop.github.io). Its commit history is retained for authorship and traceability. New Portal-specific development is maintained independently in this repository.
 
-### How to develop
-
-#### Termux
-
-We recommend the following setup, but feel free to use your own favorite tools for development:
-
-```
-pkg install helix helix-grammars rust-analyzer
-```
-
-A wonderful thing about developing directly on Android is that an agent like [Codex on Termux](https://github.com/DioNanos/codex-termux) can **test the code for you** by running unit tests, reading the output, understanding what went wrong, and trying again. In my experience, this is not possible when cross-developing on other operating systems, so you have to run the tests yourself.
-
-![Developing on Android](./gh-pages/static/img/dev-from-android.webp)
-
-
-#### Linux/Mac/Windows
-
-Recommended setup:
-
-- **IDE**: Visual Studio Code
-
-- **Extensions**:
-
-  - [Rust Analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
-  - [Android Debug](https://marketplace.visualstudio.com/items?itemName=nisargjhaveri.android-debug)
-  - [CodeLLDB](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb)
-
-- **Instructions**:
-
-  1. Open Visual Studio Code.
-  2. Launch the `[Android] Debug` configuration from the debug panel. This will:
-     - Build the Rust code into an APK.
-     - Install the APK on a selectable device, and launch the app in debug mode.
-     - Redirect stdout/stderr output to the terminal.
-
-![It is easy to debug](./gh-pages/static/img/debugable.webp)
-
-> **Tip**: You can debug the app on either a physical device or a virtual device.
-
-For more instructions on how to work on this project, please visit the [Developer Manual](https://localdesktop.github.io/docs/developer/how-it-works).
+Licensed under [GPL-3.0](LICENSE). Contributions and issue reports are welcome.

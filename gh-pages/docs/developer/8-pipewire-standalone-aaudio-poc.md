@@ -8,7 +8,7 @@ PipeWire client that registers an AAudio-backed `Audio/Sink`.
 It is intentionally not a PipeWire/SPA plugin or PipeWire module. The runtime is
 a host-side PipeWire daemon plus a host-side AAudio sink client.
 
-This is now the built-in Local Desktop audio path. The supervisor is disabled on
+This is now the built-in Portal audio path. The supervisor is disabled on
 Android below API 30 and otherwise starts when the native artifacts are bundled
 in the APK.
 

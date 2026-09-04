@@ -2,7 +2,7 @@
 title: How to logcat
 ---
 
-When Local Desktop fails to start or crashes, we need the logs to trace the cause. Please help us gather the logs using one of the following methods:
+When Portal fails to start or crashes, logs are needed to trace the cause. Gather them using one of the following methods:
 
 ## Via ADB
 
@@ -74,9 +74,9 @@ Please follow these steps to start capturing logcat:
 
   ![Start Capture](/img/logcat-start-capturing.webp#boxed)
 
-2. Exit **Logcat Reader**, then launch **Local Desktop**. Start reproducing the issue.
+2. Exit **Logcat Reader**, then launch **Portal**. Start reproducing the issue.
 
-3. Exit **Local Desktop** (if it hasn't crashed already), then open **Logcat Reader** again. Click the **square icon** to stop capturing, and share the logcat with us.
+3. Exit **Portal** (if it hasn't crashed already), then open **Logcat Reader** again. Click the **square icon** to stop capturing, and share the logcat with us.
 
   ![Share Logcat](/img/logcat-share.webp#boxed)
 

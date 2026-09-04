@@ -11,7 +11,7 @@ readonly MAX_TEXT_BYTES=4194304
 readonly PUSH_HELPER=${LOCALDESKTOP_CLIPBOARD_PUSH_HELPER:-/usr/local/bin/localdesktop-clipboard-push}
 
 fail() {
-    printf 'Local Desktop clipboard bridge: %s\n' "$1" >&2
+    printf 'Portal clipboard bridge: %s\n' "$1" >&2
     exit 1
 }
 

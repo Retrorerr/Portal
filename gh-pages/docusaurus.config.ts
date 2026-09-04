@@ -2,35 +2,20 @@ import { themes as prismThemes } from "prism-react-renderer";
 import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
 
-// This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
-
-const downloadUrl = "https://github.com/localdesktop/localdesktop.github.io/releases";
-const repositoryUrl = "https://github.com/localdesktop/localdesktop.github.io";
-const isProd = process.env.NODE_ENV === "production";
+const downloadUrl = "https://github.com/Retrorerr/Portal/releases";
+const repositoryUrl = "https://github.com/Retrorerr/Portal";
 
 const config: Config = {
-  title: "Local Desktop | Linux on Android",
-  tagline:
-    "Local Desktop helps you run a desktop Linux environment on your Android device.",
-  favicon: "img/favicon.ico",
-
-  // Set the production url of your site here
-  url: "https://localdesktop.github.io",
-  // Set the /<baseUrl>/ pathname under which your site is served
-  // For GitHub pages deployment, it is often '/<projectName>/'
-  baseUrl: "/",
-
-  // GitHub pages deployment config.
-  // If you aren't using GitHub pages, you don't need these.
-  organizationName: "localdesktop",
-  projectName: "localdesktop.github.io",
-
+  title: "Portal | Debian desktop on Android",
+  tagline: "A real Debian 13 and KDE Plasma 6 workspace, running rootlessly on Android.",
+  favicon: "img/portal-icon.png",
+  url: "https://retrorerr.github.io",
+  baseUrl: "/Portal/",
+  organizationName: "Retrorerr",
+  projectName: "Portal",
   onBrokenLinks: "throw",
   onBrokenMarkdownLinks: "warn",
 
-  // Even if you don't use internationalization, you can use this field to set
-  // useful metadata like html lang. For example, if your site is Chinese, you
-  // may want to replace "en" with "zh-Hans".
   i18n: {
     defaultLocale: "en",
     locales: ["en"],
@@ -42,157 +27,73 @@ const config: Config = {
       {
         docs: {
           sidebarPath: "./sidebars.ts",
-          // Please change this to your repo.
-          // Remove this to remove the "edit this page" links.
-          editUrl:
-            "https://github.com/localdesktop/localdesktop.github.io/tree/main/gh-pages/",
+          editUrl: "https://github.com/Retrorerr/Portal/tree/main/gh-pages/",
         },
         blog: {
           showReadingTime: true,
-          feedOptions: {
-            type: ["rss", "atom", "json"],
-            xslt: true,
-          },
-          // Please change this to your repo.
-          // Remove this to remove the "edit this page" links.
-          editUrl:
-            "https://github.com/localdesktop/localdesktop.github.io/tree/main/gh-pages/",
-          // Useful options to enforce blogging best practices
+          feedOptions: { type: ["rss", "atom", "json"], xslt: true },
+          editUrl: "https://github.com/Retrorerr/Portal/tree/main/gh-pages/",
           onInlineTags: "warn",
           onInlineAuthors: "warn",
           onUntruncatedBlogPosts: "warn",
         },
-        theme: {
-          customCss: "./src/css/custom.css",
-        },
+        theme: { customCss: "./src/css/custom.css" },
         sitemap: {
-          changefreq: "always",
+          changefreq: "weekly",
           priority: 0.5,
-          ignorePatterns: [
-            "/blog/archive",
-            "/blog/authors",
-            "/blog/tags",
-            "/blog/tags/**",
-          ],
+          ignorePatterns: ["/blog/archive", "/blog/authors", "/blog/tags", "/blog/tags/**"],
           filename: "sitemap.xml",
         },
       } satisfies Preset.Options,
     ],
   ],
 
-  scripts: [],
-
   themeConfig: {
-    // Replace with your project's social card
-    image: "img/logo.png",
+    image: "img/portal-icon.png",
     metadata: [
       {
         name: "keywords",
-        content:
-          "linux on android, android desktop environment, mobile linux, android virtualization, linux desktop mobile, android linux app, desktop environment android, run linux android, mobile desktop, android terminal, linux mobile app",
+        content: "Portal, Debian Android, KDE Plasma Android, Wayland Android, rootless Linux, ARM64 tablet",
       },
     ],
     navbar: {
-      title: "Local Desktop",
-      logo: {
-        alt: "Local Desktop Logo",
-        src: "img/logo.png",
-      },
+      title: "Portal",
+      logo: { alt: "Portal", src: "img/portal-icon.png" },
       items: [
-        {
-          type: "docSidebar",
-          sidebarId: "userSidebar",
-          position: "left",
-          label: "User Manual",
-        },
-        {
-          type: "docSidebar",
-          sidebarId: "developerSidebar",
-          position: "left",
-          label: "Developer Manual",
-        },
-        { to: "/blog", label: "News", position: "left" },
-        {
-          href: repositoryUrl,
-          label: "GitHub",
-          position: "right",
-        },
+        { type: "docSidebar", sidebarId: "userSidebar", position: "left", label: "Guide" },
+        { type: "docSidebar", sidebarId: "developerSidebar", position: "left", label: "Architecture" },
+        { to: "/blog", label: "Journal", position: "left" },
+        { href: downloadUrl, label: "Download", position: "right" },
+        { href: repositoryUrl, label: "GitHub", position: "right" },
       ],
     },
     footer: {
       style: "dark",
       links: [
-        {
-          label: "User Manual",
-          to: "/docs/user/getting-started",
-        },
-        {
-          label: "Developer Manual",
-          to: "/docs/developer/how-to-build",
-        },
-        {
-          label: "Support us 🎗️",
-          to: "/support-us",
-        },
-        {
-          label: "Download",
-          href: downloadUrl,
-        },
-        {
-          label: "Source Code",
-          href: repositoryUrl,
-        },
+        { label: "Get started", to: "/docs/user/getting-started" },
+        { label: "How it works", to: "/docs/developer/how-it-works" },
+        { label: "Releases", href: downloadUrl },
+        { label: "Source", href: repositoryUrl },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Local Desktop.`,
+      copyright: `Portal is free software under GPL-3.0 · ${new Date().getFullYear()}`,
     },
-    prism: {
-      theme: prismThemes.github,
-      darkTheme: prismThemes.dracula,
-    },
-    mermaid: {
-      theme: { light: "neutral", dark: "dark" },
-    },
+    prism: { theme: prismThemes.github, darkTheme: prismThemes.dracula },
+    mermaid: { theme: { light: "neutral", dark: "dark" } },
   } satisfies Preset.ThemeConfig,
 
   plugins: [
-    ...(isProd
-      ? [
-          [
-            "@docusaurus/plugin-google-gtag",
-            { trackingID: "G-0NQ9P761VB" },
-          ] as const,
-        ]
-      : []),
-    [
-      "@gracefullight/docusaurus-plugin-microsoft-clarity",
-      { projectId: "r0gcnlvoyw" },
-    ],
     () => ({
       name: "@tailwindcss/postcss",
       configurePostCss(options) {
-        // Setup TailwindCSS via PostCSS
-        options.plugins.push({
-          "@tailwindcss/postcss": {},
-        });
+        options.plugins.push({ "@tailwindcss/postcss": {} });
         return options;
       },
     }),
   ],
 
-  markdown: {
-    mermaid: true,
-  },
-
+  markdown: { mermaid: true },
   themes: ["@docusaurus/theme-mermaid"],
-
-  customFields: {
-    downloadUrl,
-    repositoryUrl,
-    emailCollectForm: "https://forms.gle/UDrYH9xwhznT2u8Y9",
-    // Landing page only — always the dark-themed Looker report (docs keep light/dark toggle).
-    audienceChartEmbedUrlDark:
-      "https://lookerstudio.google.com/embed/reporting/adb676dc-c6b1-4161-a995-ec93d008ab79/page/JoHzF",
-  },
+  customFields: { downloadUrl, repositoryUrl },
 };
 
 export default config;

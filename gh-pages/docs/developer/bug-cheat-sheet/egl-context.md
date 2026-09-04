@@ -4,7 +4,7 @@ title: Failed to create EGLContext
 
 ## Issue
 
-You would likely (and hopefully only) encounter this problem when using an emulator. Local Desktop will crash immediately, and the log will show `Failed to create EGLContext` with an error variant, such as `EGL_BAD_MATCH` or `EGL_BAD_ATTRIBUTE`.
+You are most likely to encounter this problem on an emulator. Portal will crash immediately, and the log will show `Failed to create EGLContext` with an error variant such as `EGL_BAD_MATCH` or `EGL_BAD_ATTRIBUTE`.
 
 [Khronos EGL documentation](https://registry.khronos.org/EGL/sdk/docs/man/html/eglMakeCurrent.xhtml#errors) points out these errors very clearly. It seems like the cause of our specific case is:
 
@@ -20,7 +20,7 @@ So remember: **whenever you get stuck, come back here!** And don't just read - p
 
 ### EGL_BAD_MATCH
 
-Local Desktop patched this [portion of Smithay](https://github.com/localdesktop/localdesktop.github.io/commit/58ffc6fc37da2d799db0d68b8549abe57fa2e636) to create a dummy 1x1 pbuffer surface and use it as both the draw and read surface when calling `eglMakeCurrent` to avoid the `EGL_BAD_MATCH` error.
+Portal carries a Smithay patch that creates a dummy 1x1 pbuffer surface and uses it as both the draw and read surface for `eglMakeCurrent`, avoiding the `EGL_BAD_MATCH` error.
 
 Dear EGL experts, does the above hack make sense?
 
