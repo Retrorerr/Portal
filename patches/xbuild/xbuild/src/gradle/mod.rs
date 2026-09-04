@@ -273,6 +273,9 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
                 let mut icon = std::fs::File::create(dir.join("ic_launcher.png"))?;
                 scaler.write(&mut icon, opts)?;
             }
+            // Adaptive layers occupy 108dp, versus 48dp for legacy launcher assets.
+            let adaptive_size = size * 108 / 48;
+            let adaptive_opts = xcommon::ScalerOptsBuilder::new(adaptive_size, adaptive_size).build();
             for variant in ["foreground", "monochrome"] {
                 let mut icon =
                     std::fs::File::create(dir.join(format!("ic_launcher_{}.png", variant)))?;
@@ -281,7 +284,7 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
                     "monochrome" => monochrome_scaler.as_mut().unwrap_or(&mut scaler),
                     _ => unreachable!(),
                 }
-                .write(&mut icon, opts)?;
+                .write(&mut icon, adaptive_opts)?;
             }
         }
         manifest.application.icon = Some("@mipmap/ic_launcher".into());
