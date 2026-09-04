@@ -107,6 +107,18 @@ pub struct PresentationSnapshot {
     pub viewport_size: (f64, f64),
     /// True when the viewport fills the host (no letterboxing).
     pub converged: bool,
+    /// Request generation the rendered frame was attributed to (owning
+    /// request in the configure history; 0 = initial/unknown).
+    pub rendered_generation: u64,
+    /// Host size the rendered frame was produced for.
+    pub rendered_host: (i32, i32),
+    /// Newest geometry requested from KWin (authoritative future target;
+    /// never moved backward by stale commits).
+    pub requested: (i32, i32),
+    /// Generation of `requested`.
+    pub requested_generation: u64,
+    /// Last xdg configure serial acked by KWin (0 = none yet).
+    pub acked_serial: u32,
 }
 
 impl PresentationSnapshot {
