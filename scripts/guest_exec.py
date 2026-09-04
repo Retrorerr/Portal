@@ -86,7 +86,7 @@ def main():
     res = subprocess.run([
         "adb", "-s", "f105b146", "shell",
         f"run-as app.polarbear sh -c '{remote_cmd}'"
-    ], capture_output=True, text=True)
+    ], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if res.stdout:
         print("STDOUT:", res.stdout)
     if res.stderr:

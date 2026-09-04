@@ -83,6 +83,14 @@ pub struct State {
     pub single_pixel_buffer_state: SinglePixelBufferState,
     pub viewporter_state: ViewporterState,
     pub fractional_scale_state: FractionalScaleManagerState,
+    /// Outer text-input-v2 resources used by nested KWin to bridge guest
+    /// text-input-v3 clients to Android's system IME.
+    pub text_inputs:
+        Vec<wayland_protocols_plasma::text_input::v2::server::zwp_text_input_v2::ZwpTextInputV2>,
+    pub active_text_input:
+        Option<wayland_protocols_plasma::text_input::v2::server::zwp_text_input_v2::ZwpTextInputV2>,
+    pub keyboard_focus_surface: Option<WlSurface>,
+    pub text_input_serial: u32,
     pub size: Size<i32, Logical>,
     pub output: Option<Output>,
     pub cursor_image: CursorImageStatus,
@@ -514,7 +522,9 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        self.update_text_input_focus(focused.cloned());
+    }
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
         self.cursor_image = image;
     }
@@ -726,6 +736,8 @@ impl Compositor {
 
         let start_time = Instant::now();
 
+        super::text_input_v2::register(&dh);
+
         // Key repeat rate and delay are in milliseconds: https://wayland-book.com/seat/keyboard.html
         let keyboard = seat
             .add_keyboard(Default::default(), 1000, 200)
@@ -761,6 +773,10 @@ impl Compositor {
             single_pixel_buffer_state: SinglePixelBufferState::new::<State>(&dh),
             viewporter_state: ViewporterState::new::<State>(&dh),
             fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
+            text_inputs: Vec::new(),
+            active_text_input: None,
+            keyboard_focus_surface: None,
+            text_input_serial: 0,
             size,
             output: None,
             cursor_image: CursorImageStatus::default_named(),

@@ -11,6 +11,8 @@ import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+import android.hardware.input.InputManager;
+import android.view.InputDevice;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 
@@ -25,12 +27,70 @@ public final class SoftKeyboardBridge {
     private static final int MAX_COMMIT_CHARS = 64 * 1024;
     private static BridgeEditText editor;
     private static Activity editorActivity;
+    private static InputManager monitoredInputManager;
+    private static InputManager.InputDeviceListener inputDeviceListener;
 
     static {
         System.loadLibrary("localdesktop");
     }
 
     private SoftKeyboardBridge() {}
+
+    /** Monitor physical keyboard hotplug using Android's authoritative input-device API. */
+    public static void startHardwareKeyboardMonitor(final Activity activity) {
+        if (activity == null) {
+            return;
+        }
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                InputManager manager =
+                    (InputManager) activity.getSystemService(Context.INPUT_SERVICE);
+                if (manager == null) {
+                    nativeOnHardwareKeyboardChanged(false);
+                    return;
+                }
+                if (monitoredInputManager != manager || inputDeviceListener == null) {
+                    if (monitoredInputManager != null && inputDeviceListener != null) {
+                        monitoredInputManager.unregisterInputDeviceListener(inputDeviceListener);
+                    }
+                    inputDeviceListener = new InputManager.InputDeviceListener() {
+                        @Override public void onInputDeviceAdded(int deviceId) { publishKeyboardState(); }
+                        @Override public void onInputDeviceRemoved(int deviceId) { publishKeyboardState(); }
+                        @Override public void onInputDeviceChanged(int deviceId) { publishKeyboardState(); }
+                    };
+                    monitoredInputManager = manager;
+                    manager.registerInputDeviceListener(inputDeviceListener, null);
+                }
+                publishKeyboardState();
+            }
+        });
+    }
+
+    private static void publishKeyboardState() {
+        nativeOnHardwareKeyboardChanged(hasPhysicalKeyboard());
+    }
+
+    private static boolean hasPhysicalKeyboard() {
+        InputManager manager = monitoredInputManager;
+        if (manager == null) {
+            return false;
+        }
+        for (int id : manager.getInputDeviceIds()) {
+            InputDevice device = manager.getInputDevice(id);
+            if (device == null || device.isVirtual()) {
+                continue;
+            }
+            boolean keyboardSource =
+                (device.getSources() & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD;
+            if (keyboardSource
+                    && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC
+                    && device.isExternal()) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /** Show the IME on the Android UI thread without a timing-dependent sleep. */
     public static void show(final Activity activity) {
@@ -44,6 +104,10 @@ public final class SoftKeyboardBridge {
                     return;
                 }
                 BridgeEditText input = ensureEditor(activity);
+                if (hasPhysicalKeyboard()) {
+                    hide(activity);
+                    return;
+                }
                 input.setVisibility(View.VISIBLE);
                 input.setFocusableInTouchMode(true);
                 input.requestFocus();
@@ -206,4 +270,5 @@ public final class SoftKeyboardBridge {
     }
 
     private static native void nativeOnTextCommit(String text);
+    private static native void nativeOnHardwareKeyboardChanged(boolean present);
 }

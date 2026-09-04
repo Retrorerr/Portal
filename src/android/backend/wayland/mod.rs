@@ -7,6 +7,7 @@ mod input;
 mod keymap;
 pub mod output_state;
 pub mod protocol;
+mod text_input_v2;
 mod winit_backend;
 pub mod wlegl;
 

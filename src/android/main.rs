@@ -2,8 +2,7 @@ use crate::{
     android::{
         accessibility::{register_event_loop_proxy, AppUserEvent},
         app::build::PolarBearApp,
-        diagnostics,
-        ime,
+        diagnostics, ime,
         utils::{
             application_context::ApplicationContext,
             fullscreen_immersive::{enable_fullscreen_immersive_mode, keep_screen_on},
@@ -50,6 +49,9 @@ fn android_main(android_app: AndroidApp) {
     match ime::hide(&android_app) {
         Ok(()) => log::info!("SoftKeyboardBridge JNI smoke check passed"),
         Err(error) => log::warn!("SoftKeyboardBridge JNI smoke check failed: {error}"),
+    }
+    if let Err(error) = ime::start_hardware_keyboard_monitor(&android_app) {
+        log::warn!("Physical keyboard monitor failed to start: {error}");
     }
 
     let event_loop = EventLoop::<AppUserEvent>::with_user_event()
