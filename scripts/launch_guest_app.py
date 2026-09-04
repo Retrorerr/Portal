@@ -1,8 +1,9 @@
 import subprocess
 import sys
+import os
+import tempfile
 
 def get_device():
-    import os
     if os.environ.get("ANDROID_SERIAL"):
         return os.environ["ANDROID_SERIAL"]
     try:
@@ -17,7 +18,7 @@ def get_device():
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: guest_exec.py <command>")
+        print("Usage: launch_guest_app.py <command>")
         sys.exit(1)
 
     cmd = " ".join(sys.argv[1:])
@@ -65,53 +66,41 @@ def main():
         "export WAYLAND_DISPLAY=wayland-1\n"
         "export DISPLAY=:0\n"
         f"export DBUS_SESSION_BUS_ADDRESS='{dbus_addr}'\n"
-        f"{cmd}\n"
+        f"nohup {cmd} >/tmp/app_launch.log 2>&1 &\n"
+        "sleep 1\n"
     )
 
-    import tempfile, os
     with tempfile.NamedTemporaryFile(mode="w", delete=False, newline="\n") as f:
         f.write(guest_script)
         local_tmp = f.name
 
     try:
-        subprocess.check_call(["adb", "-s", device_id, "push", local_tmp, "/data/local/tmp/guest_exec.sh"])
+        subprocess.check_call(["adb", "-s", device_id, "push", local_tmp, "/data/local/tmp/app_launch.sh"])
     finally:
         os.unlink(local_tmp)
 
-    # Copy into guest /tmp
     subprocess.check_call([
         "adb", "-s", device_id, "shell",
-        "run-as app.polarbear cp /data/local/tmp/guest_exec.sh /data/data/app.polarbear/files/runtime-B/tmp/exec.sh"
+        "run-as app.polarbear cp /data/local/tmp/app_launch.sh /data/data/app.polarbear/files/runtime-B/tmp/app_launch.sh"
     ])
 
     remote_cmd = (
         f"export PROOT_LOADER={proot_loader}; "
         "export PROOT_TMP_DIR=/data/data/app.polarbear/files/tmp; "
-        f"{libproot} -r /data/data/app.polarbear/files/runtime-B "
-        "-L --link2symlink --sysvipc --kill-on-exit --root-id "
+        f"nohup {libproot} -r /data/data/app.polarbear/files/runtime-B "
+        "-L --link2symlink --sysvipc --root-id "
         "-b /dev -b /proc -b /sys "
         "-b /dev/urandom:/dev/random "
-        "-b /proc/self/fd:/dev/fd "
-        "-b /proc/self/fd/0:/dev/stdin "
-        "-b /proc/self/fd/1:/dev/stdout "
-        "-b /proc/self/fd/2:/dev/stderr "
         "-b /data/data/app.polarbear/files/runtime-B/tmp:/dev/shm "
         "-b /data/local/tmp:/data/local/tmp "
-        "-w /root /bin/sh /tmp/exec.sh"
+        "-w /root /bin/sh /tmp/app_launch.sh >/dev/null 2>&1 &"
     )
 
-    res = subprocess.run([
+    subprocess.check_call([
         "adb", "-s", device_id, "shell",
         f"run-as app.polarbear sh -c '{remote_cmd}'"
-    ], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(errors="replace")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(errors="replace")
-    if res.stdout:
-        print("STDOUT:", res.stdout)
-    if res.stderr:
-        print("STDERR:", res.stderr)
+    ])
+    print(f"Launched '{cmd}' in background")
 
 if __name__ == "__main__":
     main()

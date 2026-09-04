@@ -27,8 +27,17 @@ static COMMITS: OnceLock<Mutex<CommitQueue>> = OnceLock::new();
 static EVENT_LOOP_PROXY: OnceLock<Mutex<Option<EventLoopProxy<AppUserEvent>>>> = OnceLock::new();
 static WAYLAND_TEXT_INPUT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static HARDWARE_KEYBOARD_PRESENT: AtomicBool = AtomicBool::new(false);
+static DESKTOP_INPUT_PRESENT: AtomicBool = AtomicBool::new(true);
 // -1 hide, 0 unchanged, 1 show. The event-loop owns all JNI visibility calls.
 static VISIBILITY_REQUEST: AtomicI8 = AtomicI8::new(0);
+
+pub fn is_hardware_keyboard_present() -> bool {
+    HARDWARE_KEYBOARD_PRESENT.load(Ordering::Acquire)
+}
+
+pub fn is_desktop_input_present() -> bool {
+    DESKTOP_INPUT_PRESENT.load(Ordering::Acquire)
+}
 
 fn commits() -> &'static Mutex<CommitQueue> {
     COMMITS.get_or_init(|| Mutex::new(CommitQueue::default()))
@@ -53,11 +62,14 @@ pub fn start_hardware_keyboard_monitor(android_app: &AndroidApp) -> Result<(), S
 }
 
 pub fn set_wayland_text_input_active(active: bool) {
+    let hw = HARDWARE_KEYBOARD_PRESENT.load(Ordering::Acquire);
+    log::info!("Portal ime: set_wayland_text_input_active({active}), hw_present={hw}");
     WAYLAND_TEXT_INPUT_ACTIVE.store(active, Ordering::Release);
-    request_visibility(active && !HARDWARE_KEYBOARD_PRESENT.load(Ordering::Acquire));
+    request_visibility(active && !hw);
 }
 
 pub fn request_visibility(show: bool) {
+    log::info!("Portal ime: request_visibility({show})");
     VISIBILITY_REQUEST.store(if show { 1 } else { -1 }, Ordering::Release);
     wake_event_loop();
 }
@@ -75,6 +87,175 @@ pub fn refresh_visibility() {
         WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire)
             && !HARDWARE_KEYBOARD_PRESENT.load(Ordering::Acquire),
     );
+}
+
+pub fn is_wayland_text_input_active() -> bool {
+    WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire)
+}
+
+static IME_CONTEXT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static IME_CMD_FIFO: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+pub fn is_ime_context_active() -> bool {
+    IME_CONTEXT_ACTIVE.load(Ordering::Acquire)
+}
+
+pub fn set_ime_context_active_for_test(active: bool) {
+    IME_CONTEXT_ACTIVE.store(active, Ordering::Release);
+}
+
+pub fn set_ime_cmd_file_for_test(file: Option<std::fs::File>) {
+    if let Ok(mut guard) = IME_CMD_FIFO.lock() {
+        *guard = file;
+    }
+}
+
+pub fn send_ime_command(cmd: &str) -> bool {
+    let mut guard = match IME_CMD_FIFO.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    if let Some(file) = guard.as_mut() {
+        use std::io::Write;
+        if file.write_all(cmd.as_bytes()).is_ok() && file.flush().is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn handle_fifo_line(line: &str) {
+    let trimmed = line.trim();
+    log::info!("Portal IME FIFO line received: '{trimmed}'");
+    if trimmed == "1" || trimmed == "ACTIVATE" {
+        IME_CONTEXT_ACTIVE.store(true, Ordering::Release);
+        set_wayland_text_input_active(true);
+    } else if trimmed == "0" || trimmed == "DEACTIVATE" {
+        IME_CONTEXT_ACTIVE.store(false, Ordering::Release);
+        set_wayland_text_input_active(false);
+    }
+}
+
+pub fn dispatch_committed_text(text: String) -> bool {
+    // 1. If an input-method context is active in KWin, dispatch via zwp_input_method_context_v1!
+    if is_ime_context_active() {
+        if text.chars().all(|c| c == '\x08') && !text.is_empty() {
+            let count = text.len();
+            if send_ime_command(&format!("DELETE:{count}\n")) {
+                log::info!("Dispatched {count} backspace(s) via input-method context protocol");
+                return true;
+            }
+        } else if text == "\n" || text == "\r\n" {
+            if send_ime_command("ENTER\n") {
+                log::info!("Dispatched enter key via input-method context protocol");
+                return true;
+            }
+        } else {
+            if let Ok(b64) = crate::core::clipboard_broker::encode_base64(text.as_bytes()) {
+                if send_ime_command(&format!("COMMIT:{b64}\n")) {
+                    log::info!("Dispatched commit_string via input-method context protocol: {text:?}");
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 2. Fallback to evdev key synthesis for non-text clients or if protocol bridge is unready
+    log::info!("Falling back to evdev key synthesis for text: {text:?}");
+    if enqueue_commit(text) {
+        wake_event_loop();
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(target_os = "android")]
+static FIFO_LISTENER_STARTED: AtomicBool = AtomicBool::new(false);
+
+pub fn start_ime_fifo_listener(rootfs_path: &std::path::Path) {
+    #[cfg(target_os = "android")]
+    {
+        let events_fifo_path = rootfs_path.join("tmp/portal-ime-events.fifo");
+        let commands_fifo_path = rootfs_path.join("tmp/portal-ime-commands.fifo");
+        let legacy_fifo_path = rootfs_path.join("tmp/portal-ime.fifo");
+
+        log::info!(
+            "Ensuring Portal IME FIFOs (events: {}, commands: {})",
+            events_fifo_path.display(),
+            commands_fifo_path.display()
+        );
+
+        for path in [&events_fifo_path, &commands_fifo_path, &legacy_fifo_path] {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Some(path_str) = path.to_str() {
+                if let Ok(c_path) = std::ffi::CString::new(path_str) {
+                    unsafe {
+                        libc::mkfifo(c_path.as_ptr(), 0o666);
+                        libc::chmod(c_path.as_ptr(), 0o666);
+                    }
+                }
+            }
+        }
+
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&commands_fifo_path)
+        {
+            if let Ok(mut guard) = IME_CMD_FIFO.lock() {
+                *guard = Some(file);
+            }
+        }
+
+        if !FIFO_LISTENER_STARTED.swap(true, Ordering::SeqCst) {
+            std::thread::Builder::new()
+                .name("portal-ime-fifo".to_string())
+                .spawn(move || {
+                    run_fifo_listener(&events_fifo_path);
+                })
+                .expect("Failed to spawn IME FIFO listener thread");
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = rootfs_path;
+    }
+}
+
+#[cfg(target_os = "android")]
+fn run_fifo_listener(fifo_path: &std::path::Path) {
+    use std::io::BufRead;
+
+    loop {
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(fifo_path)
+        {
+            Ok(f) => f,
+            Err(err) => {
+                log::warn!("Failed to open IME FIFO {}: {err}", fifo_path.display());
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                continue;
+            }
+        };
+
+        let mut reader = std::io::BufReader::new(file);
+        let mut line = String::new();
+
+        while let Ok(n) = reader.read_line(&mut line) {
+            if n == 0 {
+                break;
+            }
+            handle_fifo_line(&line);
+            line.clear();
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn wake_event_loop() {
@@ -219,21 +400,41 @@ pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnTextCommit(
             return;
         }
     };
-    if enqueue_commit(text) {
-        wake_event_loop();
-    }
+    dispatch_committed_text(text);
 }
 
 /// JNI callback from Android's InputDeviceListener. Device classification is
 /// performed with InputDevice source/type flags, never device names.
 #[no_mangle]
-pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnHardwareKeyboardChanged(
+pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnInputDevicesChanged(
     _env: JNIEnv,
     _bridge: JObject,
+    has_physical_keyboard: jni::sys::jboolean,
+    has_desktop_input: jni::sys::jboolean,
+) {
+    let has_physical_keyboard = has_physical_keyboard != 0;
+    let has_desktop_input = has_desktop_input != 0;
+    log::info!(
+        "Android input devices changed: has_physical_keyboard={has_physical_keyboard}, has_desktop_input={has_desktop_input}"
+    );
+
+    let prev_keyboard = HARDWARE_KEYBOARD_PRESENT.swap(has_physical_keyboard, Ordering::AcqRel);
+    if prev_keyboard != has_physical_keyboard {
+        request_visibility(!has_physical_keyboard && WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire));
+    }
+
+    let prev_desktop = DESKTOP_INPUT_PRESENT.swap(has_desktop_input, Ordering::AcqRel);
+    if prev_desktop != has_desktop_input {
+        crate::android::tablet_mode_manager::apply_kwin_tablet_mode(has_desktop_input);
+    }
+}
+
+/// Backward-compatible JNI callback for older callers or tests.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnHardwareKeyboardChanged(
+    env: JNIEnv,
+    bridge: JObject,
     present: jni::sys::jboolean,
 ) {
-    let present = present != 0;
-    log::info!("Android physical keyboard presence changed: {present}");
-    HARDWARE_KEYBOARD_PRESENT.store(present, Ordering::Release);
-    request_visibility(!present && WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire));
+    Java_app_polarbear_SoftKeyboardBridge_nativeOnInputDevicesChanged(env, bridge, present, present);
 }

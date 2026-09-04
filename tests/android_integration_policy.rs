@@ -10,6 +10,8 @@ mod android_input;
 mod android_integration;
 #[path = "../src/core/clipboard_policy.rs"]
 mod clipboard_policy;
+#[path = "../src/core/tablet_mode.rs"]
+mod tablet_mode;
 
 const ANDROID_CLIPBOARD_SOURCE: &str = include_str!("../src/android/clipboard.rs");
 const ANDROID_COMPOSITOR_SOURCE: &str =
@@ -19,6 +21,10 @@ const ANDROID_TEXT_INPUT_V2_SOURCE: &str =
 const ANDROID_KEYBOARD_BRIDGE_SOURCE: &str =
     include_str!("../src/android/java/app/polarbear/SoftKeyboardBridge.java");
 const ANDROID_SETUP_SOURCE: &str = include_str!("../src/android/proot/setup.rs");
+const ANDROID_IME_SOURCE: &str = include_str!("../src/android/ime.rs");
+const KWIN_WRAPPER_SOURCE: &str = include_str!("../assets/localdesktop-kwin-wrapper-v2.sh");
+const STARTPLASMA_SOURCE: &str = include_str!("../assets/localdesktop-startplasma.sh");
+const PORTAL_IME_BRIDGE_SOURCE: &str = include_str!("../assets/portal-ime-bridge.py");
 
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
@@ -196,10 +202,96 @@ fn nested_android_owned_settings_are_truthful() {
 #[test]
 fn debian_package_management_and_tablet_mode_policy() {
     const PLASMA_LAUNCHER_SOURCE: &str = include_str!("../assets/localdesktop-startplasma.sh");
-    assert!(PLASMA_LAUNCHER_SOURCE.contains("TabletMode auto"));
+    assert!(!PLASMA_LAUNCHER_SOURCE.contains("TabletMode auto"));
+    assert!(PLASMA_LAUNCHER_SOURCE.contains("TabletMode off"));
     assert!(PLASMA_LAUNCHER_SOURCE.contains("update-mime-database"));
     assert!(PLASMA_LAUNCHER_SOURCE.contains("update-desktop-database"));
     assert!(PLASMA_LAUNCHER_SOURCE.contains("kbuildsycoca6 --noincremental"));
+}
+
+#[test]
+fn automatic_tablet_and_laptop_mode_switching_policy() {
+    use tablet_mode::{
+        is_desktop_pointer, is_physical_alphabetic_keyboard, InputDeviceDescriptor,
+        SystemInputState, KEYBOARD_TYPE_ALPHABETIC, KEYBOARD_TYPE_NON_ALPHABETIC,
+        KEYBOARD_TYPE_NONE, SOURCE_KEYBOARD, SOURCE_MOUSE, SOURCE_TOUCHPAD, SOURCE_TOUCHSCREEN,
+    };
+
+    // 1. External physical alphabetic keyboard -> desktop mode, IME suppressed
+    let ext_keyboard =
+        InputDeviceDescriptor::new(true, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_ALPHABETIC);
+    assert!(is_physical_alphabetic_keyboard(&ext_keyboard));
+    assert!(!is_desktop_pointer(&ext_keyboard));
+    let kb_state = SystemInputState::evaluate([&ext_keyboard]);
+    assert!(kb_state.physical_keyboard_present);
+    assert!(kb_state.desktop_input_present);
+    assert_eq!(kb_state.kwin_tablet_mode(), "off");
+    assert!(kb_state.should_suppress_soft_keyboard());
+
+    // 2. External pointer/touchpad -> desktop mode, IME NOT suppressed
+    let ext_touchpad =
+        InputDeviceDescriptor::new(true, false, SOURCE_TOUCHPAD, KEYBOARD_TYPE_NONE);
+    assert!(!is_physical_alphabetic_keyboard(&ext_touchpad));
+    assert!(is_desktop_pointer(&ext_touchpad));
+    let tp_state = SystemInputState::evaluate([&ext_touchpad]);
+    assert!(!tp_state.physical_keyboard_present);
+    assert!(tp_state.desktop_input_present);
+    assert_eq!(tp_state.kwin_tablet_mode(), "off");
+    assert!(!tp_state.should_suppress_soft_keyboard());
+
+    let ext_mouse = InputDeviceDescriptor::new(true, false, SOURCE_MOUSE, KEYBOARD_TYPE_NONE);
+    assert!(is_desktop_pointer(&ext_mouse));
+    let mouse_state = SystemInputState::evaluate([&ext_mouse]);
+    assert!(mouse_state.desktop_input_present);
+    assert_eq!(mouse_state.kwin_tablet_mode(), "off");
+    assert!(!mouse_state.should_suppress_soft_keyboard());
+
+    // 3. Internal tablet touchscreen alone -> tablet mode, IME NOT suppressed
+    let touchpanel =
+        InputDeviceDescriptor::new(false, false, SOURCE_TOUCHSCREEN, KEYBOARD_TYPE_NONE);
+    assert!(!is_physical_alphabetic_keyboard(&touchpanel));
+    assert!(!is_desktop_pointer(&touchpanel));
+    let touch_state = SystemInputState::evaluate([&touchpanel]);
+    assert!(!touch_state.physical_keyboard_present);
+    assert!(!touch_state.desktop_input_present);
+    assert_eq!(touch_state.kwin_tablet_mode(), "on");
+    assert!(!touch_state.should_suppress_soft_keyboard());
+
+    // 4. Internal non-alphabetic keys (gpio-keys, power, volume) -> tablet mode
+    let power_key =
+        InputDeviceDescriptor::new(false, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_NON_ALPHABETIC);
+    let gpio_keys =
+        InputDeviceDescriptor::new(false, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_NON_ALPHABETIC);
+    let internal_state = SystemInputState::evaluate([&touchpanel, &power_key, &gpio_keys]);
+    assert!(!internal_state.physical_keyboard_present);
+    assert!(!internal_state.desktop_input_present);
+    assert_eq!(internal_state.kwin_tablet_mode(), "on");
+    assert!(!internal_state.should_suppress_soft_keyboard());
+
+    // 5. Combined OnePlus Pad keyboard case (keyboard + touchpad) attached -> desktop mode
+    let attached_state =
+        SystemInputState::evaluate([&touchpanel, &ext_keyboard, &ext_touchpad]);
+    assert!(attached_state.physical_keyboard_present);
+    assert!(attached_state.desktop_input_present);
+    assert_eq!(attached_state.kwin_tablet_mode(), "off");
+    assert!(attached_state.should_suppress_soft_keyboard());
+
+    // 6. Detached keyboard case -> transitions to tablet mode
+    let detached_state = SystemInputState::evaluate([&touchpanel]);
+    assert!(!detached_state.physical_keyboard_present);
+    assert!(!detached_state.desktop_input_present);
+    assert_eq!(detached_state.kwin_tablet_mode(), "on");
+    assert!(!detached_state.should_suppress_soft_keyboard());
+}
+
+#[test]
+fn soft_keyboard_bridge_publishes_both_states_without_device_name_heuristics() {
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("hasDesktopInput"));
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("nativeOnInputDevicesChanged"));
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("InputDevice.SOURCE_MOUSE"));
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("InputDevice.SOURCE_TOUCHPAD"));
+    assert!(!ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("OnePlus Pad 3 Keyboard"));
+    assert!(!ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("pogo_touchpad"));
 }
 
 #[test]
@@ -258,3 +350,40 @@ fn android_clipboard_path_applies_byte_limit_before_wayland_selection() {
     assert!(process_path.contains("is_valid_clip_text(&text)"));
     assert!(process_path.contains("set_data_device_selection"));
 }
+
+#[test]
+fn input_method_bridge_and_fallback_policy() {
+    // 1. Setup installs portal-ime-bridge and portal-ime.desktop
+    assert!(ANDROID_SETUP_SOURCE.contains("usr/local/bin/portal-ime-bridge"));
+    assert!(ANDROID_SETUP_SOURCE.contains("usr/share/applications/portal-ime.desktop"));
+
+    // 2. KWin wrapper passes --inputmethod to launch portal-ime-bridge
+    assert!(KWIN_WRAPPER_SOURCE.contains("--inputmethod /usr/local/bin/portal-ime-bridge"));
+
+    // 3. Startplasma sets kwinrc InputMethod and VirtualKeyboardMode
+    assert!(STARTPLASMA_SOURCE.contains("InputMethod=/usr/share/applications/portal-ime.desktop"));
+    assert!(STARTPLASMA_SOURCE.contains("VirtualKeyboardMode=1"));
+
+    // 4. Portal IME Bridge speaks zwp_input_method_v1 with commit_string (1) and delete_surrounding_text (5)
+    assert!(PORTAL_IME_BRIDGE_SOURCE.contains("zwp_input_method_v1"));
+    assert!(PORTAL_IME_BRIDGE_SOURCE.contains("active_context_id, (req_size << 16) | 1"));
+    assert!(PORTAL_IME_BRIDGE_SOURCE.contains("active_context_id, (req_size << 16) | 5"));
+    assert!(PORTAL_IME_BRIDGE_SOURCE.contains("/tmp/portal-ime-events.fifo"));
+    assert!(PORTAL_IME_BRIDGE_SOURCE.contains("/tmp/portal-ime-commands.fifo"));
+
+    // 5. Host IME dispatch prioritizes protocol when active, and only falls back to evdev when unready/inactive
+    assert!(ANDROID_IME_SOURCE.contains("is_ime_context_active()"));
+    assert!(ANDROID_IME_SOURCE.contains("send_ime_command(&format!(\"DELETE:{count}\\n\"))"));
+    assert!(ANDROID_IME_SOURCE.contains("send_ime_command(\"ENTER\\n\")"));
+    assert!(ANDROID_IME_SOURCE.contains("send_ime_command(&format!(\"COMMIT:{b64}\\n\"))"));
+    assert!(PORTAL_IME_BRIDGE_SOURCE.contains("send_enter()"));
+    assert!(PORTAL_IME_BRIDGE_SOURCE.contains("0xff0d"));
+    assert!(ANDROID_IME_SOURCE.contains("Falling back to evdev key synthesis"));
+    assert!(ANDROID_IME_SOURCE.contains("start_ime_fifo_listener"));
+
+    // 6. SoftKeyboardBridge handles text commit, backspace, and action down
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("nativeOnTextCommit"));
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("commitText"));
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("deleteSurroundingText"));
+}
+

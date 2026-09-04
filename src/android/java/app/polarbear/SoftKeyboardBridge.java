@@ -48,7 +48,7 @@ public final class SoftKeyboardBridge {
                 InputManager manager =
                     (InputManager) activity.getSystemService(Context.INPUT_SERVICE);
                 if (manager == null) {
-                    nativeOnHardwareKeyboardChanged(false);
+                    nativeOnInputDevicesChanged(false, false);
                     return;
                 }
                 if (monitoredInputManager != manager || inputDeviceListener == null) {
@@ -70,8 +70,9 @@ public final class SoftKeyboardBridge {
 
     private static void publishKeyboardState() {
         boolean hasHw = hasPhysicalKeyboard();
-        Log.i(TAG, "publishKeyboardState: hasPhysicalKeyboard=" + hasHw);
-        nativeOnHardwareKeyboardChanged(hasHw);
+        boolean hasDesktop = hasDesktopInput();
+        Log.i(TAG, "publishKeyboardState: hasPhysicalKeyboard=" + hasHw + ", hasDesktopInput=" + hasDesktop);
+        nativeOnInputDevicesChanged(hasHw, hasDesktop);
     }
 
     private static boolean hasPhysicalKeyboard() {
@@ -81,14 +82,34 @@ public final class SoftKeyboardBridge {
         }
         for (int id : manager.getInputDeviceIds()) {
             InputDevice device = manager.getInputDevice(id);
-            if (device == null || device.isVirtual()) {
+            if (device == null || device.isVirtual() || !device.isExternal()) {
                 continue;
             }
             boolean keyboardSource =
                 (device.getSources() & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD;
-            if (keyboardSource
-                    && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC
-                    && device.isExternal()) {
+            if (keyboardSource && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasDesktopInput() {
+        InputManager manager = monitoredInputManager;
+        if (manager == null) {
+            return false;
+        }
+        for (int id : manager.getInputDeviceIds()) {
+            InputDevice device = manager.getInputDevice(id);
+            if (device == null || device.isVirtual() || !device.isExternal()) {
+                continue;
+            }
+            int sources = device.getSources();
+            boolean isAlphaKeyb = (sources & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD
+                && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC;
+            boolean isPointer = (sources & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE
+                || (sources & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD;
+            if (isAlphaKeyb || isPointer) {
                 return true;
             }
         }
@@ -97,13 +118,16 @@ public final class SoftKeyboardBridge {
 
     /** Show the IME on the Android UI thread without a timing-dependent sleep. */
     public static void show(final Activity activity) {
+        Log.i(TAG, "SoftKeyboardBridge.show() called");
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+            Log.w(TAG, "SoftKeyboardBridge.show() ignored: activity is null/finishing/destroyed");
             return;
         }
         activity.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 if (activity.isFinishing() || activity.isDestroyed()) {
+                    Log.w(TAG, "SoftKeyboardBridge.show() runOnUiThread ignored: activity is finishing/destroyed");
                     return;
                 }
                 BridgeEditText input = ensureEditor(activity);
@@ -114,7 +138,8 @@ public final class SoftKeyboardBridge {
                 }
                 input.setVisibility(View.VISIBLE);
                 input.setFocusableInTouchMode(true);
-                input.requestFocus();
+                boolean focusRequested = input.requestFocus();
+                Log.i(TAG, "SoftKeyboardBridge editor requestFocus() result=" + focusRequested);
                 InputMethodManager manager =
                     (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
                 if (manager != null) {
@@ -125,7 +150,10 @@ public final class SoftKeyboardBridge {
                         public void run() {
                             Log.i(TAG, "Requesting showSoftInput for bridge editor");
                             if (!manager.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)) {
-                                manager.showSoftInput(input, 0);
+                                boolean res2 = manager.showSoftInput(input, 0);
+                                Log.i(TAG, "manager.showSoftInput fallback result: " + res2);
+                            } else {
+                                Log.i(TAG, "manager.showSoftInput SHOW_IMPLICIT succeeded");
                             }
                         }
                     });
@@ -278,5 +306,6 @@ public final class SoftKeyboardBridge {
     }
 
     private static native void nativeOnTextCommit(String text);
+    private static native void nativeOnInputDevicesChanged(boolean hasPhysicalKeyboard, boolean hasDesktopInput);
     private static native void nativeOnHardwareKeyboardChanged(boolean present);
 }

@@ -37,6 +37,7 @@ impl GlobalDispatch<ZwpTextInputManagerV2, ()> for State {
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
+        log::info!("Portal text-input-v2: zwp_text_input_manager_v2 bound by client");
         data_init.init(resource, ());
     }
 }
@@ -53,6 +54,7 @@ impl Dispatch<ZwpTextInputManagerV2, ()> for State {
     ) {
         match request {
             zwp_text_input_manager_v2::Request::GetTextInput { id, seat } => {
+                log::info!("Portal text-input-v2: GetTextInput requested seat={:?}", seat);
                 let input = data_init.init(id, TextInputData { seat });
                 state.text_inputs.push(input.clone());
                 if let Some(surface) = state.keyboard_focus_surface.clone() {
@@ -60,7 +62,9 @@ impl Dispatch<ZwpTextInputManagerV2, ()> for State {
                     input.enter(state.text_input_serial, &surface);
                 }
             }
-            zwp_text_input_manager_v2::Request::Destroy => {}
+            zwp_text_input_manager_v2::Request::Destroy => {
+                log::info!("Portal text-input-v2: zwp_text_input_manager_v2 Destroy requested");
+            }
             _ => unreachable!(),
         }
     }
@@ -71,6 +75,7 @@ impl Dispatch<ZwpTextInputManagerV2, ()> for State {
         _resource: &ZwpTextInputManagerV2,
         _data: &(),
     ) {
+        log::info!("Portal text-input-v2: zwp_text_input_manager_v2 destroyed");
     }
 }
 
@@ -86,37 +91,37 @@ impl Dispatch<ZwpTextInputV2, TextInputData> for State {
     ) {
         match request {
             zwp_text_input_v2::Request::Enable { surface } => {
-                log::info!("Nested KWin enabled Wayland text-input-v2");
+                log::info!("Portal text-input-v2: Enable requested for surface {:?}", surface);
                 state.active_text_input = Some(input.clone());
                 state.keyboard_focus_surface = Some(surface);
                 crate::android::ime::set_wayland_text_input_active(true);
             }
-            zwp_text_input_v2::Request::Disable { .. } => {
-                log::info!("Nested KWin disabled Wayland text-input-v2");
+            zwp_text_input_v2::Request::Disable { surface } => {
+                log::info!("Portal text-input-v2: Disable requested for surface {:?}", surface);
                 if state.active_text_input.as_ref() == Some(input) {
                     state.active_text_input = None;
                     crate::android::ime::set_wayland_text_input_active(false);
                 }
             }
             zwp_text_input_v2::Request::ShowInputPanel => {
-                log::info!("Nested KWin requested the Android input panel");
+                log::info!("Portal text-input-v2: ShowInputPanel requested");
                 state.active_text_input = Some(input.clone());
                 crate::android::ime::request_visibility(true);
             }
             zwp_text_input_v2::Request::HideInputPanel => {
-                log::info!("Nested KWin hid the Android input panel");
+                log::info!("Portal text-input-v2: HideInputPanel requested");
                 crate::android::ime::request_visibility(false);
             }
             zwp_text_input_v2::Request::Destroy => {
+                log::info!("Portal text-input-v2: Destroy requested");
                 if state.active_text_input.as_ref() == Some(input) {
                     state.active_text_input = None;
                     crate::android::ime::set_wayland_text_input_active(false);
                 }
             }
-            // KWin supplies surrounding text, content purpose, cursor geometry,
-            // language and update serials for the host IME. Android's editor API
-            // does not need those values to provide correct committed Unicode.
-            _ => {}
+            other => {
+                log::info!("Portal text-input-v2: other request: {:?}", other);
+            }
         }
     }
 
@@ -126,6 +131,7 @@ impl Dispatch<ZwpTextInputV2, TextInputData> for State {
         resource: &ZwpTextInputV2,
         _data: &TextInputData,
     ) {
+        log::info!("Portal text-input-v2: ZwpTextInputV2 destroyed");
         state.text_inputs.retain(Resource::is_alive);
         if state.active_text_input.as_ref() == Some(resource) {
             state.active_text_input = None;

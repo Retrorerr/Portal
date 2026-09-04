@@ -62,6 +62,18 @@
     Runs the full continuous validation loop on the OnePlus Pad 3.
 
 .EXAMPLE
+
+.PARAMETER EnforceReleaseGates
+    If set, exits with non-zero exit code if release gates fail.
+
+.PARAMETER FunctionsOnly
+    Only load helper functions into the session without running the loop.
+
+.EXAMPLE
+    .\scripts\qa-pad3-loop.ps1
+    Runs the full continuous validation loop on the OnePlus Pad 3.
+
+.EXAMPLE
     . .\scripts\qa-pad3-loop.ps1 -FunctionsOnly
     Test-ScreenResolution -DeviceId "f105b146"
     Test-KWinConnection -DeviceId "f105b146"
@@ -70,7 +82,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$DeviceId = "f105b146",
+    [string]$DeviceId = "",
     [string]$PackageName = "app.polarbear",
     [string]$ActivityName = "android.app.NativeActivity",
     [int]$ExpectedWidth = 3392,
@@ -88,15 +100,29 @@ param(
     [switch]$FunctionsOnly
 )
 
+function Get-DefaultQaDeviceId {
+    if ($env:ANDROID_SERIAL) { return $env:ANDROID_SERIAL }
+    try {
+        $devs = & adb devices | Select-String "\tdevice$"
+        if ($devs) {
+            $first = if ($devs -is [array]) { $devs[0].Line } else { $devs.Line }
+            $detected = ($first -split "\s+")[0]
+            if ($detected) { return $detected }
+        }
+    } catch {}
+    return "f105b146"
+}
+
+if (-not $DeviceId) {
+    $DeviceId = Get-DefaultQaDeviceId
+}
+$script:QaDefaultDeviceId = $DeviceId
+
 $ErrorActionPreference = "Continue"
 $PSNativeCommandUseErrorActionPreference = $false
 
 # Determine repository root and artifact directory
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-
-# ---------------------------------------------------------------------------
-# Helper Environment & Setup Functions
-# ---------------------------------------------------------------------------
 
 function Initialize-BuildEnvironment {
     [CmdletBinding()]
@@ -192,7 +218,7 @@ function Test-ScreenResolution {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceId = "f105b146",
+        [string]$DeviceId = (Get-DefaultQaDeviceId),
         [int]$ExpectedWidth = 3392,
         [int]$ExpectedHeight = 2400,
         [string]$ScreenshotPath = ""
@@ -1269,7 +1295,7 @@ function Test-KWinConnection {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceId = "f105b146",
+        [string]$DeviceId = (Get-DefaultQaDeviceId),
         [string]$HostLogContent = "",
         [string]$LogcatContent = "",
         [Int64]$RunStartTimestampMs = 0
@@ -1305,7 +1331,7 @@ function Test-WaylandReadinessMarker {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceId = "f105b146",
+        [string]$DeviceId = (Get-DefaultQaDeviceId),
         [string]$HostLogContent = "",
         [Int64]$RunStartTimestampMs = 0,
         [PSCustomObject]$KWinIdentity = $null
@@ -1349,7 +1375,7 @@ function Test-AppCrashes {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceId = "f105b146",
+        [string]$DeviceId = (Get-DefaultQaDeviceId),
         [string]$HostLogContent = "",
         [string]$GuestLogContent = "",
         [string]$LogcatContent = ""
@@ -1436,7 +1462,7 @@ function Assert-ReleaseGates {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceId = "f105b146",
+        [string]$DeviceId = (Get-DefaultQaDeviceId),
         [int]$ExpectedWidth = 3392,
         [int]$ExpectedHeight = 2400,
         [string]$ScreenshotPath = "",
@@ -1532,7 +1558,7 @@ function Test-DeviceConnection {
         Checks whether the specified target device is connected via ADB.
     #>
     [CmdletBinding()]
-    param([string]$DeviceId = "f105b146")
+    param([string]$DeviceId = (Get-DefaultQaDeviceId))
 
     Write-Host "[1/7] Checking device connection (adb devices)..." -ForegroundColor Cyan
     $adbDevices = & adb devices 2>&1
@@ -1857,7 +1883,7 @@ function Capture-DeviceScreenshot {
 function Invoke-QaLoop {
     [CmdletBinding()]
     param(
-        [string]$DeviceId = "f105b146",
+        [string]$DeviceId = (Get-DefaultQaDeviceId),
         [string]$PackageName = "app.polarbear",
         [string]$ActivityName = "android.app.NativeActivity",
         [int]$ExpectedWidth = 3392,

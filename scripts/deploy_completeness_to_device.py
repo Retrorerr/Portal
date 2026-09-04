@@ -16,7 +16,21 @@ import subprocess
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-DEVICE_ID = "f105b146"
+def get_default_device_id() -> str:
+    import os
+    if os.environ.get("ANDROID_SERIAL"):
+        return os.environ["ANDROID_SERIAL"]
+    try:
+        out = subprocess.check_output(["adb", "devices"], text=True)
+        for line in out.strip().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "device":
+                return parts[0]
+    except Exception:
+        pass
+    return ""
+
+DEVICE_ID = get_default_device_id()
 APP_PKG = "app.polarbear"
 
 def run_adb(cmd_args, capture=False):
