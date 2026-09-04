@@ -41,8 +41,6 @@ SEED_PACKAGES = [
     "qml6-module-qtquick-layouts",
     "qml6-module-org-kde-kirigami",
     "qml6-module-org-kde-kquickcontrols",
-    "qml6-module-org-kde-plasma-core",
-    "qml6-module-org-kde-plasma-components",
     # Wayland, XWayland, IPC
     "xwayland",
     "dbus-user-session",
@@ -52,15 +50,14 @@ SEED_PACKAGES = [
     "pipewire",
     "wireplumber",
     "pipewire-pulse",
+    "plasma-pa",
     # Browser
     "firefox-esr",
     # Fonts
     "fonts-dejavu-core",
     "fonts-noto-core",
     "fontconfig",
-    # Locale and desktop metadata tools. Package extraction does not run Debian
-    # maintainer scripts, so the guest startup script deterministically builds
-    # the selected locale and MIME/application caches.
+    # Locale, timezone, and desktop metadata tools
     "locales",
     "desktop-file-utils",
     "tzdata",
@@ -74,6 +71,11 @@ SEED_PACKAGES = [
     "bash",
     "coreutils",
     "util-linux",
+    "bsdutils",
+    "diffutils",
+    "hostname",
+    "ncurses-base",
+    "ncurses-bin",
     "procps",
     "sed",
     "grep",
@@ -82,8 +84,37 @@ SEED_PACKAGES = [
     "tar",
     "gzip",
     "xz-utils",
+    "bzip2",
     "ca-certificates",
     "libc-bin",
+    # D-Bus IPC system bus
+    "dbus",
+    "dbus-system-bus-common",
+    # Debian package management suite
+    "dpkg",
+    "apt",
+    "debian-archive-keyring",
+    "gnupg",
+    "gpgv",
+    # Curated desktop application suite
+    "ark",
+    "gwenview",
+    "okular",
+    "kate",
+    "kcalc",
+    # Desktop integration, plugins & wallpapers
+    "breeze-gtk-theme",
+    "kio-extras",
+    "kdegraphics-thumbnailers",
+    "ffmpegthumbnailer",
+    "plasma-widgets-addons",
+    "plasma-workspace-wallpapers",
+    "plasma-runners-addons",
+    # Compression & archive tools
+    "p7zip-full",
+    "unzip",
+    "zip",
+    "zstd",
 ]
 
 # Packages to skip if pulled in as optional/heavy non-critical dependencies
@@ -98,6 +129,9 @@ EXCLUDE_PACKAGES = {
     "sddm",
     "lightdm",
     "gdm3",
+    "network-manager",
+    "bluez",
+    "fwupd",
 }
 
 def fetch_package_index(cache_file: Path) -> dict:
@@ -183,7 +217,23 @@ def download_file(url: str, dest: Path) -> bool:
         print(f"Failed to download {url}: {e}")
         return False
 
-def extract_deb_data(deb_path: Path, dest_dir: Path):
+def decompress_tar_data(name: str, data: bytes) -> bytes:
+    if name.endswith(".xz"):
+        return lzma.decompress(data)
+    elif name.endswith(".gz"):
+        return gzip.decompress(data)
+    elif name.endswith(".zst"):
+        import zstandard
+        return zstandard.ZstdDecompressor().decompress(data)
+    return data
+
+def extract_deb_package(deb_path: Path, dest_dir: Path, dpkg_info_dir: Path) -> str:
+    """
+    Extracts data.tar.* to dest_dir,
+    captures extracted paths to /var/lib/dpkg/info/<pkg_id>.list,
+    extracts control.tar.* metadata files to /var/lib/dpkg/info/<pkg_id>.<ext>,
+    and returns the Status stanza to be written to /var/lib/dpkg/status.
+    """
     with open(deb_path, "rb") as f:
         deb_bytes = f.read()
 
@@ -191,6 +241,11 @@ def extract_deb_data(deb_path: Path, dest_dir: Path):
         raise ValueError(f"{deb_path} is not a valid ar archive")
 
     pos = 8
+    control_bytes = None
+    control_tar_name = None
+    data_bytes = None
+    data_tar_name = None
+
     while pos < len(deb_bytes):
         header = deb_bytes[pos:pos+60]
         if len(header) < 60:
@@ -198,30 +253,112 @@ def extract_deb_data(deb_path: Path, dest_dir: Path):
         name = header[:16].decode("ascii", errors="replace").strip()
         size = int(header[48:58].decode("ascii", errors="replace").strip())
         pos += 60
-        data = deb_bytes[pos:pos+size]
+        member_data = deb_bytes[pos:pos+size]
         pos += size
         if pos % 2 != 0:
             pos += 1
 
-        if name.startswith("data.tar"):
-            # Unpack data tarball
-            if name.endswith(".xz"):
-                decompressed = lzma.decompress(data)
-                bio = io.BytesIO(decompressed)
-            elif name.endswith(".gz"):
-                decompressed = gzip.decompress(data)
-                bio = io.BytesIO(decompressed)
-            elif name.endswith(".zst"):
-                import zstandard
-                dctx = zstandard.ZstdDecompressor()
-                decompressed = dctx.decompress(data)
-                bio = io.BytesIO(decompressed)
-            else:
-                bio = io.BytesIO(data)
+        if name.startswith("control.tar"):
+            control_tar_name = name
+            control_bytes = member_data
+        elif name.startswith("data.tar"):
+            data_tar_name = name
+            data_bytes = member_data
 
-            with tarfile.open(fileobj=bio) as tar:
-                tar.extractall(path=dest_dir, filter="tar")
-            return
+    if not control_bytes or not data_bytes:
+        raise ValueError(f"Incomplete deb: {deb_path}")
+
+    # Process control tarball
+    ctrl_raw = decompress_tar_data(control_tar_name, control_bytes)
+    ctrl_tar = tarfile.open(fileobj=io.BytesIO(ctrl_raw))
+
+    control_content = ""
+    control_meta = {}
+    other_control_members = []
+
+    for m in ctrl_tar.getmembers():
+        fname = Path(m.name).name
+        if fname == "control":
+            f = ctrl_tar.extractfile(m)
+            if f:
+                control_content = f.read().decode("utf-8", errors="replace")
+                for line in control_content.splitlines():
+                    if ":" in line and not line.startswith(" "):
+                        k, v = line.split(":", 1)
+                        control_meta[k.strip()] = v.strip()
+        elif fname and fname != ".":
+            other_control_members.append((fname, m))
+
+    pkg_name = control_meta.get("Package", deb_path.name.split("_")[0])
+    arch = control_meta.get("Architecture", "arm64")
+    multi_arch = control_meta.get("Multi-Arch", "")
+
+    # Debian dpkg on single-arch native systems uses <pkg_name>.<ext> in /var/lib/dpkg/info.
+    # Furthermore, colons in filenames create Alternate Data Streams on Windows NTFS.
+    pkg_id = pkg_name
+
+    # Write other control files (md5sums, conffiles, postinst, etc.) to dpkg_info_dir
+    for fname, m in other_control_members:
+        f = ctrl_tar.extractfile(m)
+        if f:
+            target_path = dpkg_info_dir / f"{pkg_id}.{fname}"
+            with open(target_path, "wb") as out_f:
+                out_f.write(f.read())
+
+    # Build status stanza: add Status: install ok installed after Package:
+    status_lines = []
+    has_status = False
+    for line in control_content.splitlines():
+        status_lines.append(line)
+        if line.startswith("Package: ") and not has_status:
+            status_lines.append("Status: install ok installed")
+            has_status = True
+    if not has_status:
+        status_lines.append("Status: install ok installed")
+    status_stanza = "\n".join(status_lines).strip() + "\n\n"
+
+    # Process data tarball and record file paths
+    data_raw = decompress_tar_data(data_tar_name, data_bytes)
+    data_tar = tarfile.open(fileobj=io.BytesIO(data_raw))
+    list_lines = []
+    for m in data_tar.getmembers():
+        p = m.name
+        if p.startswith("./"):
+            p = p[1:]
+        elif not p.startswith("/"):
+            p = "/" + p
+        p = p.rstrip("/")
+        if not p:
+            p = "/."
+        list_lines.append(p)
+
+    try:
+        data_tar.extractall(path=dest_dir, filter="tar")
+    except PermissionError:
+        for member in data_tar.getmembers():
+            target = dest_dir / member.name
+            if target.exists() and not target.is_dir():
+                try:
+                    os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+                except Exception:
+                    pass
+            try:
+                data_tar.extract(member, path=dest_dir, filter="tar")
+            except Exception:
+                pass
+    except Exception:
+        for member in data_tar.getmembers():
+            try:
+                data_tar.extract(member, path=dest_dir, filter="tar")
+            except Exception:
+                pass
+
+    # Write .list file
+    list_path = dpkg_info_dir / f"{pkg_id}.list"
+    with open(list_path, "w", newline="\n", encoding="utf-8") as f:
+        f.write("\n".join(list_lines) + "\n")
+
+    return status_stanza
 
 def build_rootfs(output_dir: Path, deb_cache_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -254,21 +391,106 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path):
                     print(f"  Downloaded {completed}/{len(download_tasks)} debs...")
     print(f"Download complete in {time.time() - start_dl:.1f} s.")
 
-    # 2. Extract debs into rootfs
-    print(f"Extracting packages into {output_dir}...")
+    # 2. Setup standard packaging directories
+    dpkg_dir = output_dir / "var" / "lib" / "dpkg"
+    dpkg_info_dir = dpkg_dir / "info"
+    dpkg_updates_dir = dpkg_dir / "updates"
+    dpkg_alternatives_dir = dpkg_dir / "alternatives"
+    dpkg_triggers_dir = dpkg_dir / "triggers"
+    for d in [dpkg_info_dir, dpkg_updates_dir, dpkg_alternatives_dir, dpkg_triggers_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+
+    # 3. Extract debs into rootfs and build dpkg database
+    print(f"Extracting packages into {output_dir} and populating dpkg database...")
     start_ext = time.time()
+    status_stanzas = []
     for idx, pkg_name in enumerate(pkg_list, 1):
         pkg = packages[pkg_name]
         deb_file = deb_cache_dir / os.path.basename(pkg["Filename"])
         try:
-            extract_deb_data(deb_file, output_dir)
+            stanza = extract_deb_package(deb_file, output_dir, dpkg_info_dir)
+            status_stanzas.append(stanza)
         except Exception as e:
             print(f"Error extracting {deb_file.name}: {e}")
-        if idx % 100 == 0 or idx == len(pkg_list):
-            print(f"  Extracted {idx}/{len(pkg_list)} packages...")
-    print(f"Extraction complete in {time.time() - start_ext:.1f} s.")
+        if idx % 50 == 0 or idx == len(pkg_list):
+            print(f"  Processed {idx}/{len(pkg_list)} packages...")
+    print(f"Extraction and dpkg database generation complete in {time.time() - start_ext:.1f} s.")
 
-    # 3. Setup standard system directories & symlinks
+    # Write /var/lib/dpkg/status and /var/lib/dpkg/status-old
+    status_file = dpkg_dir / "status"
+    with open(status_file, "w", newline="\n", encoding="utf-8") as f:
+        f.write("".join(status_stanzas))
+    status_old_file = dpkg_dir / "status-old"
+    with open(status_old_file, "w", newline="\n", encoding="utf-8") as f:
+        f.write("".join(status_stanzas))
+
+    # Write /var/lib/dpkg/arch
+    with open(dpkg_dir / "arch", "w", newline="\n", encoding="utf-8") as f:
+        f.write("arm64\n")
+
+    # Write /var/lib/dpkg/info/format (indicates infodb format 1)
+    with open(dpkg_info_dir / "format", "w", newline="\n", encoding="utf-8") as f:
+        f.write("1\n")
+
+    # Touch /var/lib/dpkg/available and lock files
+    for touch_file in [
+        dpkg_dir / "available",
+        dpkg_dir / "cmethopt",
+        dpkg_dir / "lock",
+        dpkg_dir / "lock-frontend",
+        dpkg_triggers_dir / "Lock",
+        dpkg_triggers_dir / "Unresolved",
+        output_dir / "var" / "log" / "dpkg.log",
+    ]:
+        touch_file.parent.mkdir(parents=True, exist_ok=True)
+        touch_file.touch(exist_ok=True)
+
+    # Setup apt directories
+    for apt_d in [
+        output_dir / "var" / "lib" / "apt" / "lists" / "partial",
+        output_dir / "var" / "lib" / "apt" / "mirrors" / "partial",
+        output_dir / "var" / "lib" / "apt" / "periodic",
+        output_dir / "var" / "cache" / "apt" / "archives" / "partial",
+        output_dir / "var" / "log" / "apt",
+        output_dir / "etc" / "apt" / "apt.conf.d",
+        output_dir / "etc" / "apt" / "preferences.d",
+        output_dir / "etc" / "apt" / "sources.list.d",
+    ]:
+        apt_d.mkdir(parents=True, exist_ok=True)
+
+    for apt_log in [output_dir / "var" / "log" / "apt" / "history.log", output_dir / "var" / "log" / "apt" / "term.log"]:
+        apt_log.touch(exist_ok=True)
+
+    # Write /etc/apt/sources.list
+    sources_list = output_dir / "etc" / "apt" / "sources.list"
+    with open(sources_list, "w", newline="\n", encoding="utf-8") as f:
+        f.write(
+            "deb http://deb.debian.org/debian trixie main\n"
+            "deb http://deb.debian.org/debian trixie-updates main\n"
+            "deb http://security.debian.org/debian-security trixie-security main\n"
+        )
+
+    # Write /etc/apt/apt.conf.d/01no-sandbox: tells apt not to drop privileges to _apt in PRoot
+    apt_no_sandbox = output_dir / "etc" / "apt" / "apt.conf.d" / "01no-sandbox"
+    with open(apt_no_sandbox, "w", newline="\n", encoding="utf-8") as f:
+        f.write('APT::Sandbox::User "root";\n')
+
+    # Write /etc/apt/apt.conf.d/01portal-clean: non-interactive config prompts
+    apt_clean = output_dir / "etc" / "apt" / "apt.conf.d" / "01portal-clean"
+    with open(apt_clean, "w", newline="\n", encoding="utf-8") as f:
+        f.write('DPkg::Options { "--force-confdef"; "--force-confold"; };\n')
+
+    # Write /usr/sbin/policy-rc.d: prevent maintainer scripts from failing on init/systemd
+    policy_rc_d = output_dir / "usr" / "sbin" / "policy-rc.d"
+    policy_rc_d.parent.mkdir(parents=True, exist_ok=True)
+    with open(policy_rc_d, "w", newline="\n", encoding="utf-8") as f:
+        f.write("#!/bin/sh\nexit 101\n")
+    try:
+        os.chmod(policy_rc_d, 0o755)
+    except Exception:
+        pass
+
+    # 4. Setup standard system directories & symlinks
     print("Configuring system layout...")
     for d in ["dev", "dev/shm", "proc", "sys", "tmp", "run", "run/user/1000", "home/desktop", "var/lib/localdesktop", "etc/localdesktop"]:
         (output_dir / d).mkdir(parents=True, exist_ok=True)

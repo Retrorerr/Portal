@@ -1049,6 +1049,62 @@ fn android_ui_scale(density_dpi: i32) -> i32 {
     ((density_dpi as f32) / 160.0 * 1.1).max(1.0).round() as i32
 }
 
+/// Ensure guest package-management files are durable across slot switches and clean installs.
+fn sync_debian_package_management(fs_root: &Path) {
+    let apt_conf_d = fs_root.join("etc/apt/apt.conf.d");
+    if fs::create_dir_all(&apt_conf_d).is_ok() {
+        let no_sandbox_path = apt_conf_d.join("01no-sandbox");
+        if !no_sandbox_path.exists() {
+            let _ = fs::write(&no_sandbox_path, "APT::Sandbox::User \"root\";\n");
+        }
+        let clean_path = apt_conf_d.join("01portal-clean");
+        if !clean_path.exists() {
+            let _ = fs::write(
+                &clean_path,
+                "DPkg::Options { \"--force-confdef\"; \"--force-confold\"; };\n",
+            );
+        }
+    }
+
+    let sbin_dir = fs_root.join("usr/sbin");
+    if fs::create_dir_all(&sbin_dir).is_ok() {
+        let policy_rc_d = sbin_dir.join("policy-rc.d");
+        if !policy_rc_d.exists() {
+            let _ = fs::write(&policy_rc_d, "#!/bin/sh\nexit 101\n");
+            let _ = fs::set_permissions(&policy_rc_d, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let dpkg_dir = fs_root.join("var/lib/dpkg");
+    if fs::create_dir_all(&dpkg_dir).is_ok() {
+        let arch_path = dpkg_dir.join("arch");
+        if !arch_path.exists() {
+            let _ = fs::write(&arch_path, "arm64\n");
+        }
+    }
+
+    let dpkg_info_dir = fs_root.join("var/lib/dpkg/info");
+    if fs::create_dir_all(&dpkg_info_dir).is_ok() {
+        let format_path = dpkg_info_dir.join("format");
+        if !format_path.exists() {
+            let _ = fs::write(&format_path, "1\n");
+        }
+    }
+
+    let sources_list = fs_root.join("etc/apt/sources.list");
+    if !sources_list.exists() {
+        if let Some(parent) = sources_list.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(
+            &sources_list,
+            "deb http://deb.debian.org/debian trixie main\n\
+             deb http://deb.debian.org/debian trixie-updates main\n\
+             deb http://security.debian.org/debian-security trixie-security main\n",
+        );
+    }
+}
+
 pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     let username = get_application_context().local_config.user.username;
     let home_dir = chroot_home_dir(fs_root, &username);
@@ -1057,6 +1113,7 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     sync_android_timezone(fs_root);
     sync_firefox_config(fs_root);
     sync_konsole_profile(fs_root, &home_dir);
+    sync_debian_package_management(fs_root);
 
     let xresources_path = home_dir.join(".Xresources");
     let _ = fs::create_dir_all(

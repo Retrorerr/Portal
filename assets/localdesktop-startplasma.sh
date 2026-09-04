@@ -174,16 +174,30 @@ fi
 export LANG=en_GB.UTF-8
 export LC_ALL=en_GB.UTF-8
 
-if command -v update-mime-database >/dev/null 2>&1 && [ ! -s /usr/share/mime/mime.cache ]; then
-    update-mime-database /usr/share/mime >> "$session_log" 2>&1 || true
-fi
-if command -v update-desktop-database >/dev/null 2>&1 && [ ! -s /usr/share/applications/mimeinfo.cache ]; then
-    update-desktop-database /usr/share/applications >> "$session_log" 2>&1 || true
-fi
-cache_marker="$state_dir/desktop-caches-v1"
-if [ ! -e "$cache_marker" ] && command -v kbuildsycoca6 >/dev/null 2>&1; then
-    kbuildsycoca6 --noincremental >> "$session_log" 2>&1 || true
+cache_marker="$state_dir/desktop-caches-v2"
+if [ ! -e "$cache_marker" ]; then
+    if command -v update-mime-database >/dev/null 2>&1; then
+        update-mime-database /usr/share/mime >> "$session_log" 2>&1 || true
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database /usr/share/applications >> "$session_log" 2>&1 || true
+    fi
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+        kbuildsycoca6 --noincremental >> "$session_log" 2>&1 || true
+    fi
     : > "$cache_marker"
+fi
+
+# Configure TabletMode=auto in kwinrc so KWin adapts intelligently to input state
+kwinrc="$config_dir/kwinrc"
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file "$kwinrc" --group Input --key TabletMode auto
+else
+    if [ ! -f "$kwinrc" ]; then
+        printf '[Input]\nTabletMode=auto\n' > "$kwinrc"
+    elif ! grep -q 'TabletMode=' "$kwinrc"; then
+        printf '\n[Input]\nTabletMode=auto\n' >> "$kwinrc"
+    fi
 fi
 
 # Disable ksplash to avoid hanging on splash animation under PRoot

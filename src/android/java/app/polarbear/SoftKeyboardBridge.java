@@ -12,6 +12,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.hardware.input.InputManager;
+import android.util.Log;
 import android.view.InputDevice;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -68,7 +69,9 @@ public final class SoftKeyboardBridge {
     }
 
     private static void publishKeyboardState() {
-        nativeOnHardwareKeyboardChanged(hasPhysicalKeyboard());
+        boolean hasHw = hasPhysicalKeyboard();
+        Log.i(TAG, "publishKeyboardState: hasPhysicalKeyboard=" + hasHw);
+        nativeOnHardwareKeyboardChanged(hasHw);
     }
 
     private static boolean hasPhysicalKeyboard() {
@@ -105,6 +108,7 @@ public final class SoftKeyboardBridge {
                 }
                 BridgeEditText input = ensureEditor(activity);
                 if (hasPhysicalKeyboard()) {
+                    Log.i(TAG, "Physical keyboard present; suppressing soft input");
                     hide(activity);
                     return;
                 }
@@ -119,7 +123,10 @@ public final class SoftKeyboardBridge {
                     input.post(new Runnable() {
                         @Override
                         public void run() {
-                            manager.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+                            Log.i(TAG, "Requesting showSoftInput for bridge editor");
+                            if (!manager.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)) {
+                                manager.showSoftInput(input, 0);
+                            }
                         }
                     });
                 }
@@ -139,6 +146,7 @@ public final class SoftKeyboardBridge {
                 if (input == null) {
                     return;
                 }
+                Log.i(TAG, "Hiding soft input from window");
                 InputMethodManager manager =
                     (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
                 if (manager != null) {
