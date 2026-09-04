@@ -5,6 +5,7 @@ pub mod core {
     pub mod config;
     pub mod coordinate_transform;
     pub mod ime_policy;
+    pub mod presentation;
     pub mod runtime;
     pub mod startup;
     pub mod wayland_protocol;
