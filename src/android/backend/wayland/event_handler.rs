@@ -180,27 +180,43 @@ fn poll_long_press(backend: &mut WaylandBackend) {
     if backend.touch_mode != TouchMode::Undecided || backend.touch_points.len() != 1 {
         return;
     }
-    let (Some(down_time), Some(down_position)) =
-        (backend.touch_down_time, backend.touch_down_position)
-    else {
+    let (Some(down_time), Some(down_position), Some(down_generation)) = (
+        backend.touch_down_time,
+        backend.touch_down_position,
+        backend.touch_down_generation,
+    ) else {
         return;
     };
     let now = backend.clock.now().as_millis() as u64;
     if now.saturating_sub(down_time) < backend.long_press_timeout_ms {
         return;
     }
+    // A host resize during the press invalidates the down physical: the old
+    // window coordinates no longer map through the new viewport. Abort arming
+    // rather than anchoring to a stale remap (no sleeps, generation-guarded).
+    if down_generation
+        != backend
+            .compositor
+            .state
+            .authoritative_display_state
+            .resize_generation
+    {
+        return;
+    }
 
     backend.touch_mode = TouchMode::LongPress;
     // Anchor the pointer where the finger landed, so a drag selects from there.
-    let logical = backend
+    // Single snapshot: border (should not happen — starts in letterbox are
+    // dropped — but guard anyway) aborts instead of edge-clamping.
+    let snapshot = backend
         .compositor
         .state
-        .coordinate_transform
-        .physical_to_logical(crate::core::coordinate_transform::PhysicalPoint {
-            x: down_position.x,
-            y: down_position.y,
-        });
-    emit_pointer_motion(&mut backend.compositor, logical.x, logical.y, now as u32);
+        .authoritative_display_state
+        .presentation_snapshot();
+    let Some((lx, ly)) = snapshot.physical_to_logical(down_position.x, down_position.y) else {
+        return;
+    };
+    emit_pointer_motion(&mut backend.compositor, lx, ly, now as u32);
 }
 
 pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop: &ActiveEventLoop) {
@@ -452,28 +468,60 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             size,
             guest_scale_factor,
         } => {
+            // Zero/invalid = temporarily unavailable surface: preserve last
+            // valid, skip EGL/output/configure, resume on next valid size.
+            // Identical sizes coalesce (no new generation) so storms converge
+            // on the newest valid size without making KWin process every
+            // obsolete intermediate. No debounce sleeps.
+            if !crate::core::presentation::is_valid_host_size(size.w, size.h) {
+                log::warn!(
+                    "Resized: ignoring invalid Android surface {}x{}; preserving last valid {:?} generation={}",
+                    size.w,
+                    size.h,
+                    backend.compositor.state.authoritative_display_state.physical_size,
+                    backend
+                        .compositor
+                        .state
+                        .authoritative_display_state
+                        .resize_generation,
+                );
+                return;
+            }
             backend.compositor.state.size = (size.w, size.h).into();
-            backend
+            let host_changed = backend
                 .compositor
                 .state
                 .authoritative_display_state
-                .update_physical_size(size.w, size.h);
+                .try_update_physical_size(size.w, size.h)
+                .is_some();
             let density_dpi = (guest_scale_factor * 160.0).round().max(160.0) as i32;
             backend
                 .compositor
                 .state
                 .authoritative_display_state
                 .update_density_dpi(density_dpi);
+            // Plasma scale is stable across resizes; refresh only from the
+            // mtime-cached file (parsed only when kwinoutputconfig.json changed).
+            // Resizing must NOT alter the user's configured Plasma UI scale.
+            crate::android::backend::wayland::output_state::sync_kwin_output_scale(
+                &mut backend.compositor.state.authoritative_display_state,
+            );
             backend.compositor.state.coordinate_transform = backend
                 .compositor
                 .state
                 .authoritative_display_state
                 .coordinate_transform();
-            backend.compositor.state.kwin_surface_scale = backend
+            let uniform = backend
                 .compositor
                 .state
                 .authoritative_display_state
-                .presentation_scale();
+                .uniform_presentation_scale();
+            backend.compositor.state.kwin_surface_scale = (uniform, uniform);
+
+            if !host_changed {
+                // Coalesced repeat (same size): output/configure already correct.
+                return;
+            }
 
             if let Some(output) = &backend.compositor.output {
                 let mode = Mode {
@@ -633,6 +681,83 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     backend.compositor.process_android_clipboard();
 
     let size = winit.window_size();
+    // Zero/invalid = surface temporarily unavailable: preserve last valid,
+    // skip EGL/output/KWin/transform updates, resume on next valid size.
+    // EGL, Smithay output, KWin configure and transforms stay on last valid.
+    if !crate::core::presentation::is_valid_host_size(size.w, size.h) {
+        log::debug!(
+            "redraw: ignoring invalid Android surface {}x{}; preserving last valid {:?}",
+            size.w,
+            size.h,
+            backend
+                .compositor
+                .state
+                .authoritative_display_state
+                .physical_size,
+        );
+        return Ok(());
+    }
+    // Backup host sync: Resized events should already have updated the host,
+    // but if the window changed without one, converge here on the newest valid
+    // size (coalescing, no sleeps) so rendering never uses a stale host.
+    {
+        let host = backend
+            .compositor
+            .state
+            .authoritative_display_state
+            .physical_size;
+        if (host.0, host.1) != (size.w, size.h) {
+            if let Some(gen) = backend
+                .compositor
+                .state
+                .authoritative_display_state
+                .try_update_physical_size(size.w, size.h)
+            {
+                log::info!(
+                    "redraw: host sync to {}x{} generation={} (missed Resized)",
+                    size.w,
+                    size.h,
+                    gen,
+                );
+                backend.compositor.state.size = (size.w, size.h).into();
+                backend.compositor.state.coordinate_transform = backend
+                    .compositor
+                    .state
+                    .authoritative_display_state
+                    .coordinate_transform();
+                let uniform = backend
+                    .compositor
+                    .state
+                    .authoritative_display_state
+                    .uniform_presentation_scale();
+                backend.compositor.state.kwin_surface_scale = (uniform, uniform);
+                if let Some(output) = &backend.compositor.output {
+                    let mode = Mode {
+                        size: size.into(),
+                        refresh: backend.refresh_rate_millihz,
+                    };
+                    output.set_preferred(mode);
+                    output.change_current_state(
+                        Some(mode),
+                        Some(Transform::Normal),
+                        Some(Scale::Integer(1)),
+                        Some((0, 0).into()),
+                    );
+                }
+                let configure_size = backend
+                    .compositor
+                    .state
+                    .authoritative_display_state
+                    .configure_size();
+                for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
+                    if let Some(output) = &backend.compositor.output {
+                        output.enter(surface.wl_surface());
+                    }
+                    configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+                }
+            }
+        }
+    }
     let damage = Rectangle::from_size(size);
     let mut presentation_feedbacks = Vec::new();
     let mut frame_trace = FrameTrace::new();
@@ -682,7 +807,12 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .bind()
             .map_err(|error| format!("Failed to bind EGL surface: {error}"))?;
 
-        let compositor = &mut backend.compositor;
+        // Disjoint borrows: geometry state vs commit tracking.
+        let crate::android::backend::wayland::WaylandBackend {
+            compositor,
+            last_kwin_commit,
+            ..
+        } = &mut *backend;
 
         let toplevels = compositor
             .state
@@ -690,73 +820,94 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .toplevel_surfaces()
             .to_vec();
 
-        // Sync KWin configured scale from guest configuration (e.g. if scale changed via kscreen-doctor or Plasma Settings)
-        let scale_changed = crate::android::backend::wayland::output_state::sync_kwin_output_scale(
-            &mut compositor.state.authoritative_display_state,
-        );
-        if scale_changed {
-            compositor.state.coordinate_transform = compositor
-                .state
-                .authoritative_display_state
-                .coordinate_transform();
-            log::info!(
-                "KWin configured scale changed: scale={:.3} logical_geom={:?}",
-                compositor
-                    .state
-                    .authoritative_display_state
-                    .effective_kwin_scale(),
-                compositor
-                    .state
-                    .authoritative_display_state
-                    .logical_geometry(),
-            );
-        }
-
-        // Detect committed KWin geometry and update presentation scale if changed
+        // Detect committed KWin geometry. Filesystem/JSON parsing NEVER happens
+        // per-frame: Plasma scale is refreshed (mtime-cached) only when a NEW
+        // KWin commit arrives, and guest convergence is size-aware so stale
+        // frames cannot overwrite newer host generations.
         for surface in &toplevels {
             if compositor.state.is_known_kwin_surface(surface.wl_surface()) {
-                let detected = smithay::backend::renderer::utils::with_renderer_surface_state(
+                let observed = smithay::backend::renderer::utils::with_renderer_surface_state(
                     surface.wl_surface(),
                     |state| {
-                        let candidate_size = state.surface_size().or_else(|| state.buffer_size());
-                        if let Some(surf_size) = candidate_size {
-                            if surf_size.w > 0 && surf_size.h > 0 {
-                                return Some((surf_size.w as f64, surf_size.h as f64));
-                            }
-                        }
-                        None
+                        let surface_size = state
+                            .surface_size()
+                            .and_then(|s| (s.w > 0 && s.h > 0).then_some((s.w as f64, s.h as f64)));
+                        let buffer_size = state
+                            .buffer_size()
+                            .and_then(|s| (s.w > 0 && s.h > 0).then_some((s.w as f64, s.h as f64)));
+                        let buffer_scale = state.buffer_scale();
+                        let commit = state.current_commit();
+                        (surface_size, buffer_size, buffer_scale, commit)
                     },
-                )
-                .flatten();
-
-                if let Some(surf_size) = detected {
-                    if compositor
-                        .state
-                        .authoritative_display_state
-                        .update_observed_surface_size(surf_size)
-                    {
-                        compositor.state.kwin_surface_scale = compositor
+                );
+                if let Some((surface_size, buffer_size, buffer_scale, commit)) = observed {
+                    let is_new_commit = *last_kwin_commit != Some(commit);
+                    if is_new_commit {
+                        *last_kwin_commit = Some(commit);
+                        // Refresh Plasma scale only on real commits (mtime-cached;
+                        // parses JSON only when kwinoutputconfig.json changed).
+                        let scale_changed =
+                            crate::android::backend::wayland::output_state::sync_kwin_output_scale(
+                                &mut compositor.state.authoritative_display_state,
+                            );
+                        if scale_changed {
+                            log::info!(
+                                "KWin configured scale changed: scale={:.3} logical_geom={:?}",
+                                compositor
+                                    .state
+                                    .authoritative_display_state
+                                    .effective_kwin_scale(),
+                                compositor
+                                    .state
+                                    .authoritative_display_state
+                                    .logical_geometry(),
+                            );
+                        }
+                        if compositor
                             .state
                             .authoritative_display_state
-                            .presentation_scale();
-                        log::info!(
-                            "Authoritative display presentation scale updated: surface_size=({:.1}, {:.1}) presentation_scale=({:.2}, {:.2})",
-                            surf_size.0,
-                            surf_size.1,
-                            compositor.state.kwin_surface_scale.0,
-                            compositor.state.kwin_surface_scale.1,
-                        );
+                            .note_kwin_commit(surface_size, buffer_size, Some(buffer_scale))
+                        {
+                            let snap = compositor
+                                .state
+                                .authoritative_display_state
+                                .presentation_snapshot();
+                            compositor.state.coordinate_transform = compositor
+                                .state
+                                .authoritative_display_state
+                                .coordinate_transform();
+                            compositor.state.kwin_surface_scale =
+                                (snap.uniform_scale, snap.uniform_scale);
+                            log::info!(
+                                "presentation snapshot gen={} host={:?} committed={:?} guest={:?} uniform={:.3} viewport_origin={:?} viewport_size={:?} converged={} plasma={:.3}",
+                                snap.generation,
+                                snap.host,
+                                snap.committed,
+                                snap.guest_logical,
+                                snap.uniform_scale,
+                                snap.viewport_origin,
+                                snap.viewport_size,
+                                snap.converged,
+                                snap.plasma_scale,
+                            );
+                        }
                     }
                 }
                 break;
             }
         }
 
-        let presentation_scale = compositor
+        // Single coherent snapshot for this frame: desktop rendering, cursor
+        // placement, hotspot and sprite scale all derive from it. Uniform
+        // aspect-preserving FIT, allows <1 (downscale old large frames into
+        // smaller popups), centered with temporary letterboxing — never
+        // anisotropic stretch, crop or drift.
+        let snapshot = compositor
             .state
             .authoritative_display_state
-            .presentation_scale();
-        let scale_to_use = presentation_scale.0.max(1.0);
+            .presentation_snapshot();
+        let scale_to_use = snapshot.uniform_scale;
+        let viewport_origin = snapshot.viewport_origin;
 
         let mut elements = Vec::new();
         let mut non_kwin_elements = Vec::new();
@@ -765,16 +916,24 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             log::debug!("event_handler: toplevels count={}", toplevels.len());
         }
         for surface in &toplevels {
-            let surface_scale = if compositor.state.is_known_kwin_surface(surface.wl_surface()) {
-                scale_to_use
+            let is_kwin = compositor.state.is_known_kwin_surface(surface.wl_surface());
+            let surface_scale = if is_kwin { scale_to_use } else { 1.0 };
+            // KWin desktop is FIT-centered at the snapshot viewport origin
+            // (fullscreen 0,0 when converged, letterboxed when transitional).
+            // Overlays/non-KWin clients stay at native origin.
+            let origin = if is_kwin {
+                (
+                    viewport_origin.0.round() as i32,
+                    viewport_origin.1.round() as i32,
+                )
             } else {
-                1.0
+                (0, 0)
             };
             let surface_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
                     renderer,
                     surface.wl_surface(),
-                    (0, 0),
+                    origin,
                     surface_scale,
                     1.0,
                     Kind::Unspecified,
@@ -815,14 +974,16 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                     .unwrap_or_default()
             });
             let pointer_logical = compositor.pointer.current_location();
-            let pointer_physical = compositor.state.coordinate_transform.logical_to_physical(
-                crate::core::coordinate_transform::LogicalPoint {
-                    x: pointer_logical.x,
-                    y: pointer_logical.y,
-                },
-            );
-            let elem_phys_x = pointer_physical.x - (hotspot.x as f64) * presentation_scale.0;
-            let elem_phys_y = pointer_physical.y - (hotspot.y as f64) * presentation_scale.1;
+            // Same snapshot as the desktop: logical→physical through the FIT
+            // viewport, hotspot scaled by the SAME uniform scale. Target <1px
+            // hotspot error (only integer sprite rounding remains).
+            let (pointer_phys_x, pointer_phys_y) =
+                match snapshot.logical_to_physical(pointer_logical.x, pointer_logical.y) {
+                    Some((px, py)) => (px, py),
+                    None => (viewport_origin.0, viewport_origin.1),
+                };
+            let elem_phys_x = pointer_phys_x - (hotspot.x as f64) * snapshot.uniform_scale;
+            let elem_phys_y = pointer_phys_y - (hotspot.y as f64) * snapshot.uniform_scale;
             let location = (elem_phys_x.round() as i32, elem_phys_y.round() as i32);
             elements.extend(render_elements_from_surface_tree(
                 renderer,
@@ -837,8 +998,10 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         let mut frame = renderer
             .render(&mut framebuffer, size, Transform::Flipped180)
             .map_err(|error| format!("Failed to render frame: {error:?}"))?;
+        // Black letterbox/pillarbox for transitional FIT frames (old KWin frame
+        // centered in the new host until the matching commit converges).
         frame
-            .clear(Color32F::new(0.1, 0.0, 0.0, 1.0), &[damage])
+            .clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage])
             .map_err(|error| format!("Failed to clear frame: {error:?}"))?;
         draw_render_elements(&mut frame, scale_to_use, &elements, &[damage])
             .map_err(|error| format!("Failed to draw render elements: {error:?}"))?;

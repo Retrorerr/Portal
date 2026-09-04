@@ -35,8 +35,8 @@ use smithay::{
     },
     utils::{Physical, Rectangle, Size},
 };
-use std::ffi::c_void;
 use std::collections::VecDeque;
+use std::ffi::c_void;
 use std::sync::Arc;
 use winit::event_loop::ActiveEventLoop;
 use winit::raw_window_handle::{AndroidNdkWindowHandle, HasWindowHandle, RawWindowHandle};
@@ -54,11 +54,8 @@ const EGL_TIMESTAMP_INVALID_ANDROID: i64 = -1;
 const FRAME_TIMESTAMP_EXTENSION: &str = "EGL_ANDROID_get_frame_timestamps";
 const MAX_PENDING_FRAME_TIMESTAMPS: usize = 8;
 
-type EglGetNextFrameId = unsafe extern "system" fn(
-    RawEglDisplay,
-    RawEglSurface,
-    *mut u64,
-) -> RawEglBoolean;
+type EglGetNextFrameId =
+    unsafe extern "system" fn(RawEglDisplay, RawEglSurface, *mut u64) -> RawEglBoolean;
 type EglGetFrameTimestamps = unsafe extern "system" fn(
     RawEglDisplay,
     RawEglSurface,
@@ -67,11 +64,8 @@ type EglGetFrameTimestamps = unsafe extern "system" fn(
     *const i32,
     *mut i64,
 ) -> RawEglBoolean;
-type EglGetFrameTimestampSupported = unsafe extern "system" fn(
-    RawEglDisplay,
-    RawEglSurface,
-    i32,
-) -> RawEglBoolean;
+type EglGetFrameTimestampSupported =
+    unsafe extern "system" fn(RawEglDisplay, RawEglSurface, i32) -> RawEglBoolean;
 
 /// Whether Android's physical display-present timestamp can be queried for
 /// the active EGL window surface.
@@ -122,14 +116,14 @@ impl Default for AndroidFrameTimestampProbe {
 
 impl AndroidFrameTimestampProbe {
     fn load_next_frame_id() -> Option<EglGetNextFrameId> {
-        let address = unsafe { smithay::backend::egl::get_proc_address("eglGetNextFrameIdANDROID") };
+        let address =
+            unsafe { smithay::backend::egl::get_proc_address("eglGetNextFrameIdANDROID") };
         (!address.is_null()).then(|| unsafe { std::mem::transmute(address) })
     }
 
     fn load_frame_timestamps() -> Option<EglGetFrameTimestamps> {
-        let address = unsafe {
-            smithay::backend::egl::get_proc_address("eglGetFrameTimestampsANDROID")
-        };
+        let address =
+            unsafe { smithay::backend::egl::get_proc_address("eglGetFrameTimestampsANDROID") };
         (!address.is_null()).then(|| unsafe { std::mem::transmute(address) })
     }
 
@@ -154,13 +148,9 @@ impl AndroidFrameTimestampProbe {
             return false;
         };
 
-        let supported = unsafe {
-            supported(
-                raw_display,
-                raw_surface,
-                EGL_DISPLAY_PRESENT_TIME_ANDROID,
-            )
-        } == EGL_TRUE;
+        let supported =
+            unsafe { supported(raw_display, raw_surface, EGL_DISPLAY_PRESENT_TIME_ANDROID) }
+                == EGL_TRUE;
         if !supported {
             log::warn!(
                 "EGL_ANDROID_get_frame_timestamps is present but EGL_DISPLAY_PRESENT_TIME_ANDROID is unsupported"
@@ -232,11 +222,7 @@ impl AndroidFrameTimestampProbe {
         self.enable_for_surface(display, raw_display, raw_surface);
     }
 
-    fn ensure_surface_enabled(
-        &mut self,
-        display: &EGLDisplay,
-        raw_surface: RawEglSurface,
-    ) -> bool {
+    fn ensure_surface_enabled(&mut self, display: &EGLDisplay, raw_surface: RawEglSurface) -> bool {
         if !matches!(self.support, AndroidFrameTimestampSupport::Available) {
             return false;
         }
@@ -260,7 +246,8 @@ impl AndroidFrameTimestampProbe {
         let get_next_frame_id = self.get_next_frame_id?;
         let mut frame_id = 0;
         let raw_display = Self::raw_display(display);
-        let success = unsafe { get_next_frame_id(raw_display, raw_surface, &mut frame_id) } == EGL_TRUE;
+        let success =
+            unsafe { get_next_frame_id(raw_display, raw_surface, &mut frame_id) } == EGL_TRUE;
         if success {
             Some(frame_id)
         } else {
@@ -285,9 +272,7 @@ impl AndroidFrameTimestampProbe {
             self.pending_frame_ids.clear();
             self.pending_surface = None;
             self.enabled_surface = None;
-            log::warn!(
-                "EGL surface changed during swap; dropping frame timestamp id={frame_id}"
-            );
+            log::warn!("EGL surface changed during swap; dropping frame timestamp id={frame_id}");
             return None;
         }
         self.pending_surface = Some(surface_after);
@@ -631,10 +616,24 @@ where
         // software does the order that way due to mesa latching back buffer on each
         // `make_current`.
         let window_size = self.window_size();
-        if Some(window_size) != self.bind_size {
-            self.egl_surface.resize(window_size.w, window_size.h, 0, 0);
+        // Zero/invalid surfaces occur during Android multi-window/lifecycle
+        // transitions: preserve last valid EGL size instead of resizing to 0
+        // (which would poison EGL/Smithay/KWin geometry agreement).
+        if window_size.w <= 0 || window_size.h <= 0 {
+            if let Some(valid) = self.bind_size {
+                log::debug!(
+                    "WinitGraphicsBackend::bind: ignoring invalid window {}x{}, preserving EGL {:?}",
+                    window_size.w,
+                    window_size.h,
+                    valid,
+                );
+            }
+        } else {
+            if Some(window_size) != self.bind_size {
+                self.egl_surface.resize(window_size.w, window_size.h, 0, 0);
+            }
+            self.bind_size = Some(window_size);
         }
-        self.bind_size = Some(window_size);
 
         let fb = self.renderer.bind(&mut self.egl_surface)?;
 
@@ -659,7 +658,8 @@ where
     /// frame. The result is independent of Wayland presentation feedback and
     /// is used to gate the host readiness marker.
     pub fn poll_android_frame_timestamps(&mut self) -> Vec<AndroidFrameTimestampSample> {
-        self.frame_timestamps.poll(&self._display, &self.egl_surface)
+        self.frame_timestamps
+            .poll(&self._display, &self.egl_surface)
     }
 
     /// Retrieve the buffer age of the current backbuffer of the window.

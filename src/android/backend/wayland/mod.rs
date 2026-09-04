@@ -58,6 +58,10 @@ pub struct WaylandBackend {
     pub touch_down_position: Option<PhysicalPosition<f64>>,
     /// When that finger landed, in `clock` milliseconds.
     pub touch_down_time: Option<u64>,
+    /// Resize generation at `touch_down_position` time. Guards long-press
+    /// anchoring against host resizes during the press (stale physical must
+    /// not remap through a newer viewport).
+    pub touch_down_generation: Option<u64>,
     /// `ViewConfiguration.getScaledTouchSlop()`.
     pub touch_slop_px: f64,
     /// `ViewConfiguration.getLongPressTimeout()`.
@@ -75,6 +79,11 @@ pub struct WaylandBackend {
     pub refresh_rate_millihz: i32,
     /// Currently pressed evdev physical scancodes.
     pub pressed_keys: HashSet<u32>,
+    /// Last observed KWin commit counter. Detects new KWin frames even when
+    /// the committed size is unchanged (e.g. Plasma-scale change with identical
+    /// buffer dimensions) so cached `kwinoutputconfig.json` scale is refreshed
+    /// only on real commits — never per-frame unconditionally.
+    pub last_kwin_commit: Option<smithay::backend::renderer::utils::CommitCounter>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +100,7 @@ impl WaylandBackend {
         self.touch_mode = TouchMode::Undecided;
         self.touch_down_position = None;
         self.touch_down_time = None;
+        self.touch_down_generation = None;
     }
 
     /// Release any synthesized pointer grab and clear pending presentation state on suspend.

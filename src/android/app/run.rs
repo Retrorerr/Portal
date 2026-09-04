@@ -37,6 +37,22 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     };
 
     let window_size = winit.window_size();
+    // Zero/invalid means the Android surface is temporarily unavailable:
+    // preserve last valid state and resume on the next valid size. Never turn
+    // 0 into fake 1px desktop geometry.
+    if !crate::core::presentation::is_valid_host_size(window_size.w, window_size.h) {
+        log::warn!(
+            "configure_output: ignoring invalid Android surface {}x{}; preserving last valid {:?}",
+            window_size.w,
+            window_size.h,
+            backend
+                .compositor
+                .state
+                .authoritative_display_state
+                .physical_size,
+        );
+        return;
+    }
     let size = (window_size.w, window_size.h);
     let density_dpi = ndk::density_dpi(&backend.android_app).max(1);
     // Not `winit.scale_factor()`: that reads `AConfiguration`, which still reports the 160 dpi
@@ -46,32 +62,37 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     backend.refresh_rate_millihz = ndk::refresh_rate_millihz(&backend.android_app);
     backend.compositor.state.size = size.into();
 
-    let mut display_state = crate::core::coordinate_transform::AuthoritativeDisplayState::new(
-        window_size.w,
-        window_size.h,
-        density_dpi,
-        backend.refresh_rate_millihz,
-    );
-    if let Some(scale) = backend
-        .compositor
-        .state
-        .authoritative_display_state
-        .kwin_scale
+    // Mutate the existing authoritative state in place so resize generations,
+    // requested configures, committed guest geometry and Plasma scale survive
+    // suspend/resume. A fresh `new()` here would reset generation to 0 and
+    // discard transitional guest state.
     {
-        display_state.update_kwin_scale(scale);
+        let state = &mut backend.compositor.state.authoritative_display_state;
+        // Density is panel metadata, never rewrites Plasma scale/guest.
+        state.update_density_dpi(density_dpi);
+        // Host target: bumps generation only on real change, coalesces repeats,
+        // preserves OLD guest until the matching KWin commit converges.
+        if let Some(gen) = state.try_update_physical_size(window_size.w, window_size.h) {
+            log::info!(
+                "configure_output: host resize to {}x{} generation={}",
+                window_size.w,
+                window_size.h,
+                gen,
+            );
+        }
+        // Plasma scale: mtime-cached, parsed only when kwinoutputconfig.json
+        // actually changed (never per-frame).
+        if crate::android::backend::wayland::output_state::sync_kwin_output_scale(state) {
+            log::info!(
+                "configure_output: KWin Plasma scale now {:.3}",
+                state.effective_kwin_scale(),
+            );
+        }
     }
-    crate::android::backend::wayland::output_state::sync_kwin_output_scale(&mut display_state);
-    if let Some(surf_size) = backend
-        .compositor
-        .state
-        .authoritative_display_state
-        .observed_surface_size
-    {
-        display_state.update_observed_surface_size(surf_size);
-    }
-    backend.compositor.state.authoritative_display_state = display_state;
+    let display_state = backend.compositor.state.authoritative_display_state;
     backend.compositor.state.coordinate_transform = display_state.coordinate_transform();
-    backend.compositor.state.kwin_surface_scale = display_state.presentation_scale();
+    let uniform = display_state.uniform_presentation_scale();
+    backend.compositor.state.kwin_surface_scale = (uniform, uniform);
 
     let physical_size_mm = display_state.physical_size_mm();
 

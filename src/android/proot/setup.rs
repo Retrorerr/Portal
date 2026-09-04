@@ -1745,6 +1745,7 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         touch_mode: TouchMode::Undecided,
         touch_down_position: None,
         touch_down_time: None,
+        touch_down_generation: None,
         touch_slop_px: touch_slop_px(&android_app),
         long_press_timeout_ms: long_press_timeout_ms(&android_app),
         pointer_pressed: false,
@@ -1752,6 +1753,7 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         pending_kwin_presentation: None,
         refresh_rate_millihz: refresh_rate_millihz(&android_app),
         pressed_keys: std::collections::HashSet::new(),
+        last_kwin_commit: None,
         android_app,
     })
 }
