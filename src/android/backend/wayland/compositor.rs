@@ -757,7 +757,10 @@ impl Compositor {
             &mut auth_display_state,
         );
         let coordinate_transform = auth_display_state.coordinate_transform();
-        let kwin_surface_scale = auth_display_state.presentation_scale();
+        // Single uniform aspect-preserving scale (never anisotropic, allows
+        // <1 for transitional downscaling). Both axes identical by construction.
+        let uniform = auth_display_state.uniform_presentation_scale();
+        let kwin_surface_scale = (uniform, uniform);
 
         let state = State {
             compositor_state: CompositorState::new::<State>(&dh),
