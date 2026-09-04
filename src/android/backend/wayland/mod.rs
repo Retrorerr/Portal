@@ -15,7 +15,7 @@ pub use output_state::{read_kwin_output_scale, sync_kwin_output_scale, write_gue
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
-pub use event_handler::handle;
+pub use event_handler::{handle, log_presentation_state};
 pub use winit_backend::{
     bind, AndroidFrameTimestampSample, AndroidFrameTimestampSupport, WinitGraphicsBackend,
 };
@@ -79,11 +79,17 @@ pub struct WaylandBackend {
     pub refresh_rate_millihz: i32,
     /// Currently pressed evdev physical scancodes.
     pub pressed_keys: HashSet<u32>,
-    /// Last observed KWin commit counter. Detects new KWin frames even when
-    /// the committed size is unchanged (e.g. Plasma-scale change with identical
-    /// buffer dimensions) so cached `kwinoutputconfig.json` scale is refreshed
-    /// only on real commits — never per-frame unconditionally.
-    pub last_kwin_commit: Option<smithay::backend::renderer::utils::CommitCounter>,
+    /// Guest-side mouse button policy: presses in letterbox borders are
+    /// suppressed, releases for forwarded presses always land (no stuck
+    /// buttons across resizes/drags).
+    pub button_tracker: crate::core::pointer_buttons::PointerButtonTracker,
+    /// Touch ids whose down landed in a border and must never affect the
+    /// guest (a border press sliding inside still must not click).
+    pub suppressed_touch_ids: HashSet<u64>,
+    /// Last `clock` millisecond a Plasma-scale refresh ran. The render loop
+    /// consumes cached scale; the filesystem is stat'ed at low frequency
+    /// only, never per-frame or per-commit.
+    pub last_plasma_poll_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +107,7 @@ impl WaylandBackend {
         self.touch_down_position = None;
         self.touch_down_time = None;
         self.touch_down_generation = None;
+        self.suppressed_touch_ids.clear();
     }
 
     /// Release any synthesized pointer grab and clear pending presentation state on suspend.
@@ -120,6 +127,24 @@ impl WaylandBackend {
             );
             self.compositor.pointer.frame(&mut self.compositor.state);
             self.pointer_pressed = false;
+        }
+        // Release every mouse button the guest believes is held (not just
+        // BTN_LEFT) so none can stick across suspend while the tracker resets.
+        let held_buttons = self.button_tracker.drain_pressed();
+        for button in held_buttons.iter().copied() {
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.compositor.pointer.button(
+                &mut self.compositor.state,
+                &smithay::input::pointer::ButtonEvent {
+                    button,
+                    state: smithay::backend::input::ButtonState::Released,
+                    serial,
+                    time,
+                },
+            );
+        }
+        if !held_buttons.is_empty() {
+            self.compositor.pointer.frame(&mut self.compositor.state);
         }
         for scancode in self.pressed_keys.drain() {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();

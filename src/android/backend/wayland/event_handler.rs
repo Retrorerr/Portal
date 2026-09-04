@@ -293,34 +293,47 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 emit_pointer_motion(&mut backend.compositor, event.x(), event.y(), time);
             }
             InputEvent::TouchUp { event } => {
+                use crate::core::pointer_buttons::{
+                    resolve_touch_lift, GuestTouchEnd, TouchLiftAction,
+                };
                 let time = event.time_msec();
-
-                if backend.pointer_pressed {
-                    // End of a drag.
-                    emit_pointer_motion(&mut backend.compositor, event.x, event.y, time);
-                    emit_pointer_release(&mut backend.compositor, BTN_LEFT, time);
-                    backend.pointer_pressed = false;
-                } else {
-                    match event.mode {
-                        // A tap: left click where the finger lifted.
-                        TouchMode::Undecided => emit_pointer_click(
-                            &mut backend.compositor,
-                            BTN_LEFT,
-                            event.x,
-                            event.y,
-                            time,
-                        ),
-                        // Held still, then lifted without moving: a context menu, as on Android.
-                        TouchMode::LongPress => emit_pointer_click(
-                            &mut backend.compositor,
-                            BTN_RIGHT,
-                            event.x,
-                            event.y,
-                            time,
-                        ),
-                        // A scroll consumed the gesture; nothing to click.
-                        TouchMode::Scroll | TouchMode::Drag => {}
+                let end = match event.mode {
+                    TouchMode::Undecided => GuestTouchEnd::Tap,
+                    TouchMode::LongPress => GuestTouchEnd::LongPress,
+                    TouchMode::Scroll => GuestTouchEnd::Scroll,
+                    TouchMode::Drag => GuestTouchEnd::Drag,
+                };
+                match resolve_touch_lift(backend.pointer_pressed, end, event.in_guest) {
+                    TouchLiftAction::ReleaseAtCurrent => {
+                        // End of a drag at the current guest pointer location.
+                        // The lift coordinates are deliberately unused: a
+                        // border/outside release must never synthesize edge
+                        // movement or snap the drag to a fake Plasma edge.
+                        let current = backend.compositor.pointer.current_location();
+                        emit_pointer_motion(&mut backend.compositor, current.x, current.y, time);
+                        emit_pointer_release(&mut backend.compositor, BTN_LEFT, time);
+                        backend.pointer_pressed = false;
                     }
+                    // A tap: left click where the finger lifted (always
+                    // in-guest here; border lifts are dropped at ingestion).
+                    TouchLiftAction::ClickLeft => emit_pointer_click(
+                        &mut backend.compositor,
+                        BTN_LEFT,
+                        event.x,
+                        event.y,
+                        time,
+                    ),
+                    // Held still, then lifted without moving: a context menu.
+                    TouchLiftAction::ClickRight => emit_pointer_click(
+                        &mut backend.compositor,
+                        BTN_RIGHT,
+                        event.x,
+                        event.y,
+                        time,
+                    ),
+                    // A scroll consumed the gesture, or a border lift with
+                    // nothing held: nothing to click or release.
+                    TouchLiftAction::Ignore => {}
                 }
             }
             InputEvent::TouchCancel { event } => {
@@ -494,18 +507,25 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 .authoritative_display_state
                 .try_update_physical_size(size.w, size.h)
                 .is_some();
+            if !host_changed {
+                // Coalesced repeat (same size) or nothing to do: output,
+                // configure, scale and transforms are already correct.
+                return;
+            }
             let density_dpi = (guest_scale_factor * 160.0).round().max(160.0) as i32;
             backend
                 .compositor
                 .state
                 .authoritative_display_state
                 .update_density_dpi(density_dpi);
-            // Plasma scale is stable across resizes; refresh only from the
-            // mtime-cached file (parsed only when kwinoutputconfig.json changed).
-            // Resizing must NOT alter the user's configured Plasma UI scale.
-            crate::android::backend::wayland::output_state::sync_kwin_output_scale(
+            // Explicit display-configuration refresh (not the render path):
+            // mtime-cached, parses JSON only when kwinoutputconfig.json
+            // actually changed. Resizing must NOT alter the user's Plasma scale.
+            if crate::android::backend::wayland::output_state::sync_kwin_output_scale(
                 &mut backend.compositor.state.authoritative_display_state,
-            );
+            ) {
+                log_presentation_state("plasma-scale", &backend.compositor.state);
+            }
             backend.compositor.state.coordinate_transform = backend
                 .compositor
                 .state
@@ -517,11 +537,18 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 .authoritative_display_state
                 .uniform_presentation_scale();
             backend.compositor.state.kwin_surface_scale = (uniform, uniform);
-
-            if !host_changed {
-                // Coalesced repeat (same size): output/configure already correct.
-                return;
+            // The viewport moved under a stationary cursor: recompute whether
+            // the last physical pointer is still inside (border presses stay
+            // suppressed until motion returns into the guest).
+            {
+                let snapshot = backend
+                    .compositor
+                    .state
+                    .authoritative_display_state
+                    .presentation_snapshot();
+                backend.button_tracker.reevaluate(&snapshot);
             }
+            log_presentation_state("host-resize", &backend.compositor.state);
 
             if let Some(output) = &backend.compositor.output {
                 let mode = Mode {
@@ -546,7 +573,17 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 .authoritative_display_state
                 .configure_size();
             if let Some(surface) = get_surface(&backend.compositor.state) {
-                configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+                let serial =
+                    configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+                // Record the serial against the current request so later KWin
+                // commits attribute to their owning configure (ack tie-break).
+                if let Some(serial) = serial {
+                    backend
+                        .compositor
+                        .state
+                        .authoritative_display_state
+                        .note_configure_sent(serial);
+                }
             }
         }
         CentralizedEvent::Focus(focused) => {
@@ -657,6 +694,77 @@ fn complete_kwin_presentation_without_android_timestamp(
     }
 }
 
+/// One-line resize-geometry diagnostic, emitted only on state changes
+/// (host resize, commit geometry change, convergence flip, Plasma change) —
+/// never per frame. Filter device logs with `adb logcat | grep
+/// presentation.state` while stress-testing popup/fullscreen resizing.
+pub fn log_presentation_state(reason: &str, state: &State) {
+    let display = &state.authoritative_display_state;
+    let snap = display.presentation_snapshot();
+    let fmt_size = |size: Option<(f64, f64)>| match size {
+        Some((w, h)) => format!("{w:.0}x{h:.0}"),
+        None => "none".to_owned(),
+    };
+    log::info!(
+        "presentation.state reason={reason} gen={} host={}x{} req={}x{} reqgen={} ack={} surf={} buf={} bscale={:?} plasma={:.3} rgen={} rhost={}x{} rlogic={:.0}x{:.0} commit={} view={:.0},{:.0}+{:.0}x{:.0} scale={:.3} conv={}",
+        snap.generation,
+        snap.host.0,
+        snap.host.1,
+        snap.requested.0,
+        snap.requested.1,
+        snap.requested_generation,
+        snap.acked_serial,
+        fmt_size(display.last_surface_size),
+        fmt_size(display.last_buffer_size),
+        display.last_buffer_scale,
+        snap.plasma_scale,
+        snap.rendered_generation,
+        snap.rendered_host.0,
+        snap.rendered_host.1,
+        snap.guest_logical.0,
+        snap.guest_logical.1,
+        fmt_size(snap.committed),
+        snap.viewport_origin.0,
+        snap.viewport_origin.1,
+        snap.viewport_size.0,
+        snap.viewport_size.1,
+        snap.uniform_scale,
+        snap.converged,
+    );
+}
+
+/// Low-frequency Plasma-scale refresh, gated by `clock` time (default 2s).
+/// The render loop consumes cached scale; this stats the config file at most
+/// twice a second and parses JSON only when its mtime advanced. Explicit
+/// display-configuration actions (resume, resize) refresh immediately via
+/// `sync_kwin_output_scale` instead of waiting for this sampler.
+fn maybe_poll_plasma_scale(backend: &mut WaylandBackend) {
+    const POLL_INTERVAL_MS: u64 = 2000;
+    let now_ms = backend.clock.now().as_millis() as u64;
+    if let Some(last) = backend.last_plasma_poll_ms {
+        if now_ms.saturating_sub(last) < POLL_INTERVAL_MS {
+            return;
+        }
+    }
+    backend.last_plasma_poll_ms = Some(now_ms);
+    if crate::android::backend::wayland::output_state::sync_kwin_output_scale(
+        &mut backend.compositor.state.authoritative_display_state,
+    ) {
+        backend.compositor.state.coordinate_transform = backend
+            .compositor
+            .state
+            .authoritative_display_state
+            .coordinate_transform();
+        let uniform = backend
+            .compositor
+            .state
+            .authoritative_display_state
+            .uniform_presentation_scale();
+        backend.compositor.state.kwin_surface_scale = (uniform, uniform);
+        log_presentation_state("plasma-scale", &backend.compositor.state);
+    }
+}
+
 fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     // Android reports the physical display-present timestamp asynchronously.
     // Poll every sample rather than just the first one: unrelated frames can
@@ -672,13 +780,18 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         complete_kwin_android_presentation(backend, sample);
     }
 
-    let Some(winit) = backend.graphic_renderer.as_mut() else {
-        return Ok(());
-    };
-
     // Android clipboard polling and transfer workers never touch the render thread; apply only
     // completed, immutable changes here before dispatching the next batch of Wayland requests.
     backend.compositor.process_android_clipboard();
+
+    // Low-frequency cached-scale sampler (filesystem stat at most every 2s,
+    // JSON parse only on mtime change). Runs before any renderer borrow so the
+    // frame below consumes cache only.
+    maybe_poll_plasma_scale(backend);
+
+    let Some(winit) = backend.graphic_renderer.as_mut() else {
+        return Ok(());
+    };
 
     let size = winit.window_size();
     // Zero/invalid = surface temporarily unavailable: preserve last valid,
@@ -707,18 +820,12 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .authoritative_display_state
             .physical_size;
         if (host.0, host.1) != (size.w, size.h) {
-            if let Some(gen) = backend
+            if let Some(_gen) = backend
                 .compositor
                 .state
                 .authoritative_display_state
                 .try_update_physical_size(size.w, size.h)
             {
-                log::info!(
-                    "redraw: host sync to {}x{} generation={} (missed Resized)",
-                    size.w,
-                    size.h,
-                    gen,
-                );
                 backend.compositor.state.size = (size.w, size.h).into();
                 backend.compositor.state.coordinate_transform = backend
                     .compositor
@@ -731,6 +838,14 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                     .authoritative_display_state
                     .uniform_presentation_scale();
                 backend.compositor.state.kwin_surface_scale = (uniform, uniform);
+                {
+                    let snapshot = backend
+                        .compositor
+                        .state
+                        .authoritative_display_state
+                        .presentation_snapshot();
+                    backend.button_tracker.reevaluate(&snapshot);
+                }
                 if let Some(output) = &backend.compositor.output {
                     let mode = Mode {
                         size: size.into(),
@@ -753,8 +868,17 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                     if let Some(output) = &backend.compositor.output {
                         output.enter(surface.wl_surface());
                     }
-                    configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+                    let serial =
+                        configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+                    if let Some(serial) = serial {
+                        backend
+                            .compositor
+                            .state
+                            .authoritative_display_state
+                            .note_configure_sent(serial);
+                    }
                 }
+                log_presentation_state("host-resize-missed", &backend.compositor.state);
             }
         }
     }
@@ -808,11 +932,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .map_err(|error| format!("Failed to bind EGL surface: {error}"))?;
 
         // Disjoint borrows: geometry state vs commit tracking.
-        let crate::android::backend::wayland::WaylandBackend {
-            compositor,
-            last_kwin_commit,
-            ..
-        } = &mut *backend;
+        let compositor = &mut backend.compositor;
 
         let toplevels = compositor
             .state
@@ -820,10 +940,10 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .toplevel_surfaces()
             .to_vec();
 
-        // Detect committed KWin geometry. Filesystem/JSON parsing NEVER happens
-        // per-frame: Plasma scale is refreshed (mtime-cached) only when a NEW
-        // KWin commit arrives, and guest convergence is size-aware so stale
-        // frames cannot overwrite newer host generations.
+        // Attribute the live KWin frame to its owning request (newest-first
+        // history, ack-serial tie-break). Pure state math every frame — no
+        // filesystem access here; Plasma scale arrives via explicit refreshes
+        // and the low-frequency sampler only.
         for surface in &toplevels {
             if compositor.state.is_known_kwin_surface(surface.wl_surface()) {
                 let observed = smithay::backend::renderer::utils::with_renderer_surface_state(
@@ -836,61 +956,40 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                             .buffer_size()
                             .and_then(|s| (s.w > 0 && s.h > 0).then_some((s.w as f64, s.h as f64)));
                         let buffer_scale = state.buffer_scale();
-                        let commit = state.current_commit();
-                        (surface_size, buffer_size, buffer_scale, commit)
+                        (surface_size, buffer_size, buffer_scale)
                     },
                 );
-                if let Some((surface_size, buffer_size, buffer_scale, commit)) = observed {
-                    let is_new_commit = *last_kwin_commit != Some(commit);
-                    if is_new_commit {
-                        *last_kwin_commit = Some(commit);
-                        // Refresh Plasma scale only on real commits (mtime-cached;
-                        // parses JSON only when kwinoutputconfig.json changed).
-                        let scale_changed =
-                            crate::android::backend::wayland::output_state::sync_kwin_output_scale(
-                                &mut compositor.state.authoritative_display_state,
-                            );
-                        if scale_changed {
-                            log::info!(
-                                "KWin configured scale changed: scale={:.3} logical_geom={:?}",
-                                compositor
-                                    .state
-                                    .authoritative_display_state
-                                    .effective_kwin_scale(),
-                                compositor
-                                    .state
-                                    .authoritative_display_state
-                                    .logical_geometry(),
-                            );
-                        }
-                        if compositor
+                if let Some((surface_size, buffer_size, buffer_scale)) = observed {
+                    let was_converged = compositor
+                        .state
+                        .authoritative_display_state
+                        .presentation_snapshot()
+                        .converged;
+                    if compositor
+                        .state
+                        .authoritative_display_state
+                        .note_kwin_commit(surface_size, buffer_size, Some(buffer_scale))
+                    {
+                        compositor.state.coordinate_transform = compositor
                             .state
                             .authoritative_display_state
-                            .note_kwin_commit(surface_size, buffer_size, Some(buffer_scale))
-                        {
-                            let snap = compositor
-                                .state
-                                .authoritative_display_state
-                                .presentation_snapshot();
-                            compositor.state.coordinate_transform = compositor
-                                .state
-                                .authoritative_display_state
-                                .coordinate_transform();
-                            compositor.state.kwin_surface_scale =
-                                (snap.uniform_scale, snap.uniform_scale);
-                            log::info!(
-                                "presentation snapshot gen={} host={:?} committed={:?} guest={:?} uniform={:.3} viewport_origin={:?} viewport_size={:?} converged={} plasma={:.3}",
-                                snap.generation,
-                                snap.host,
-                                snap.committed,
-                                snap.guest_logical,
-                                snap.uniform_scale,
-                                snap.viewport_origin,
-                                snap.viewport_size,
-                                snap.converged,
-                                snap.plasma_scale,
-                            );
-                        }
+                            .coordinate_transform();
+                        let snap = compositor
+                            .state
+                            .authoritative_display_state
+                            .presentation_snapshot();
+                        compositor.state.kwin_surface_scale =
+                            (snap.uniform_scale, snap.uniform_scale);
+                        log_presentation_state(
+                            if snap.converged && !was_converged {
+                                "commit-converged"
+                            } else if !snap.converged && was_converged {
+                                "commit-stale"
+                            } else {
+                                "commit"
+                            },
+                            &compositor.state,
+                        );
                     }
                 }
                 break;
@@ -1174,12 +1273,13 @@ fn record_protocol_event(trace: &mut FrameTrace, event: FrameEvent) {
 fn configure_toplevel(
     surface: &ToplevelSurface,
     size: smithay::utils::Size<i32, smithay::utils::Logical>,
-) {
+) -> Option<u32> {
     surface.with_pending_state(|state| {
         state.size = Some(size);
         state.states.set(xdg_toplevel::State::Activated);
         state.states.set(xdg_toplevel::State::Fullscreen);
         state.states.set(xdg_toplevel::State::Maximized);
     });
-    surface.send_pending_configure();
+    // Capture the serial so later KWin commits attribute to this request.
+    surface.send_pending_configure().map(u32::from)
 }

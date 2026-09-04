@@ -1753,7 +1753,9 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         pending_kwin_presentation: None,
         refresh_rate_millihz: refresh_rate_millihz(&android_app),
         pressed_keys: std::collections::HashSet::new(),
-        last_kwin_commit: None,
+        button_tracker: crate::core::pointer_buttons::PointerButtonTracker::new(),
+        suppressed_touch_ids: std::collections::HashSet::new(),
+        last_plasma_poll_ms: None,
         android_app,
     })
 }

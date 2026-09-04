@@ -336,7 +336,10 @@ impl XdgShellHandler for State {
             state.states.set(xdg_toplevel::State::Fullscreen);
             state.states.set(xdg_toplevel::State::Maximized);
         });
-        surface.send_configure();
+        // Capture the serial for the initial request so the first KWin
+        // commits already attribute to a known configure.
+        let serial = u32::from(surface.send_configure());
+        self.authoritative_display_state.note_configure_sent(serial);
         self.observe_kwin_toplevel(&surface);
     }
 
@@ -363,22 +366,34 @@ impl XdgShellHandler for State {
         // callback runs.
         self.observe_kwin_surface_id(&surface);
         if self.is_known_kwin_surface(&surface) {
+            // Record the ack against the configure history so later commits
+            // can prefer the acknowledged request on same-dimension ties.
+            // The serial is authoritative here; size comes from the payload.
+            let (serial, acked_size) = match &configure {
+                Configure::Toplevel(configure) => (
+                    u32::from(configure.serial),
+                    configure.state.size.map(|size| (size.w, size.h)),
+                ),
+                Configure::Popup(configure) => (u32::from(configure.serial), None),
+            };
+            let acked_gen = self
+                .authoritative_display_state
+                .note_configure_acked(serial);
             if let Some(generation) = self.kwin_generation {
                 if self.readiness.mark_configure_acked_for(generation) {
-                    let serial = match configure {
-                        Configure::Toplevel(configure) => u32::from(configure.serial),
-                        Configure::Popup(configure) => u32::from(configure.serial),
-                    };
                     log::info!(
-                        "wayland.readiness stage=configure-acked generation={} serial={} surface={:?}",
+                        "wayland.readiness stage=configure-acked generation={} serial={} acked_resize_gen={:?} acked_size={:?} resize_gen={} surface={:?}",
                         generation,
                         serial,
+                        acked_gen,
+                        acked_size,
+                        self.authoritative_display_state.resize_generation,
                         surface.id()
                     );
                     crate::android::diagnostics::host_event(
                         "wayland-readiness",
                         &format!(
-                            "stage=configure-acked generation={} serial={} surface={:?}",
+                            "stage=configure-acked generation={} serial={} acked_resize_gen={acked_gen:?} surface={:?}",
                             generation,
                             serial,
                             surface.id()
