@@ -341,6 +341,10 @@ pub struct WinitTouchEndedEvent {
     pub(crate) mode: TouchMode,
     pub(crate) x: f64,
     pub(crate) y: f64,
+    /// Whether the lift physical was inside the guest viewport. Border lifts
+    /// carry dummy coordinates that handlers must ignore (release-at-current
+    /// or drop) — never edge-snapped into guest clicks.
+    pub(crate) in_guest: bool,
 }
 
 impl Event<WinitInput> for WinitTouchEndedEvent {

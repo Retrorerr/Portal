@@ -66,33 +66,42 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     // requested configures, committed guest geometry and Plasma scale survive
     // suspend/resume. A fresh `new()` here would reset generation to 0 and
     // discard transitional guest state.
-    {
+    let host_changed = {
         let state = &mut backend.compositor.state.authoritative_display_state;
         // Density is panel metadata, never rewrites Plasma scale/guest.
         state.update_density_dpi(density_dpi);
-        // Host target: bumps generation only on real change, coalesces repeats,
-        // preserves OLD guest until the matching KWin commit converges.
-        if let Some(gen) = state.try_update_physical_size(window_size.w, window_size.h) {
-            log::info!(
-                "configure_output: host resize to {}x{} generation={}",
-                window_size.w,
-                window_size.h,
-                gen,
-            );
-        }
-        // Plasma scale: mtime-cached, parsed only when kwinoutputconfig.json
-        // actually changed (never per-frame).
+        // Host target: bumps generation only on real change, coalesces repeats.
+        let changed = state
+            .try_update_physical_size(window_size.w, window_size.h)
+            .is_some();
+        // Explicit display-configuration refresh (not the render path):
+        // mtime-cached, parses JSON only when kwinoutputconfig.json changed.
         if crate::android::backend::wayland::output_state::sync_kwin_output_scale(state) {
-            log::info!(
-                "configure_output: KWin Plasma scale now {:.3}",
-                state.effective_kwin_scale(),
+            crate::android::backend::wayland::log_presentation_state(
+                "plasma-scale",
+                &backend.compositor.state,
             );
         }
-    }
+        changed
+    };
     let display_state = backend.compositor.state.authoritative_display_state;
     backend.compositor.state.coordinate_transform = display_state.coordinate_transform();
     let uniform = display_state.uniform_presentation_scale();
     backend.compositor.state.kwin_surface_scale = (uniform, uniform);
+    {
+        let snapshot = backend
+            .compositor
+            .state
+            .authoritative_display_state
+            .presentation_snapshot();
+        backend.button_tracker.reevaluate(&snapshot);
+    }
+    if host_changed {
+        crate::android::backend::wayland::log_presentation_state(
+            "host-resize",
+            &backend.compositor.state,
+        );
+    }
 
     let physical_size_mm = display_state.physical_size_mm();
 
@@ -136,7 +145,13 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     let configure_size = display_state.configure_size();
     for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
         output.enter(surface.wl_surface());
-        configure_toplevel(surface, configure_size.0, configure_size.1);
+        if let Some(serial) = configure_toplevel(surface, configure_size.0, configure_size.1) {
+            backend
+                .compositor
+                .state
+                .authoritative_display_state
+                .note_configure_sent(serial);
+        }
     }
 }
 
@@ -179,14 +194,15 @@ fn resume_wayland(
     true
 }
 
-fn configure_toplevel(surface: &ToplevelSurface, width: i32, height: i32) {
+fn configure_toplevel(surface: &ToplevelSurface, width: i32, height: i32) -> Option<u32> {
     surface.with_pending_state(|state| {
         state.size.replace((width, height).into());
         state.states.set(xdg_toplevel::State::Activated);
         state.states.set(xdg_toplevel::State::Fullscreen);
         state.states.set(xdg_toplevel::State::Maximized);
     });
-    surface.send_configure();
+    // Capture the serial so later KWin commits attribute to this request.
+    Some(u32::from(surface.send_configure()))
 }
 
 impl PolarBearApp {
