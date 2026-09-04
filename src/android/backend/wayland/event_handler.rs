@@ -60,9 +60,10 @@ fn pointer_focus(
 }
 
 fn clamp_coordinates(state: &State, x: f64, y: f64) -> (f64, f64) {
+    let logical = state.coordinate_transform.logical_source();
     (
-        crate::core::android_integration::clamp_physical_coordinate(x, state.size.w),
-        crate::core::android_integration::clamp_physical_coordinate(y, state.size.h),
+        crate::core::android_integration::clamp_physical_coordinate(x, logical.width as i32),
+        crate::core::android_integration::clamp_physical_coordinate(y, logical.height as i32),
     )
 }
 
@@ -75,6 +76,24 @@ fn emit_pointer_motion(
     let pointer = compositor.pointer.clone();
     let state = &mut compositor.state;
     let (clamped_x, clamped_y) = clamp_coordinates(state, x, y);
+    let round_trip = state.coordinate_transform.logical_to_physical(
+        crate::core::coordinate_transform::LogicalPoint {
+            x: clamped_x,
+            y: clamped_y,
+        },
+    );
+    let physical = state
+        .coordinate_transform
+        .logical_to_physical(crate::core::coordinate_transform::LogicalPoint { x, y });
+    let error_px =
+        ((round_trip.x - physical.x).powi(2) + (round_trip.y - physical.y).powi(2)).sqrt();
+    log::info!(
+        "input.alignment source=touch physical=({:.1},{:.1}) logical=({clamped_x:.1},{clamped_y:.1}) round_trip=({:.1},{:.1}) error_px={error_px:.3}",
+        physical.x,
+        physical.y,
+        round_trip.x,
+        round_trip.y
+    );
     if let Some(focus) = pointer_focus(state) {
         let serial = SERIAL_COUNTER.next_serial();
         pointer.motion(
@@ -173,12 +192,15 @@ fn poll_long_press(backend: &mut WaylandBackend) {
 
     backend.touch_mode = TouchMode::LongPress;
     // Anchor the pointer where the finger landed, so a drag selects from there.
-    emit_pointer_motion(
-        &mut backend.compositor,
-        down_position.x,
-        down_position.y,
-        now as u32,
-    );
+    let logical = backend
+        .compositor
+        .state
+        .coordinate_transform
+        .physical_to_logical(crate::core::coordinate_transform::PhysicalPoint {
+            x: down_position.x,
+            y: down_position.y,
+        });
+    emit_pointer_motion(&mut backend.compositor, logical.x, logical.y, now as u32);
 }
 
 pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop: &ActiveEventLoop) {
@@ -298,6 +320,41 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 let (clamped_x, clamped_y) =
                     clamp_coordinates(&compositor.state, event.x(), event.y());
 
+                let round_trip = compositor.state.coordinate_transform.logical_to_physical(
+                    crate::core::coordinate_transform::LogicalPoint {
+                        x: clamped_x,
+                        y: clamped_y,
+                    },
+                );
+                let error_px = ((round_trip.x - event.physical_x()).powi(2)
+                    + (round_trip.y - event.physical_y()).powi(2))
+                .sqrt();
+                let kwin_scale = compositor
+                    .state
+                    .authoritative_display_state
+                    .effective_kwin_scale();
+                if let (Some(dev), Some(src), Some(tool)) = (
+                    event.android_device_id(),
+                    event.android_source(),
+                    event.android_tool_type(),
+                ) {
+                    log::info!(
+                        "input.alignment device={dev} source={src:#x} tool={tool} physical=({:.1},{:.1}) logical=({clamped_x:.1},{clamped_y:.1}) round_trip=({:.1},{:.1}) error_px={error_px:.3} scale={kwin_scale:.3}",
+                        event.physical_x(),
+                        event.physical_y(),
+                        round_trip.x,
+                        round_trip.y
+                    );
+                } else {
+                    log::info!(
+                        "input.alignment physical=({:.1},{:.1}) logical=({clamped_x:.1},{clamped_y:.1}) round_trip=({:.1},{:.1}) error_px={error_px:.3} scale={kwin_scale:.3}",
+                        event.physical_x(),
+                        event.physical_y(),
+                        round_trip.x,
+                        round_trip.y
+                    );
+                }
+
                 if let Some(surface) = get_surface(&compositor.state) {
                     pointer.motion(
                         &mut compositor.state,
@@ -396,6 +453,27 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             guest_scale_factor,
         } => {
             backend.compositor.state.size = (size.w, size.h).into();
+            backend
+                .compositor
+                .state
+                .authoritative_display_state
+                .update_physical_size(size.w, size.h);
+            let density_dpi = (guest_scale_factor * 160.0).round().max(160.0) as i32;
+            backend
+                .compositor
+                .state
+                .authoritative_display_state
+                .update_density_dpi(density_dpi);
+            backend.compositor.state.coordinate_transform = backend
+                .compositor
+                .state
+                .authoritative_display_state
+                .coordinate_transform();
+            backend.compositor.state.kwin_surface_scale = backend
+                .compositor
+                .state
+                .authoritative_display_state
+                .presentation_scale();
 
             if let Some(output) = &backend.compositor.output {
                 let mode = Mode {
@@ -414,8 +492,18 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             let guest_scale = guest_scale_factor.round().max(1.0) as i32;
             write_guest_output_state(size.w, size.h, guest_scale);
 
+            let configure_size = backend
+                .compositor
+                .state
+                .authoritative_display_state
+                .configure_size();
             if let Some(surface) = get_surface(&backend.compositor.state) {
-                configure_toplevel(&surface, (size.w, size.h).into());
+                configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+            }
+        }
+        CentralizedEvent::Focus(focused) => {
+            if !focused {
+                backend.suspend_input_and_presentation();
             }
         }
         _ => (),
@@ -601,6 +689,75 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .xdg_shell_state
             .toplevel_surfaces()
             .to_vec();
+
+        // Sync KWin configured scale from guest configuration (e.g. if scale changed via kscreen-doctor or Plasma Settings)
+        let scale_changed = crate::android::backend::wayland::output_state::sync_kwin_output_scale(
+            &mut compositor.state.authoritative_display_state,
+        );
+        if scale_changed {
+            compositor.state.coordinate_transform = compositor
+                .state
+                .authoritative_display_state
+                .coordinate_transform();
+            log::info!(
+                "KWin configured scale changed: scale={:.3} logical_geom={:?}",
+                compositor
+                    .state
+                    .authoritative_display_state
+                    .effective_kwin_scale(),
+                compositor
+                    .state
+                    .authoritative_display_state
+                    .logical_geometry(),
+            );
+        }
+
+        // Detect committed KWin geometry and update presentation scale if changed
+        for surface in &toplevels {
+            if compositor.state.is_known_kwin_surface(surface.wl_surface()) {
+                let detected = smithay::backend::renderer::utils::with_renderer_surface_state(
+                    surface.wl_surface(),
+                    |state| {
+                        let candidate_size = state.surface_size().or_else(|| state.buffer_size());
+                        if let Some(surf_size) = candidate_size {
+                            if surf_size.w > 0 && surf_size.h > 0 {
+                                return Some((surf_size.w as f64, surf_size.h as f64));
+                            }
+                        }
+                        None
+                    },
+                )
+                .flatten();
+
+                if let Some(surf_size) = detected {
+                    if compositor
+                        .state
+                        .authoritative_display_state
+                        .update_observed_surface_size(surf_size)
+                    {
+                        compositor.state.kwin_surface_scale = compositor
+                            .state
+                            .authoritative_display_state
+                            .presentation_scale();
+                        log::info!(
+                            "Authoritative display presentation scale updated: surface_size=({:.1}, {:.1}) presentation_scale=({:.2}, {:.2})",
+                            surf_size.0,
+                            surf_size.1,
+                            compositor.state.kwin_surface_scale.0,
+                            compositor.state.kwin_surface_scale.1,
+                        );
+                    }
+                }
+                break;
+            }
+        }
+
+        let presentation_scale = compositor
+            .state
+            .authoritative_display_state
+            .presentation_scale();
+        let scale_to_use = presentation_scale.0.max(1.0);
+
         let mut elements = Vec::new();
         let mut non_kwin_elements = Vec::new();
         let mut kwin_elements = Vec::new();
@@ -608,17 +765,26 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             log::debug!("event_handler: toplevels count={}", toplevels.len());
         }
         for surface in &toplevels {
+            let surface_scale = if compositor.state.is_known_kwin_surface(surface.wl_surface()) {
+                scale_to_use
+            } else {
+                1.0
+            };
             let surface_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
-                renderer,
-                surface.wl_surface(),
-                (0, 0),
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            );
+                    renderer,
+                    surface.wl_surface(),
+                    (0, 0),
+                    surface_scale,
+                    1.0,
+                    Kind::Unspecified,
+                );
             if toplevels.len() > 1 {
-                log::debug!("surface {:?} produced {} elements", surface.wl_surface(), surface_elements.len());
+                log::debug!(
+                    "surface {:?} produced {} elements",
+                    surface.wl_surface(),
+                    surface_elements.len()
+                );
             }
 
             if compositor.state.is_known_kwin_surface(surface.wl_surface()) {
@@ -634,7 +800,6 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         elements.extend(non_kwin_elements);
         elements.extend(kwin_elements);
 
-
         let cursor_surface = match &compositor.state.cursor_image {
             CursorImageStatus::Surface(surface) if surface.alive() => Some(surface.clone()),
             _ => None,
@@ -649,13 +814,21 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                     })
                     .unwrap_or_default()
             });
-            let location =
-                (compositor.pointer.current_location() - hotspot.to_f64()).to_i32_round();
+            let pointer_logical = compositor.pointer.current_location();
+            let pointer_physical = compositor.state.coordinate_transform.logical_to_physical(
+                crate::core::coordinate_transform::LogicalPoint {
+                    x: pointer_logical.x,
+                    y: pointer_logical.y,
+                },
+            );
+            let elem_phys_x = pointer_physical.x - (hotspot.x as f64) * presentation_scale.0;
+            let elem_phys_y = pointer_physical.y - (hotspot.y as f64) * presentation_scale.1;
+            let location = (elem_phys_x.round() as i32, elem_phys_y.round() as i32);
             elements.extend(render_elements_from_surface_tree(
                 renderer,
                 surface,
-                (location.x, location.y),
-                1.0,
+                (location.0, location.1),
+                scale_to_use,
                 1.0,
                 Kind::Cursor,
             ));
@@ -667,7 +840,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         frame
             .clear(Color32F::new(0.1, 0.0, 0.0, 1.0), &[damage])
             .map_err(|error| format!("Failed to clear frame: {error:?}"))?;
-        draw_render_elements(&mut frame, 1.0, &elements, &[damage])
+        draw_render_elements(&mut frame, scale_to_use, &elements, &[damage])
             .map_err(|error| format!("Failed to draw render elements: {error:?}"))?;
         // We rely on the nested compositor to do the sync for us.
         let _ = frame
@@ -742,11 +915,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         }
         if kwin_surface_rendered && kwin_feedback_requested {
             let generation = backend.compositor.state.kwin_frame_generation();
-            match (
-                submitted_frame_id,
-                generation,
-                timestamp_support,
-            ) {
+            match (submitted_frame_id, generation, timestamp_support) {
                 (Some(egl_frame_id), Some(generation), _) => {
                     if backend.pending_kwin_presentation.is_none() {
                         backend.pending_kwin_presentation = Some(PendingKwinPresentation {

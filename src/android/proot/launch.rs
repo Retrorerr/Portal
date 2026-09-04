@@ -1,8 +1,6 @@
 use super::process::ArchProcess;
 use crate::android::{
-    diagnostics,
-    utils::application_context::get_application_context,
-    utils::webview_handoff,
+    diagnostics, utils::application_context::get_application_context, utils::webview_handoff,
 };
 use crate::core::runtime::LinuxRuntime;
 use std::fs;
@@ -10,8 +8,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 static LAUNCH_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -63,7 +61,10 @@ fn report_failure(reason: impl Into<String>) {
 
 /// Consume a failure reported by the guest-session monitor.
 pub fn take_failure() -> Option<String> {
-    launch_failure().lock().ok().and_then(|mut failure| failure.take())
+    launch_failure()
+        .lock()
+        .ok()
+        .and_then(|mut failure| failure.take())
 }
 
 fn clear_failure_markers() {
@@ -98,12 +99,17 @@ fn spawn_failure_monitor(cancel: Arc<AtomicBool>) -> JoinHandle<()> {
     thread::spawn(move || {
         let runtime = crate::android::runtime::proot::PRootRuntime::active();
         let state_dir = runtime.rootfs_path().join("var/lib/localdesktop");
+        let mut last_net_sync = Instant::now();
         while !cancel.load(Ordering::Acquire) {
             for name in ["plasma-failed", "kwin-crash"] {
                 let path = state_dir.join(name);
                 if path.is_file() {
                     report_failure(marker_reason(&path, name));
                 }
+            }
+            if last_net_sync.elapsed() >= Duration::from_secs(5) {
+                last_net_sync = Instant::now();
+                crate::android::proot::setup::sync_guest_network_config(runtime.rootfs_path());
             }
             thread::sleep(Duration::from_millis(100));
         }
@@ -143,9 +149,20 @@ pub fn launch() {
         *failure = None;
     }
 
+    let layout = crate::core::runtime::RuntimeLayout::new("/data/data/app.polarbear/files");
+    if layout.base_dir.join("runtime-B").exists() {
+        let _ = layout.set_active_slot("slot-b");
+    }
+    let runtime = crate::android::runtime::proot::PRootRuntime::active();
+    let rootfs = runtime.rootfs_path();
+    log::info!("launch: active runtime rootfs is {}", rootfs.display());
+    crate::android::proot::setup::sync_session_runtime_files(&rootfs, 1);
+
     let cancel = Arc::new(AtomicBool::new(false));
     let Ok(mut state) = launch_state().lock() else {
-        log::error!("Launch registry lock is poisoned; refusing to start an untracked guest session");
+        log::error!(
+            "Launch registry lock is poisoned; refusing to start an untracked guest session"
+        );
         LAUNCH_RUNNING.store(false, Ordering::Release);
         return;
     };

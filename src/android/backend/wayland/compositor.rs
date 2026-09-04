@@ -98,6 +98,12 @@ pub struct State {
     /// Wayland backend, so setup/webview stages never touch Android clipboard state.
     pub clipboard_bridge: Option<ClipboardBridge>,
     pub ahb_importer: Option<crate::android::backend::wayland::gl_import::AhbTextureImporter>,
+    /// Single authoritative display state for physical dimensions, configure size, and presentation.
+    pub authoritative_display_state: crate::core::coordinate_transform::AuthoritativeDisplayState,
+    /// Dynamic display scaling factor for KWin's nested output surface (scale_x, scale_y).
+    pub kwin_surface_scale: (f64, f64),
+    /// Single source of truth for Android physical, rendered viewport, and KWin logical space.
+    pub coordinate_transform: crate::core::coordinate_transform::CoordinateTransform,
 }
 
 impl State {
@@ -284,10 +290,7 @@ impl State {
     /// Compatibility helper for callers that only have submit/feedback
     /// evidence and no Android timestamp sample.
     pub fn mark_kwin_frame_presented(&mut self) -> Option<u64> {
-        self.mark_kwin_frame_presented_with_evidence(
-            "egl-swap-and-wayland-feedback",
-            None,
-        )
+        self.mark_kwin_frame_presented_with_evidence("egl-swap-and-wayland-feedback", None)
     }
 
     fn observe_kwin_surface_id(&mut self, surface: &WlSurface) {
@@ -316,8 +319,11 @@ impl XdgShellHandler for State {
         if let Some(output) = &self.output {
             output.enter(surface.wl_surface());
         }
+        let configure_size = self.authoritative_display_state.configure_size();
         surface.with_pending_state(|state| {
-            state.size.replace(self.size);
+            state
+                .size
+                .replace((configure_size.0, configure_size.1).into());
             state.states.set(xdg_toplevel::State::Activated);
             state.states.set(xdg_toplevel::State::Fullscreen);
             state.states.set(xdg_toplevel::State::Maximized);
@@ -531,9 +537,10 @@ impl PointerConstraintsHandler for State {
 
 impl FractionalScaleHandler for State {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
+        let preferred = self.authoritative_display_state.baseline_density_scale();
         smithay::wayland::compositor::with_states(&surface, |states| {
             fractional_scale::with_fractional_scale(states, |scale| {
-                scale.set_preferred_scale(1.0);
+                scale.set_preferred_scale(preferred);
             });
         });
     }
@@ -639,10 +646,12 @@ impl smithay::reexports::wayland_server::Dispatch<
     }
 }
 
-impl smithay::reexports::wayland_server::Dispatch<
-    smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
-    smithay::backend::renderer::ExternalBufferData,
-> for State {
+impl
+    smithay::reexports::wayland_server::Dispatch<
+        smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+        smithay::backend::renderer::ExternalBufferData,
+    > for State
+{
     fn request(
         _state: &mut Self,
         _client: &smithay::reexports::wayland_server::Client,
@@ -700,9 +709,14 @@ impl Compositor {
     ///
     /// Supports `(width, height)`, `winit::dpi::PhysicalSize<u32>` (e.g. from `window.inner_size()`),
     /// `&Window`, or `smithay::utils::Size`.
-    pub fn new(size: impl IntoCompositorSize) -> Result<Compositor, Box<dyn Error>> {
+    pub fn new(
+        size: impl IntoCompositorSize,
+        guest_scale: f64,
+    ) -> Result<Compositor, Box<dyn Error>> {
         let display = Display::new()?;
         let dh = display.handle();
+        let size = size.into_compositor_size();
+        let scale_val = guest_scale.max(1.0);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "Local Desktop");
@@ -719,6 +733,20 @@ impl Compositor {
         let touch = seat.add_touch();
         let pointer = seat.add_pointer();
 
+        let mut auth_display_state =
+            crate::core::coordinate_transform::AuthoritativeDisplayState::new(
+                size.w,
+                size.h,
+                (scale_val * 160.0).round() as i32,
+                60000,
+            );
+        auth_display_state.update_kwin_scale(scale_val);
+        crate::android::backend::wayland::output_state::sync_kwin_output_scale(
+            &mut auth_display_state,
+        );
+        let coordinate_transform = auth_display_state.coordinate_transform();
+        let kwin_surface_scale = auth_display_state.presentation_scale();
+
         let state = State {
             compositor_state: CompositorState::new::<State>(&dh),
             xdg_shell_state: XdgShellState::new::<State>(&dh),
@@ -733,7 +761,7 @@ impl Compositor {
             single_pixel_buffer_state: SinglePixelBufferState::new::<State>(&dh),
             viewporter_state: ViewporterState::new::<State>(&dh),
             fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
-            size: size.into_compositor_size(),
+            size,
             output: None,
             cursor_image: CursorImageStatus::default_named(),
             readiness: StartupReadiness::new(),
@@ -741,7 +769,11 @@ impl Compositor {
             kwin_client_id: None,
             kwin_generation: None,
             clipboard_bridge: None,
-            ahb_importer: match crate::android::backend::wayland::gl_import::AhbTextureImporter::new() {
+            authoritative_display_state: auth_display_state,
+            kwin_surface_scale,
+            coordinate_transform,
+            ahb_importer: match crate::android::backend::wayland::gl_import::AhbTextureImporter::new(
+            ) {
                 Ok(imp) => {
                     dh.create_global::<State, crate::android::backend::wayland::protocol::android_wlegl::server::android_wlegl::AndroidWlegl, _>(
                         1,
@@ -774,7 +806,7 @@ impl Compositor {
 
     /// Legacy constructor defaulting to 1920x1080 for backwards compatibility.
     pub fn build() -> Result<Compositor, Box<dyn Error>> {
-        Self::new((1920, 1080))
+        Self::new((1920, 1080), 1.0)
     }
 
     /// Start clipboard polling after the Android NativeActivity and the nested compositor exist.

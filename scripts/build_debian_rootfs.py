@@ -75,6 +75,8 @@ SEED_PACKAGES = [
     "tar",
     "gzip",
     "xz-utils",
+    "ca-certificates",
+    "libc-bin",
 ]
 
 # Packages to skip if pulled in as optional/heavy non-critical dependencies
@@ -270,10 +272,52 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path):
         except Exception:
             pass
 
-    # Ensure /etc/resolv.conf exists
+    # Ensure /etc/resolv.conf exists with UNIX newlines
     resolv_conf = output_dir / "etc" / "resolv.conf"
     if not resolv_conf.exists():
-        resolv_conf.write_text("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+        with open(resolv_conf, "w", newline="\n", encoding="utf-8") as f:
+            f.write("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+
+    # Ensure /etc/nsswitch.conf exists
+    nsswitch_conf = output_dir / "etc" / "nsswitch.conf"
+    if not nsswitch_conf.exists():
+        with open(nsswitch_conf, "w", newline="\n", encoding="utf-8") as f:
+            f.write(
+                "passwd:         files\n"
+                "group:          files\n"
+                "shadow:         files\n"
+                "gshadow:        files\n\n"
+                "hosts:          files dns\n"
+                "networks:       files\n\n"
+                "protocols:      db files\n"
+                "services:       db files\n"
+                "ethers:         db files\n"
+                "rpc:            db files\n\n"
+                "netgroup:       nis\n"
+            )
+
+    # Ensure /etc/hosts exists
+    hosts = output_dir / "etc" / "hosts"
+    if not hosts.exists():
+        with open(hosts, "w", newline="\n", encoding="utf-8") as f:
+            f.write("127.0.0.1       localhost\n::1             localhost ip6-localhost ip6-loopback\n")
+
+    # Setup SSL paths and symlinks
+    (output_dir / "etc" / "ssl" / "certs").mkdir(parents=True, exist_ok=True)
+    (output_dir / "usr" / "lib").mkdir(parents=True, exist_ok=True)
+    usr_lib_ssl = output_dir / "usr" / "lib" / "ssl"
+    if not usr_lib_ssl.exists():
+        try:
+            os.symlink("../../etc/ssl", usr_lib_ssl)
+        except Exception:
+            pass
+
+    ssl_cert_pem = output_dir / "etc" / "ssl" / "cert.pem"
+    if not ssl_cert_pem.exists():
+        try:
+            os.symlink("certs/ca-certificates.crt", ssl_cert_pem)
+        except Exception:
+            pass
 
     # Ensure /etc/passwd has root and desktop user
     passwd = output_dir / "etc" / "passwd"
@@ -281,7 +325,8 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path):
         "root:x:0:0:root:/root:/bin/bash\n"
         "desktop:x:1000:1000:desktop:/home/desktop:/bin/bash\n"
     )
-    passwd.write_text(passwd_content)
+    with open(passwd, "w", newline="\n", encoding="utf-8") as f:
+        f.write(passwd_content)
 
     group = output_dir / "etc" / "group"
     group_content = (

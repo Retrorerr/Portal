@@ -60,13 +60,35 @@ fn plasma_launcher_waits_for_host_presented_marker() {
     assert!(PLASMA_LAUNCHER.contains("systemdBoot false"));
     assert!(PLASMA_LAUNCHER.contains("loginMode emptySession"));
     assert!(!PLASMA_LAUNCHER.contains("pgrep plasmashell"));
-    assert!(PLASMA_LAUNCHER.contains("rm -f \"$ready_marker\" \"$failure_marker\" \"$crash_marker\""));
+    assert!(
+        PLASMA_LAUNCHER.contains("rm -f \"$ready_marker\" \"$failure_marker\" \"$crash_marker\"")
+    );
     assert!(PLASMA_LAUNCHER.contains("attempt=$attempt_id"));
     assert!(PLASMA_LAUNCHER.contains("WAYLAND_DEBUG=${WAYLAND_DEBUG:-1}"));
     assert!(PLASMA_LAUNCHER.contains("stage=backend compositor=kwin_wayland"));
     assert!(PLASMA_LAUNCHER.contains("package in kwin plasma-workspace"));
     assert!(PLASMA_LAUNCHER.contains("signal_tree \"$session_pid\" KILL"));
-    assert!(PLASMA_LAUNCHER.contains("LOCALDESKTOP_GDB_BACKTRACE=${LOCALDESKTOP_GDB_BACKTRACE:-@GDB_BACKTRACE@}"));
+    assert!(PLASMA_LAUNCHER
+        .contains("LOCALDESKTOP_GDB_BACKTRACE=${LOCALDESKTOP_GDB_BACKTRACE:-@GDB_BACKTRACE@}"));
+}
+
+#[test]
+fn kwin_wrapper_disables_guest_screenlocker() {
+    assert!(KWIN_WRAPPER.contains("/usr/bin/kwin_wayland --no-lockscreen"));
+}
+
+#[test]
+fn plasma_launcher_and_setup_disable_guest_screenlocker() {
+    assert!(PLASMA_LAUNCHER.contains("action/lock_screen"));
+    assert!(PLASMA_LAUNCHER.contains("Autolock false"));
+    assert!(SETUP.contains("action/lock_screen"));
+    assert!(SETUP.contains("kscreenlockerrc"));
+}
+
+#[test]
+fn plasma_launcher_and_setup_do_not_force_scale_1() {
+    assert!(!PLASMA_LAUNCHER.contains("\"scale\": 1"));
+    assert!(!PLASMA_LAUNCHER.contains("QT_SCALE_FACTOR"));
 }
 
 #[test]

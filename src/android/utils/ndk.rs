@@ -169,3 +169,70 @@ pub fn long_press_timeout_ms(android_app: &AndroidApp) -> u64 {
     .map(|timeout| timeout.max(0) as u64)
     .unwrap_or(500)
 }
+
+/// Control Android system cursor visibility.
+/// Setting to false (TYPE_NULL) hides Android's native pointer icon so only KWin's
+/// cursor is visible. Setting to true restores the default system pointer icon.
+pub fn set_android_system_cursor_visible(android_app: &AndroidApp, visible: bool) {
+    run_in_jvm(
+        |env, app| {
+            let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            let window =
+                match env.call_method(&activity, "getWindow", "()Landroid/view/Window;", &[]) {
+                    Ok(v) => match v.l() {
+                        Ok(w) => w,
+                        Err(e) => {
+                            log::warn!("Failed to get window: {e}");
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!("Failed to call getWindow: {e}");
+                        return;
+                    }
+                };
+            let decor_view =
+                match env.call_method(&window, "getDecorView", "()Landroid/view/View;", &[]) {
+                    Ok(v) => match v.l() {
+                        Ok(dv) => dv,
+                        Err(e) => {
+                            log::warn!("Failed to get decorView: {e}");
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!("Failed to call getDecorView: {e}");
+                        return;
+                    }
+                };
+            let icon_type: i32 = if visible { 1000 } else { 0 }; // 1000 = TYPE_DEFAULT, 0 = TYPE_NULL
+            let pointer_icon = match env.call_static_method(
+                "android/view/PointerIcon",
+                "getSystemIcon",
+                "(Landroid/content/Context;I)Landroid/view/PointerIcon;",
+                &[JValue::Object(&activity), JValue::Int(icon_type)],
+            ) {
+                Ok(v) => match v.l() {
+                    Ok(pi) => pi,
+                    Err(e) => {
+                        log::warn!("Failed to get system PointerIcon: {e}");
+                        return;
+                    }
+                },
+                Err(e) => {
+                    log::warn!("Failed to call PointerIcon.getSystemIcon: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = env.call_method(
+                &decor_view,
+                "setPointerIcon",
+                "(Landroid/view/PointerIcon;)V",
+                &[JValue::Object(&pointer_icon)],
+            ) {
+                log::warn!("Failed to call setPointerIcon: {e}");
+            }
+        },
+        android_app.clone(),
+    );
+}

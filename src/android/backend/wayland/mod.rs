@@ -5,13 +5,12 @@ mod event_handler;
 pub mod gl_import;
 mod input;
 mod keymap;
-mod output_state;
+pub mod output_state;
 pub mod protocol;
 mod winit_backend;
 pub mod wlegl;
 
-
-pub use output_state::write_guest_output_state;
+pub use output_state::{read_kwin_output_scale, sync_kwin_output_scale, write_guest_output_state};
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
@@ -24,7 +23,7 @@ use smithay::{
     backend::renderer::gles::GlesRenderer,
     utils::{Clock, Monotonic},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use winit::dpi::PhysicalPosition;
 use winit::platform::android::activity::AndroidApp;
 
@@ -73,6 +72,8 @@ pub struct WaylandBackend {
     pub pending_kwin_presentation: Option<PendingKwinPresentation>,
     /// Android display refresh rate in Wayland mode units (millihertz).
     pub refresh_rate_millihz: i32,
+    /// Currently pressed evdev physical scancodes.
+    pub pressed_keys: HashSet<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +95,8 @@ impl WaylandBackend {
     /// Release any synthesized pointer grab and clear pending presentation state on suspend.
     pub fn suspend_input_and_presentation(&mut self) {
         self.reset_touch_state();
+        let time = self.clock.now().as_millis() as u32;
         if self.pointer_pressed {
-            let time = self.clock.now().as_millis() as u32;
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.compositor.pointer.button(
                 &mut self.compositor.state,
@@ -108,6 +109,17 @@ impl WaylandBackend {
             );
             self.compositor.pointer.frame(&mut self.compositor.state);
             self.pointer_pressed = false;
+        }
+        for scancode in self.pressed_keys.drain() {
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.compositor.keyboard.input::<(), _>(
+                &mut self.compositor.state,
+                scancode.into(),
+                smithay::backend::input::KeyState::Released,
+                serial,
+                time,
+                |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+            );
         }
         self.pending_kwin_presentation = None;
         self.key_counter = 0;

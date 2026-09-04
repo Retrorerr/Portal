@@ -8,6 +8,7 @@ use crate::android::backend::wayland::{
     TouchMode, WaylandBackend,
 };
 use crate::android::utils::ndk;
+use crate::core::coordinate_transform::PhysicalPoint;
 use smithay::backend::input::InputEvent;
 use smithay::utils::{Physical, Size};
 use winit::dpi::PhysicalPosition;
@@ -39,6 +40,80 @@ pub enum CentralizedEvent {
     Unsupported,
 }
 
+fn reconcile_modifiers(meta_state: u32, time: u32, backend: &mut WaylandBackend) {
+    const AMETA_ALT_ON: u32 = 0x02;
+    const AMETA_ALT_LEFT_ON: u32 = 0x10;
+    const AMETA_ALT_RIGHT_ON: u32 = 0x20;
+    const AMETA_SHIFT_ON: u32 = 0x01;
+    const AMETA_SHIFT_LEFT_ON: u32 = 0x40;
+    const AMETA_SHIFT_RIGHT_ON: u32 = 0x80;
+    const AMETA_CTRL_ON: u32 = 0x1000;
+    const AMETA_CTRL_LEFT_ON: u32 = 0x2000;
+    const AMETA_CTRL_RIGHT_ON: u32 = 0x4000;
+    const AMETA_META_ON: u32 = 0x10000;
+    const AMETA_META_LEFT_ON: u32 = 0x20000;
+    const AMETA_META_RIGHT_ON: u32 = 0x40000;
+
+    const KEY_LEFTALT: u32 = 56;
+    const KEY_RIGHTALT: u32 = 100;
+    const KEY_LEFTSHIFT: u32 = 42;
+    const KEY_RIGHTSHIFT: u32 = 54;
+    const KEY_LEFTCTRL: u32 = 29;
+    const KEY_RIGHTCTRL: u32 = 97;
+    const KEY_LEFTMETA: u32 = 125;
+    const KEY_RIGHTMETA: u32 = 126;
+
+    let mut to_release = Vec::new();
+
+    if (meta_state & (AMETA_ALT_ON | AMETA_ALT_LEFT_ON | AMETA_ALT_RIGHT_ON)) == 0 {
+        if backend.pressed_keys.contains(&KEY_LEFTALT) {
+            to_release.push(KEY_LEFTALT);
+        }
+        if backend.pressed_keys.contains(&KEY_RIGHTALT) {
+            to_release.push(KEY_RIGHTALT);
+        }
+    }
+    if (meta_state & (AMETA_CTRL_ON | AMETA_CTRL_LEFT_ON | AMETA_CTRL_RIGHT_ON)) == 0 {
+        if backend.pressed_keys.contains(&KEY_LEFTCTRL) {
+            to_release.push(KEY_LEFTCTRL);
+        }
+        if backend.pressed_keys.contains(&KEY_RIGHTCTRL) {
+            to_release.push(KEY_RIGHTCTRL);
+        }
+    }
+    if (meta_state & (AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON | AMETA_SHIFT_RIGHT_ON)) == 0 {
+        if backend.pressed_keys.contains(&KEY_LEFTSHIFT) {
+            to_release.push(KEY_LEFTSHIFT);
+        }
+        if backend.pressed_keys.contains(&KEY_RIGHTSHIFT) {
+            to_release.push(KEY_RIGHTSHIFT);
+        }
+    }
+    if (meta_state & (AMETA_META_ON | AMETA_META_LEFT_ON | AMETA_META_RIGHT_ON)) == 0 {
+        if backend.pressed_keys.contains(&KEY_LEFTMETA) {
+            to_release.push(KEY_LEFTMETA);
+        }
+        if backend.pressed_keys.contains(&KEY_RIGHTMETA) {
+            to_release.push(KEY_RIGHTMETA);
+        }
+    }
+
+    for scancode in to_release {
+        backend.pressed_keys.remove(&scancode);
+        backend.key_counter = backend.key_counter.saturating_sub(1);
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        backend.compositor.keyboard.input::<(), _>(
+            &mut backend.compositor.state,
+            scancode.into(),
+            smithay::backend::input::KeyState::Released,
+            serial,
+            time,
+            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+        );
+        log::debug!("Reconciled modifier released: scancode={scancode}");
+    }
+}
+
 fn centralize_keyboard(
     scancode: u32,
     state: ElementState,
@@ -46,9 +121,13 @@ fn centralize_keyboard(
     backend: &mut WaylandBackend,
 ) -> CentralizedEvent {
     match state {
-        ElementState::Pressed => backend.key_counter += 1,
+        ElementState::Pressed => {
+            backend.key_counter += 1;
+            backend.pressed_keys.insert(scancode);
+        }
         ElementState::Released => {
             backend.key_counter = backend.key_counter.saturating_sub(1);
+            backend.pressed_keys.remove(&scancode);
         }
     };
 
@@ -112,17 +191,43 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
                 log::debug!("Dropping keyboard event without a physical evdev mapping: {event:?}");
                 return CentralizedEvent::Unsupported;
             };
+            reconcile_modifiers(event.android_meta_state(), time as u32, backend);
             centralize_keyboard(scancode, event.state, time, backend)
         }
         WindowEvent::CursorMoved { position, .. } => {
+            let logical = physical_to_logical_position(backend, position);
             let event = InputEvent::PointerMotionAbsolute {
                 event: WinitMouseMovedEvent {
                     time,
                     position: relative_position(backend, position),
-                    global_position: position,
+                    global_position: logical,
+                    physical_position: position,
+                    android_device_id: None,
+                    android_source: None,
+                    android_tool_type: None,
                 },
             };
             CentralizedEvent::Input(event)
+        }
+        WindowEvent::AndroidPointerMoved {
+            position,
+            android_device_id,
+            source,
+            tool_type,
+            ..
+        } => {
+            let logical = physical_to_logical_position(backend, position);
+            CentralizedEvent::Input(InputEvent::PointerMotionAbsolute {
+                event: WinitMouseMovedEvent {
+                    time,
+                    position: relative_position(backend, position),
+                    global_position: logical,
+                    physical_position: position,
+                    android_device_id: Some(android_device_id),
+                    android_source: Some(source),
+                    android_tool_type: Some(tool_type),
+                },
+            })
         }
         WindowEvent::MouseWheel { delta, .. } => {
             let event = InputEvent::PointerAxis {
@@ -147,6 +252,7 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             id,
             ..
         }) => {
+            let logical = physical_to_logical_position(backend, location);
             backend.touch_points.insert(id, location);
             backend.scroll_centroid = Some(centroid(&backend.touch_points));
 
@@ -162,7 +268,7 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             CentralizedEvent::Input(InputEvent::TouchDown {
                 event: WinitTouchStartedEvent {
                     time,
-                    global_position: location,
+                    global_position: logical,
                     position: relative_position(backend, location),
                     id,
                 },
@@ -218,7 +324,7 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
                     event: WinitTouchMovedEvent {
                         time,
                         position: relative_position(backend, location),
-                        global_position: location,
+                        global_position: physical_to_logical_position(backend, location),
                         id,
                     },
                 }),
@@ -240,14 +346,15 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             }
 
             let mode = backend.touch_mode;
+            let logical = physical_to_logical_position(backend, location);
             backend.reset_touch_state();
             CentralizedEvent::Input(InputEvent::TouchUp {
                 event: WinitTouchEndedEvent {
                     time,
                     id,
                     mode,
-                    x: location.x,
-                    y: location.y,
+                    x: logical.x,
+                    y: logical.y,
                 },
             })
         }
@@ -290,6 +397,22 @@ fn relative_position(
         location.x / size.width.max(1) as f64,
         location.y / size.height.max(1) as f64,
     )
+}
+
+/// Convert an Android physical surface position exactly once at the ingestion boundary.
+fn physical_to_logical_position(
+    backend: &WaylandBackend,
+    location: PhysicalPosition<f64>,
+) -> PhysicalPosition<f64> {
+    let logical = backend
+        .compositor
+        .state
+        .coordinate_transform
+        .physical_to_logical(PhysicalPoint {
+            x: location.x,
+            y: location.y,
+        });
+    PhysicalPosition::new(logical.x, logical.y)
 }
 
 /// Whether the finger has moved far enough from where it landed to stop being a tap.

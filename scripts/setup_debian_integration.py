@@ -34,7 +34,7 @@ export KDE_NO_PORTAL=1
 export GTK_USE_PORTAL=0
 export QT_NO_XDG_DESKTOP_PORTAL=1
 export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
-export QT_SCALE_FACTOR=2.0
+export QT_SCALE_FACTOR=1
 export PLASMA_USE_QT_SCALING=1
 export ELECTRON_DISABLE_SANDBOX=1
 export LOCALDESKTOP_DIAGNOSTICS=1
@@ -81,6 +81,23 @@ if command -v kwriteconfig6 >/dev/null 2>&1; then
     kwriteconfig6 --file "$ksplashrc" --group KSplash --key Theme None
 else
     printf '[KSplash]\\nTheme=None\\n' > "$ksplashrc"
+fi
+
+# Disable screen locking completely: Android/OxygenOS owns device security
+kdeglobals="$config_dir/kdeglobals"
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file "$kdeglobals" --group 'KDE Action Restrictions][$i' --key 'action/lock_screen' false
+else
+    printf '[KDE Action Restrictions][$i]\\naction/lock_screen=false\\n' > "$kdeglobals"
+fi
+
+kscreenlockerrc="$config_dir/kscreenlockerrc"
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file "$kscreenlockerrc" --group 'Daemon][$i' --key Autolock false
+    kwriteconfig6 --file "$kscreenlockerrc" --group 'Daemon][$i' --key LockOnResume false
+    kwriteconfig6 --file "$kscreenlockerrc" --group 'Daemon][$i' --key Timeout 0
+else
+    printf '[Daemon][$i]\\nAutolock=false\\nLockOnResume=false\\nTimeout=0\\n' > "$kscreenlockerrc"
 fi
 
 # Run ldconfig once if needed
@@ -149,7 +166,7 @@ fi
 
 printf 'timestamp_ms=%s attempt=%s args=%q\\n' "$(date +%s000)" "$attempt_id" "$*" >> "$log_file"
 
-/usr/bin/kwin_wayland "$@" 2>&1 | tee -a "$log_file"
+/usr/bin/kwin_wayland --no-lockscreen "$@" 2>&1 | tee -a "$log_file"
 status="${PIPESTATUS[0]}"
 
 if [ "$status" -ge 128 ]; then

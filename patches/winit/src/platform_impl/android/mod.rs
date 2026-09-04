@@ -131,7 +131,9 @@ impl RedrawRequester {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub struct KeyEventExtra {}
+pub struct KeyEventExtra {
+    pub meta_state: u32,
+}
 
 pub struct EventLoop<T: 'static> {
     pub(crate) android_app: AndroidApp,
@@ -145,6 +147,8 @@ pub struct EventLoop<T: 'static> {
     cause: StartCause,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
+    pressed_mouse_buttons: std::collections::HashSet<MouseButton>,
+    touchpad_scrolling: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -194,6 +198,8 @@ impl<T: 'static> EventLoop<T> {
             cause: StartCause::Init,
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
+            pressed_mouse_buttons: std::collections::HashSet::new(),
+            touchpad_scrolling: false,
         })
     }
 
@@ -392,83 +398,55 @@ impl<T: 'static> EventLoop<T> {
                     let window_id = window::WindowId(WindowId);
                     let device_id = event::DeviceId(DeviceId(motion_event.device_id()));
 
-                    // .action_button() will crash on API Level < 33, use .button_state() instead
-                    let button = motion_event.button_state();
+                    let is_touchpad = source == Source::Touchpad
+                        || (source == Source::Mouse && tool_type == ToolType::Finger);
+                    let is_mouse = source == Source::Mouse && tool_type != ToolType::Finger;
 
-                    // Mouse move (hover or drag)
-                    match action {
-                        MotionAction::HoverMove | MotionAction::Move => {
-                            let location =
-                                PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
-                            callback(
-                                Event::WindowEvent {
-                                    window_id,
-                                    event: WindowEvent::CursorMoved {
-                                        device_id,
-                                        position: location,
-                                    },
+                    // Query continuous gesture scroll distance (axes 50/51 on Android 14+ / 16)
+                    let gesture_dx = pointer.axis_value(input::Axis::from(50)) as f64;
+                    let gesture_dy = pointer.axis_value(input::Axis::from(51)) as f64;
+                    let has_gesture_scroll = gesture_dx != 0.0 || gesture_dy != 0.0;
+
+                    // 1. Continuous Touchpad Scrolling
+                    if is_touchpad && has_gesture_scroll {
+                        self.touchpad_scrolling = true;
+                        callback(
+                            Event::WindowEvent {
+                                window_id,
+                                event: WindowEvent::MouseWheel {
+                                    device_id,
+                                    delta: event::MouseScrollDelta::PixelDelta(PhysicalPosition {
+                                        x: gesture_dx,
+                                        y: gesture_dy,
+                                    }),
+                                    phase: event::TouchPhase::Moved,
                                 },
-                                self.window_target(),
-                            );
-                        },
-                        MotionAction::ButtonPress
-                        | MotionAction::ButtonRelease
-                        | MotionAction::PointerDown
-                        | MotionAction::PointerUp
-                        // | MotionAction::HoverEnter // These Hover events are reported by Android Studio Desktop AVDs, it seems like they simulate stylus as input method, but we will redirect clicks based on `MotionAction::Down` and `MotionAction::Up`
-                        // | MotionAction::HoverExit
-                        | MotionAction::Down
-                        | MotionAction::Up
-                        | MotionAction::Cancel=> {
-                            // Mouse button pressed
-
-                            // Skip `MotionAction::Down` and `MotionAction::Up` when source is mouse as they already reported on `MotionAction::PointerDown` and `MotionAction::PointerUp`
-                            // The issue is here: drag gesture start with down and up
-                            if (source == Source::Mouse ||  source == Source::Touchpad) && (action == MotionAction::Down || action == MotionAction::Up) {
-                                return input_status;
+                            },
+                            self.window_target(),
+                        );
+                    } else if action == MotionAction::Scroll {
+                        if is_touchpad {
+                            let h = pointer.axis_value(input::Axis::Hscroll) as f64 * 20.0;
+                            let v = pointer.axis_value(input::Axis::Vscroll) as f64 * 20.0;
+                            if h != 0.0 || v != 0.0 {
+                                self.touchpad_scrolling = true;
+                                callback(
+                                    Event::WindowEvent {
+                                        window_id,
+                                        event: WindowEvent::MouseWheel {
+                                            device_id,
+                                            delta: event::MouseScrollDelta::PixelDelta(
+                                                PhysicalPosition { x: h, y: v },
+                                            ),
+                                            phase: event::TouchPhase::Moved,
+                                        },
+                                    },
+                                    self.window_target(),
+                                );
                             }
-
-                            let button = match button {
-                                _ if button.primary() => MouseButton::Left,
-                                _ if button.secondary() => MouseButton::Right,
-                                _ if button.teriary() => MouseButton::Middle,
-                                _ if button.back() => MouseButton::Back,
-                                _ if button.forward() => MouseButton::Forward,
-                                _ if button.stylus_primary() => MouseButton::Left,
-                                _ if button.stylus_secondary() => {
-                                    MouseButton::Right
-                                },
-                                _  => {
-                                    warn!("Unknown button: {:?}", button);
-                                    MouseButton::Left
-                                },
-                            };
-
-                            let state = match action {
-                                MotionAction::ButtonPress
-                                | MotionAction::Down
-                                | MotionAction::PointerDown => event::ElementState::Pressed,
-                                _ => event::ElementState::Released,
-                            };
-
-                            callback(
-                                Event::WindowEvent {
-                                    window_id,
-                                    event: WindowEvent::MouseInput {
-                                        device_id,
-                                        state,
-                                        button,
-                                    },
-                                },
-                                self.window_target(),
-                            );
-                        },
-                        MotionAction::Scroll => {
-                            // Mouse wheel scroll
-                            // TODO: Why this event is not firing on Samsung Dex?
+                        } else if is_mouse {
                             let h = pointer.axis_value(input::Axis::Hscroll);
                             let v = pointer.axis_value(input::Axis::Vscroll);
-
                             if h != 0.0 || v != 0.0 {
                                 callback(
                                     Event::WindowEvent {
@@ -479,6 +457,183 @@ impl<T: 'static> EventLoop<T> {
                                                 h as f32, v as f32,
                                             ),
                                             phase: event::TouchPhase::Moved,
+                                        },
+                                    },
+                                    self.window_target(),
+                                );
+                            }
+                        }
+                    }
+
+                    // 2. Mouse / Touchpad Pointer Movement
+                    if (action == MotionAction::HoverMove || action == MotionAction::Move)
+                        && !has_gesture_scroll
+                    {
+                        if self.touchpad_scrolling {
+                            self.touchpad_scrolling = false;
+                            callback(
+                                Event::WindowEvent {
+                                    window_id,
+                                    event: WindowEvent::MouseWheel {
+                                        device_id,
+                                        delta: event::MouseScrollDelta::PixelDelta(
+                                            PhysicalPosition { x: 0.0, y: 0.0 },
+                                        ),
+                                        phase: event::TouchPhase::Ended,
+                                    },
+                                },
+                                self.window_target(),
+                            );
+                        }
+                        let location =
+                            PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
+                        callback(
+                            Event::WindowEvent {
+                                window_id,
+                                event: WindowEvent::AndroidPointerMoved {
+                                    device_id,
+                                    android_device_id: motion_event.device_id(),
+                                    source: source.into(),
+                                    tool_type: tool_type.into(),
+                                    position: location,
+                                },
+                            },
+                            self.window_target(),
+                        );
+                    }
+
+                    // 3. Mouse / Touchpad Buttons (Tap-to-click, physical clicks, click-drag)
+                    let button = motion_event.button_state();
+                    let mapped_button = match button {
+                        _ if button.secondary() => MouseButton::Right,
+                        _ if button.teriary() => MouseButton::Middle,
+                        _ if button.back() => MouseButton::Back,
+                        _ if button.forward() => MouseButton::Forward,
+                        _ if button.stylus_secondary() => MouseButton::Right,
+                        _ => MouseButton::Left,
+                    };
+
+                    match action {
+                        MotionAction::ButtonPress => {
+                            if self.pressed_mouse_buttons.insert(mapped_button) {
+                                callback(
+                                    Event::WindowEvent {
+                                        window_id,
+                                        event: WindowEvent::MouseInput {
+                                            device_id,
+                                            state: event::ElementState::Pressed,
+                                            button: mapped_button,
+                                        },
+                                    },
+                                    self.window_target(),
+                                );
+                            }
+                        },
+                        MotionAction::ButtonRelease => {
+                            if self.pressed_mouse_buttons.remove(&mapped_button) {
+                                callback(
+                                    Event::WindowEvent {
+                                        window_id,
+                                        event: WindowEvent::MouseInput {
+                                            device_id,
+                                            state: event::ElementState::Released,
+                                            button: mapped_button,
+                                        },
+                                    },
+                                    self.window_target(),
+                                );
+                            }
+                        },
+                        MotionAction::Down => {
+                            if self.pressed_mouse_buttons.is_empty() {
+                                self.pressed_mouse_buttons.insert(mapped_button);
+                                callback(
+                                    Event::WindowEvent {
+                                        window_id,
+                                        event: WindowEvent::MouseInput {
+                                            device_id,
+                                            state: event::ElementState::Pressed,
+                                            button: mapped_button,
+                                        },
+                                    },
+                                    self.window_target(),
+                                );
+                            }
+                        },
+                        MotionAction::Up => {
+                            if self.touchpad_scrolling {
+                                self.touchpad_scrolling = false;
+                                callback(
+                                    Event::WindowEvent {
+                                        window_id,
+                                        event: WindowEvent::MouseWheel {
+                                            device_id,
+                                            delta: event::MouseScrollDelta::PixelDelta(
+                                                PhysicalPosition { x: 0.0, y: 0.0 },
+                                            ),
+                                            phase: event::TouchPhase::Ended,
+                                        },
+                                    },
+                                    self.window_target(),
+                                );
+                            }
+                            let released: Vec<MouseButton> =
+                                self.pressed_mouse_buttons.drain().collect();
+                            if released.is_empty() {
+                                callback(
+                                    Event::WindowEvent {
+                                        window_id,
+                                        event: WindowEvent::MouseInput {
+                                            device_id,
+                                            state: event::ElementState::Released,
+                                            button: mapped_button,
+                                        },
+                                    },
+                                    self.window_target(),
+                                );
+                            } else {
+                                for btn in released {
+                                    callback(
+                                        Event::WindowEvent {
+                                            window_id,
+                                            event: WindowEvent::MouseInput {
+                                                device_id,
+                                                state: event::ElementState::Released,
+                                                button: btn,
+                                            },
+                                        },
+                                        self.window_target(),
+                                    );
+                                }
+                            }
+                        },
+                        MotionAction::Cancel => {
+                            if self.touchpad_scrolling {
+                                self.touchpad_scrolling = false;
+                                callback(
+                                    Event::WindowEvent {
+                                        window_id,
+                                        event: WindowEvent::MouseWheel {
+                                            device_id,
+                                            delta: event::MouseScrollDelta::PixelDelta(
+                                                PhysicalPosition { x: 0.0, y: 0.0 },
+                                            ),
+                                            phase: event::TouchPhase::Ended,
+                                        },
+                                    },
+                                    self.window_target(),
+                                );
+                            }
+                            let cancelled: Vec<MouseButton> =
+                                self.pressed_mouse_buttons.drain().collect();
+                            for btn in cancelled {
+                                callback(
+                                    Event::WindowEvent {
+                                        window_id,
+                                        event: WindowEvent::MouseInput {
+                                            device_id,
+                                            state: event::ElementState::Released,
+                                            button: btn,
                                         },
                                     },
                                     self.window_target(),
@@ -572,7 +727,9 @@ impl<T: 'static> EventLoop<T> {
                                     location: keycodes::to_location(keycode),
                                     repeat: key.repeat_count() > 0,
                                     text: None,
-                                    platform_specific: KeyEventExtra {},
+                                    platform_specific: KeyEventExtra {
+                                        meta_state: key.meta_state().0,
+                                    },
                                 },
                                 is_synthetic: false,
                             },

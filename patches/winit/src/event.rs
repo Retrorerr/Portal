@@ -249,6 +249,16 @@ pub enum WindowEvent {
         position: PhysicalPosition<f64>,
     },
 
+    /// Android pointer motion with the raw input identity retained for compositor diagnostics.
+    #[cfg(target_os = "android")]
+    AndroidPointerMoved {
+        device_id: DeviceId,
+        android_device_id: i32,
+        source: u32,
+        tool_type: u32,
+        position: PhysicalPosition<f64>,
+    },
+
     /// The cursor has entered the window.
     ///
     /// ## Platform-specific
@@ -653,6 +663,13 @@ pub struct KeyEvent {
     ///
     /// On Android, iOS, Redox and Web, this type is a no-op.
     pub(crate) platform_specific: platform_impl::KeyEventExtra,
+}
+
+impl KeyEvent {
+    #[cfg(target_os = "android")]
+    pub fn android_meta_state(&self) -> u32 {
+        self.platform_specific.meta_state
+    }
 }
 
 /// Describes keyboard modifiers event.

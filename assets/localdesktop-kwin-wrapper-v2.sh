@@ -97,7 +97,8 @@ run_real_kwin() {
     # Persist the real KWin stdout/stderr as well as forwarding it to the
     # session. This captures loader, protocol and signal-handler diagnostics
     # even when the guest process exits before a host frame exists.
-    /usr/bin/kwin_wayland "$@" 2>&1 | tee -a "$log_file"
+    # Always disable KWin's internal guest screen locker; device locking belongs to Android.
+    /usr/bin/kwin_wayland --no-lockscreen "$@" 2>&1 | tee -a "$log_file"
     return "${PIPESTATUS[0]}"
 }
 
@@ -113,14 +114,14 @@ if [ "${LOCALDESKTOP_GDB_BACKTRACE:-0}" = "1" ] && command -v gdb >/dev/null 2>&
             -ex 'set pagination off' \
             -ex run \
             -ex 'thread apply all bt full' \
-            --args /usr/bin/kwin_wayland "$@" \
+            --args /usr/bin/kwin_wayland --no-lockscreen "$@" \
             > "$debugger_output" 2>&1
     else
         gdb --batch --quiet \
             -ex 'set pagination off' \
             -ex run \
             -ex 'thread apply all bt full' \
-            --args /usr/bin/kwin_wayland "$@" \
+            --args /usr/bin/kwin_wayland --no-lockscreen "$@" \
             > "$debugger_output" 2>&1
     fi
     gdb_status=$?

@@ -25,19 +25,63 @@ def main():
     plasma_pid = pid_str[0]
 
     env_raw = subprocess.check_output([
-        "adb", "-s", "f105b146", "shell",
+        "adb", "-s", "f105b146", "exec-out",
         f"run-as app.polarbear cat /proc/{plasma_pid}/environ"
-    ], encoding="latin-1")
+    ])
 
     dbus_addr = ""
-    for item in env_raw.split("\x00"):
-        if item.startswith("DBUS_SESSION_BUS_ADDRESS="):
-            dbus_addr = item.split("=", 1)[1]
+    for item in env_raw.split(b"\x00"):
+        if item.startswith(b"DBUS_SESSION_BUS_ADDRESS="):
+            dbus_addr = item.split(b"=", 1)[1].decode("utf-8", "ignore")
             break
 
-    guest_script = f"export HOME=/root; export TMPDIR=/tmp; export USER=root; export LOGNAME=root; export LANG=C.UTF-8; export LC_ALL=C.UTF-8; export PATH=/usr/local/sbin:/usr/local/bin:/usr/lib/aarch64-linux-gnu/libexec:/usr/bin:/bin:/usr/sbin:/sbin; export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu; export XDG_RUNTIME_DIR=/tmp; export WAYLAND_DISPLAY=wayland-1; export DISPLAY=:0; export DBUS_SESSION_BUS_ADDRESS='{dbus_addr}'; {cmd}"
+    guest_script = (
+        "#!/bin/sh\n"
+        "export HOME=/root\n"
+        "export TMPDIR=/tmp\n"
+        "export USER=root\n"
+        "export LOGNAME=root\n"
+        "export LANG=C.UTF-8\n"
+        "export LC_ALL=C.UTF-8\n"
+        "export PATH=/usr/local/sbin:/usr/local/bin:/usr/lib/aarch64-linux-gnu/libexec:/usr/bin:/bin:/usr/sbin:/sbin\n"
+        "export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu\n"
+        "export XDG_RUNTIME_DIR=/tmp\n"
+        "export WAYLAND_DISPLAY=wayland-1\n"
+        "export DISPLAY=:0\n"
+        f"export DBUS_SESSION_BUS_ADDRESS='{dbus_addr}'\n"
+        f"{cmd}\n"
+    )
 
-    remote_cmd = f"export PROOT_LOADER={proot_loader}; export PROOT_TMP_DIR=/data/data/app.polarbear/files/tmp; {libproot} -k 6.6.0 -0 --link2symlink --sysvipc -r /data/data/app.polarbear/files/runtime-B -b /dev -b /proc -b /sys -b /data/data/app.polarbear/files/runtime-B/tmp:/dev/shm -w /root /usr/bin/dash -c \"{guest_script}\""
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, newline="\n") as f:
+        f.write(guest_script)
+        local_tmp = f.name
+
+    try:
+        subprocess.check_call(["adb", "-s", "f105b146", "push", local_tmp, "/data/local/tmp/guest_exec.sh"])
+    finally:
+        os.unlink(local_tmp)
+
+    # Copy into guest /tmp
+    subprocess.check_call([
+        "adb", "-s", "f105b146", "shell",
+        "run-as app.polarbear cp /data/local/tmp/guest_exec.sh /data/data/app.polarbear/files/runtime-B/tmp/exec.sh"
+    ])
+
+    remote_cmd = (
+        f"export PROOT_LOADER={proot_loader}; "
+        "export PROOT_TMP_DIR=/data/data/app.polarbear/files/tmp; "
+        f"{libproot} -r /data/data/app.polarbear/files/runtime-B "
+        "-L --link2symlink --sysvipc --kill-on-exit --root-id "
+        "-b /dev -b /proc -b /sys "
+        "-b /dev/urandom:/dev/random "
+        "-b /proc/self/fd:/dev/fd "
+        "-b /proc/self/fd/0:/dev/stdin "
+        "-b /proc/self/fd/1:/dev/stdout "
+        "-b /proc/self/fd/2:/dev/stderr "
+        "-b /data/data/app.polarbear/files/runtime-B/tmp:/dev/shm "
+        "-w /root /bin/sh /tmp/exec.sh"
+    )
 
     res = subprocess.run([
         "adb", "-s", "f105b146", "shell",
