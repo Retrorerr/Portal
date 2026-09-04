@@ -529,13 +529,10 @@ fn setup_pipewire_package_lock(_: &SetupOptions) -> StageOutput {
     None
 }
 
-fn setup_firefox_config(_: &SetupOptions) -> StageOutput {
-    use crate::core::runtime::LinuxRuntime;
-    let active_runtime = crate::android::runtime::proot::PRootRuntime::active();
-    let rootfs = active_runtime.rootfs_path();
+pub fn sync_firefox_config(fs_root: &Path) {
     let candidates = [
-        rootfs.join("usr/lib/firefox"),
-        rootfs.join("usr/lib/firefox-esr"),
+        fs_root.join("usr/lib/firefox"),
+        fs_root.join("usr/lib/firefox-esr"),
     ];
 
     let autoconfig_js = r#"pref("general.config.filename", "localdesktop.cfg");
@@ -568,7 +565,12 @@ try {
             let _ = fs::write(dir.join("localdesktop.cfg"), firefox_cfg);
         }
     }
+}
 
+fn setup_firefox_config(_: &SetupOptions) -> StageOutput {
+    use crate::core::runtime::LinuxRuntime;
+    let active_runtime = crate::android::runtime::proot::PRootRuntime::active();
+    sync_firefox_config(&active_runtime.rootfs_path());
     None
 }
 
@@ -1053,6 +1055,8 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     let xft_dpi = ui_scale * 96;
 
     sync_android_timezone(fs_root);
+    sync_firefox_config(fs_root);
+    sync_konsole_profile(fs_root, &home_dir);
 
     let xresources_path = home_dir.join(".Xresources");
     let _ = fs::create_dir_all(
@@ -1076,7 +1080,12 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     // a nested Android PRoot session. Keep the KWin touchscreen-gestures KCM:
     // it legitimately acts on the wl_touch seat. Hide only the libinput device,
     // drawing-tablet and privileged timedated pages.
-    for desktop_file in ["kcm_clock.desktop", "kcm_tablet.desktop"] {
+    for desktop_file in [
+        "kcm_clock.desktop",
+        "kcm_tablet.desktop",
+        "kcm_mouse.desktop",
+        "kcm_touchpad.desktop",
+    ] {
         let path = fs_root.join("usr/share/applications").join(desktop_file);
         if path.is_file() {
             upsert_kv_file(
@@ -1092,6 +1101,8 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     for plugin in [
         "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_touchscreen.so",
         "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_tablet.so",
+        "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_mouse.so",
+        "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_touchpad.so",
         "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings_qwidgets/kcm_clock.so",
     ] {
         let source = fs_root.join(plugin);
@@ -1192,6 +1203,20 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     );
 
     sync_guest_network_config(fs_root);
+}
+
+fn sync_konsole_profile(fs_root: &Path, home_dir: &Path) {
+    let profile_content = "[General]\nCommand=/bin/bash\nName=Profile 1\nParent=FALLBACK/\n\n[Appearance]\nColorScheme=Breeze\n";
+    for dir in [
+        fs_root.join("usr/share/konsole"),
+        home_dir.join(".local/share/konsole"),
+    ] {
+        let _ = fs::create_dir_all(&dir);
+        let profile_path = dir.join("Profile 1.profile");
+        if !profile_path.exists() {
+            let _ = fs::write(&profile_path, profile_content);
+        }
+    }
 }
 
 fn sync_android_timezone(fs_root: &Path) {

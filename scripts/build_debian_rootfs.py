@@ -63,6 +63,8 @@ SEED_PACKAGES = [
     # the selected locale and MIME/application caches.
     "locales",
     "desktop-file-utils",
+    "tzdata",
+    "shared-mime-info",
     # Graphics drivers / Mesa
     "libgl1-mesa-dri",
     "mesa-vulkan-drivers",
@@ -343,6 +345,27 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path):
         "video:x:44:desktop\n"
     )
     group.write_text(group_content)
+
+    # Ensure /etc/default/locale exists
+    default_locale = output_dir / "etc" / "default" / "locale"
+    default_locale.parent.mkdir(parents=True, exist_ok=True)
+    if not default_locale.exists():
+        with open(default_locale, "w", newline="\n", encoding="utf-8") as f:
+            f.write("LANG=en_GB.UTF-8\nLC_ALL=en_GB.UTF-8\n")
+
+    # Ensure /etc/locale.gen exists
+    locale_gen = output_dir / "etc" / "locale.gen"
+    if not locale_gen.exists():
+        with open(locale_gen, "w", newline="\n", encoding="utf-8") as f:
+            f.write("en_GB.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\n")
+
+    # Ensure default Konsole profile exists
+    konsole_dir = output_dir / "usr" / "share" / "konsole"
+    konsole_dir.mkdir(parents=True, exist_ok=True)
+    konsole_profile = konsole_dir / "Profile 1.profile"
+    if not konsole_profile.exists():
+        with open(konsole_profile, "w", newline="\n", encoding="utf-8") as f:
+            f.write("[General]\nCommand=/bin/bash\nName=Profile 1\nParent=FALLBACK/\n\n[Appearance]\nColorScheme=Breeze\n")
 
     print("Debian 13 rootfs pre-provisioning completed successfully!")
 
