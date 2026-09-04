@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Automates the build, install, launch, diagnostics retrieval, screenshot capture,
-    crash analysis, and release gate verification for Local Desktop on the OnePlus Pad 3.
+    crash analysis, and release gate verification for Portal on the OnePlus Pad 3.
 
     The release result is intentionally stricter than a partial diagnostics check. A
     release pass requires all of the following evidence from the current run:

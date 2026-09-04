@@ -7,7 +7,7 @@
 //! The important distinction is that this is not a PipeWire/SPA plugin or
 //! module. It is a standalone client process, so the POC can avoid PipeWire's
 //! plugin ABI while still testing the end-to-end timing path. This is the only
-//! built-in audio backend; Local Desktop no longer starts or configures a
+//! built-in audio backend; Portal no longer starts or configures a
 //! separate legacy audio server.
 
 use std::ffi::CString;
@@ -406,7 +406,7 @@ fn device_api_level() -> c_int {
 fn build_pipewire_env(data_dir: &Path, lib_dir: &Path) -> Result<PipewireAaudioEnv, String> {
     let runtime_dir = pipewire_runtime_dir();
     let config_dir = data_dir.join("pipewire-standalone-aaudio/config");
-    // Local Desktop's APK packagers extract top-level `.so` files from
+    // Portal's APK packagers extract top-level `.so` files from
     // `assets/libs/<abi>` into nativeLibraryDir. PipeWire modules can stay flat
     // there, but SPA factory names resolve through the normal subdirectory
     // layout below SPA_PLUGIN_DIR, for example support/libspa-support.
@@ -553,9 +553,9 @@ fn write_pipewire_config(config_dir: &Path, use_embedded_policy: bool) -> Result
     };
 
     let body = format!(
-        r#"# Local Desktop PipeWire standalone-client AAudio sink POC.
+        r#"# Portal PipeWire standalone-client AAudio sink.
 #
-# This config intentionally does not load a Local Desktop PipeWire/SPA plugin.
+# This config intentionally does not load a Portal PipeWire/SPA plugin.
 # Runtime shape:
 #   guest PipeWire clients -> exposed PipeWire socket -> Android-side PipeWire
 #   daemon -> standalone PipeWire client with an AAudio-backed Audio/Sink.
@@ -619,7 +619,7 @@ context.objects = [
     fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
 
     let client_config = format!(
-        r#"# Local Desktop PipeWire client config for the standalone AAudio sink.
+        r#"# Portal PipeWire client config for the standalone AAudio sink.
 context.properties = {{
     application.name = localdesktop-pipewire-aaudio-sink
 }}
@@ -647,7 +647,7 @@ fn write_pipewire_pulse_config(
 ) -> Result<PathBuf, String> {
     let pulse_socket = env.runtime_dir.join(PULSE_SOCKET_NAME);
     let body = format!(
-        r#"# Local Desktop PipeWire Pulse compatibility service.
+        r#"# Portal PipeWire Pulse compatibility service.
 #
 # This is not the PulseAudio daemon. It is PipeWire's PulseAudio-compatible
 # protocol front door for applications such as Firefox that still use libpulse.

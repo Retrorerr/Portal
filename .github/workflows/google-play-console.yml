@@ -21,7 +21,7 @@ jobs:
         uses: robinraju/release-downloader@v1
         with:
           tag: ${{ github.event.release.tag_name }}
-          fileName: "localdesktop-*.aab"
+          fileName: "Portal-*.aab"
           out-file-path: "target"
           extract: false
 
@@ -30,7 +30,7 @@ jobs:
         uses: robinraju/release-downloader@v1
         with:
           latest: true
-          fileName: "localdesktop-*.aab"
+          fileName: "Portal-*.aab"
           out-file-path: "target"
           extract: false
 

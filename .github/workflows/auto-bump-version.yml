@@ -18,35 +18,8 @@ permissions:
   pull-requests: read
 
 jobs:
-  classify-pr:
-    name: Classify PR
-    runs-on: ubuntu-latest
-    outputs:
-      gh_pages_only: ${{ steps.classify.outputs.gh_pages_only }}
-
-    steps:
-      - name: Classify PR
-        id: classify
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pr = context.payload.pull_request;
-            const files = await github.paginate(github.rest.pulls.listFiles, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: pr.number,
-              per_page: 100,
-            });
-
-            const ghPagesOnly =
-              files.length > 0 &&
-              files.every((file) => file.filename.startsWith("gh-pages/"));
-
-            core.setOutput("gh_pages_only", ghPagesOnly ? "true" : "false");
-
   prepare-release:
     name: Prepare Release
-    needs: classify-pr
     if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     permissions:
@@ -54,12 +27,7 @@ jobs:
       pull-requests: read
 
     steps:
-      - name: Skip gh-pages-only PR
-        if: needs.classify-pr.outputs.gh_pages_only == 'true'
-        run: echo "Release workflow skipped for gh-pages-only PR."
-
       - name: Resolve release label
-        if: needs.classify-pr.outputs.gh_pages_only != 'true'
         id: release
         env:
           LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
@@ -102,22 +70,20 @@ jobs:
           PY
 
       - name: Require same-repo branch
-        if: needs.classify-pr.outputs.gh_pages_only != 'true' && github.event.pull_request.head.repo.full_name != github.repository
+        if: github.event.pull_request.head.repo.full_name != github.repository
         run: |
           echo "::error::Release version automation can only push to branches in ${GITHUB_REPOSITORY}."
           echo "::error::Please add the Cargo.toml/Cargo.lock version bump manually for fork PRs."
           exit 1
 
       - name: Check out PR branch
-        if: needs.classify-pr.outputs.gh_pages_only != 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
-          token: ${{ secrets.PAT }}
+          token: ${{ github.token }}
 
       - name: Sync release version commit
-        if: needs.classify-pr.outputs.gh_pages_only != 'true'
         env:
           BUMP_LEVEL: ${{ steps.release.outputs.level }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
@@ -226,8 +192,7 @@ jobs:
 
   tag-release:
     name: Tag Release
-    needs: classify-pr
-    if: github.event.action == 'closed' && github.event.pull_request.merged == true && needs.classify-pr.outputs.gh_pages_only != 'true' && !contains(github.event.pull_request.labels.*.name, 'release:docs')
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true && !contains(github.event.pull_request.labels.*.name, 'release:docs')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -266,7 +231,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.PAT }}
+          token: ${{ github.token }}
 
       - name: Create release tag
         env:

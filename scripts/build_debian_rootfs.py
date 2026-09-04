@@ -7,7 +7,7 @@ Downloads the official Debian Trixie package catalog, resolves the transitive
 dependency closure for Plasma 6, KWin, Dolphin, System Settings, Konsole, KScreen,
 Breeze, D-Bus, XWayland, PipeWire, and Firefox ESR, downloads the .deb files
 concurrently, and extracts them into a clean rootfs directory ready for packaging
-and deployment into Local Desktop's Slot B.
+and deployment into Portal's runtime slots.
 """
 
 import os
