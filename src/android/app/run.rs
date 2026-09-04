@@ -80,11 +80,11 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
         .output
         .get_or_insert_with(|| {
             Output::new(
-                "Local Desktop Wayland Compositor".into(),
+                "Portal Wayland Compositor".into(),
                 PhysicalProperties {
                     size: physical_size_mm.into(),
                     subpixel: Subpixel::HorizontalRgb,
-                    make: "Local Desktop".into(),
+                    make: "Portal".into(),
                     model: config::VERSION.into(),
                 },
             )

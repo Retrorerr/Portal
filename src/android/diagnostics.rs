@@ -7,9 +7,7 @@
 //! app's private data directory and a bounded ZIP is produced on demand.
 
 use crate::{
-    android::{
-        utils::{application_context::get_application_context, ndk::run_in_jvm},
-    },
+    android::utils::{application_context::get_application_context, ndk::run_in_jvm},
     core::config::{ARCH_FS_ROOT, VERSION},
 };
 use jni::{
@@ -156,7 +154,10 @@ pub fn setup_stage(index: usize, name: &str, event: &str) {
             serde_json::to_string(event).unwrap_or_else(|_| "\"unknown\"".into())
         ),
     );
-    host_event("setup", &format!("index={index} stage={name} event={event}"));
+    host_event(
+        "setup",
+        &format!("index={index} stage={name} event={event}"),
+    );
 }
 
 /// Record a successful host presentation of a guest surface.
@@ -258,7 +259,10 @@ fn mark_plasma_frame_presented_with_evidence(
 pub fn guest_process_line(command: &str, user: &str, stream: &str, line: &str) {
     guest_event(
         "process",
-        &format!("user={user} stream={stream} command={} line={line}", command),
+        &format!(
+            "user={user} stream={stream} command={} line={line}",
+            command
+        ),
     );
 }
 
@@ -280,9 +284,17 @@ pub fn desktop_exit(status: Option<i32>, elapsed_ms: u128) {
         }
         let _ = fs::write(
             marker,
-            format!("timestamp_ms={} status={} elapsed_ms={}\n", now_ms(), status_text, elapsed_ms),
+            format!(
+                "timestamp_ms={} status={} elapsed_ms={}\n",
+                now_ms(),
+                status_text,
+                elapsed_ms
+            ),
         );
-        guest_event("kwin-crash", &format!("status={status_text} elapsed_ms={elapsed_ms}"));
+        guest_event(
+            "kwin-crash",
+            &format!("status={status_text} elapsed_ms={elapsed_ms}"),
+        );
     }
 }
 
@@ -398,7 +410,9 @@ fn add_tree(
     if !canonical_current.starts_with(&canonical_root) {
         return Ok(());
     }
-    let Ok(entries) = fs::read_dir(&canonical_current) else { return Ok(()) };
+    let Ok(entries) = fs::read_dir(&canonical_current) else {
+        return Ok(());
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(metadata) = fs::symlink_metadata(&path) else {
@@ -449,8 +463,13 @@ pub fn export_archive() -> Result<PathBuf, String> {
         &mut total,
     )
     .map_err(|error| error.to_string())?;
-    add_file(&mut writer, &paths.stages_log, "host/stages.jsonl", &mut total)
-        .map_err(|error| error.to_string())?;
+    add_file(
+        &mut writer,
+        &paths.stages_log,
+        "host/stages.jsonl",
+        &mut total,
+    )
+    .map_err(|error| error.to_string())?;
     add_file(
         &mut writer,
         &rotated_log_path(&paths.stages_log),
@@ -475,7 +494,7 @@ pub fn export_archive() -> Result<PathBuf, String> {
     .map_err(|error| error.to_string())?;
 
     let metadata = format!(
-        "Local Desktop diagnostics\nversion={VERSION}\ntimestamp_ms={}\narch={}\nrootfs={}\nguest_state={guest_state_status}\nbytes={}\n",
+        "Portal diagnostics\nversion={VERSION}\ntimestamp_ms={}\narch={}\nrootfs={}\nguest_state={guest_state_status}\nbytes={}\n",
         now_ms(),
         std::env::consts::ARCH,
         ARCH_FS_ROOT,
@@ -488,7 +507,10 @@ pub fn export_archive() -> Result<PathBuf, String> {
         .write_all(metadata.as_bytes())
         .map_err(|error| error.to_string())?;
     writer.finish().map_err(|error| error.to_string())?;
-    host_event("diagnostics-exported", &format!("path={}", archive.display()));
+    host_event(
+        "diagnostics-exported",
+        &format!("path={}", archive.display()),
+    );
     Ok(archive)
 }
 
@@ -558,12 +580,7 @@ fn copy_archive_to_content_uri<'local>(
     let copy_result = (|| -> Result<(), String> {
         loop {
             let read = match env
-                .call_method(
-                    &input,
-                    "read",
-                    "([B)I",
-                    &[JValue::Object(buffer.as_ref())],
-                )
+                .call_method(&input, "read", "([B)I", &[JValue::Object(buffer.as_ref())])
                 .and_then(|value| value.i())
             {
                 Ok(read) => read,
@@ -723,7 +740,7 @@ fn share_file(env: &mut JNIEnv, android_app: &AndroidApp, path: &Path) -> Result
         .unwrap_or_else(|| "localdesktop-diagnostics.zip".to_string());
     put_content_string(env, &values, "_display_name", &display_name)?;
     put_content_string(env, &values, "mime_type", "application/zip")?;
-    put_content_string(env, &values, "relative_path", "Download/Local Desktop")?;
+    put_content_string(env, &values, "relative_path", "Download/Portal")?;
     put_content_int(env, &values, "is_pending", 1)?;
     let uri = env
         .call_method(
@@ -803,7 +820,7 @@ fn share_file(env: &mut JNIEnv, android_app: &AndroidApp, path: &Path) -> Result
         )
         .map_err(|error| error.to_string())?;
         let clip_label = env
-            .new_string("Local Desktop diagnostics")
+            .new_string("Portal diagnostics")
             .map_err(|error| error.to_string())?;
         let clip_data = env
             .call_static_method(
@@ -829,7 +846,7 @@ fn share_file(env: &mut JNIEnv, android_app: &AndroidApp, path: &Path) -> Result
         )
         .map_err(|error| error.to_string())?;
         let chooser_title = env
-            .new_string("Share Local Desktop diagnostics")
+            .new_string("Share Portal diagnostics")
             .map_err(|error| error.to_string())?;
         let chooser = env
             .call_static_method(

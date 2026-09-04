@@ -2,7 +2,7 @@
 title: Build for unofficially supported platforms
 ---
 
-Local Desktop only ships binaries for ARM64-v8a. However, you can build APKs for other platforms from source.
+Portal only ships binaries for ARM64-v8a. However, you can build APKs for other platforms from source.
 
 :::warning
 This is an advanced topic. Prepare to fix cross-compilation issues.
@@ -10,7 +10,7 @@ This is an advanced topic. Prepare to fix cross-compilation issues.
 
 ## Build Libraries
 
-First, you need to recompile all the libraries that Local Desktop depends on for your architecture.
+First, you need to recompile all the libraries that Portal depends on for your architecture.
 
 ### libproot.so & libproot_loader.so
 
@@ -63,15 +63,15 @@ First, you need to recompile all the libraries that Local Desktop depends on for
 
 Thanks to `Smithay`, you don't need to cross-compile `libwayland.so` anymore.
 
-## Build Local Desktop
+## Build Portal
 
 ### libpolar_bear.so
 
-If you extract Local Desktop APK, you would notice a file: `libpolar_bear.so`.
+If you extract the Portal APK, you will find a file named `libpolar_bear.so`.
 
-As you recall, Local Desktop is written in pure Rust. Now you know where all the Rust code goes.
+Portal is written in Rust; this native library contains the application code.
 
-Traditionally, you would need to build `libpolar_bear.so` using `cargo`. Then packaging it inside an APK, which technically a Zip file. To tell Android to load the `*.so` from the Native Activity, you would need to compose an `AndroidManifest.xml` file. Local Desktop uses `Xbuild` to do all of this.
+Traditionally, you would build `libpolar_bear.so` using `cargo`, package it inside an APK, and configure an `AndroidManifest.xml` to load it from the Native Activity. Portal uses Xbuild to do all of this.
 
 After you have put all the required libraries above into `assets/libs/<architecture>`, you can build the APK with this command:
 

@@ -2,9 +2,9 @@
 title: GIMP
 ---
 
-GIMP works great on Local Desktop.
+GIMP works great on Portal.
 
-![GIMP on Local Desktop](/img/gimp.webp#boxed)
+![GIMP on Portal](/img/gimp.webp#boxed)
 
 You can install it using `pacman`:
 

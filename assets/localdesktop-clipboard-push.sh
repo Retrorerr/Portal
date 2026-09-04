@@ -11,7 +11,7 @@ set -euo pipefail
 readonly MAX_TEXT_BYTES=4194304
 
 fail() {
-    printf 'Local Desktop clipboard bridge: %s\n' "$1" >&2
+    printf 'Portal clipboard bridge: %s\n' "$1" >&2
     exit 1
 }
 

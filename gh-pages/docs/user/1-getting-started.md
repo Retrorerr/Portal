@@ -2,84 +2,54 @@
 title: Getting Started
 ---
 
-Welcome to Local Desktop!
+Welcome to Portal.
 
-{/* hide-in-pdf — shown only inside the in-app installer iframe (setup-progress.html); dropped from the PDF manuals by build_docs */}
+Portal provisions a Debian 13 (Trixie) userspace and starts KDE Plasma 6 as a native Wayland session on your Android device. The first launch extracts and configures the Linux runtime, so keep Portal in the foreground until setup completes.
 
-If you are seeing this page, the application is performing several tasks in the background:
+{/* hide-in-pdf — shown only inside the in-app installer iframe; dropped from PDF manuals */}
 
-- It is extracting an Arch Linux ARM64 filesystem.
-- It is installing KDE Plasma 6 and the other required packages.
+During setup you can tap the progress area to show or hide its log. A fresh installation can take several minutes depending on storage and network speed. You can revisit this guide at [retrorerr.github.io/Portal](/).
 
-You can click the progress bar to show/hide the log panel. This process can take up to 10 minutes. In the meantime, let's spend your precious time to understand some important concepts.
-
-You can always revisit this page by going to [localdesktop.github.io](/).
-
-:::info Tips
-It is highly recommended that you keep the app open in the foreground until the installation is complete.
+:::info Recommended setup
+Use an ARM64 tablet with a physical keyboard and, ideally, a mouse or trackpad. Portal is currently hardware-verified on the OnePlus Pad 3; other devices are experimental.
 :::
 
 {/* /hide-in-pdf */}
 
-## How to install applications?
+## How to install applications
 
-Local Desktop ships Arch Linux to you. Installing applications is actually easier than on other distros:
+Portal ships Debian, so software is managed with `apt`:
 
-```
-pacman -S firefox
-```
-
-The command above will install Firefox.
-
-```
-pacman -Ss chrom
+```bash
+sudo apt update
+sudo apt install firefox-esr
 ```
 
-The command above will search for applications that contain the word `chrom`. You will find Chromium in the list, but not Google Chrome. Why?
+Search the Debian repositories with:
 
-Google Chrome, and many other important software that you might need, are proprietary software and are not conveniently available in the pacman-compatible applications.
-
-But you don't need to go to their website looking for `*.installer` files. There is an important concept that makes Arch so beloved: the AUR (Arch User Repository). The concept is that you install an AUR package manager such as `yay` or `paru`, and then you can install any AUR package you want.
-
-```
-yay google-chrome
-yay visual-studio-code
-yay spotify
+```bash
+apt search <package-name>
 ```
 
-The hardest part is installing `yay` or `paru`. You have to follow the `README.md` on their GitHub repository. It is not that simple, but it is a great exercise for you to learn how to install software from source code in Linux.
+Graphical applications appear in Plasma's application launcher after installation. Some Chromium/Electron applications require `--no-sandbox` under Android's userspace restrictions; Portal applies compatibility launchers for common packages.
 
-## I don't have a physical keyboard.
+## Display scaling
 
-After Plasma launches, use the application launcher to open your apps. A physical keyboard is strongly recommended for a desktop workflow; Android's accessibility keyboard bridge remains available for software-keyboard input.
+Portal detects the device display and prepares Plasma scaling automatically. To change it, open **System Settings → Display & Monitor → Display Configuration**, choose the Portal output, adjust **Global scale**, and apply the change.
 
-![Onboard](/img/onboard.webp#boxed)
+If text is still too small, sign out and back into the Plasma session after changing scale.
 
-## Text is too small
+## Physical keyboard shortcuts
 
-Open _"Applications"_ > _"Settings"_ > _"Display"_, select your Wayland output, set _"Scale"_ to **2.00**, then click _"Apply"_.
-
-![2× display scaling on Wayland](/img/2x-scaling.webp#boxed)
+Android may intercept combinations such as `Ctrl+C`, `Ctrl+V`, or `Alt+Tab`. If that happens, enable Portal's optional accessibility service under **Android Settings → Accessibility → Downloaded apps → Portal**. It forwards physical key events and does not inspect screen content.
 
 ## Disable phantom process killer
 
-:::warning Important
-Must read if you’re using Android 12 or newer!
+:::warning Android 12 and newer
+Android may stop child processes used by a Linux desktop. If Portal shuts down unexpectedly, disable the phantom-process restriction for your device.
 :::
 
-Android's "phantom process killer," introduced in Android 12, limits child processes (default 32) or high CPU usage. Applications like Local Desktop and Termux spawn many child processes, and if you don't disable this feature, you may experience **sudden shutdowns**.
-
-### Samsung devices
-
-Enable the _"Developer options"_ by going to _"Settings"_ > _"About phone"_ > Tap on _"Build number"_ 7 times.
-
-Then search for _"Disable child process restrictions"_ switch and turn it on.
-
-![Disable phantom process killer on Samsung devices](/img/disable-phantom-process-killer-samsung.webp#boxed)
-
-### Other devices
-
-If your device does not support disabling phantom process killer directly from developer options, you must connect to it via [adb](https://developer.android.com/tools/adb) and run the following command:
+Some devices expose **Disable child process restrictions** in Developer options. Otherwise, with USB debugging enabled, run:
 
 ```bash
 adb shell "/system/bin/device_config set_sync_disabled_for_tests persistent"
@@ -87,6 +57,8 @@ adb shell "/system/bin/device_config put activity_manager max_phantom_processes 
 adb shell settings put global settings_enable_monitor_phantom_procs false
 ```
 
-## What didn’t work?
+These are Android system settings; review and reverse them if you no longer need a Linux userspace workload.
 
-We are still working on the application. If you find any bugs, feel free to open an issue on [GitHub](https://github.com/localdesktop/localdesktop.github.io/issues). Please star the project to show your support and keep us motivated to provide quick updates 🙏
+## Getting help
+
+If setup or Plasma fails, use Portal's diagnostics export before reinstalling—the report captures the relevant Android and guest state without including unrelated personal files. Open a report at [github.com/Retrorerr/Portal/issues](https://github.com/Retrorerr/Portal/issues) and include the device model, Android version, and reproduction steps.

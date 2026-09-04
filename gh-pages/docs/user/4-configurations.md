@@ -4,7 +4,7 @@ title: Configurations
 
 ## Config file
 
-On launch, Local Desktop reads the config file located at:
+On launch, Portal reads the config file located at:
 
 ```
 /etc/localdesktop/localdesktop.toml
@@ -17,12 +17,12 @@ If the content of the config file is invalid (for example, invalid TOML format),
 ```
 
 Some important notes:
-- Although TOML does support multi-line strings, Local Desktop requires each config to fit in a **single line**. You can use `\n` for multi-line config values if needed.
+- Although TOML does support multi-line strings, Portal requires each config to fit in a **single line**. You can use `\n` for multi-line config values if needed.
 - We use **all lowercase** for config **keys**. For config **values**, the content is **case-sensitive**.
 
 ## Config schema
 
-We might draw a table or have a mechanism to generate the config schema automatically here. But for now, please check the code for the schema: [localdesktop/src/core/config.rs#L28-L87](https://github.com/localdesktop/localdesktop.github.io/blob/main/src/core/config.rs#L28-L87).
+For the authoritative schema, see [src/core/config.rs](https://github.com/Retrorerr/Portal/blob/main/src/core/config.rs).
 
 ## Special `try_*` configs
 
@@ -36,7 +36,7 @@ username="root"
 try_username="teddy"
 ```
 
-The next time Local Desktop starts, it will log in as `teddy` instead of `root`. But then the `try_` configs will be commented out like this:
+The next time Portal starts, it will log in as `teddy` instead of `root`. The `try_` configs will then be commented out like this:
 
 ```toml
 [user]
@@ -44,7 +44,7 @@ username="root"
 # try_username="teddy"
 ```
 
-So if the config didn't work, and you got stuck on a black screen, you can just restart Local Desktop, and things will go back to normal. Then you can uncomment the config and try with another value. If the config does work, you just have to remove the `try_` prefix to persist the config.
+If the config did not work and you got stuck on a black screen, restart Portal to return to the previous configuration. You can then uncomment the setting and try another value. If it works, remove the `try_` prefix to persist it.
 
 Some important notes:
 - This rule applies to **all** configs.

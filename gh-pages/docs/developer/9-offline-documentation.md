@@ -16,10 +16,10 @@ cargo run --bin build_docs -- all          # purge manuals/ + rebuild every vari
 - **Developer Manual** — everything: the repository README, the full `gh-pages` user +
   developer guides and blog, and an architecture walkthrough of the code. Book-like
   (Cardo serif).
-  → `manuals/Local Desktop - Developer Manual.pdf`
+  → `manuals/Portal - Developer Manual.pdf`
 - **User Manual** — the `gh-pages` *user* guide **and blog**, with screenshots, styled to
-  feel like the [website](https://localdesktop.github.io) (Lato sans, teal accents).
-  → `manuals/Local Desktop - User Manual.pdf`
+  match the [Portal website](https://retrorerr.github.io/Portal/) visual language.
+  → `manuals/Portal - User Manual.pdf`
 
 Extra knobs (words, in any order):
 
@@ -38,13 +38,13 @@ cargo run --bin build_docs -- user phone dark     # user manual, dark, phone pag
 ```
 
 `all` regenerates the full set, so `manuals/` only ever holds the latest build:
-`Local Desktop - {Developer,User} Manual [(Call Graph|Fold|Phone[, Dark])].pdf`.
+`Portal - {Developer,User} Manual [(Call Graph|Fold|Phone[, Dark])].pdf`.
 
 The User Manual ships as release artifacts in **6 variants** — every size
 (desktop/fold/phone) × theme (light/dark) — attached alongside the APK/AAB as
 `Local-Desktop-v<version>-User-Manual[-Fold|-Phone][-Dark].pdf`. The app also
 pre-downloads the matching desktop/light manual onto the Linux desktop as
-`Local Desktop - User Manual.pdf`.
+`Portal - User Manual.pdf`.
 
 The Developer Manual's architecture part comes in two modes:
 

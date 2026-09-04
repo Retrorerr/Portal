@@ -719,7 +719,7 @@ impl Compositor {
         let scale_val = guest_scale.max(1.0);
 
         let mut seat_state = SeatState::new();
-        let mut seat = seat_state.new_wl_seat(&dh, "Local Desktop");
+        let mut seat = seat_state.new_wl_seat(&dh, "Portal");
 
         let listener = bind_socket()?;
         let clients = Vec::new();

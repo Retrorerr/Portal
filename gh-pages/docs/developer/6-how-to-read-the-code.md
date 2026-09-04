@@ -35,7 +35,7 @@ flowchart TD
 - `core/config.rs`: Plasma-first default commands and guest output state.
 - `android/main.rs`: Did you see that `#[no_mangle] fn android_main` function? Android apps do not have a `main` function, instead:
   - When you open an Android app (by clicking the app icon), Android will launch an activity.
-  - An activity is a Java class that extends `android.app.Activity`. Local Desktop is written in pure Rust, so we registered a special `NativeActivity`.
+  - An activity is a Java class that extends `android.app.Activity`. Portal is written in Rust, so it registers a special `NativeActivity`.
   - The `NativeActivity` will load the `android_main` inside `libpolar_bear.so` (the object into which all of our Rust code is compiled). That's why we need the `#[no_mangle]` annotation, to prevent Rust compiler from changing the function name.
 
 So `android/main.rs` is the genesis of all the spaghetti code. In case you got lost, just put a breakpoint at the beginning of this function and follow the execution flow.

@@ -4,11 +4,11 @@ title: Share files between Android and Linux
 
 ## Setup
 
-Before you can use this feature, you must grant "All files access" permission to Local Desktop:
+Before you can use this feature, you must grant "All files access" permission to Portal:
 
 1. Open your device's **Settings** app
 2. Navigate to **Apps** or **Applications**
-3. Find and select **Local Desktop**
+3. Find and select **Portal**
 4. Look for **Permissions** or **Special app access**
 5. Enable **All files access** (or "Manage all files" on some devices)
 

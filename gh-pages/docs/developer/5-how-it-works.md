@@ -37,7 +37,7 @@ Now you might got the idea of what `proot` is. It is a tool that allows you to r
 
 ### Wrapping it up
 
-The magic behind Local Desktop is that:
+The key to Portal is that:
 
 - It scaffolds an Arch Linux filesystem inside the app's internal storage.
 - It `proot` into the filesystem, so that you can have the same file system, the same libraries, and the same system calls. And with the already Linux Kernel that Android has, you can run Linux applications.
@@ -62,7 +62,7 @@ Remember, X11 is a protocol, Xorg is a display server. Although they are often u
 
 ### Wayland
 
-Wayland is a modern display server protocol that is designed to replace X11. And Local Desktop follows this trend. This approach has some advantages:
+Wayland is the modern display protocol designed to replace X11, and Portal uses it directly. This approach has several advantages:
 
 - Wayland servers, more frequently called **compositors**, are much more efficient than X11 servers.
 - By implementing a minimal Wayland compositor, guest Wayland sessions can connect as clients. Legacy X11 applications can still run via Xwayland when a nested compositor (such as labwc) provides it.
@@ -77,11 +77,11 @@ How Xwayland did this, you may ask? It is more obvious than you think: it acts a
 
 ### Wrapping it up
 
-The magic behind Local Desktop is that:
+The key to Portal is that:
 
 - It implements a minimal Wayland compositor that runs on an Android native activity and listens on `/tmp/wayland-0`.
 - The default Plasma session starts with `/usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland`. KWin connects directly to the built-in `/tmp/wayland-0` compositor and uses its shared-memory/QPainter path on Android.
 - Applications (Firefox, Dolphin, Konsole, the Plasma shell, and so on) render through that native Wayland stack back to the Android window. Xwayland remains available only for legacy X11-only apps when needed.
-- If Plasma exits during its first 30 seconds, Local Desktop records the failure and starts a labwc recovery session on the same native Wayland socket. Recovery can retry Plasma without deleting the guest filesystem.
+- If Plasma exits during its first 30 seconds, Portal records the failure and starts a labwc recovery session on the same native Wayland socket. Recovery can retry Plasma without deleting the guest filesystem.
 
 Fun fact: [Termux:X11](https://github.com/termux/termux-x11) also implements a display server, but it is based on X11. Just like how Xwayland is an X11 server running on top of Wayland, Termux:X11 is an X11 server running on top of an Android activity. (And Xorg is an X11 server running on top of the Linux kernel, remember that?)

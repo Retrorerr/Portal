@@ -1,4 +1,4 @@
-icon: assets/icon.png
+icon: assets/portal-icon.png
 android:
   assets:
     - assets/setup-progress.html
@@ -16,7 +16,7 @@ android:
       min_sdk_version: 21
       target_sdk_version: 35
     application:
-      label: "Local Desktop"
+      label: "Portal"
       extract_native_libs: true # Required for proot invocations
       use_cleartext_traffic: true # Required for connecting to ws://127.0.0.1, see assets/setup-progress.html
       services:

@@ -196,7 +196,7 @@ fn write_text_inner<'local>(
         ));
     }
     let label = env
-        .new_string("Local Desktop")
+        .new_string("Portal")
         .map_err(|error| jni_error("create clipboard label", error))?;
     let contents = env
         .new_string(text)

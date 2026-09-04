@@ -8,7 +8,7 @@ This is an advanced topic. Keep a copy of the working Plasma commands before exp
 
 ## The `[command]` configuration
 
-Local Desktop uses three commands from `/etc/localdesktop/localdesktop.toml`:
+Portal uses three commands from `/etc/localdesktop/localdesktop.toml`:
 
 - `check` verifies that the complete desktop environment is installed.
 - `install` provisions any missing packages during the guided first run.
@@ -19,7 +19,7 @@ The built-in defaults install KDE Plasma 6 and launch
 Xwayland remains available only for individual legacy applications inside Plasma; it is not
 the app's display backend or session launcher.
 
-The default launcher also connects Plasma to Local Desktop's PipeWire/Pulse bridge, applies
+The default launcher also connects Plasma to Portal's PipeWire/Pulse bridge, applies
 Android-aware scaling, enables KWin's QPainter renderer, and records startup failures under
 `/var/lib/localdesktop`. If Plasma cannot become ready within the startup window, the app
 enters a small native-Wayland labwc recovery session where Plasma can be retried.
