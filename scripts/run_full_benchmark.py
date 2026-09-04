@@ -4,7 +4,22 @@ import json
 import re
 import sys
 
-ADB_DEVICE = "f105b146"
+import os
+
+def get_default_device_id() -> str:
+    if os.environ.get("ANDROID_SERIAL"):
+        return os.environ["ANDROID_SERIAL"]
+    try:
+        out = subprocess.check_output(["adb", "devices"], text=True)
+        for line in out.strip().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "device":
+                return parts[0]
+    except Exception:
+        pass
+    return ""
+
+ADB_DEVICE = get_default_device_id()
 UID = "10487"
 
 def run_adb(cmd: str) -> str:

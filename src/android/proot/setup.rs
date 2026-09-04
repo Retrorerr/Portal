@@ -64,6 +64,8 @@ const KONSOLE_CONFIG: &str = include_str!("../../../assets/konsole/konsolerc");
 const KONSOLE_PROFILE: &str = include_str!("../../../assets/konsole/LocalDesktop.profile");
 const CRASH_HANDLER_SOURCE: &str = include_str!("../../../assets/localdesktop-crash-handler.c");
 const PATCHED_LIBKWIN: &[u8] = include_bytes!("../../../assets/kwin-arm64/libkwin.so.6.7.4");
+const PORTAL_IME_BRIDGE: &str = include_str!("../../../assets/portal-ime-bridge.py");
+const PORTAL_IME_DESKTOP: &str = include_str!("../../../assets/portal-ime.desktop");
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -1258,6 +1260,15 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/plasma_waitforname"),
         "#!/bin/sh\nif [ \"$1\" = \"org.kde.KSplash\" ]; then\n    exit 0\nfi\nexec /usr/bin/plasma_waitforname \"$@\"\n",
     );
+    write_executable(
+        &fs_root.join("usr/local/bin/portal-ime-bridge"),
+        PORTAL_IME_BRIDGE,
+    );
+    let ime_desktop_path = fs_root.join("usr/share/applications/portal-ime.desktop");
+    if let Some(parent) = ime_desktop_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
 
     sync_guest_network_config(fs_root);
 }

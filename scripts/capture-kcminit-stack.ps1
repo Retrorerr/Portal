@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$DeviceId = "f105b146",
+    [string]$DeviceId = "",
     [string]$RepoRoot = "",
     [string]$ArtifactRoot = "",
     [int]$WaitSeconds = 30
@@ -12,6 +12,15 @@ param(
 $ErrorActionPreference = "Stop"
 $adb = Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"
 if (-not (Test-Path -LiteralPath $adb)) { throw "adb not found: $adb" }
+if (-not $DeviceId) {
+    $DeviceId = if ($env:ANDROID_SERIAL) { $env:ANDROID_SERIAL } else {
+        $devs = & $adb devices | Select-String "\tdevice$"
+        if ($devs) {
+            $first = if ($devs -is [array]) { $devs[0].Line } else { $devs.Line }
+            ($first -split "\s+")[0]
+        } else { "f105b146" }
+    }
+}
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
 if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
     $ArtifactRoot = Join-Path $RepoRoot ("artifacts\qa\kcminit-stack-" + (Get-Date -Format "yyyyMMdd-HHmmss"))

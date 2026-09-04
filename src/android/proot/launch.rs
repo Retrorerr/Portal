@@ -157,6 +157,7 @@ pub fn launch() {
     let rootfs = runtime.rootfs_path();
     log::info!("launch: active runtime rootfs is {}", rootfs.display());
     crate::android::proot::setup::sync_session_runtime_files(&rootfs, 1);
+    crate::android::ime::start_ime_fifo_listener(&rootfs);
 
     let cancel = Arc::new(AtomicBool::new(false));
     let Ok(mut state) = launch_state().lock() else {
