@@ -1,5 +1,6 @@
 .cache
 target
+/target-*/
 localdesktop.apk
 .DS_Store
 /build/
