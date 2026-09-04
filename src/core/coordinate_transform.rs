@@ -168,13 +168,31 @@ fn inverse_unit_transform(t: ViewportTransform, u: f64, v: f64) -> (f64, f64) {
 /// - `physical_size` is the current Android host target (always >0, last valid
 ///   preserved — zero/invalid resizes never fabricate 1px geometry).
 /// - `requested_configure` is the last geometry actually requested from KWin.
-/// - `observed_surface_size` is the latest valid committed KWin surface.
-/// - `guest_logical_size` is the KWin logical desktop for the COMMITTED frame
-///   (old desktop during transitions, NOT the future host/plasma).
+/// - `observed_surface_size` is the committed texture of the CURRENTLY RENDERED
+///   KWin frame (live surface, possibly stale relative to the host target).
+/// - `guest_logical_size` is the KWin logical desktop matching THAT rendered
+///   frame — never the logical of a different generation. A stale frame keeps
+///   its own correct logical while still targeting the newest host.
+/// - `rendered_host`/`rendered_generation` identify which request the rendered
+///   frame was attributed to (size match, newest-first, xdg-ack tie-break).
 /// - `resize_generation` increases monotonically; newer resizes never lose to
 ///   obsolete state. No sleeps/timing guesses.
 /// - `kwin_scale` (Plasma UI scale) is stable across resizes, never derived
 ///   from stale presentation state.
+/// One xdg configure sent (or coalesced) for a host request.
+///
+/// `serial` is the Wayland configure serial captured from `send_configure`
+/// (0 when the send site did not capture one). Bounded ring, newest last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigureRequest {
+    pub generation: u64,
+    pub host: (i32, i32),
+    pub serial: u32,
+}
+
+/// How many configure requests the history ring retains.
+pub const REQUEST_HISTORY_LEN: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AuthoritativeDisplayState {
     /// Physical dimensions of the Android surface (W_phys, H_phys)
@@ -197,10 +215,32 @@ pub struct AuthoritativeDisplayState {
     pub requested_configure: (i32, i32),
     /// Generation of `requested_configure`.
     pub requested_generation: u64,
-    /// KWin logical desktop for the committed frame (old during transitions).
+    /// KWin logical desktop matching the CURRENTLY RENDERED frame.
+    /// Updated atomically with `observed_surface_size` in `note_kwin_commit`
+    /// from the request the frame was attributed to — never the logical of a
+    /// different generation.
     pub guest_logical_size: (f64, f64),
-    /// True when the committed frame fills the host (no letterboxing).
-    pub converged: bool,
+    /// Host size the rendered frame was produced for (owning request).
+    pub rendered_host: (i32, i32),
+    /// Request generation the rendered frame was attributed to.
+    pub rendered_generation: u64,
+    /// True when the rendered frame came from a viewporter surface size
+    /// (authoritative KWin logical, kept verbatim across Plasma changes).
+    pub rendered_from_surface: bool,
+    /// Last xdg configure serial acked by KWin (0 = none yet). Tie-breaks
+    /// same-dimension history matches toward the acknowledged request.
+    pub acked_serial: u32,
+    /// Ordered configure-request history, oldest first, newest last.
+    /// Only the first `request_len` entries are live.
+    pub requests: [ConfigureRequest; REQUEST_HISTORY_LEN],
+    /// Number of live entries in `requests` (1..=REQUEST_HISTORY_LEN).
+    pub request_len: u8,
+    /// Last seen live surface reading (viewport dst when present).
+    pub last_surface_size: Option<(f64, f64)>,
+    /// Last seen live buffer reading (logical buffer size).
+    pub last_buffer_size: Option<(f64, f64)>,
+    /// Last seen integer buffer scale.
+    pub last_buffer_scale: Option<i32>,
     /// mtime of `kwinoutputconfig.json` at last successful parse, nanos since
     /// UNIX epoch. Lets the compositor refresh Plasma scale only when the
     /// authoritative file actually changes (no per-frame JSON parsing).
@@ -218,6 +258,11 @@ impl AuthoritativeDisplayState {
         // All later updates MUST preserve last valid instead (see
         // `try_update_physical_size`).
         let physical_size = (physical_w.max(1), physical_h.max(1));
+        let seed = ConfigureRequest {
+            generation: 0,
+            host: physical_size,
+            serial: 0,
+        };
         let mut state = Self {
             physical_size,
             density_dpi: density_dpi.max(1),
@@ -229,11 +274,76 @@ impl AuthoritativeDisplayState {
             requested_configure: physical_size,
             requested_generation: 0,
             guest_logical_size: (1.0, 1.0),
-            converged: true,
+            rendered_host: physical_size,
+            rendered_generation: 0,
+            rendered_from_surface: false,
+            acked_serial: 0,
+            requests: [seed; REQUEST_HISTORY_LEN],
+            request_len: 1,
+            last_surface_size: None,
+            last_buffer_size: None,
+            last_buffer_scale: None,
             kwin_config_mtime_ns: None,
         };
         state.guest_logical_size = state.fresh_logical_geometry();
         state
+    }
+
+    /// Live configure-request history, oldest first.
+    pub fn request_history(&self) -> &[ConfigureRequest] {
+        &self.requests[..self.request_len.min(REQUEST_HISTORY_LEN as u8) as usize]
+    }
+
+    fn push_request(&mut self, generation: u64, host: (i32, i32), serial: u32) {
+        let entry = ConfigureRequest {
+            generation,
+            host,
+            serial,
+        };
+        let len = (self.request_len as usize).min(REQUEST_HISTORY_LEN);
+        if len < REQUEST_HISTORY_LEN {
+            self.requests[len] = entry;
+            self.request_len = (len + 1) as u8;
+        } else {
+            self.requests.copy_within(1.., 0);
+            self.requests[REQUEST_HISTORY_LEN - 1] = entry;
+        }
+    }
+
+    /// Record that an xdg configure was sent for the current request.
+    /// Call at every configure send site with the captured serial so commits
+    /// can later be attributed to their owning request (serial tie-break) and
+    /// diagnostics can show what KWin was asked for.
+    pub fn note_configure_sent(&mut self, serial: u32) {
+        let gen = self.requested_generation;
+        let host = self.requested_configure;
+        if let Some(entry) = self.requests[..(self.request_len as usize).min(REQUEST_HISTORY_LEN)]
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.generation == gen)
+        {
+            entry.serial = serial;
+            return;
+        }
+        self.push_request(gen, host, serial);
+    }
+
+    /// Record KWin's ack of a configure serial. Returns the owning request
+    /// generation when the serial is found in history.
+    pub fn note_configure_acked(&mut self, serial: u32) -> Option<u64> {
+        self.acked_serial = serial;
+        self.request_history()
+            .iter()
+            .rev()
+            .find(|entry| entry.serial != 0 && entry.serial == serial)
+            .map(|entry| entry.generation)
+    }
+
+    /// Whether the rendered frame was produced for the current host target.
+    /// A stale frame may be rendered (letterboxed) while this is false, but
+    /// it always carries its OWN matching logical geometry.
+    pub fn rendered_is_current(&self) -> bool {
+        self.observed_surface_size.is_none() || self.rendered_host == self.physical_size
     }
 
     fn fresh_logical_geometry(&self) -> (f64, f64) {
@@ -276,6 +386,14 @@ impl AuthoritativeDisplayState {
 
     /// Update the KWin scale factor.
     /// Returns true if the scale factor changed significantly.
+    ///
+    /// A rendered buffer-derived frame keeps its origin host but is
+    /// re-paired with that host under the new scale (the live surface is
+    /// overwhelmingly likely already new-scale: KWin recommits immediately on
+    /// scale changes while our refresh is low-frequency). Surface-derived
+    /// frames keep their authoritative KWin logical verbatim. Either way the
+    /// rendered pair stays internally consistent; the next matching commit
+    /// repairs any residual corner exactly.
     pub fn update_kwin_scale(&mut self, scale: f64) -> bool {
         if scale <= 0.0 || !scale.is_finite() {
             return false;
@@ -287,6 +405,11 @@ impl AuthoritativeDisplayState {
         };
         if changed {
             self.kwin_scale = Some(scale);
+            if self.observed_surface_size.is_some() && !self.rendered_from_surface {
+                let w = (self.rendered_host.0 as f64 / scale).round().max(1.0);
+                let h = (self.rendered_host.1 as f64 / scale).round().max(1.0);
+                self.guest_logical_size = (w, h);
+            }
         }
         changed
     }
@@ -377,11 +500,9 @@ impl AuthoritativeDisplayState {
         let (origin, size) = self.presentation_viewport();
         let uniform = self.uniform_presentation_scale();
         let (guest_w, guest_h) = self.logical_geometry();
-        // Converged (no letterbox) when a committed frame exists and the
-        // viewport fills the host within rounding. `converged` state is
-        // authoritative (updated in `note_kwin_commit`/`try_update_physical_size`
-        // with size-aware matching, not just aspect) — the geometric fill check
-        // here is a consistent derived view for the snapshot.
+        // Converged (no letterbox) when the rendered frame was produced for
+        // the current host target and its viewport fills the host within
+        // integer-truncation rounding.
         let host_w = self.physical_size.0 as f64;
         let host_h = self.physical_size.1 as f64;
         let fills = self.observed_surface_size.is_none()
@@ -395,7 +516,12 @@ impl AuthoritativeDisplayState {
             uniform_scale: uniform,
             viewport_origin: origin,
             viewport_size: size,
-            converged: self.converged && fills,
+            converged: self.rendered_is_current() && fills,
+            rendered_generation: self.rendered_generation,
+            rendered_host: self.rendered_host,
+            requested: self.requested_configure,
+            requested_generation: self.requested_generation,
+            acked_serial: self.acked_serial,
         }
     }
 
@@ -444,22 +570,73 @@ impl AuthoritativeDisplayState {
         changed
     }
 
-    /// Record a KWin commit with size-aware convergence.
+    /// Attribute a commit to a frame produced for `host`, returning the
+    /// matching logical geometry and whether it came from a viewporter
+    /// surface (authoritative KWin logical) or was derived (buffer path).
+    ///
+    /// Surface sizes (viewport dst) are authoritative KWin logical when they
+    /// equal `round(host/plasma)`. But `surface_size()` ALSO echoes the
+    /// integer buffer logical when KWin sets no viewport — observed live on
+    /// device at 2.25x (`surf == buf == 1130x800`) — so a surface reading that
+    /// instead matches `host/buffer_scale` is a buffer-mirror frame whose
+    /// logical must be derived, never used verbatim. Tolerances cover integer
+    /// `Size<i32>` truncation.
+    fn attribute_frame(
+        host: (i32, i32),
+        plasma: f64,
+        surface: Option<(f64, f64)>,
+        buffer: Option<(f64, f64)>,
+        buffer_scale: Option<i32>,
+    ) -> Option<((f64, f64), bool)> {
+        if let Some(s) = surface {
+            let exp_w = (host.0 as f64 / plasma).round();
+            let exp_h = (host.1 as f64 / plasma).round();
+            if (s.0 - exp_w).abs() <= 2.0 && (s.1 - exp_h).abs() <= 2.0 {
+                return Some((s, true));
+            }
+            if let Some(scale) = buffer_scale {
+                if (1..=4).contains(&scale) {
+                    let bw = host.0 as f64 / scale as f64;
+                    let bh = host.1 as f64 / scale as f64;
+                    if (s.0 - bw).abs() <= 2.5 && (s.1 - bh).abs() <= 2.5 {
+                        let w = (host.0 as f64 / plasma).round().max(1.0);
+                        let h = (host.1 as f64 / plasma).round().max(1.0);
+                        return Some(((w, h), false));
+                    }
+                }
+            }
+            return None;
+        }
+        if let (Some(b), Some(scale)) = (buffer, buffer_scale) {
+            if (1..=4).contains(&scale) {
+                let exp_w = host.0 as f64 / scale as f64;
+                let exp_h = host.1 as f64 / scale as f64;
+                if (b.0 - exp_w).abs() <= 2.5 && (b.1 - exp_h).abs() <= 2.5 {
+                    let w = (host.0 as f64 / plasma).round().max(1.0);
+                    let h = (host.1 as f64 / plasma).round().max(1.0);
+                    return Some(((w, h), false));
+                }
+            }
+        }
+        None
+    }
+
+    /// Record a KWin commit, attributing it to its owning request.
     ///
     /// - `surface_size`: viewport dst when KWin uses viewporter (fractional
-    ///   path, expected `host/plasma`), else `None`.
+    ///   path); authoritative KWin logical, used verbatim.
     /// - `buffer_size`: logical buffer size fallback (integer `buffer_scale`
-    ///   path, expected `host/buffer_scale`), else `None`.
+    ///   path); paired with `round(origin_host/plasma)`.
     /// - `buffer_scale`: integer `wl_surface` buffer scale when known.
     ///
-    /// Updates `observed_surface_size` (preferring surface over buffer),
-    /// then atomically transitions `guest_logical_size`/`converged` ONLY when
-    /// the commit matches the CURRENT host. Stale commits (old geometry
-    /// arriving after a newer host resize) update the texture record but must
-    /// NOT overwrite the guest logical or fake convergence. Re-evaluates even
-    /// when the size is unchanged so a Plasma-scale change with identical
-    /// buffer dimensions still converges on the next new commit.
-    /// Returns true when committed/guest/converged state changed.
+    /// The commit is matched newest-first against the configure-request
+    /// history; same-dimension ambiguities (A→B→A) prefer the entry whose
+    /// serial KWin last acked. The rendered texture AND its logical are then
+    /// updated atomically from the matched request — a stale intermediate
+    /// (B committed while targeting C) renders B with B-era logical while the
+    /// newest host target C is never disturbed. Re-evaluates even when the
+    /// size is unchanged so same-size recommits still repair attribution.
+    /// Returns true when rendered/logical/convergence state changed.
     pub fn note_kwin_commit(
         &mut self,
         surface_size: Option<(f64, f64)>,
@@ -476,61 +653,119 @@ impl AuthoritativeDisplayState {
         }
         let surface = valid(surface_size);
         let buffer = valid(buffer_size);
+        // Record the raw live readings for diagnostics even when the frame
+        // proves unattributable below.
+        self.last_surface_size = surface;
+        self.last_buffer_size = buffer;
+        self.last_buffer_scale = buffer_scale;
         let Some(committed) = surface.or(buffer) else {
             return false;
         };
+        let plasma = self.effective_kwin_scale();
+
+        // Newest-first history scan; acked serial wins ties.
+        let mut best: Option<(u64, (i32, i32), (f64, f64), bool)> = None;
+        let mut acked_best: Option<(u64, (i32, i32), (f64, f64), bool)> = None;
+        for entry in self.request_history().iter().rev() {
+            if let Some((guest, from_surface)) =
+                Self::attribute_frame(entry.host, plasma, surface, buffer, buffer_scale)
+            {
+                if best.is_none() {
+                    best = Some((entry.generation, entry.host, guest, from_surface));
+                }
+                if entry.serial != 0 && entry.serial == self.acked_serial {
+                    acked_best = Some((entry.generation, entry.host, guest, from_surface));
+                    break;
+                }
+            }
+        }
+        // Fall back to the current target itself (covers evicted history and
+        // pre-history initial commits); otherwise the frame is unattributable.
+        let matched = acked_best.or(best).or_else(|| {
+            Self::attribute_frame(self.physical_size, plasma, surface, buffer, buffer_scale).map(
+                |(guest, from_surface)| {
+                    (
+                        self.requested_generation,
+                        self.physical_size,
+                        guest,
+                        from_surface,
+                    )
+                },
+            )
+        });
+
+        let (origin_gen, origin_host, guest, from_surface) = match matched {
+            Some((gen, host, guest, from_surface)) => (gen, host, guest, from_surface),
+            None => {
+                // Unattributable frame: still track the LIVE texture (the
+                // renderer draws it regardless) paired with the best available
+                // logical — buffer-mirror derivation when a scale is known,
+                // verbatim surface otherwise — but never claim currency and
+                // never touch the newest host target.
+                let (guest, from_surface) = if surface.is_some() {
+                    match buffer_scale {
+                        Some(scale)
+                            if (1..=4).contains(&scale) && plasma.is_finite() && plasma > 0.0 =>
+                        {
+                            let s = surface.expect("surface branch");
+                            (
+                                (
+                                    (s.0 * scale as f64 / plasma).round().max(1.0),
+                                    (s.1 * scale as f64 / plasma).round().max(1.0),
+                                ),
+                                false,
+                            )
+                        }
+                        _ => (surface.expect("surface branch"), true),
+                    }
+                } else if let (Some(b), Some(scale)) = (buffer, buffer_scale) {
+                    if (1..=4).contains(&scale) && plasma.is_finite() && plasma > 0.0 {
+                        (
+                            (
+                                (b.0 * scale as f64 / plasma).round().max(1.0),
+                                (b.1 * scale as f64 / plasma).round().max(1.0),
+                            ),
+                            false,
+                        )
+                    } else {
+                        (self.guest_logical_size, self.rendered_from_surface)
+                    }
+                } else {
+                    (self.guest_logical_size, self.rendered_from_surface)
+                };
+                (
+                    self.rendered_generation,
+                    self.rendered_host,
+                    guest,
+                    from_surface,
+                )
+            }
+        };
+
         let size_changed = match self.observed_surface_size {
             Some(prev) => {
                 (prev.0 - committed.0).abs() > 0.01 || (prev.1 - committed.1).abs() > 0.01
             }
             None => true,
         };
-        if size_changed {
+        let guest_changed = (self.guest_logical_size.0 - guest.0).abs() > 0.01
+            || (self.guest_logical_size.1 - guest.1).abs() > 0.01;
+        let origin_changed =
+            self.rendered_generation != origin_gen || self.rendered_host != origin_host;
+        let from_surface_changed = self.rendered_from_surface != from_surface;
+
+        // Deliberately no "currency changed" term: currency is derived
+        // (`rendered_host == host` plus viewport fill), so folding it into
+        // change detection would report phantom changes every frame.
+        let changed = size_changed || guest_changed || origin_changed || from_surface_changed;
+        if changed {
             self.observed_surface_size = Some(committed);
+            self.guest_logical_size = guest;
+            self.rendered_host = origin_host;
+            self.rendered_generation = origin_gen;
+            self.rendered_from_surface = from_surface;
         }
-
-        let host = self.physical_size;
-        let plasma = self.effective_kwin_scale();
-        let mut now_converged = false;
-        if let Some(s) = surface {
-            let exp_w = (host.0 as f64 / plasma).round();
-            let exp_h = (host.1 as f64 / plasma).round();
-            if (s.0 - exp_w).abs() <= 2.0 && (s.1 - exp_h).abs() <= 2.0 {
-                now_converged = true;
-            }
-        } else if let (Some(b), Some(scale)) = (buffer, buffer_scale) {
-            if (1..=4).contains(&scale) {
-                let exp_w = host.0 as f64 / scale as f64;
-                let exp_h = host.1 as f64 / scale as f64;
-                if (b.0 - exp_w).abs() <= 2.5 && (b.1 - exp_h).abs() <= 2.5 {
-                    now_converged = true;
-                }
-            }
-        } else {
-            // No size hint to prove convergence (should not happen in
-            // production — redraw always provides buffer_scale). Preserve guest.
-            return size_changed;
-        }
-
-        if now_converged {
-            let new_guest = self.fresh_logical_geometry();
-            let guest_changed = (self.guest_logical_size.0 - new_guest.0).abs() > 0.01
-                || (self.guest_logical_size.1 - new_guest.1).abs() > 0.01
-                || !self.converged;
-            if guest_changed || size_changed {
-                self.guest_logical_size = new_guest;
-                self.converged = true;
-                return true;
-            }
-            return false;
-        }
-
-        // Transitional stale frame: keep OLD guest, mark unconverged.
-        if size_changed || self.converged {
-            self.converged = false;
-            return true;
-        }
-        false
+        changed
     }
 
     /// Update physical surface dimensions on resize or orientation change.
@@ -538,12 +773,15 @@ impl AuthoritativeDisplayState {
     /// - Zero/invalid dimensions mean the Android surface is temporarily
     ///   unavailable: preserve last valid state and return `false` (callers
     ///   must skip EGL/output/configure updates and resume on next valid).
-    /// - Identical sizes coalesce (no new generation, return `false`) so
-    ///   resize storms converge on the newest valid size without requiring the
-    ///   guest to process every obsolete intermediate.
+    /// - Identical sizes coalesce (no new generation, no history entry, return
+    ///   `false`) so resize storms converge on the newest valid size without
+    ///   requiring the guest to process every obsolete intermediate, and
+    ///   repeated equal-sized configures never corrupt request ownership.
     /// - New valid sizes bump `resize_generation`, update host + requested
-    ///   configure, preserve the OLD guest logical until the matching KWin
-    ///   commit arrives (transitional FIT letterboxes, never stretches).
+    ///   configure, and append to the request history. The rendered frame
+    ///   (texture + logical + origin) is untouched: the old frame keeps
+    ///   rendering letterboxed with its own correct logical until the matching
+    ///   KWin commit is attributed back to it.
     /// Returns true when host/generation actually changed.
     pub fn update_physical_size(&mut self, w: i32, h: i32) -> bool {
         self.try_update_physical_size(w, h).is_some()
@@ -563,13 +801,12 @@ impl AuthoritativeDisplayState {
         self.physical_size = (w, h);
         self.requested_configure = (w, h);
         self.requested_generation = self.resize_generation;
+        self.push_request(self.resize_generation, (w, h), 0);
         if self.observed_surface_size.is_none() {
             // No frame yet: guest tracks the fresh host directly.
             self.guest_logical_size = self.fresh_logical_geometry();
-            self.converged = true;
-        } else {
-            // Transitional: keep OLD guest until matching commit converges.
-            self.converged = false;
+            self.rendered_host = (w, h);
+            self.rendered_generation = self.resize_generation;
         }
         Some(self.resize_generation)
     }

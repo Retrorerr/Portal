@@ -7,6 +7,7 @@
 //! compositor, cursor and input paths use — so these run on the host without ADB.
 
 use localdesktop::core::coordinate_transform::AuthoritativeDisplayState;
+use localdesktop::core::presentation::fit_viewport;
 
 const PLASMA: f64 = 2.25;
 const BUFFER_SCALE: i32 = 3;
@@ -458,4 +459,277 @@ fn randomized_property_resize_storms_preserve_invariants() {
     assert_snapshot_invariants(&state, "random-final", PLASMA);
     assert_pointer_touch_hotspot(&state, "random-final");
     assert!((state.effective_kwin_scale() - PLASMA).abs() < 1e-9);
+}
+
+fn guest_for(host: (i32, i32)) -> (f64, f64) {
+    (
+        (host.0 as f64 / PLASMA).round(),
+        (host.1 as f64 / PLASMA).round(),
+    )
+}
+
+fn assert_near(actual: f64, expected: f64) {
+    assert!((actual - expected).abs() < 1e-8, "{actual} != {expected}");
+}
+
+/// Request `host` like a configure send site would: bump generation, record
+/// the serial so later commits attribute to this request.
+fn request(state: &mut AuthoritativeDisplayState, host: (i32, i32), serial: u32) -> u64 {
+    let gen = state
+        .try_update_physical_size(host.0, host.1)
+        .expect("valid distinct resize must bump generation");
+    state.note_configure_sent(serial);
+    gen
+}
+
+/// Assert an intermediate frame that really arrived after a newer host
+/// request: the rendered texture AND logical both belong to `frame_host`,
+/// the viewport FITs that frame into `target`, pointer/touch map that frame,
+/// and the newest host/requested target is untouched.
+fn assert_intermediate_frame(
+    state: &AuthoritativeDisplayState,
+    frame_host: (i32, i32),
+    target: (i32, i32),
+    context: &str,
+) {
+    let snap = state.presentation_snapshot();
+    let committed = simulated_buffer_commit(frame_host);
+    assert_eq!(snap.host, target, "{context}: host target moved");
+    assert_eq!(snap.requested, target, "{context}: requested target moved");
+    assert_eq!(
+        snap.committed,
+        Some(committed),
+        "{context}: rendered texture unknown"
+    );
+    assert_eq!(
+        snap.rendered_host, frame_host,
+        "{context}: rendered origin wrong"
+    );
+    assert_eq!(
+        snap.guest_logical,
+        guest_for(frame_host),
+        "{context}: logical mismatches the rendered frame (render/input skew)"
+    );
+    assert!(
+        !snap.converged,
+        "{context}: stale frame must not claim convergence"
+    );
+    let vp = fit_viewport(target, committed).expect("valid FIT");
+    assert!(
+        (snap.uniform_scale - vp.scale).abs() < 1e-9,
+        "{context}: uniform scale wrong"
+    );
+    assert_eq!(snap.viewport_origin, vp.origin);
+    assert_eq!(snap.viewport_size, vp.size);
+    // Pointer/touch map THAT frame: viewport center round-trips <1px and
+    // lands on that frame's logical center.
+    let (cx, cy) = (vp.origin.0 + vp.size.0 / 2.0, vp.origin.1 + vp.size.1 / 2.0);
+    let (lx, ly) = snap
+        .physical_to_logical(cx, cy)
+        .expect("viewport center must map");
+    let (rx, ry) = snap.logical_to_physical(lx, ly).unwrap();
+    assert!(
+        ((rx - cx).powi(2) + (ry - cy).powi(2)).sqrt() < 1.0,
+        "{context}: center round-trip drifted"
+    );
+    let g = guest_for(frame_host);
+    assert!(
+        (lx - g.0 / 2.0).abs() < 1.0 && (ly - g.1 / 2.0).abs() < 1.0,
+        "{context}: center maps to {lx},{ly} instead of frame center"
+    );
+}
+
+#[test]
+fn intermediate_commit_renders_own_frame_while_targeting_newest() {
+    // A → request B → request C → commit B → commit C.
+    let (b, c) = ((1100, 900), (2100, 1600));
+    let mut s = fresh_converged_fullscreen();
+    let gen_b = request(&mut s, b, 11);
+    let gen_c = request(&mut s, c, 12);
+    assert!(gen_c > gen_b);
+    // B really arrives after C was requested (not merely delayed-away).
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(b)), Some(BUFFER_SCALE)));
+    assert_intermediate_frame(&s, b, c, "B-while-targeting-C");
+    assert_eq!(s.presentation_snapshot().rendered_generation, gen_b);
+    assert_eq!(s.physical_size, c, "stale commit moved the host target");
+    assert_eq!(s.requested_configure, c);
+    // The matching commit for the newest target converges exactly.
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(c)), Some(BUFFER_SCALE)));
+    let snap = s.presentation_snapshot();
+    assert!(snap.converged);
+    assert_eq!(snap.guest_logical, guest_for(c));
+    assert_eq!(snap.rendered_generation, gen_c);
+    assert_snapshot_invariants(&s, "converged-C", PLASMA);
+    assert_pointer_touch_hotspot(&s, "converged-C");
+}
+
+#[test]
+fn rapid_bcd_then_old_b_then_d() {
+    // A → B → C → D → commit B → commit D.
+    let (b, c, d) = ((1100, 900), (2100, 1600), (850, 1200));
+    let mut s = fresh_converged_fullscreen();
+    request(&mut s, b, 21);
+    request(&mut s, c, 22);
+    let gen_d = request(&mut s, d, 23);
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(b)), Some(BUFFER_SCALE)));
+    assert_intermediate_frame(&s, b, d, "B-while-targeting-D");
+    // Skipped intermediates (C) never need a commit; the newest one converges.
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(d)), Some(BUFFER_SCALE)));
+    let snap = s.presentation_snapshot();
+    assert!(snap.converged);
+    assert_eq!(snap.guest_logical, guest_for(d));
+    assert_eq!(snap.rendered_generation, gen_d);
+}
+
+#[test]
+fn aba_stale_intermediate_then_newest() {
+    // A → B → A(newest) → stale B commit → newest A commit.
+    let (a, b) = ((3392, 2400), (1100, 900));
+    let mut s = fresh_converged_fullscreen();
+    let gen_b = request(&mut s, b, 31);
+    s.note_configure_acked(31);
+    let gen_a2 = request(&mut s, a, 32);
+    assert!(gen_a2 > gen_b);
+    // KWin's in-flight B frame lands after A was re-requested: it must render
+    // B with B-era logical (not A!), still targeting newest A.
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(b)), Some(BUFFER_SCALE)));
+    assert_intermediate_frame(&s, b, a, "stale-B-while-targeting-A2");
+    assert_eq!(s.presentation_snapshot().rendered_generation, gen_b);
+    // The newest A frame converges and attributes to the newest A request.
+    s.note_configure_acked(32);
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(a)), Some(BUFFER_SCALE)));
+    let snap = s.presentation_snapshot();
+    assert!(snap.converged);
+    assert_eq!(snap.guest_logical, guest_for(a));
+    assert_eq!(snap.rendered_generation, gen_a2);
+    assert_eq!(snap.acked_serial, 32);
+}
+
+#[test]
+fn duplicate_size_requests_do_not_corrupt_ownership() {
+    // A → B → B(coalesced) → C → commit B → commit C.
+    let (b, c) = ((1100, 900), (2100, 1600));
+    let mut s = fresh_converged_fullscreen();
+    let gen_b = request(&mut s, b, 41);
+    let len_before = s.request_history().len();
+    assert_eq!(s.try_update_physical_size(b.0, b.1), None);
+    assert_eq!(s.request_history().len(), len_before);
+    // Re-sending the same configure (same generation) only refreshes serials.
+    s.note_configure_sent(42);
+    assert_eq!(s.request_history().len(), len_before);
+    let gen_c = request(&mut s, c, 43);
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(b)), Some(BUFFER_SCALE)));
+    assert_intermediate_frame(&s, b, c, "dup-B-while-targeting-C");
+    assert_eq!(s.presentation_snapshot().rendered_generation, gen_b);
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(c)), Some(BUFFER_SCALE)));
+    assert!(s.presentation_snapshot().converged);
+    assert_eq!(s.presentation_snapshot().rendered_generation, gen_c);
+}
+
+#[test]
+fn repeated_dimensions_across_generations() {
+    // A → B → C → B(newest): a B-sized commit belongs to the newest B.
+    let (b, c) = ((1100, 900), (2100, 1600));
+    let mut s = fresh_converged_fullscreen();
+    request(&mut s, b, 51);
+    request(&mut s, c, 52);
+    let gen_b2 = request(&mut s, b, 53);
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(b)), Some(BUFFER_SCALE)));
+    let snap = s.presentation_snapshot();
+    assert!(snap.converged, "newest B frame fills newest B target");
+    assert_eq!(snap.guest_logical, guest_for(b));
+    assert_eq!(snap.rendered_generation, gen_b2);
+}
+
+#[test]
+fn surface_commits_carry_authoritative_logical_across_scale_change() {
+    // Viewporter path: surface size IS the KWin logical. It survives a Plasma
+    // scale change verbatim, while buffer-derived frames re-pair by origin.
+    let h = (1600, 1200);
+    let mut s = AuthoritativeDisplayState::new(h.0, h.1, DENSITY_DPI, 144_000);
+    s.update_kwin_scale(PLASMA);
+    let surface = (711.0, 533.0); // round(1600/2.25), round(1200/2.25)
+    let buffer = simulated_buffer_commit(h);
+    assert!(s.note_kwin_commit(Some(surface), Some(buffer), Some(BUFFER_SCALE)));
+    assert!(s.presentation_snapshot().converged);
+    assert_eq!(s.logical_geometry(), surface);
+    assert!(s.rendered_from_surface);
+    // Plasma scale change: the surface frame keeps KWin's own logical.
+    assert!(s.update_kwin_scale(2.0));
+    assert_eq!(s.logical_geometry(), surface);
+    // A buffer-derived frame instead re-pairs with its origin host.
+    let mut t = AuthoritativeDisplayState::new(h.0, h.1, DENSITY_DPI, 144_000);
+    t.update_kwin_scale(PLASMA);
+    assert!(t.note_kwin_commit(None, Some(buffer), Some(BUFFER_SCALE)));
+    assert_eq!(t.logical_geometry(), guest_for(h));
+    assert!(t.update_kwin_scale(2.0));
+    assert_eq!(
+        t.logical_geometry(),
+        ((h.0 as f64 / 2.0).round(), (h.1 as f64 / 2.0).round())
+    );
+}
+
+#[test]
+fn surface_mirroring_buffer_derives_logical_live_device_case() {
+    // Observed live on the OnePlus Pad 3 at Plasma 2.25x: KWin sets no
+    // viewport, so `surface_size() == buffer_size() == 1130x800`. That surface
+    // reading is a buffer mirror, NOT KWin logical — using it verbatim would
+    // pair the fullscreen texture with a 1130x800 desktop (render/input skew).
+    let mut s = AuthoritativeDisplayState::new(3392, 2400, DENSITY_DPI, 144_000);
+    s.update_kwin_scale(PLASMA);
+    let mirror = simulated_buffer_commit((3392, 2400));
+    assert!(s.note_kwin_commit(Some(mirror), Some(mirror), Some(BUFFER_SCALE)));
+    assert_eq!(s.logical_geometry(), guest_for((3392, 2400)));
+    assert!(!s.rendered_from_surface);
+    let snap = s.presentation_snapshot();
+    assert!(snap.converged);
+    assert_near(snap.uniform_scale, 3.0);
+    // Repeat identical commits (every frame) report no change: no log spam,
+    // no transform churn.
+    assert!(!s.note_kwin_commit(Some(mirror), Some(mirror), Some(BUFFER_SCALE)));
+    assert!(!s.note_kwin_commit(Some(mirror), Some(mirror), Some(BUFFER_SCALE)));
+}
+
+#[test]
+fn configure_serials_and_acks_attribute_commits() {
+    let (b, c) = ((1100, 900), (2100, 1600));
+    let mut s = fresh_converged_fullscreen();
+    let gen_b = request(&mut s, b, 61);
+    assert_eq!(s.note_configure_acked(61), Some(gen_b));
+    let gen_c = request(&mut s, c, 62);
+    // History is ordered oldest-first with serials attached.
+    let history = s.request_history();
+    assert!(history.len() >= 3);
+    assert_eq!(history[history.len() - 2].serial, 61);
+    assert_eq!(history[history.len() - 1].serial, 62);
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(b)), Some(BUFFER_SCALE)));
+    assert_eq!(s.presentation_snapshot().rendered_generation, gen_b);
+    assert_eq!(s.presentation_snapshot().acked_serial, 61);
+    // Unknown serials never corrupt attribution.
+    assert_eq!(s.note_configure_acked(9999), None);
+    assert_eq!(s.presentation_snapshot().acked_serial, 9999);
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(c)), Some(BUFFER_SCALE)));
+    assert!(s.presentation_snapshot().converged);
+    assert_eq!(s.presentation_snapshot().rendered_generation, gen_c);
+}
+
+#[test]
+fn request_history_is_bounded_and_newest_wins() {
+    let mut s = fresh_converged_fullscreen();
+    let mut serial = 100u32;
+    // 20 distinct requests; ring keeps the newest 16.
+    for i in 0..20 {
+        let w = 1000 + i * 37;
+        let h = 800 + i * 23;
+        serial += 1;
+        request(&mut s, (w, h), serial);
+    }
+    let history = s.request_history();
+    assert_eq!(history.len(), 16);
+    assert_eq!(history[15].host, (1000 + 19 * 37, 800 + 19 * 23));
+    assert_eq!(history[15].serial, serial);
+    // Genset strictly increases along the ring.
+    for pair in history.windows(2) {
+        assert!(pair[0].generation < pair[1].generation);
+    }
 }
