@@ -25,6 +25,7 @@ export QT_NO_XDG_DESKTOP_PORTAL=1
 export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
 export ELECTRON_DISABLE_SANDBOX=1
 export LOCALDESKTOP_DIAGNOSTICS=1
+export SHELL=/bin/bash
 # Debugger capture is opt-in.  Running every KWin instance under gdb changes
 # startup timing and ptrace is commonly denied by Android's sandbox.
 export LOCALDESKTOP_GDB_BACKTRACE=${LOCALDESKTOP_GDB_BACKTRACE:-@GDB_BACKTRACE@}
@@ -141,12 +142,34 @@ else
 fi
 rm -f "$config_dir/autostart/konsole.desktop" "$config_dir/autostart/org.kde.konsole.desktop"
 
+# Ensure default Konsole profile and konsolerc exist
+konsole_profile_dir="$home_dir/.local/share/konsole"
+mkdir -p "$konsole_profile_dir"
+if [ ! -f "$konsole_profile_dir/Profile 1.profile" ]; then
+    cat <<'EOF' > "$konsole_profile_dir/Profile 1.profile"
+[General]
+Command=/bin/bash
+Name=Profile 1
+Parent=FALLBACK/
+
+[Appearance]
+ColorScheme=Breeze
+EOF
+fi
+
+konsolerc="$config_dir/konsolerc"
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file "$konsolerc" --group 'Desktop Entry' --key DefaultProfile 'Profile 1.profile'
+fi
+
 # The Debian image is assembled by extracting a deterministic package closure,
 # so maintainer scripts do not run during image creation. Generate only the
 # small runtime databases desktop applications actually consume. Each command
 # is guarded and idempotent; failures remain non-fatal for an older image.
 if command -v localedef >/dev/null 2>&1 && [ ! -e /usr/lib/locale/locale-archive ]; then
     localedef -i en_GB -f UTF-8 en_GB.UTF-8 >> "$session_log" 2>&1 || true
+    localedef -i en_US -f UTF-8 en_US.UTF-8 >> "$session_log" 2>&1 || true
+    localedef -i C -f UTF-8 C.UTF-8 >> "$session_log" 2>&1 || true
 fi
 export LANG=en_GB.UTF-8
 export LC_ALL=en_GB.UTF-8

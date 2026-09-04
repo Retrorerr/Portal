@@ -175,12 +175,16 @@ fn nested_kwin_text_input_uses_protocol_commits_and_authoritative_hotplug() {
 #[test]
 fn nested_android_owned_settings_are_truthful() {
     assert!(ANDROID_SETUP_SOURCE.contains("browser.tabs.inTitlebar\", 0"));
+    assert!(ANDROID_SETUP_SOURCE.contains("sync_firefox_config"));
     assert!(ANDROID_SETUP_SOURCE.contains("get_timezone_id()"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_touchscreen.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_tablet.so"));
+    assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_mouse.so"));
+    assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_touchpad.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings_qwidgets/kcm_clock.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("with_extension(\"so.portal-disabled\")"));
     assert!(ANDROID_SETUP_SOURCE.contains("org.kde.dolphin.desktop"));
+    assert!(ANDROID_SETUP_SOURCE.contains("Profile 1.profile"));
 }
 
 #[test]

@@ -32,7 +32,7 @@ def main():
     dbus_addr = ""
     for item in env_raw.split(b"\x00"):
         if item.startswith(b"DBUS_SESSION_BUS_ADDRESS="):
-            dbus_addr = item.split(b"=", 1)[1].decode("utf-8", "ignore")
+            dbus_addr = item.split(b"=", 1)[1].decode("utf-8", "ignore").strip()
             break
 
     guest_script = (
@@ -43,6 +43,7 @@ def main():
         "export LOGNAME=root\n"
         "export LANG=C.UTF-8\n"
         "export LC_ALL=C.UTF-8\n"
+        "export SHELL=/bin/bash\n"
         "export PATH=/usr/local/sbin:/usr/local/bin:/usr/lib/aarch64-linux-gnu/libexec:/usr/bin:/bin:/usr/sbin:/sbin\n"
         "export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu\n"
         "export XDG_RUNTIME_DIR=/tmp\n"
