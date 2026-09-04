@@ -141,6 +141,28 @@ else
 fi
 rm -f "$config_dir/autostart/konsole.desktop" "$config_dir/autostart/org.kde.konsole.desktop"
 
+# The Debian image is assembled by extracting a deterministic package closure,
+# so maintainer scripts do not run during image creation. Generate only the
+# small runtime databases desktop applications actually consume. Each command
+# is guarded and idempotent; failures remain non-fatal for an older image.
+if command -v localedef >/dev/null 2>&1 && [ ! -e /usr/lib/locale/locale-archive ]; then
+    localedef -i en_GB -f UTF-8 en_GB.UTF-8 >> "$session_log" 2>&1 || true
+fi
+export LANG=en_GB.UTF-8
+export LC_ALL=en_GB.UTF-8
+
+if command -v update-mime-database >/dev/null 2>&1 && [ ! -s /usr/share/mime/mime.cache ]; then
+    update-mime-database /usr/share/mime >> "$session_log" 2>&1 || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1 && [ ! -s /usr/share/applications/mimeinfo.cache ]; then
+    update-desktop-database /usr/share/applications >> "$session_log" 2>&1 || true
+fi
+cache_marker="$state_dir/desktop-caches-v1"
+if [ ! -e "$cache_marker" ] && command -v kbuildsycoca6 >/dev/null 2>&1; then
+    kbuildsycoca6 --noincremental >> "$session_log" 2>&1 || true
+    : > "$cache_marker"
+fi
+
 # Disable ksplash to avoid hanging on splash animation under PRoot
 ksplashrc="$config_dir/ksplashrc"
 if command -v kwriteconfig6 >/dev/null 2>&1; then

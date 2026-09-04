@@ -12,7 +12,13 @@ mod android_integration;
 mod clipboard_policy;
 
 const ANDROID_CLIPBOARD_SOURCE: &str = include_str!("../src/android/clipboard.rs");
-const ANDROID_COMPOSITOR_SOURCE: &str = include_str!("../src/android/backend/wayland/compositor.rs");
+const ANDROID_COMPOSITOR_SOURCE: &str =
+    include_str!("../src/android/backend/wayland/compositor.rs");
+const ANDROID_TEXT_INPUT_V2_SOURCE: &str =
+    include_str!("../src/android/backend/wayland/text_input_v2.rs");
+const ANDROID_KEYBOARD_BRIDGE_SOURCE: &str =
+    include_str!("../src/android/java/app/polarbear/SoftKeyboardBridge.java");
+const ANDROID_SETUP_SOURCE: &str = include_str!("../src/android/proot/setup.rs");
 
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
@@ -153,6 +159,28 @@ fn software_keyboard_mixed_and_edge_case_commits() {
 #[test]
 fn software_keyboard_delete_commit_maps_to_backspace() {
     assert_eq!(committed_ascii_to_key_events("\u{8}"), vec![(14, false)]);
+}
+
+#[test]
+fn nested_kwin_text_input_uses_protocol_commits_and_authoritative_hotplug() {
+    assert!(ANDROID_TEXT_INPUT_V2_SOURCE.contains("ZwpTextInputManagerV2"));
+    assert!(ANDROID_TEXT_INPUT_V2_SOURCE.contains("input.commit_string"));
+    assert!(ANDROID_TEXT_INPUT_V2_SOURCE.contains("input.delete_surrounding_text"));
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("InputManager.InputDeviceListener"));
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("InputDevice.KEYBOARD_TYPE_ALPHABETIC"));
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("device.isExternal()"));
+    assert!(!ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("OnePlus Pad 3 Keyboard"));
+}
+
+#[test]
+fn nested_android_owned_settings_are_truthful() {
+    assert!(ANDROID_SETUP_SOURCE.contains("browser.tabs.inTitlebar\", 0"));
+    assert!(ANDROID_SETUP_SOURCE.contains("get_timezone_id()"));
+    assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_touchscreen.so"));
+    assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_tablet.so"));
+    assert!(ANDROID_SETUP_SOURCE.contains("systemsettings_qwidgets/kcm_clock.so"));
+    assert!(ANDROID_SETUP_SOURCE.contains("with_extension(\"so.portal-disabled\")"));
+    assert!(ANDROID_SETUP_SOURCE.contains("org.kde.dolphin.desktop"));
 }
 
 #[test]

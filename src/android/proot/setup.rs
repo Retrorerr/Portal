@@ -548,6 +548,10 @@ defaultPref("media.cubeb.sandbox", false);
 defaultPref("security.sandbox.content.level", 0);
 defaultPref("media.allow-audio-non-utility", true);
 defaultPref("media.rdd-process.enabled", false);
+// Firefox's client-side titlebar cannot obtain KDE's button layout in the
+// stripped PRoot session. Use KWin's proven Breeze server decoration so close,
+// maximize and minimize are always visible and scaled consistently.
+defaultPref("browser.tabs.inTitlebar", 0);
 
 try {
   var { SandboxUtils } = ChromeUtils.importESModule("resource://gre/modules/SandboxUtils.sys.mjs");
@@ -1048,6 +1052,8 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     let home_dir = chroot_home_dir(fs_root, &username);
     let xft_dpi = ui_scale * 96;
 
+    sync_android_timezone(fs_root);
+
     let xresources_path = home_dir.join(".Xresources");
     let _ = fs::create_dir_all(
         xresources_path
@@ -1065,6 +1071,82 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         '=',
         &[("action/lock_screen", "false".to_string())],
     );
+
+    // These KCMs configure Linux-owned hardware/services that do not exist in
+    // a nested Android PRoot session. Keep the KWin touchscreen-gestures KCM:
+    // it legitimately acts on the wl_touch seat. Hide only the libinput device,
+    // drawing-tablet and privileged timedated pages.
+    for desktop_file in ["kcm_clock.desktop", "kcm_tablet.desktop"] {
+        let path = fs_root.join("usr/share/applications").join(desktop_file);
+        if path.is_file() {
+            upsert_kv_file(
+                &path,
+                '=',
+                &[
+                    ("Hidden", "true".to_string()),
+                    ("NoDisplay", "true".to_string()),
+                ],
+            );
+        }
+    }
+    for plugin in [
+        "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_touchscreen.so",
+        "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_tablet.so",
+        "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings_qwidgets/kcm_clock.so",
+    ] {
+        let source = fs_root.join(plugin);
+        if source.is_file() {
+            let disabled = source.with_extension("so.portal-disabled");
+            fs::rename(&source, &disabled)
+                .expect("Failed to disable an unsupported Plasma settings module");
+        }
+    }
+
+    // Plasma's stock panel pins Discover even when this deliberately minimal
+    // image has no package-management backend. Migrate that one dead launcher
+    // to Dolphin once, then leave subsequent user panel customisation alone.
+    let panel_marker = home_dir.join(".local/state/portal/panel-launchers-v1");
+    if !panel_marker.exists() {
+        let appletsrc = config_dir.join("plasma-org.kde.plasma.desktop-appletsrc");
+        if let Ok(content) = fs::read_to_string(&appletsrc) {
+            let discover_available = fs_root.join("usr/bin/plasma-discover").is_file();
+            let dolphin_available = fs_root.join("usr/bin/dolphin").is_file();
+            let mut changed = false;
+            let mut lines = Vec::new();
+            for line in content.lines() {
+                if let Some(value) = line.strip_prefix("launchers=") {
+                    let mut launchers: Vec<&str> = value
+                        .split(',')
+                        .filter(|entry| {
+                            discover_available || *entry != "applications:org.kde.discover.desktop"
+                        })
+                        .collect();
+                    if dolphin_available
+                        && !launchers.contains(&"applications:org.kde.dolphin.desktop")
+                    {
+                        let at = launchers
+                            .iter()
+                            .position(|entry| entry.starts_with("preferred://"))
+                            .unwrap_or(launchers.len());
+                        launchers.insert(at, "applications:org.kde.dolphin.desktop");
+                    }
+                    let replacement = format!("launchers={}", launchers.join(","));
+                    changed |= replacement != line;
+                    lines.push(replacement);
+                } else {
+                    lines.push(line.to_string());
+                }
+            }
+            if changed {
+                fs::write(&appletsrc, format!("{}\n", lines.join("\n")))
+                    .expect("Failed to repair the default panel launchers");
+            }
+        }
+        if let Some(parent) = panel_marker.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(panel_marker, "migrated\n");
+    }
     let kscreenlockerrc = config_dir.join("kscreenlockerrc");
     upsert_kv_file(
         &kscreenlockerrc,
@@ -1110,6 +1192,51 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     );
 
     sync_guest_network_config(fs_root);
+}
+
+fn sync_android_timezone(fs_root: &Path) {
+    let Some(zone_id) = get_application_context().get_timezone_id() else {
+        log::warn!("Android timezone was unavailable; retaining the guest timezone");
+        return;
+    };
+    let relative = Path::new(&zone_id);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        log::warn!("Ignoring invalid Android timezone identifier: {zone_id:?}");
+        return;
+    }
+    let zoneinfo = fs_root.join("usr/share/zoneinfo").join(relative);
+    if !zoneinfo.is_file() {
+        log::warn!("Android timezone is not present in the guest zoneinfo database: {zone_id}");
+        return;
+    }
+
+    let etc = fs_root.join("etc");
+    fs::create_dir_all(&etc).expect("Failed to create guest /etc for timezone sync");
+    let localtime = etc.join("localtime");
+    match fs::symlink_metadata(&localtime) {
+        Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+            fs::remove_file(&localtime).expect("Failed to replace guest /etc/localtime");
+        }
+        Ok(_) => {
+            log::warn!("Guest /etc/localtime is not a file; leaving it unchanged");
+            return;
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            log::warn!("Failed to inspect guest /etc/localtime: {error}");
+            return;
+        }
+    }
+    symlink(format!("/usr/share/zoneinfo/{zone_id}"), &localtime)
+        .expect("Failed to link guest timezone to Android's zone");
+    fs::write(etc.join("timezone"), format!("{zone_id}\n"))
+        .expect("Failed to write guest /etc/timezone");
+    log::info!("Synchronized guest timezone from Android: {zone_id}");
 }
 
 /// Keep guest network configuration (DNS resolver, NSS, hosts, SSL CA certificates)

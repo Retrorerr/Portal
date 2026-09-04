@@ -58,6 +58,11 @@ SEED_PACKAGES = [
     "fonts-dejavu-core",
     "fonts-noto-core",
     "fontconfig",
+    # Locale and desktop metadata tools. Package extraction does not run Debian
+    # maintainer scripts, so the guest startup script deterministically builds
+    # the selected locale and MIME/application caches.
+    "locales",
+    "desktop-file-utils",
     # Graphics drivers / Mesa
     "libgl1-mesa-dri",
     "mesa-vulkan-drivers",
@@ -141,7 +146,9 @@ def resolve_dependencies(packages: dict, seeds: list) -> list:
 
         resolved.add(clean)
         pkg = packages[clean]
-        deps_str = pkg.get("Depends", "")
+        deps_str = ", ".join(
+            value for value in (pkg.get("Pre-Depends", ""), pkg.get("Depends", "")) if value
+        )
         if deps_str:
             for dep in deps_str.split(","):
                 # Take first alternative in "pkgA | pkgB"

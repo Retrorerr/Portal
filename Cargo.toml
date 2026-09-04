@@ -36,6 +36,7 @@ winit = { version = "0.30.11", features = [
     "wayland",
 ] }
 wayland-protocols = "0.32.6"
+wayland-protocols-plasma = { version = "0.3.8", features = ["server"] }
 wayland-scanner = "0.31"
 khronos-egl = { version = "6.0.0", features = ["dynamic"] }
 

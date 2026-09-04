@@ -243,6 +243,40 @@ impl ApplicationContext {
             self.android_app.clone(),
         )
     }
+
+    /// Return Android's authoritative IANA timezone identifier.
+    ///
+    /// PRoot has no timedated service or hardware clock. Mirroring this value
+    /// on every launch gives libc and Plasma the same wall-clock zone as the
+    /// physical tablet without pretending the guest can change Android time.
+    pub fn get_timezone_id(&self) -> Option<String> {
+        run_in_jvm(
+            |env, _| {
+                let zone = env
+                    .call_static_method(
+                        "java/util/TimeZone",
+                        "getDefault",
+                        "()Ljava/util/TimeZone;",
+                        &[],
+                    )
+                    .ok()?
+                    .l()
+                    .ok()?;
+                let id = env
+                    .call_method(&zone, "getID", "()Ljava/lang/String;", &[])
+                    .ok()?
+                    .l()
+                    .ok()?;
+                if id.is_null() {
+                    return None;
+                }
+                env.get_string(&JString::from(id))
+                    .ok()
+                    .map(|value| value.to_string_lossy().into_owned())
+            },
+            self.android_app.clone(),
+        )
+    }
 }
 
 static APPLICATION_CONTEXT: RwLock<Option<ApplicationContext>> = RwLock::new(None);

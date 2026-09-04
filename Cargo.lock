@@ -2387,6 +2387,7 @@ dependencies = [
  "typst-as-lib",
  "typst-pdf",
  "wayland-protocols",
+ "wayland-protocols-plasma",
  "wayland-scanner",
  "websocket",
  "winit",
@@ -6015,6 +6016,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]

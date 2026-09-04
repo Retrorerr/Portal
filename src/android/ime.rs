@@ -11,7 +11,10 @@ use jni::{
     objects::{JClass, JObject, JString},
     JNIEnv,
 };
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, AtomicI8, Ordering},
+    Mutex, OnceLock,
+};
 use winit::{
     event_loop::{EventLoopClosed, EventLoopProxy},
     platform::android::activity::AndroidApp,
@@ -22,6 +25,10 @@ use crate::core::ime_policy::CommitQueue;
 
 static COMMITS: OnceLock<Mutex<CommitQueue>> = OnceLock::new();
 static EVENT_LOOP_PROXY: OnceLock<Mutex<Option<EventLoopProxy<AppUserEvent>>>> = OnceLock::new();
+static WAYLAND_TEXT_INPUT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static HARDWARE_KEYBOARD_PRESENT: AtomicBool = AtomicBool::new(false);
+// -1 hide, 0 unchanged, 1 show. The event-loop owns all JNI visibility calls.
+static VISIBILITY_REQUEST: AtomicI8 = AtomicI8::new(0);
 
 fn commits() -> &'static Mutex<CommitQueue> {
     COMMITS.get_or_init(|| Mutex::new(CommitQueue::default()))
@@ -37,6 +44,37 @@ pub fn register_event_loop_proxy(proxy: EventLoopProxy<AppUserEvent>) {
     if let Ok(mut current) = event_loop_proxy().lock() {
         *current = Some(proxy);
     }
+}
+
+/// Start authoritative Android InputManager monitoring. This is event-driven:
+/// pogo/USB/Bluetooth keyboard hotplug wakes the existing winit loop.
+pub fn start_hardware_keyboard_monitor(android_app: &AndroidApp) -> Result<(), String> {
+    call_bridge(android_app, "startHardwareKeyboardMonitor")
+}
+
+pub fn set_wayland_text_input_active(active: bool) {
+    WAYLAND_TEXT_INPUT_ACTIVE.store(active, Ordering::Release);
+    request_visibility(active && !HARDWARE_KEYBOARD_PRESENT.load(Ordering::Acquire));
+}
+
+pub fn request_visibility(show: bool) {
+    VISIBILITY_REQUEST.store(if show { 1 } else { -1 }, Ordering::Release);
+    wake_event_loop();
+}
+
+pub fn take_visibility_request() -> Option<bool> {
+    match VISIBILITY_REQUEST.swap(0, Ordering::AcqRel) {
+        1 => Some(true),
+        -1 => Some(false),
+        _ => None,
+    }
+}
+
+pub fn refresh_visibility() {
+    request_visibility(
+        WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire)
+            && !HARDWARE_KEYBOARD_PRESENT.load(Ordering::Acquire),
+    );
 }
 
 fn wake_event_loop() {
@@ -73,12 +111,7 @@ fn bridge_class<'local>(
     activity: &JObject<'local>,
 ) -> Result<JClass<'local>, String> {
     let loader = env
-        .call_method(
-            activity,
-            "getClassLoader",
-            "()Ljava/lang/ClassLoader;",
-            &[],
-        )
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
         .and_then(|value| value.l())
         .map_err(|error| format!("Activity.getClassLoader: {error}"))?;
     if loader.is_null() {
@@ -154,6 +187,7 @@ pub fn reset() {
     if let Ok(mut queue) = commits().lock() {
         queue.clear();
     }
+    VISIBILITY_REQUEST.store(0, Ordering::Release);
 }
 
 /// Drain committed text from Android's input connection.
@@ -188,4 +222,18 @@ pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnTextCommit(
     if enqueue_commit(text) {
         wake_event_loop();
     }
+}
+
+/// JNI callback from Android's InputDeviceListener. Device classification is
+/// performed with InputDevice source/type flags, never device names.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnHardwareKeyboardChanged(
+    _env: JNIEnv,
+    _bridge: JObject,
+    present: jni::sys::jboolean,
+) {
+    let present = present != 0;
+    log::info!("Android physical keyboard presence changed: {present}");
+    HARDWARE_KEYBOARD_PRESENT.store(present, Ordering::Release);
+    request_visibility(!present && WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire));
 }

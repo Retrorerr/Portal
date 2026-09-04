@@ -340,7 +340,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             ime::reset();
             let runtime = crate::android::runtime::proot::PRootRuntime::active();
             crate::android::proot::setup::sync_guest_network_config(runtime.rootfs_path());
-            !resume_wayland(backend, event_loop, &self.frontend.android_app)
+            let failed = !resume_wayland(backend, event_loop, &self.frontend.android_app);
+            if !failed {
+                ime::refresh_visibility();
+            }
+            failed
         } else {
             false
         };
@@ -385,8 +389,21 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             return;
         };
 
+        if let Some(show) = ime::take_visibility_request() {
+            let result = if show {
+                ime::show(&backend.android_app)
+            } else {
+                ime::hide(&backend.android_app)
+            };
+            if let Err(error) = result {
+                log::warn!("Could not update Android software-keyboard visibility: {error}");
+            }
+        }
+
         for text in ime::drain_commits() {
-            inject_committed_text(&text, backend, event_loop);
+            if !backend.compositor.state.commit_android_text(&text) {
+                inject_committed_text(&text, backend, event_loop);
+            }
         }
 
         for event in accessibility::drain_pending_events() {
