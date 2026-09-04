@@ -74,7 +74,11 @@ impl ProcessSpec {
         self
     }
 
-    pub fn with_bind(mut self, host_path: impl Into<PathBuf>, guest_path: impl Into<PathBuf>) -> Self {
+    pub fn with_bind(
+        mut self,
+        host_path: impl Into<PathBuf>,
+        guest_path: impl Into<PathBuf>,
+    ) -> Self {
         self.extra_binds.push(BindMount::new(host_path, guest_path));
         self
     }
@@ -176,6 +180,15 @@ impl RuntimeLayout {
                 slot.is_active = true;
                 return slot;
             }
+            if active_id == "slot-a" {
+                return self.slot_a();
+            }
+        }
+        let slot_b_path = self.base_dir.join("runtime-B");
+        if slot_b_path.exists() {
+            let mut slot = self.slot_b();
+            slot.is_active = true;
+            return slot;
         }
         self.slot_a()
     }
@@ -187,9 +200,7 @@ impl RuntimeLayout {
     }
 
     pub fn standard_bind_mounts(&self) -> Vec<BindMount> {
-        vec![
-            BindMount::new(&self.shared_home, "/home"),
-        ]
+        vec![BindMount::new(&self.shared_home, "/home")]
     }
 }
 
@@ -240,7 +251,9 @@ mod tests {
     fn runtime_layout_switches_to_slot_b() {
         let temp_dir = std::env::temp_dir().join(format!("portal-test-b-{}", std::process::id()));
         let layout = RuntimeLayout::new(&temp_dir);
-        layout.set_active_slot("slot-b").expect("Failed to write active slot");
+        layout
+            .set_active_slot("slot-b")
+            .expect("Failed to write active slot");
         let active = layout.active_slot();
         assert_eq!(active.id, "slot-b");
         assert_eq!(active.distro_name, "Debian 13 (Trixie) ARM64");

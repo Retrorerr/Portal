@@ -90,6 +90,32 @@ pub struct WinitMouseMovedEvent {
     pub(crate) time: u64,
     pub(crate) position: RelativePosition,
     pub(crate) global_position: PhysicalPosition<f64>,
+    pub(crate) physical_position: PhysicalPosition<f64>,
+    pub(crate) android_device_id: Option<i32>,
+    pub(crate) android_source: Option<u32>,
+    pub(crate) android_tool_type: Option<u32>,
+}
+
+impl WinitMouseMovedEvent {
+    pub fn physical_x(&self) -> f64 {
+        self.physical_position.x
+    }
+
+    pub fn physical_y(&self) -> f64 {
+        self.physical_position.y
+    }
+
+    pub fn android_device_id(&self) -> Option<i32> {
+        self.android_device_id
+    }
+
+    pub fn android_source(&self) -> Option<u32> {
+        self.android_source
+    }
+
+    pub fn android_tool_type(&self) -> Option<u32> {
+        self.android_tool_type
+    }
 }
 
 impl Event<WinitInput> for WinitMouseMovedEvent {
@@ -142,7 +168,7 @@ impl PointerAxisEvent<WinitInput> for WinitMouseWheelEvent {
     fn source(&self) -> AxisSource {
         match self.delta {
             MouseScrollDelta::LineDelta(_, _) => AxisSource::Wheel,
-            MouseScrollDelta::PixelDelta(_) => AxisSource::Continuous,
+            MouseScrollDelta::PixelDelta(_) => AxisSource::Finger,
         }
     }
 
@@ -150,7 +176,8 @@ impl PointerAxisEvent<WinitInput> for WinitMouseWheelEvent {
         match (axis, self.delta) {
             (Axis::Horizontal, MouseScrollDelta::PixelDelta(delta)) => Some(-delta.x),
             (Axis::Vertical, MouseScrollDelta::PixelDelta(delta)) => Some(-delta.y),
-            (_, MouseScrollDelta::LineDelta(_, _)) => None,
+            (Axis::Horizontal, MouseScrollDelta::LineDelta(x, _)) => Some(-x as f64 * 15.0),
+            (Axis::Vertical, MouseScrollDelta::LineDelta(_, y)) => Some(-y as f64 * 15.0),
         }
     }
 

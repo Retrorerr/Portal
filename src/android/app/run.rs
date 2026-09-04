@@ -15,14 +15,13 @@ use crate::android::{
     proot::launch::{is_running, launch, stop, take_failure},
     utils::{
         ndk::{self, run_in_jvm},
-        webview::{
-            runtime_error_page_url, setup_page_url, show_webview_popup,
-        },
+        webview::{runtime_error_page_url, setup_page_url, show_webview_popup},
         webview_handoff,
     },
 };
 use crate::core::android_input::committed_ascii_to_key_events;
 use crate::core::config;
+use crate::core::runtime::LinuxRuntime;
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::Transform;
@@ -39,6 +38,7 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
 
     let window_size = winit.window_size();
     let size = (window_size.w, window_size.h);
+    let density_dpi = ndk::density_dpi(&backend.android_app).max(1);
     // Not `winit.scale_factor()`: that reads `AConfiguration`, which still reports the 160 dpi
     // default on the first launch and only becomes accurate after a configuration change.
     let guest_scale_factor = ndk::scale_factor(&backend.android_app);
@@ -46,11 +46,34 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     backend.refresh_rate_millihz = ndk::refresh_rate_millihz(&backend.android_app);
     backend.compositor.state.size = size.into();
 
-    let density = ndk::density_dpi(&backend.android_app).max(1) as f64;
-    let physical_size_mm = (
-        (window_size.w as f64 * 25.4 / density).round().max(1.0) as i32,
-        (window_size.h as f64 * 25.4 / density).round().max(1.0) as i32,
+    let mut display_state = crate::core::coordinate_transform::AuthoritativeDisplayState::new(
+        window_size.w,
+        window_size.h,
+        density_dpi,
+        backend.refresh_rate_millihz,
     );
+    if let Some(scale) = backend
+        .compositor
+        .state
+        .authoritative_display_state
+        .kwin_scale
+    {
+        display_state.update_kwin_scale(scale);
+    }
+    crate::android::backend::wayland::output_state::sync_kwin_output_scale(&mut display_state);
+    if let Some(surf_size) = backend
+        .compositor
+        .state
+        .authoritative_display_state
+        .observed_surface_size
+    {
+        display_state.update_observed_surface_size(surf_size);
+    }
+    backend.compositor.state.authoritative_display_state = display_state;
+    backend.compositor.state.coordinate_transform = display_state.coordinate_transform();
+    backend.compositor.state.kwin_surface_scale = display_state.presentation_scale();
+
+    let physical_size_mm = display_state.physical_size_mm();
 
     let output = backend
         .compositor
@@ -86,12 +109,13 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
         Some(Scale::Integer(1)),
         Some((0, 0).into()),
     );
-    let guest_scale = guest_scale_factor.round().max(1.0) as i32;
+    let guest_scale = display_state.baseline_density_scale().round().max(1.0) as i32;
     write_guest_output_state(window_size.w, window_size.h, guest_scale);
 
+    let configure_size = display_state.configure_size();
     for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
         output.enter(surface.wl_surface());
-        configure_toplevel(surface, window_size.w, window_size.h);
+        configure_toplevel(surface, configure_size.0, configure_size.1);
     }
 }
 
@@ -207,10 +231,8 @@ impl PolarBearApp {
         pipewire_standalone_aaudio::shutdown();
         webview_handoff::clear();
         log::error!("Switching to graphical runtime error screen: {reason}");
-        self.backend = PolarBearBackend::WebView(WebviewBackend::runtime_error(
-            android_app,
-            reason,
-        ));
+        self.backend =
+            PolarBearBackend::WebView(WebviewBackend::runtime_error(android_app, reason));
         self.show_webview();
     }
 
@@ -316,6 +338,8 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
 
         let resume_failed = if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             ime::reset();
+            let runtime = crate::android::runtime::proot::PRootRuntime::active();
+            crate::android::proot::setup::sync_guest_network_config(runtime.rootfs_path());
             !resume_wayland(backend, event_loop, &self.frontend.android_app)
         } else {
             false
@@ -470,12 +494,7 @@ fn inject_committed_text(
         let time = backend.clock.now().as_millis() as u64;
         if shift_required {
             handle(
-                centralize_injected_keyboard(
-                    42,
-                    ElementState::Pressed,
-                    time,
-                    backend,
-                ),
+                centralize_injected_keyboard(42, ElementState::Pressed, time, backend),
                 backend,
                 event_loop,
             );
@@ -495,12 +514,7 @@ fn inject_committed_text(
         if shift_required {
             let time = backend.clock.now().as_millis() as u64;
             handle(
-                centralize_injected_keyboard(
-                    42,
-                    ElementState::Released,
-                    time,
-                    backend,
-                ),
+                centralize_injected_keyboard(42, ElementState::Released, time, backend),
                 backend,
                 event_loop,
             );

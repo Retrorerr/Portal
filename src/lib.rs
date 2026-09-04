@@ -3,6 +3,7 @@ pub mod core {
     pub mod android_integration;
     pub mod clipboard_policy;
     pub mod config;
+    pub mod coordinate_transform;
     pub mod ime_policy;
     pub mod runtime;
     pub mod startup;

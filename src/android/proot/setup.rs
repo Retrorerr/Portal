@@ -9,14 +9,13 @@ use crate::{
         diagnostics,
         utils::application_context::get_application_context,
         utils::ndk::{
-            density_dpi, long_press_timeout_ms, refresh_rate_millihz, scale_factor,
-            touch_slop_px,
+            density_dpi, long_press_timeout_ms, refresh_rate_millihz, scale_factor, touch_slop_px,
         },
     },
     core::{
         config::{
-            CommandConfig, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR,
-            PULSE_GUEST_SERVER,
+            CommandConfig, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL,
+            PIPEWIRE_GUEST_RUNTIME_DIR, PULSE_GUEST_SERVER,
         },
         runtime::LinuxRuntime,
     },
@@ -209,9 +208,7 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
                     let _ = fs::remove_file(&temp_file);
 
                     if attempt >= ARCH_FS_MAX_ATTEMPTS {
-                        panic!(
-                            "Failed to extract Arch Linux FS after {attempt} attempts: {e}"
-                        );
+                        panic!("Failed to extract Arch Linux FS after {attempt} attempts: {e}");
                     }
 
                     let _ = mpsc_sender.send(SetupMessage::Error(format!(
@@ -534,7 +531,8 @@ fn setup_pipewire_package_lock(_: &SetupOptions) -> StageOutput {
 
 fn setup_firefox_config(_: &SetupOptions) -> StageOutput {
     use crate::core::runtime::LinuxRuntime;
-    let rootfs = crate::android::runtime::proot::PRootRuntime::active().rootfs_path();
+    let active_runtime = crate::android::runtime::proot::PRootRuntime::active();
+    let rootfs = active_runtime.rootfs_path();
     let candidates = [
         rootfs.join("usr/lib/firefox"),
         rootfs.join("usr/lib/firefox-esr"),
@@ -1008,14 +1006,17 @@ fn upsert_kconfig_value(path: &Path, group: &str, key: &str, value: &str) {
         .map(|(index, _)| index)
         .unwrap_or(lines.len());
     let mut key_index = None;
-    for (index, line) in lines.iter().enumerate().take(group_end).skip(group_start + 1) {
+    for (index, line) in lines
+        .iter()
+        .enumerate()
+        .take(group_end)
+        .skip(group_start + 1)
+    {
         let trimmed = line.trim_start();
         if trimmed.starts_with('#') || trimmed.starts_with(';') {
             continue;
         }
-        let Some((existing_key, _)) = trimmed
-            .split_once('=')
-            .or_else(|| trimmed.split_once(':'))
+        let Some((existing_key, _)) = trimmed.split_once('=').or_else(|| trimmed.split_once(':'))
         else {
             continue;
         };
@@ -1037,15 +1038,14 @@ fn upsert_kconfig_value(path: &Path, group: &str, key: &str, value: &str) {
 }
 
 /// Map Android density to a whole-number UI scale factor (same baseline as the old LXQt setup).
+#[allow(dead_code)]
 fn android_ui_scale(density_dpi: i32) -> i32 {
     ((density_dpi as f32) / 160.0 * 1.1).max(1.0).round() as i32
 }
 
-fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(ARCH_FS_ROOT);
+pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     let username = get_application_context().local_config.user.username;
     let home_dir = chroot_home_dir(fs_root, &username);
-    let ui_scale = android_ui_scale(density_dpi(&options.android_app));
     let xft_dpi = ui_scale * 96;
 
     let xresources_path = home_dir.join(".Xresources");
@@ -1055,6 +1055,26 @@ fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
             .expect("Failed to read Xresources parent directory"),
     );
     upsert_kv_file(&xresources_path, ':', &[("Xft.dpi", xft_dpi.to_string())]);
+
+    // Disable screen locking completely: Android/OxygenOS owns device security.
+    let config_dir = home_dir.join(".config");
+    let _ = fs::create_dir_all(&config_dir);
+    let kdeglobals = config_dir.join("kdeglobals");
+    upsert_kv_file(
+        &kdeglobals,
+        '=',
+        &[("action/lock_screen", "false".to_string())],
+    );
+    let kscreenlockerrc = config_dir.join("kscreenlockerrc");
+    upsert_kv_file(
+        &kscreenlockerrc,
+        '=',
+        &[
+            ("Autolock", "false".to_string()),
+            ("LockOnResume", "false".to_string()),
+            ("Timeout", "0".to_string()),
+        ],
+    );
 
     // The guest scripts are versioned assets so the classic startup contract,
     // KWin crash capture and graphical recovery UI cannot drift apart. The
@@ -1070,10 +1090,7 @@ fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
         &fs_root.join("usr/local/bin/startplasma-localdesktop"),
         &launcher,
     );
-    write_executable(
-        &fs_root.join("usr/local/bin/kwin_wayland"),
-        KWIN_WRAPPER,
-    );
+    write_executable(&fs_root.join("usr/local/bin/kwin_wayland"), KWIN_WRAPPER);
     let recovery_launcher = RECOVERY_LAUNCHER.replace("@UI_SCALE@", &ui_scale.to_string());
     write_executable(
         &fs_root.join("usr/local/bin/start-localdesktop-recovery"),
@@ -1091,6 +1108,116 @@ fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
         &fs_root.join("usr/local/bin/plasma_waitforname"),
         "#!/bin/sh\nif [ \"$1\" = \"org.kde.KSplash\" ]; then\n    exit 0\nfi\nexec /usr/bin/plasma_waitforname \"$@\"\n",
     );
+
+    sync_guest_network_config(fs_root);
+}
+
+/// Keep guest network configuration (DNS resolver, NSS, hosts, SSL CA certificates)
+/// synchronized with Android system state and distro requirements.
+pub fn sync_guest_network_config(fs_root: &Path) {
+    let context = get_application_context();
+    let mut dns_servers = context.get_active_dns_servers();
+    if dns_servers.is_empty() {
+        dns_servers = vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()];
+    }
+
+    let mut resolv_content =
+        String::from("# Generated by Local Desktop from Android ConnectivityManager\n");
+    for srv in &dns_servers {
+        resolv_content.push_str(&format!("nameserver {srv}\n"));
+    }
+
+    let etc_dir = fs_root.join("etc");
+    let _ = fs::create_dir_all(&etc_dir);
+
+    let resolv_conf = etc_dir.join("resolv.conf");
+    let current_content = fs::read_to_string(&resolv_conf).unwrap_or_default();
+    if current_content != resolv_content {
+        if let Ok(()) = fs::write(&resolv_conf, normalize_guest_text(&resolv_content)) {
+            log::info!(
+                "Updated guest /etc/resolv.conf with active DNS: {:?}",
+                dns_servers
+            );
+        }
+    }
+
+    // Ensure /etc/nsswitch.conf exists with standard host resolution
+    let nsswitch = etc_dir.join("nsswitch.conf");
+    if !nsswitch.exists() {
+        let nsswitch_content = "passwd:         files\ngroup:          files\nshadow:         files\ngshadow:        files\n\nhosts:          files dns\nnetworks:       files\n\nprotocols:      db files\nservices:       db files\nethers:         db files\nrpc:            db files\n\nnetgroup:       nis\n";
+        let _ = fs::write(&nsswitch, normalize_guest_text(nsswitch_content));
+        log::info!("Seeded guest /etc/nsswitch.conf");
+    }
+
+    // Ensure /etc/hosts exists with localhost definitions
+    let hosts = etc_dir.join("hosts");
+    if !hosts.exists() {
+        let hosts_content =
+            "127.0.0.1       localhost\n::1             localhost ip6-localhost ip6-loopback\n";
+        let _ = fs::write(&hosts, normalize_guest_text(hosts_content));
+        log::info!("Seeded guest /etc/hosts");
+    }
+
+    // Ensure SSL CA certificates are present
+    sync_guest_ssl_certificates(fs_root);
+}
+
+/// Ensure OpenSSL and standard Linux tools inside the guest have access to valid CA certificates.
+pub fn sync_guest_ssl_certificates(fs_root: &Path) {
+    let certs_dir = fs_root.join("etc/ssl/certs");
+    let _ = fs::create_dir_all(&certs_dir);
+    let ca_bundle = certs_dir.join("ca-certificates.crt");
+
+    if !ca_bundle.exists() || fs::metadata(&ca_bundle).map(|m| m.len()).unwrap_or(0) == 0 {
+        let mut bundle_data = Vec::new();
+        for dir in [
+            "/system/etc/security/cacerts",
+            "/apex/com.android.conscrypt/cacerts",
+        ] {
+            let path = Path::new(dir);
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    if let Ok(content) = fs::read(entry.path()) {
+                        bundle_data.extend_from_slice(&content);
+                        if !content.ends_with(b"\n") {
+                            bundle_data.push(b'\n');
+                        }
+                    }
+                }
+            }
+        }
+        if !bundle_data.is_empty() {
+            let _ = fs::write(&ca_bundle, &bundle_data);
+            log::info!(
+                "Bundled Android system CA certificates into {}",
+                ca_bundle.display()
+            );
+        }
+    }
+
+    // Symlink /etc/ssl/cert.pem -> certs/ca-certificates.crt
+    let cert_pem = fs_root.join("etc/ssl/cert.pem");
+    if !cert_pem.exists() {
+        let _ = symlink("certs/ca-certificates.crt", &cert_pem);
+    }
+
+    // Symlink /usr/lib/ssl -> /etc/ssl
+    let usr_lib = fs_root.join("usr/lib");
+    let _ = fs::create_dir_all(&usr_lib);
+    let usr_lib_ssl = usr_lib.join("ssl");
+    if !usr_lib_ssl.exists() {
+        let _ = symlink("/etc/ssl", &usr_lib_ssl);
+    }
+}
+
+fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    let username = get_application_context().local_config.user.username;
+    let home_dir = chroot_home_dir(fs_root, &username);
+    // The host Wayland compositor already establishes a logical viewport scaled by
+    // guest_scale_factor; the guest Plasma session must run at 1:1 (scale 1) to prevent double scaling.
+    let ui_scale = 1;
+    sync_session_runtime_files(fs_root, ui_scale);
 
     // Deploy the patched KWin shared object that tolerates missing netlink udev monitors.
     let local_lib = fs_root.join("usr/local/lib");
@@ -1123,8 +1250,11 @@ fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
     if let Some(parent) = crash_handler_source.parent() {
         fs::create_dir_all(parent).expect("Failed to create crash handler directory");
     }
-    fs::write(&crash_handler_source, normalize_guest_text(CRASH_HANDLER_SOURCE))
-        .expect("Failed to write crash handler source");
+    fs::write(
+        &crash_handler_source,
+        normalize_guest_text(CRASH_HANDLER_SOURCE),
+    )
+    .expect("Failed to write crash handler source");
     fs::set_permissions(&crash_handler_source, fs::Permissions::from_mode(0o644))
         .expect("Failed to set crash handler source permissions");
 
@@ -1391,14 +1521,16 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         .native_window()
         .map(|nw| (nw.width(), nw.height()))
         .unwrap_or((1920, 1080));
-    let mut compositor = Compositor::new(size).expect("Failed to build compositor");
+    let guest_scale_factor = scale_factor(&android_app);
+    let mut compositor =
+        Compositor::new(size, guest_scale_factor).expect("Failed to build compositor");
     compositor.enable_android_clipboard(android_app.clone());
     PolarBearBackend::Wayland(WaylandBackend {
         compositor,
         graphic_renderer: None,
         clock: Clock::new(),
         key_counter: 0,
-        guest_scale_factor: scale_factor(&android_app),
+        guest_scale_factor,
         touch_points: std::collections::HashMap::new(),
         scroll_centroid: None,
         touch_mode: TouchMode::Undecided,
@@ -1406,10 +1538,11 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         touch_down_time: None,
         touch_slop_px: touch_slop_px(&android_app),
         long_press_timeout_ms: long_press_timeout_ms(&android_app),
-            pointer_pressed: false,
-            presentation_sequence: 0,
-            pending_kwin_presentation: None,
-            refresh_rate_millihz: refresh_rate_millihz(&android_app),
+        pointer_pressed: false,
+        presentation_sequence: 0,
+        pending_kwin_presentation: None,
+        refresh_rate_millihz: refresh_rate_millihz(&android_app),
+        pressed_keys: std::collections::HashSet::new(),
         android_app,
     })
 }
@@ -1510,7 +1643,10 @@ mod tests {
 
     #[test]
     fn guest_scripts_are_written_with_unix_line_endings() {
-        assert_eq!(normalize_guest_text("#!/bin/bash\r\nready\r\n"), "#!/bin/bash\nready\n");
+        assert_eq!(
+            normalize_guest_text("#!/bin/bash\r\nready\r\n"),
+            "#!/bin/bash\nready\n"
+        );
         assert_eq!(normalize_guest_text("line\rnext\n"), "line\next\n");
     }
 }

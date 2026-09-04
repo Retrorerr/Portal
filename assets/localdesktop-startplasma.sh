@@ -23,8 +23,6 @@ export GTK_USE_PORTAL=0
 # kcminit_startup before it publishes its readiness pipe byte.
 export QT_NO_XDG_DESKTOP_PORTAL=1
 export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
-export QT_SCALE_FACTOR=@UI_SCALE@
-export PLASMA_USE_QT_SCALING=1
 export ELECTRON_DISABLE_SANDBOX=1
 export LOCALDESKTOP_DIAGNOSTICS=1
 # Debugger capture is opt-in.  Running every KWin instance under gdb changes
@@ -69,7 +67,7 @@ done
 for name in HOME USER LOGNAME WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
     XDG_CURRENT_DESKTOP DESKTOP_SESSION KDE_FULL_SESSION KDE_SESSION_VERSION \
     KDE_USE_SYSTEMD PLASMA_USE_SYSTEMD QT_NO_XDG_DESKTOP_PORTAL \
-    QT_SCALE_FACTOR WAYLAND_DEBUG; do
+    WAYLAND_DEBUG; do
     eval "value=\${$name-}"
     printf 'env %s=%q\n' "$name" "$value" >> "$session_log"
 done
@@ -155,6 +153,27 @@ else
     else
         sed -i 's/^Theme=.*/Theme=None/' "$ksplashrc"
     fi
+fi
+
+# Disable screen locking completely: Android/OxygenOS owns device security
+kdeglobals="$config_dir/kdeglobals"
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file "$kdeglobals" --group 'KDE Action Restrictions][$i' --key 'action/lock_screen' false
+else
+    if [ ! -f "$kdeglobals" ]; then
+        printf '[KDE Action Restrictions][$i]\naction/lock_screen=false\n' > "$kdeglobals"
+    elif ! grep -q 'action/lock_screen=' "$kdeglobals"; then
+        printf '\n[KDE Action Restrictions][$i]\naction/lock_screen=false\n' >> "$kdeglobals"
+    fi
+fi
+
+kscreenlockerrc="$config_dir/kscreenlockerrc"
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file "$kscreenlockerrc" --group 'Daemon][$i' --key Autolock false
+    kwriteconfig6 --file "$kscreenlockerrc" --group 'Daemon][$i' --key LockOnResume false
+    kwriteconfig6 --file "$kscreenlockerrc" --group 'Daemon][$i' --key Timeout 0
+else
+    printf '[Daemon][$i]\nAutolock=false\nLockOnResume=false\nTimeout=0\n' > "$kscreenlockerrc"
 fi
 
 # A normal dbus-run-session owns the bus for the complete Plasma process tree;

@@ -9,3 +9,35 @@ localdesktop.apk
 /.release-signing/
 .tmp-android-dex/
 test_apply_probe.tmp
+
+# Local Pad 3 screenshots and one-off hardware investigation artifacts.
+# Keep these on the development machine without treating them as release source.
+/*.png
+/android_wlegl.xml
+/tawc_*.rs
+/wlegl_import.c
+/scripts/inspect_res.py
+/scripts/measure_cpu.py
+/scripts/patch_compositor.py
+/scripts/phase2-guest-probe.sh
+/scripts/probe_gpu_caps
+/scripts/run_audit_benchmarks.py
+/scripts/run_kgsl_probe.py
+/scripts/test_ahb_cross_process
+/scripts/test_ahb_gles_render
+/scripts/test_ahb_wire
+/scripts/test_dma_heap.py
+/scripts/test_glibc_hello.c
+/scripts/test_guest_dlopen.py
+/scripts/test_guest_kgsl_egl.c
+/scripts/test_guest_probe
+/scripts/test_guest_probe.rs
+/scripts/test_guest_probe_glibc.*.rcgu.o
+/scripts/test_kgsl_dmabuf_export
+/scripts/test_kgsl_dmabuf_export.c
+/scripts/test_kgsl_gbm_dmabuf.py
+/scripts/test_proot_vendor.py
+/scripts/test_scenarios.py
+/scripts/test_turnip_dmabuf_export.py
+/scripts/test_turnip_export_dma.py
+/scripts/test_wayland_ahb_client
