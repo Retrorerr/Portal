@@ -387,13 +387,14 @@ impl AuthoritativeDisplayState {
     /// Update the KWin scale factor.
     /// Returns true if the scale factor changed significantly.
     ///
-    /// A rendered buffer-derived frame keeps its origin host but is
-    /// re-paired with that host under the new scale (the live surface is
-    /// overwhelmingly likely already new-scale: KWin recommits immediately on
-    /// scale changes while our refresh is low-frequency). Surface-derived
-    /// frames keep their authoritative KWin logical verbatim. Either way the
-    /// rendered pair stays internally consistent; the next matching commit
-    /// repairs any residual corner exactly.
+    /// Updates the cached/current Plasma scale ONLY. An already
+    /// committed/rendered frame is never touched: its `guest_logical_size`,
+    /// `rendered_host` and `rendered_generation` keep the geometry that
+    /// belonged to that committed frame until a genuine new KWin commit
+    /// arrives (already gated by `KwinCommitGate`), which then atomically
+    /// pairs the new frame with logical geometry derived under the new
+    /// scale. With no rendered frame yet, geometry live-derives from the
+    /// current scale via [`Self::logical_geometry`].
     pub fn update_kwin_scale(&mut self, scale: f64) -> bool {
         if scale <= 0.0 || !scale.is_finite() {
             return false;
@@ -405,11 +406,6 @@ impl AuthoritativeDisplayState {
         };
         if changed {
             self.kwin_scale = Some(scale);
-            if self.observed_surface_size.is_some() && !self.rendered_from_surface {
-                let w = (self.rendered_host.0 as f64 / scale).round().max(1.0);
-                let h = (self.rendered_host.1 as f64 / scale).round().max(1.0);
-                self.guest_logical_size = (w, h);
-            }
         }
         changed
     }
@@ -417,9 +413,10 @@ impl AuthoritativeDisplayState {
     /// Authoritative logical output geometry for the COMMITTED frame.
     ///
     /// Steady state: `round(host / plasma_scale)`.
-    /// Transitional (host resized, KWin not yet recommitted): still the OLD
-    /// desktop geometry — never pretend the old frame already has new size.
-    /// With no committed frame yet (startup): `host / plasma`.
+    /// Transitional (host resized — or Plasma scale changed — with no new
+    /// KWin commit yet): still the OLD frame geometry, never rewritten from
+    /// newer host/scale state. With no committed frame yet (startup):
+    /// `host / plasma` live.
     #[inline]
     pub fn logical_geometry(&self) -> (f64, f64) {
         if self.observed_surface_size.is_some() {
