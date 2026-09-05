@@ -202,9 +202,77 @@ impl PresentationSnapshot {
     }
 }
 
+/// Gate ensuring rendered-frame ownership changes only on real guest commits.
+///
+/// A configure ACK can arrive (and change ack-tracking state) without any new
+/// `wl_surface` commit. Since ACKs participate in commit attribution
+/// (same-dimension tie-break), re-running attribution for an unchanged texture
+/// on every redraw could falsely reattribute the old buffer to a newer
+/// request. The compositor must therefore call `note_kwin_commit()` only when
+/// this gate reports a genuinely new frame: first sighting, or a changed
+/// commit counter for the identified surface.
+///
+/// The counter type stays generic so this policy is host-testable (tests use
+/// `u64`); production instantiates it with Smithay's `CommitCounter`. ACK and
+/// resize state deliberately have no input here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KwinCommitGate<C: Copy + PartialEq> {
+    last: Option<(u64, C)>,
+}
+
+impl<C: Copy + PartialEq> KwinCommitGate<C> {
+    pub fn new() -> Self {
+        Self { last: None }
+    }
+
+    /// Returns true exactly when `(surface_generation, commit)` was never
+    /// processed, and records it. Same-size recommits still count: their
+    /// counter differs. Surface replacement counts too: either the generation
+    /// or the (reset) counter differs, so no explicit reset call is needed on
+    /// the hot path — though [`KwinCommitGate::reset`] exists for teardown.
+    pub fn check_and_record(&mut self, surface_generation: u64, commit: C) -> bool {
+        let id = (surface_generation, commit);
+        if self.last == Some(id) {
+            return false;
+        }
+        self.last = Some(id);
+        true
+    }
+
+    /// Forget all history (surface teardown). The next frame counts as new.
+    pub fn reset(&mut self) {
+        self.last = None;
+    }
+
+    /// Last processed frame, if any (diagnostics).
+    pub fn last(&self) -> Option<(u64, C)> {
+        self.last
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commit_gate_only_passes_real_commits() {
+        let mut gate = KwinCommitGate::<u64>::new();
+        // First sighting always counts.
+        assert!(gate.check_and_record(7, 100));
+        assert_eq!(gate.last(), Some((7, 100)));
+        // Same frame on later redraws: suppressed (ACKs/resizes cannot reach
+        // this decision, so they can never reattribute the old texture).
+        assert!(!gate.check_and_record(7, 100));
+        assert!(!gate.check_and_record(7, 100));
+        // Same-size recommit: counter changed, must be processed.
+        assert!(gate.check_and_record(7, 101));
+        // New surface generation with a reset counter: must be processed.
+        assert!(gate.check_and_record(8, 0));
+        // Explicit teardown reset: next frame counts as new.
+        gate.reset();
+        assert!(gate.check_and_record(8, 0));
+        assert!(!gate.check_and_record(8, 0));
+    }
 
     #[test]
     fn fit_allows_downscaling_and_centers() {

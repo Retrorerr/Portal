@@ -691,6 +691,76 @@ fn surface_mirroring_buffer_derives_logical_live_device_case() {
 }
 
 #[test]
+fn ack_without_commit_never_reattributes_rendered_frame() {
+    // A committed → request B → request A2 → ACK A2 → several evaluations
+    // with NO KWin commit. Rendered ownership must stay with old A throughout;
+    // only a genuine new commit may move it. (At runtime the KwinCommitGate
+    // enforces the "no note call without a commit" precondition; here the
+    // test simply never calls note until the genuine commit.)
+    let (a, b) = ((3392, 2400), (1100, 900));
+    let mut s = fresh_converged_fullscreen();
+    let _gen_b = request(&mut s, b, 71);
+    let gen_a2 = request(&mut s, a, 72);
+    assert_eq!(s.note_configure_acked(72), Some(gen_a2));
+    // Several redraw-equivalent evaluations: snapshot reads only.
+    for _ in 0..3 {
+        let snap = s.presentation_snapshot();
+        assert_eq!(snap.acked_serial, 72, "ACK is recorded");
+        assert_eq!(
+            snap.rendered_generation, 0,
+            "ACK alone must not reattribute the old texture"
+        );
+        assert_eq!(snap.rendered_host, a);
+        assert_eq!(snap.guest_logical, guest_for(a));
+        assert_eq!(snap.host, a, "newest target untouched");
+        assert_eq!(snap.requested, a);
+        assert_eq!(snap.committed, Some(simulated_buffer_commit(a)));
+        assert!(snap.converged, "old A frame still fills the A host");
+    }
+    // The genuine new A2 commit (same dimensions, real wl_surface commit at
+    // runtime) moves ownership to A2.
+    assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(a)), Some(BUFFER_SCALE)));
+    let snap = s.presentation_snapshot();
+    assert_eq!(snap.rendered_generation, gen_a2);
+    assert_eq!(snap.guest_logical, guest_for(a));
+    assert!(snap.converged);
+    // Repeating the identical commit changes nothing further.
+    assert!(!s.note_kwin_commit(None, Some(simulated_buffer_commit(a)), Some(BUFFER_SCALE)));
+}
+
+#[test]
+fn scale_ack_without_commit_keeps_old_frame_ownership() {
+    // A (old scale) → same host dimensions → Plasma scale change + config ACK
+    // → no new KWin commit. Ownership (generation/host/texture) must not move
+    // merely because config metadata changed.
+    let a = (3392, 2400);
+    let mut s = fresh_converged_fullscreen();
+    assert!(s.update_kwin_scale(2.0));
+    assert_eq!(s.note_configure_acked(99), None);
+    let committed = simulated_buffer_commit(a);
+    for _ in 0..3 {
+        let snap = s.presentation_snapshot();
+        assert_eq!(snap.rendered_generation, 0);
+        assert_eq!(snap.rendered_host, a);
+        assert_eq!(snap.committed, Some(committed));
+        assert_eq!(snap.host, a);
+        // Documented re-pairing: the buffer frame tracks its origin host
+        // under the live scale, but that is not a new commit.
+        assert_eq!(
+            snap.guest_logical,
+            ((a.0 as f64 / 2.0).round(), (a.1 as f64 / 2.0).round())
+        );
+    }
+    // When the real same-size commit arrives it attributes cleanly with no
+    // churn: same entry, same guest, same texture.
+    assert!(!s.note_kwin_commit(None, Some(committed), Some(BUFFER_SCALE)));
+    let snap = s.presentation_snapshot();
+    assert_eq!(snap.rendered_generation, 0);
+    assert_eq!(snap.rendered_host, a);
+    assert!(snap.converged);
+}
+
+#[test]
 fn configure_serials_and_acks_attribute_commits() {
     let (b, c) = ((1100, 900), (2100, 1600));
     let mut s = fresh_converged_fullscreen();

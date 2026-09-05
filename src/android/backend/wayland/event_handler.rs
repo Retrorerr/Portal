@@ -931,8 +931,9 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .bind()
             .map_err(|error| format!("Failed to bind EGL surface: {error}"))?;
 
-        // Disjoint borrows: geometry state vs commit tracking.
+        // Disjoint field borrows: compositor geometry state vs commit gate.
         let compositor = &mut backend.compositor;
+        let backend_gate = &mut backend.kwin_commit_gate;
 
         let toplevels = compositor
             .state
@@ -941,9 +942,13 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             .to_vec();
 
         // Attribute the live KWin frame to its owning request (newest-first
-        // history, ack-serial tie-break). Pure state math every frame — no
-        // filesystem access here; Plasma scale arrives via explicit refreshes
-        // and the low-frequency sampler only.
+        // history, ack-serial tie-break) — but ONLY for a genuinely new
+        // frame. The gate suppresses re-attribution when neither the surface
+        // identity generation nor the commit counter moved, so a configure
+        // ACK by itself can never hand the old unchanged texture to a newer
+        // request. Same-size recommits still process (counter changed). Pure
+        // state math here — no filesystem access; Plasma scale arrives via
+        // explicit refreshes and the low-frequency sampler only.
         for surface in &toplevels {
             if compositor.state.is_known_kwin_surface(surface.wl_surface()) {
                 let observed = smithay::backend::renderer::utils::with_renderer_surface_state(
@@ -956,10 +961,16 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                             .buffer_size()
                             .and_then(|s| (s.w > 0 && s.h > 0).then_some((s.w as f64, s.h as f64)));
                         let buffer_scale = state.buffer_scale();
-                        (surface_size, buffer_size, buffer_scale)
+                        let commit = state.current_commit();
+                        (surface_size, buffer_size, buffer_scale, commit)
                     },
                 );
-                if let Some((surface_size, buffer_size, buffer_scale)) = observed {
+                if let Some((surface_size, buffer_size, buffer_scale, commit)) = observed {
+                    let is_new_frame = backend_gate
+                        .check_and_record(compositor.state.kwin_generation.unwrap_or(0), commit);
+                    if !is_new_frame {
+                        break;
+                    }
                     let was_converged = compositor
                         .state
                         .authoritative_display_state

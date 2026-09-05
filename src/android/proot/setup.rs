@@ -1756,6 +1756,7 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         button_tracker: crate::core::pointer_buttons::PointerButtonTracker::new(),
         suppressed_touch_ids: std::collections::HashSet::new(),
         last_plasma_poll_ms: None,
+        kwin_commit_gate: crate::core::presentation::KwinCommitGate::new(),
         android_app,
     })
 }
