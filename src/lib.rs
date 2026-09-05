@@ -10,6 +10,7 @@ pub mod core {
     pub mod presentation;
     pub mod runtime;
     pub mod provisioning;
+    pub mod shm_damage;
     pub mod startup;
     pub mod tablet_mode;
     pub mod wayland_protocol;

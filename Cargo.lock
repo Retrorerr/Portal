@@ -4462,6 +4462,7 @@ dependencies = [
  "indexmap",
  "libc",
  "libloading",
+ "log 0.4.27",
  "profiling",
  "rand 0.8.5",
  "rustix 0.38.42",
