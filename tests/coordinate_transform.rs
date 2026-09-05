@@ -132,23 +132,80 @@ fn authoritative_display_state_configure_size_invariant_under_observed_size() {
     use localdesktop::core::coordinate_transform::AuthoritativeDisplayState;
 
     let mut state = AuthoritativeDisplayState::new(3392, 2400, 420, 120000);
-    assert_eq!(state.configure_size(), (3392, 2400));
+    // Baseline density scale is 420/160 = 2.625
+    // configure_size() derives logical dimensions: (round(3392/2.625), round(2400/2.625)) = (1292, 914)
+    assert_eq!(state.configure_size(), (1292, 914));
     assert_eq!(state.presentation_scale(), (1.0, 1.0));
 
     // KWin commits with scale 2.0 (surface size 1696x1200)
     let changed = state.update_observed_surface_size((1696.0, 1200.0));
     assert!(changed);
-    // Crucial invariant: configure_size MUST remain (3392, 2400), NEVER shrink!
-    assert_eq!(state.configure_size(), (3392, 2400));
+    // Crucial invariant: configure_size MUST remain (1292, 914), NEVER polluted by observed surface!
+    assert_eq!(state.configure_size(), (1292, 914));
     assert_near(state.presentation_scale().0, 2.0);
     assert_near(state.presentation_scale().1, 2.0);
 
-    // KWin commits with scale 2.625 (surface size 1292.19x914.28)
-    let changed2 = state.update_observed_surface_size((3392.0 / 2.625, 2400.0 / 2.625));
+    // Update to authoritative Plasma scale 2.0
+    state.update_kwin_scale(2.0);
+    // Now logical configure size reflects scale 2.0: 3392/2 = 1696, 2400/2 = 1200
+    assert_eq!(state.configure_size(), (1696, 1200));
+
+    // KWin commits arbitrary other observed size
+    let changed2 = state.update_observed_surface_size((1000.0, 800.0));
     assert!(changed2);
-    assert_eq!(state.configure_size(), (3392, 2400));
-    assert_near(state.presentation_scale().0, 2.625);
-    assert_near(state.presentation_scale().1, 2.625);
+    // configure_size remains rock-solid (1696, 1200)
+    assert_eq!(state.configure_size(), (1696, 1200));
+}
+
+#[test]
+fn logical_configure_rounding_policy_invariants() {
+    use localdesktop::core::coordinate_transform::{
+        kwin_logical_to_physical_pixels, physical_to_kwin_logical_configure,
+    };
+
+    let host = (3392, 2400);
+    for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.625] {
+        let logical = physical_to_kwin_logical_configure(host, scale);
+        let recon_host = kwin_logical_to_physical_pixels(logical, scale);
+        // Invariant: error bounded by <= 1 pixel across all supported scales
+        assert!(
+            (recon_host.0 - host.0).abs() <= 1,
+            "scale {scale} width reconstructed {recon_host:?} vs {host:?}"
+        );
+        assert!(
+            (recon_host.1 - host.1).abs() <= 1,
+            "scale {scale} height reconstructed {recon_host:?} vs {host:?}"
+        );
+    }
+
+    // Odd dimensions test
+    let odd_host = (3393, 2401);
+    for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.625] {
+        let logical = physical_to_kwin_logical_configure(odd_host, scale);
+        let recon = kwin_logical_to_physical_pixels(logical, scale);
+        assert!((recon.0 - odd_host.0).abs() <= 1);
+        assert!((recon.1 - odd_host.1).abs() <= 1);
+    }
+}
+
+#[test]
+fn unattributed_commit_invalidates_frame_ownership() {
+    use localdesktop::core::coordinate_transform::AuthoritativeDisplayState;
+
+    let mut state = AuthoritativeDisplayState::new(3392, 2400, 320, 120000); // 320 dpi = 2.0x
+    state.update_kwin_scale(2.0);
+    // Commit valid frame for current target (logical 1696x1200)
+    assert!(state.note_kwin_commit(Some((1696.0, 1200.0)), None, Some(2)));
+    assert!(state.presentation_snapshot().converged);
+    assert!(state.rendered_is_current());
+
+    // Commit an unattributable frame (e.g. nonsense dimensions from corrupt/stale pipe)
+    assert!(state.note_kwin_commit(Some((777.0, 555.0)), None, Some(2)));
+    let snap = state.presentation_snapshot();
+    assert!(!snap.converged);
+    assert!(!state.rendered_is_current());
+    assert_eq!(snap.rendered_generation, 0);
+    assert_eq!(snap.rendered_host, (0, 0));
 }
 
 #[test]

@@ -180,13 +180,70 @@ fn inverse_unit_transform(t: ViewportTransform, u: f64, v: f64) -> (f64, f64) {
 /// - `kwin_scale` (Plasma UI scale) is stable across resizes, never derived
 ///   from stale presentation state.
 /// One xdg configure sent (or coalesced) for a host request.
+
+/// Physical dimensions of the Android host surface / window in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostPhysicalSize {
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Logical configure dimensions for KWin's nested Wayland toplevel in surface-local units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KwinLogicalConfigure {
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Compute KWin's logical configure size from host physical drawable dimensions and KWin desktop scale.
 ///
+/// Invariant: KWin calculates its output pixel extent as `round(logical * scale)`.
+/// To make KWin target the host physical extent, Portal derives:
+/// `logical = round(physical / scale)`.
+///
+/// Clamped to minimum 1 to never produce zero dimensions.
+#[inline]
+pub fn physical_to_kwin_logical_configure(
+    host: (i32, i32),
+    kwin_scale: f64,
+) -> (i32, i32) {
+    let scale = if kwin_scale.is_finite() && kwin_scale > 0.0 {
+        kwin_scale.clamp(1.0, 8.0)
+    } else {
+        1.0
+    };
+    let w = (host.0.max(1) as f64 / scale).round().max(1.0) as i32;
+    let h = (host.1.max(1) as f64 / scale).round().max(1.0) as i32;
+    (w, h)
+}
+
+/// Expected KWin physical pixel output given a logical configure size and scale.
+#[inline]
+pub fn kwin_logical_to_physical_pixels(
+    logical: (i32, i32),
+    kwin_scale: f64,
+) -> (i32, i32) {
+    let scale = if kwin_scale.is_finite() && kwin_scale > 0.0 {
+        kwin_scale.clamp(1.0, 8.0)
+    } else {
+        1.0
+    };
+    let w = (logical.0.max(1) as f64 * scale).round().max(1.0) as i32;
+    let h = (logical.1.max(1) as f64 * scale).round().max(1.0) as i32;
+    (w, h)
+}
+
 /// `serial` is the Wayland configure serial captured from `send_configure`
 /// (0 when the send site did not capture one). Bounded ring, newest last.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConfigureRequest {
     pub generation: u64,
+    /// Physical host dimensions for which this configure was generated.
     pub host: (i32, i32),
+    /// Actual logical configure dimensions sent to KWin's xdg_toplevel.
+    pub requested_logical: (i32, i32),
+    /// Plasma desktop scale under which this configure was generated.
+    pub scale: f64,
     pub serial: u32,
 }
 
@@ -199,8 +256,13 @@ pub struct AuthoritativeDisplayState {
     pub physical_size: (i32, i32),
     /// Android screen density DPI (e.g. 420)
     pub density_dpi: i32,
-    /// Refresh rate in millihertz (e.g. 120000)
+    /// Stable nominal refresh advertised to KWin via `wl_output` (e.g. 120000).
+    /// Never mirrors transient Android VRR scanout changes.
     pub refresh_rate_millihz: i32,
+    /// Last observed instantaneous Android physical/VRR scanout rate
+    /// (e.g. 50000/60000/120000 on the OnePlus Pad 3). Diagnostics and
+    /// pacing only: never advertised as the `wl_output` mode.
+    pub physical_refresh_millihz: i32,
     /// Transform for orientation / rotation
     pub transform: ViewportTransform,
     /// Currently observed surface size from KWin in surface-local coordinates (W_surf, H_surf).
@@ -245,6 +307,8 @@ pub struct AuthoritativeDisplayState {
     /// UNIX epoch. Lets the compositor refresh Plasma scale only when the
     /// authoritative file actually changes (no per-frame JSON parsing).
     pub kwin_config_mtime_ns: Option<u64>,
+    /// Re-configure repair attempts for current generation.
+    pub configure_repair_count: u32,
 }
 
 impl AuthoritativeDisplayState {
@@ -258,24 +322,29 @@ impl AuthoritativeDisplayState {
         // All later updates MUST preserve last valid instead (see
         // `try_update_physical_size`).
         let physical_size = (physical_w.max(1), physical_h.max(1));
+        let initial_scale = (density_dpi as f64 / 160.0).clamp(1.0, 8.0);
+        let initial_logical = physical_to_kwin_logical_configure(physical_size, initial_scale);
         let seed = ConfigureRequest {
-            generation: 0,
+            generation: 1,
             host: physical_size,
+            requested_logical: initial_logical,
+            scale: initial_scale,
             serial: 0,
         };
         let mut state = Self {
             physical_size,
             density_dpi: density_dpi.max(1),
             refresh_rate_millihz: refresh_rate_millihz.max(1000),
+            physical_refresh_millihz: refresh_rate_millihz.max(1000),
             transform: ViewportTransform::Normal,
             observed_surface_size: None,
             kwin_scale: None,
-            resize_generation: 0,
-            requested_configure: physical_size,
-            requested_generation: 0,
-            guest_logical_size: (1.0, 1.0),
+            resize_generation: 1,
+            requested_configure: initial_logical,
+            requested_generation: 1,
+            guest_logical_size: (initial_logical.0 as f64, initial_logical.1 as f64),
             rendered_host: physical_size,
-            rendered_generation: 0,
+            rendered_generation: 1,
             rendered_from_surface: false,
             acked_serial: 0,
             requests: [seed; REQUEST_HISTORY_LEN],
@@ -284,6 +353,7 @@ impl AuthoritativeDisplayState {
             last_buffer_size: None,
             last_buffer_scale: None,
             kwin_config_mtime_ns: None,
+            configure_repair_count: 0,
         };
         state.guest_logical_size = state.fresh_logical_geometry();
         state
@@ -294,10 +364,28 @@ impl AuthoritativeDisplayState {
         &self.requests[..self.request_len.min(REQUEST_HISTORY_LEN as u8) as usize]
     }
 
-    fn push_request(&mut self, generation: u64, host: (i32, i32), serial: u32) {
+    #[inline]
+    fn next_generation(&mut self) -> u64 {
+        self.resize_generation = self.resize_generation.wrapping_add(1);
+        if self.resize_generation == 0 {
+            self.resize_generation = 1;
+        }
+        self.resize_generation
+    }
+
+    fn push_request(
+        &mut self,
+        generation: u64,
+        host: (i32, i32),
+        requested_logical: (i32, i32),
+        scale: f64,
+        serial: u32,
+    ) {
         let entry = ConfigureRequest {
             generation,
             host,
+            requested_logical,
+            scale,
             serial,
         };
         let len = (self.request_len as usize).min(REQUEST_HISTORY_LEN);
@@ -316,7 +404,9 @@ impl AuthoritativeDisplayState {
     /// diagnostics can show what KWin was asked for.
     pub fn note_configure_sent(&mut self, serial: u32) {
         let gen = self.requested_generation;
-        let host = self.requested_configure;
+        let host = self.physical_size;
+        let logical = self.requested_configure;
+        let scale = self.effective_kwin_scale();
         if let Some(entry) = self.requests[..(self.request_len as usize).min(REQUEST_HISTORY_LEN)]
             .iter_mut()
             .rev()
@@ -325,7 +415,7 @@ impl AuthoritativeDisplayState {
             entry.serial = serial;
             return;
         }
-        self.push_request(gen, host, serial);
+        self.push_request(gen, host, logical, scale, serial);
     }
 
     /// Record KWin's ack of a configure serial. Returns the owning request
@@ -339,25 +429,88 @@ impl AuthoritativeDisplayState {
             .map(|entry| entry.generation)
     }
 
+    /// Returns true if the most recently sent configure serial has not yet been
+    /// acknowledged by the client.
+    pub fn has_unacknowledged_configure(&self) -> bool {
+        if let Some(latest) = self.request_history().last() {
+            latest.serial != 0 && latest.serial != self.acked_serial
+        } else {
+            false
+        }
+    }
+
+    /// Check whether KWin has settled on an un-converged geometry without any
+    /// configure request currently in flight.
+    ///
+    /// This occurs during cold startup when KWin's nested WaylandOutput initializes
+    /// with default scale 1.0 before loading `kwinoutputconfig.json`. KWin acknowledges
+    /// the startup configure under scale 1.0, then applies its configured scale (e.g. 2.0)
+    /// without re-evaluating its output mode. The resulting surface size is half (or
+    /// 1/scale) of the requested logical configure.
+    ///
+    /// When this occurs, sending a single re-configure dispatches the authoritative
+    /// logical dimensions to KWin while its scale is now active. KWin then calls
+    /// `resize(size * scale())`, allocating the full host physical resolution.
+    pub fn needs_configure_repair(&self) -> bool {
+        let Some(committed) = self.observed_surface_size else {
+            return false;
+        };
+        if self.presentation_snapshot().converged {
+            return false;
+        }
+        if self.has_unacknowledged_configure() {
+            return false;
+        }
+        if self.configure_repair_count >= 3 {
+            return false;
+        }
+        let cfg = self.configure_size();
+        let comm_w = committed.0.round() as i32;
+        let comm_h = committed.1.round() as i32;
+        (comm_w - cfg.0).abs() > 1 || (comm_h - cfg.1).abs() > 1
+    }
+
+    /// Record a configure repair dispatch attempt.
+    pub fn record_configure_repair(&mut self) {
+        self.configure_repair_count = self.configure_repair_count.saturating_add(1);
+    }
+
     /// Whether the rendered frame was produced for the current host target.
-    /// A stale frame may be rendered (letterboxed) while this is false, but
-    /// it always carries its OWN matching logical geometry.
+    /// Invariant: must belong to the current generation, cannot be unattributed (gen 0),
+    /// and rendered host physical dimensions must match current host physical target.
     pub fn rendered_is_current(&self) -> bool {
-        self.observed_surface_size.is_none() || self.rendered_host == self.physical_size
+        if self.observed_surface_size.is_none() {
+            return self.rendered_generation == self.resize_generation;
+        }
+        self.rendered_generation != 0
+            && self.rendered_generation == self.resize_generation
+            && self.rendered_host == self.physical_size
     }
 
     fn fresh_logical_geometry(&self) -> (f64, f64) {
-        let scale = self.effective_kwin_scale();
-        let w = (self.physical_size.0 as f64 / scale).round().max(1.0);
-        let h = (self.physical_size.1 as f64 / scale).round().max(1.0);
-        (w, h)
+        let (w, h) = self.configure_size();
+        (w as f64, h as f64)
     }
 
-    /// The configure dimensions sent to the nested compositor toplevel.
-    /// Invariant: ALWAYS derived solely from physical size and orientation,
-    /// NEVER from observed surface/buffer size.
+    /// The authoritative KWin logical configure dimensions sent to the nested compositor toplevel.
+    /// Invariant: ALWAYS derived from physical size and effective KWin desktop scale:
+    /// `W_logical = round(W_phys / scale)`
+    /// `H_logical = round(H_phys / scale)`
+    /// NEVER sends raw physical dimensions directly.
     #[inline]
     pub fn configure_size(&self) -> (i32, i32) {
+        physical_to_kwin_logical_configure(self.physical_size, self.effective_kwin_scale())
+    }
+
+    /// Explicit alias for [`Self::configure_size`].
+    #[inline]
+    pub fn logical_configure_size(&self) -> (i32, i32) {
+        self.configure_size()
+    }
+
+    /// Explicit physical dimensions of the Android host surface.
+    #[inline]
+    pub fn physical_size(&self) -> (i32, i32) {
         self.physical_size
     }
 
@@ -406,6 +559,24 @@ impl AuthoritativeDisplayState {
         };
         if changed {
             self.kwin_scale = Some(scale);
+            self.configure_repair_count = 0;
+            let new_logical = self.configure_size();
+            if new_logical != self.requested_configure {
+                let gen = self.next_generation();
+                self.requested_configure = new_logical;
+                self.requested_generation = gen;
+                self.push_request(
+                    gen,
+                    self.physical_size,
+                    new_logical,
+                    scale,
+                    0,
+                );
+                if self.observed_surface_size.is_none() {
+                    self.guest_logical_size = (new_logical.0 as f64, new_logical.1 as f64);
+                    self.rendered_generation = gen;
+                }
+            }
         }
         changed
     }
@@ -579,26 +750,24 @@ impl AuthoritativeDisplayState {
     /// logical must be derived, never used verbatim. Tolerances cover integer
     /// `Size<i32>` truncation.
     fn attribute_frame(
-        host: (i32, i32),
-        plasma: f64,
+        request: &ConfigureRequest,
         surface: Option<(f64, f64)>,
         buffer: Option<(f64, f64)>,
         buffer_scale: Option<i32>,
     ) -> Option<((f64, f64), bool)> {
+        let req_w = request.requested_logical.0 as f64;
+        let req_h = request.requested_logical.1 as f64;
+
         if let Some(s) = surface {
-            let exp_w = (host.0 as f64 / plasma).round();
-            let exp_h = (host.1 as f64 / plasma).round();
-            if (s.0 - exp_w).abs() <= 2.0 && (s.1 - exp_h).abs() <= 2.0 {
+            if (s.0 - req_w).abs() <= 2.0 && (s.1 - req_h).abs() <= 2.0 {
                 return Some((s, true));
             }
             if let Some(scale) = buffer_scale {
                 if (1..=4).contains(&scale) {
-                    let bw = host.0 as f64 / scale as f64;
-                    let bh = host.1 as f64 / scale as f64;
+                    let bw = request.host.0 as f64 / scale as f64;
+                    let bh = request.host.1 as f64 / scale as f64;
                     if (s.0 - bw).abs() <= 2.5 && (s.1 - bh).abs() <= 2.5 {
-                        let w = (host.0 as f64 / plasma).round().max(1.0);
-                        let h = (host.1 as f64 / plasma).round().max(1.0);
-                        return Some(((w, h), false));
+                        return Some(((req_w, req_h), false));
                     }
                 }
             }
@@ -606,12 +775,10 @@ impl AuthoritativeDisplayState {
         }
         if let (Some(b), Some(scale)) = (buffer, buffer_scale) {
             if (1..=4).contains(&scale) {
-                let exp_w = host.0 as f64 / scale as f64;
-                let exp_h = host.1 as f64 / scale as f64;
+                let exp_w = request.host.0 as f64 / scale as f64;
+                let exp_h = request.host.1 as f64 / scale as f64;
                 if (b.0 - exp_w).abs() <= 2.5 && (b.1 - exp_h).abs() <= 2.5 {
-                    let w = (host.0 as f64 / plasma).round().max(1.0);
-                    let h = (host.1 as f64 / plasma).round().max(1.0);
-                    return Some(((w, h), false));
+                    return Some(((req_w, req_h), false));
                 }
             }
         }
@@ -665,7 +832,7 @@ impl AuthoritativeDisplayState {
         let mut acked_best: Option<(u64, (i32, i32), (f64, f64), bool)> = None;
         for entry in self.request_history().iter().rev() {
             if let Some((guest, from_surface)) =
-                Self::attribute_frame(entry.host, plasma, surface, buffer, buffer_scale)
+                Self::attribute_frame(entry, surface, buffer, buffer_scale)
             {
                 if best.is_none() {
                     best = Some((entry.generation, entry.host, guest, from_surface));
@@ -678,8 +845,15 @@ impl AuthoritativeDisplayState {
         }
         // Fall back to the current target itself (covers evicted history and
         // pre-history initial commits); otherwise the frame is unattributable.
+        let current_synthetic_request = ConfigureRequest {
+            generation: self.requested_generation,
+            host: self.physical_size,
+            requested_logical: self.requested_configure,
+            scale: plasma,
+            serial: self.acked_serial,
+        };
         let matched = acked_best.or(best).or_else(|| {
-            Self::attribute_frame(self.physical_size, plasma, surface, buffer, buffer_scale).map(
+            Self::attribute_frame(&current_synthetic_request, surface, buffer, buffer_scale).map(
                 |(guest, from_surface)| {
                     (
                         self.requested_generation,
@@ -697,8 +871,8 @@ impl AuthoritativeDisplayState {
                 // Unattributable frame: still track the LIVE texture (the
                 // renderer draws it regardless) paired with the best available
                 // logical — buffer-mirror derivation when a scale is known,
-                // verbatim surface otherwise — but never claim currency and
-                // never touch the newest host target.
+                // verbatim surface otherwise — but NEVER claim currency and
+                // NEVER retain old generation/host ownership.
                 let (guest, from_surface) = if surface.is_some() {
                     match buffer_scale {
                         Some(scale)
@@ -730,12 +904,7 @@ impl AuthoritativeDisplayState {
                 } else {
                     (self.guest_logical_size, self.rendered_from_surface)
                 };
-                (
-                    self.rendered_generation,
-                    self.rendered_host,
-                    guest,
-                    from_surface,
-                )
+                (0, (0, 0), guest, from_surface)
             }
         };
 
@@ -794,18 +963,21 @@ impl AuthoritativeDisplayState {
         if self.physical_size == (w, h) {
             return None;
         }
-        self.resize_generation = self.resize_generation.wrapping_add(1);
+        let gen = self.next_generation();
         self.physical_size = (w, h);
-        self.requested_configure = (w, h);
-        self.requested_generation = self.resize_generation;
-        self.push_request(self.resize_generation, (w, h), 0);
+        self.configure_repair_count = 0;
+        let scale = self.effective_kwin_scale();
+        let logical = physical_to_kwin_logical_configure((w, h), scale);
+        self.requested_configure = logical;
+        self.requested_generation = gen;
+        self.push_request(gen, (w, h), logical, scale, 0);
         if self.observed_surface_size.is_none() {
             // No frame yet: guest tracks the fresh host directly.
-            self.guest_logical_size = self.fresh_logical_geometry();
+            self.guest_logical_size = (logical.0 as f64, logical.1 as f64);
             self.rendered_host = (w, h);
-            self.rendered_generation = self.resize_generation;
+            self.rendered_generation = gen;
         }
-        Some(self.resize_generation)
+        Some(gen)
     }
 
     /// Update display density DPI (preserves on invalid, returns changed).
@@ -823,6 +995,14 @@ impl AuthoritativeDisplayState {
             self.guest_logical_size = self.fresh_logical_geometry();
         }
         true
+    }
+
+    /// Record an observed instantaneous Android physical/VRR rate.
+    ///
+    /// Diagnostics/pacing only: the nominal `refresh_rate_millihz` advertised
+    /// via `wl_output` is never touched here.
+    pub fn note_physical_refresh_millihz(&mut self, observed_millihz: i32) {
+        self.physical_refresh_millihz = observed_millihz;
     }
 }
 

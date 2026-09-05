@@ -494,8 +494,13 @@ fn assert_intermediate_frame(
 ) {
     let snap = state.presentation_snapshot();
     let committed = simulated_buffer_commit(frame_host);
+    let req_logical =
+        localdesktop::core::coordinate_transform::physical_to_kwin_logical_configure(
+            target,
+            state.effective_kwin_scale(),
+        );
     assert_eq!(snap.host, target, "{context}: host target moved");
-    assert_eq!(snap.requested, target, "{context}: requested target moved");
+    assert_eq!(snap.requested, req_logical, "{context}: requested target moved");
     assert_eq!(
         snap.committed,
         Some(committed),
@@ -552,7 +557,10 @@ fn intermediate_commit_renders_own_frame_while_targeting_newest() {
     assert_intermediate_frame(&s, b, c, "B-while-targeting-C");
     assert_eq!(s.presentation_snapshot().rendered_generation, gen_b);
     assert_eq!(s.physical_size, c, "stale commit moved the host target");
-    assert_eq!(s.requested_configure, c);
+    assert_eq!(
+        s.requested_configure,
+        localdesktop::core::coordinate_transform::physical_to_kwin_logical_configure(c, PLASMA)
+    );
     // The matching commit for the newest target converges exactly.
     assert!(s.note_kwin_commit(None, Some(simulated_buffer_commit(c)), Some(BUFFER_SCALE)));
     let snap = s.presentation_snapshot();
@@ -706,6 +714,7 @@ fn ack_without_commit_never_reattributes_rendered_frame() {
     // test simply never calls note until the genuine commit.)
     let (a, b) = ((3392, 2400), (1100, 900));
     let mut s = fresh_converged_fullscreen();
+    let gen_a = s.presentation_snapshot().rendered_generation;
     let _gen_b = request(&mut s, b, 71);
     let gen_a2 = request(&mut s, a, 72);
     assert_eq!(s.note_configure_acked(72), Some(gen_a2));
@@ -714,15 +723,21 @@ fn ack_without_commit_never_reattributes_rendered_frame() {
         let snap = s.presentation_snapshot();
         assert_eq!(snap.acked_serial, 72, "ACK is recorded");
         assert_eq!(
-            snap.rendered_generation, 0,
+            snap.rendered_generation, gen_a,
             "ACK alone must not reattribute the old texture"
         );
         assert_eq!(snap.rendered_host, a);
         assert_eq!(snap.guest_logical, guest_for(a));
         assert_eq!(snap.host, a, "newest target untouched");
-        assert_eq!(snap.requested, a);
+        assert_eq!(
+            snap.requested,
+            localdesktop::core::coordinate_transform::physical_to_kwin_logical_configure(a, PLASMA)
+        );
         assert_eq!(snap.committed, Some(simulated_buffer_commit(a)));
-        assert!(snap.converged, "old A frame still fills the A host");
+        assert!(
+            !snap.converged,
+            "stale A1 frame must not claim convergence for A2 target before A2 commits"
+        );
     }
     // The genuine new A2 commit (same dimensions, real wl_surface commit at
     // runtime) moves ownership to A2.
@@ -743,12 +758,14 @@ fn scale_ack_without_commit_keeps_old_frame_ownership() {
     // changed.
     let a = (3392, 2400);
     let mut s = fresh_converged_fullscreen();
+    let old_gen = s.presentation_snapshot().rendered_generation;
     assert!(s.update_kwin_scale(2.0));
+    let new_gen = s.resize_generation;
     assert_eq!(s.note_configure_acked(99), None);
     let committed = simulated_buffer_commit(a);
     for _ in 0..3 {
         let snap = s.presentation_snapshot();
-        assert_eq!(snap.rendered_generation, 0);
+        assert_eq!(snap.rendered_generation, old_gen);
         assert_eq!(snap.rendered_host, a);
         assert_eq!(snap.committed, Some(committed));
         assert_eq!(snap.host, a);
@@ -762,7 +779,7 @@ fn scale_ack_without_commit_keeps_old_frame_ownership() {
     let new_guest = ((a.0 as f64 / 2.0).round(), (a.1 as f64 / 2.0).round());
     assert!(s.note_kwin_commit(None, Some(committed), Some(BUFFER_SCALE)));
     let snap = s.presentation_snapshot();
-    assert_eq!(snap.rendered_generation, 0);
+    assert_eq!(snap.rendered_generation, new_gen);
     assert_eq!(snap.rendered_host, a);
     assert_eq!(snap.guest_logical, new_guest);
     assert!(snap.converged);
@@ -813,3 +830,95 @@ fn request_history_is_bounded_and_newest_wins() {
         assert!(pair[0].generation < pair[1].generation);
     }
 }
+
+#[test]
+fn cold_startup_scale_race_repair_and_convergence() {
+    // Cold startup on OnePlus Pad 3 with Plasma scale 200%.
+    // KWin's nested WaylandOutput initializes at scale 1.0, applies the initial configure
+    // at 1.0 (mode 1696x1200), then loads kwinoutputconfig.json (scale 2.0).
+    // KWin commits 848x600 (1696 / 2).
+    let mut state = AuthoritativeDisplayState::new(3392, 2400, DENSITY_DPI, 144_000);
+    state.update_kwin_scale(2.0);
+    assert_eq!(state.configure_size(), (1696, 1200));
+
+    // Host sends initial configure serial 1.
+    state.note_configure_sent(1);
+    assert!(state.has_unacknowledged_configure());
+
+    // KWin acks serial 1.
+    state.note_configure_acked(1);
+    assert!(!state.has_unacknowledged_configure());
+
+    // KWin commits stale frame (848x600).
+    let stale_commit = (848.0, 600.0);
+    state.note_kwin_commit(Some(stale_commit), Some(stale_commit), Some(2));
+    assert!(!state.presentation_snapshot().converged);
+    assert!(state.needs_configure_repair());
+
+    // Host sends repair configure serial 2.
+    state.note_configure_sent(2);
+    state.record_configure_repair();
+    assert!(state.has_unacknowledged_configure());
+    assert!(!state.needs_configure_repair(), "repair must not re-trigger while in flight");
+
+    // KWin acks serial 2 under scale 2.0, resizes output mode to 3392x2400, commits 1696x1200.
+    state.note_configure_acked(2);
+    assert!(!state.has_unacknowledged_configure());
+
+    let full_commit = (1696.0, 1200.0);
+    state.note_kwin_commit(Some(full_commit), Some(full_commit), Some(2));
+    let snap = state.presentation_snapshot();
+    assert!(snap.converged);
+    assert_eq!(snap.guest_logical, (1696.0, 1200.0));
+    assert_eq!(snap.viewport_origin, (0.0, 0.0));
+    assert_eq!(snap.viewport_size, (3392.0, 2400.0));
+    assert_eq!(snap.uniform_scale, 2.0);
+    assert!(!state.needs_configure_repair());
+}
+
+#[test]
+fn configure_repair_stops_after_three_attempts() {
+    let mut state = AuthoritativeDisplayState::new(3392, 2400, DENSITY_DPI, 144_000);
+    state.update_kwin_scale(2.0);
+    state.note_configure_sent(1);
+    state.note_configure_acked(1);
+
+    let rogue_commit = (800.0, 600.0);
+    for serial in 2..=4 {
+        state.note_kwin_commit(Some(rogue_commit), Some(rogue_commit), Some(2));
+        assert!(state.needs_configure_repair());
+        state.note_configure_sent(serial);
+        state.record_configure_repair();
+        state.note_configure_acked(serial);
+    }
+
+    // 4th commit with mismatch: attempts capped at 3, must not trigger further repairs.
+    state.note_kwin_commit(Some(rogue_commit), Some(rogue_commit), Some(2));
+    assert!(!state.needs_configure_repair(), "repair must be capped at 3 attempts");
+}
+
+#[test]
+fn resize_in_flight_does_not_trigger_premature_repair() {
+    let mut state = fresh_converged_fullscreen();
+    // User resizes to popup (1134x2016).
+    let popup = (1134, 2016);
+    let gen_popup = state.try_update_physical_size(popup.0, popup.1).expect("new gen");
+    state.note_configure_sent(101);
+    assert!(state.has_unacknowledged_configure());
+
+    // Old fullscreen frame commits while popup configure is in flight.
+    let old_frame = (1696.0, 1200.0);
+    state.note_kwin_commit(Some(old_frame), Some(old_frame), Some(2));
+    assert!(!state.presentation_snapshot().converged);
+    assert!(!state.needs_configure_repair(), "in-flight configure must suppress repair");
+
+    // Popup configure acked and committed.
+    state.note_configure_acked(101);
+    let popup_commit = (567.0, 1008.0);
+    state.note_kwin_commit(Some(popup_commit), Some(popup_commit), Some(2));
+    let snap = state.presentation_snapshot();
+    assert!(snap.converged);
+    assert_eq!(snap.rendered_generation, gen_popup);
+    assert!(!state.needs_configure_repair());
+}
+

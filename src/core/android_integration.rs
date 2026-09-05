@@ -55,6 +55,84 @@ pub fn refresh_period_nanos(refresh_millihz: i32) -> u64 {
     (1_000_000_000_000u64 / refresh).max(1)
 }
 
+/// Portal's interactive desktop frame-rate hint in millihertz.
+///
+/// Fallback when Android's supported-mode list is unavailable: requested
+/// through the supported `ANativeWindow_setFrameRate[WithChangeStrategy]`
+/// path as a hint only. The live path prefers
+/// [`select_preferred_refresh_millihz`] over the reported modes; this stays
+/// as the sane default on devices where enumeration fails.
+pub const DESIRED_REFRESH_MILLIHZ: i32 = 120_000;
+
+/// Stable nominal refresh advertised to nested KWin via `wl_output` (millihertz).
+///
+/// Fallback when Android's supported-mode list is unavailable. The live path
+/// resolves the nominal target with [`select_preferred_refresh_millihz`] over
+/// `Display.getSupportedModes()` instead of using this fixed value directly,
+/// so a 144 Hz panel advertises 144 Hz while 120/90/60 Hz devices keep their
+/// own maximum.
+///
+/// This is intentionally NOT the instantaneous Android physical/VRR scanout
+/// rate (which legitimately varies between 50/60/90/120/144 Hz on the OnePlus
+/// Pad 3). KWin's virtual output must see a stable intended mode so cold-start
+/// fullscreen boots at the preferred rate without requiring a popup transition
+/// to re-sample Android while it happens to be at that rate. The live physical
+/// rate is tracked separately for diagnostics/pacing and never rewrites this
+/// mode. Physical presentation timing itself is communicated through
+/// frame/presentation feedback, not mode rewrites.
+pub const NOMINAL_OUTPUT_REFRESH_MILLIHZ: i32 = 120_000;
+
+/// Select the preferred stable high-refresh target from Android's reported
+/// supported display modes (millihertz).
+///
+/// Portable policy: prefer the highest *valid* supported rate so a 144 Hz
+/// panel resolves to 144 Hz while 120/90/60 Hz devices resolve to their own
+/// maximum. Invalid readings (zero/negative/absurd) are ignored; an empty or
+/// fully-invalid list falls back to [`NOMINAL_OUTPUT_REFRESH_MILLIHZ`] so
+/// callers always get a usable nominal mode. Pure and host-testable: JNI
+/// enumeration lives in `ndk`, selection lives here.
+pub fn select_preferred_refresh_millihz(supported_millihz: &[i32]) -> i32 {
+    supported_millihz
+        .iter()
+        .copied()
+        .filter(|rate| is_valid_refresh_millihz(*rate))
+        .max()
+        .unwrap_or(NOMINAL_OUTPUT_REFRESH_MILLIHZ)
+}
+
+/// Hysteresis for host refresh-change detection (millihertz).
+///
+/// Fractional modes (e.g. 59.94 Hz vs 60 Hz differ by ~60 millihertz) must not
+/// flap the Wayland output. Real OnePlus Pad 3 steps (50/60/90/120/144 Hz) differ
+/// by >= 10_000 millihertz, so 500 cleanly separates noise from real switches.
+pub const REFRESH_CHANGE_THRESHOLD_MILLIHZ: i32 = 500;
+
+/// Whether a millihertz refresh value is usable for Wayland output timing.
+pub fn is_valid_refresh_millihz(refresh_millihz: i32) -> bool {
+    (1_000..=1_000_000).contains(&refresh_millihz)
+}
+
+/// Whether an observed host refresh differs enough from the tracked physical
+/// rate to be worth logging.
+///
+/// This is for physical/VRR diagnostics only: it must NEVER gate a `wl_output`
+/// mode rewrite. The Wayland output mode is the stable preferred target from
+/// [`select_preferred_refresh_millihz`]; transient 50/60/90/120/144 Hz scanout
+/// changes leave Plasma's configured mode untouched.
+///
+/// Returns false when the new reading is invalid (preserve last valid) or when
+/// the delta is within hysteresis. Pure, host-testable; callers must only use
+/// it to update separately-tracked physical state, never `wl_output`.
+pub fn refresh_changed(current_millihz: i32, observed_millihz: i32) -> bool {
+    if !is_valid_refresh_millihz(observed_millihz) {
+        return false;
+    }
+    if !is_valid_refresh_millihz(current_millihz) {
+        return true;
+    }
+    (observed_millihz - current_millihz).abs() >= REFRESH_CHANGE_THRESHOLD_MILLIHZ
+}
+
 /// Clamp an event coordinate to the compositor's normalized 0..1 range.
 pub fn normalized_coordinate(value: f64) -> f64 {
     if value.is_finite() {
@@ -116,6 +194,55 @@ mod tests {
         assert_eq!(refresh_period_nanos(120_000), 8_333_333);
         assert_eq!(refresh_period_nanos(0), 16_666_666);
         assert_eq!(refresh_period_nanos(-1), 16_666_666);
+    }
+
+    #[test]
+    fn refresh_change_detection_ignores_fractional_noise() {
+        // 59.94 Hz (59940) vs 60 Hz must not flap the output.
+        assert!(!refresh_changed(60_000, 59_940));
+        assert!(!refresh_changed(60_000, 60_000));
+        // Real OnePlus Pad 3 VRR steps must trigger.
+        assert!(refresh_changed(60_000, 50_000));
+        assert!(refresh_changed(60_000, 120_000));
+        assert!(refresh_changed(50_000, 60_000));
+        assert!(refresh_changed(120_000, 144_000));
+        // Invalid readings never trigger (preserve last valid).
+        assert!(!refresh_changed(60_000, 0));
+        assert!(!refresh_changed(60_000, -1));
+        assert!(!refresh_changed(60_000, 2_000_000));
+        // Invalid current with a valid observation adopts the observation.
+        assert!(refresh_changed(0, 120_000));
+        assert!(is_valid_refresh_millihz(DESIRED_REFRESH_MILLIHZ));
+        assert_eq!(DESIRED_REFRESH_MILLIHZ, 120_000);
+    }
+
+    #[test]
+    fn preferred_refresh_selects_highest_valid_supported_mode() {
+        // OnePlus Pad 3: full VRR/mode list resolves to 144 Hz.
+        assert_eq!(
+            select_preferred_refresh_millihz(&[50_000, 60_000, 90_000, 120_000, 144_000]),
+            144_000
+        );
+        // Order-independent.
+        assert_eq!(
+            select_preferred_refresh_millihz(&[144_000, 60_000, 120_000]),
+            144_000
+        );
+        // Portable fallback: 120/90/60 Hz devices keep their own maximum.
+        assert_eq!(select_preferred_refresh_millihz(&[60_000, 120_000]), 120_000);
+        assert_eq!(select_preferred_refresh_millihz(&[60_000, 90_000]), 90_000);
+        assert_eq!(select_preferred_refresh_millihz(&[60_000]), 60_000);
+        assert_eq!(select_preferred_refresh_millihz(&[59_940, 60_000]), 60_000);
+        // Invalid entries are ignored, never selected.
+        assert_eq!(select_preferred_refresh_millihz(&[0, -1, 144_000]), 144_000);
+        assert_eq!(select_preferred_refresh_millihz(&[0, -1, 2_000_000]), 120_000);
+        // Empty/unusable lists fall back to the sane default.
+        assert_eq!(select_preferred_refresh_millihz(&[]), 120_000);
+        assert_eq!(select_preferred_refresh_millihz(&[0]), 120_000);
+        assert_eq!(
+            select_preferred_refresh_millihz(&[]),
+            NOMINAL_OUTPUT_REFRESH_MILLIHZ
+        );
     }
 
     #[test]
