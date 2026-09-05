@@ -90,6 +90,12 @@ pub struct WaylandBackend {
     /// consumes cached scale; the filesystem is stat'ed at low frequency
     /// only, never per-frame or per-commit.
     pub last_plasma_poll_ms: Option<u64>,
+    /// Rendered-frame ownership gate: `note_kwin_commit()` runs only for a
+    /// genuinely new KWin frame (first sighting or changed commit counter for
+    /// the identified surface). A configure ACK alone must never reattribute
+    /// the currently rendered buffer to a newer request.
+    pub kwin_commit_gate:
+        crate::core::presentation::KwinCommitGate<smithay::backend::renderer::utils::CommitCounter>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
