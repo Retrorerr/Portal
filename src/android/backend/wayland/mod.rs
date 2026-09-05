@@ -7,6 +7,7 @@ mod input;
 mod keymap;
 pub mod output_state;
 pub mod protocol;
+pub mod socket_watcher;
 mod text_input_v2;
 mod winit_backend;
 pub mod wlegl;
@@ -15,7 +16,8 @@ pub use output_state::{read_kwin_output_scale, sync_kwin_output_scale, write_gue
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
-pub use event_handler::handle;
+pub use event_handler::{dispatch_wayland, handle, log_presentation_state};
+pub use socket_watcher::WaylandSocketWatcher;
 pub use winit_backend::{
     bind, AndroidFrameTimestampSample, AndroidFrameTimestampSupport, WinitGraphicsBackend,
 };
@@ -58,6 +60,10 @@ pub struct WaylandBackend {
     pub touch_down_position: Option<PhysicalPosition<f64>>,
     /// When that finger landed, in `clock` milliseconds.
     pub touch_down_time: Option<u64>,
+    /// Resize generation at `touch_down_position` time. Guards long-press
+    /// anchoring against host resizes during the press (stale physical must
+    /// not remap through a newer viewport).
+    pub touch_down_generation: Option<u64>,
     /// `ViewConfiguration.getScaledTouchSlop()`.
     pub touch_slop_px: f64,
     /// `ViewConfiguration.getLongPressTimeout()`.
@@ -71,10 +77,50 @@ pub struct WaylandBackend {
     /// timestamp. The frame id prevents a later recovery or KWin generation
     /// from satisfying this attempt.
     pub pending_kwin_presentation: Option<PendingKwinPresentation>,
-    /// Android display refresh rate in Wayland mode units (millihertz).
+    /// Stable nominal Android display refresh in Wayland mode units (millihertz).
+    /// Resolved once from `Display.getSupportedModes()` (preferred target;
+    /// 144 Hz on the OnePlus Pad 3, otherwise the device maximum):
+    /// advertised as the `wl_output` mode and used for presentation-feedback
+    /// `Refresh`. Never mirrors transient VRR scanout changes.
     pub refresh_rate_millihz: i32,
+    /// Last observed instantaneous Android physical/VRR scanout rate
+    /// (millihertz). Diagnostics and pacing only; never advertised via
+    /// `wl_output`.
+    pub physical_refresh_millihz: i32,
+    /// Last `clock` millisecond a host refresh-rate sample ran. The render
+    /// loop consumes the cached nominal rate; `Display.getMode()` is queried
+    /// at low frequency only (never per-frame) to track the instantaneous
+    /// physical/VRR rate for diagnostics. Physical changes never rewrite
+    /// `wl_output` and never recreate the output.
+    pub last_refresh_poll_ms: Option<u64>,
+    /// Whether the preferred `ANativeWindow` hint has been issued for the current
+    /// native window. Reset on suspend (window destroyed); re-issued on resume.
+    pub frame_rate_requested: bool,
     /// Currently pressed evdev physical scancodes.
     pub pressed_keys: HashSet<u32>,
+    /// Guest-side mouse button policy: presses in letterbox borders are
+    /// suppressed, releases for forwarded presses always land (no stuck
+    /// buttons across resizes/drags).
+    pub button_tracker: crate::core::pointer_buttons::PointerButtonTracker,
+    /// Touch ids whose down landed in a border and must never affect the
+    /// guest (a border press sliding inside still must not click).
+    pub suppressed_touch_ids: HashSet<u64>,
+    /// Last `clock` millisecond a Plasma-scale refresh ran. The render loop
+    /// consumes cached scale; the filesystem is stat'ed at low frequency
+    /// only, never per-frame or per-commit.
+    pub last_plasma_poll_ms: Option<u64>,
+    /// Rendered-frame ownership gate: `note_kwin_commit()` runs only for a
+    /// genuinely new KWin frame (first sighting or changed commit counter for
+    /// the identified surface). A configure ACK alone must never reattribute
+    /// the currently rendered buffer to a newer request.
+    pub kwin_commit_gate:
+        crate::core::presentation::KwinCommitGate<smithay::backend::renderer::utils::CommitCounter>,
+    /// Background socket watcher that unblocks the event loop on Wayland socket traffic.
+    pub socket_watcher: Option<WaylandSocketWatcher>,
+    /// Whether the output needs a redraw (commits received, input motion, resize, etc.).
+    pub output_dirty: bool,
+    /// Whether a frame is currently in flight to the Android compositor.
+    pub frame_in_flight: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +137,8 @@ impl WaylandBackend {
         self.touch_mode = TouchMode::Undecided;
         self.touch_down_position = None;
         self.touch_down_time = None;
+        self.touch_down_generation = None;
+        self.suppressed_touch_ids.clear();
     }
 
     /// Release any synthesized pointer grab and clear pending presentation state on suspend.
@@ -110,6 +158,24 @@ impl WaylandBackend {
             );
             self.compositor.pointer.frame(&mut self.compositor.state);
             self.pointer_pressed = false;
+        }
+        // Release every mouse button the guest believes is held (not just
+        // BTN_LEFT) so none can stick across suspend while the tracker resets.
+        let held_buttons = self.button_tracker.drain_pressed();
+        for button in held_buttons.iter().copied() {
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.compositor.pointer.button(
+                &mut self.compositor.state,
+                &smithay::input::pointer::ButtonEvent {
+                    button,
+                    state: smithay::backend::input::ButtonState::Released,
+                    serial,
+                    time,
+                },
+            );
+        }
+        if !held_buttons.is_empty() {
+            self.compositor.pointer.frame(&mut self.compositor.state);
         }
         for scancode in self.pressed_keys.drain() {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();

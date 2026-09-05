@@ -112,6 +112,8 @@ pub struct State {
     pub kwin_surface_scale: (f64, f64),
     /// Single source of truth for Android physical, rendered viewport, and KWin logical space.
     pub coordinate_transform: crate::core::coordinate_transform::CoordinateTransform,
+    /// Whether client visual state (buffers, cursor, geometry) has changed since last render.
+    pub dirty: bool,
 }
 
 impl State {
@@ -336,7 +338,10 @@ impl XdgShellHandler for State {
             state.states.set(xdg_toplevel::State::Fullscreen);
             state.states.set(xdg_toplevel::State::Maximized);
         });
-        surface.send_configure();
+        // Capture the serial for the initial request so the first KWin
+        // commits already attribute to a known configure.
+        let serial = u32::from(surface.send_configure());
+        self.authoritative_display_state.note_configure_sent(serial);
         self.observe_kwin_toplevel(&surface);
     }
 
@@ -363,22 +368,34 @@ impl XdgShellHandler for State {
         // callback runs.
         self.observe_kwin_surface_id(&surface);
         if self.is_known_kwin_surface(&surface) {
+            // Record the ack against the configure history so later commits
+            // can prefer the acknowledged request on same-dimension ties.
+            // The serial is authoritative here; size comes from the payload.
+            let (serial, acked_size) = match &configure {
+                Configure::Toplevel(configure) => (
+                    u32::from(configure.serial),
+                    configure.state.size.map(|size| (size.w, size.h)),
+                ),
+                Configure::Popup(configure) => (u32::from(configure.serial), None),
+            };
+            let acked_gen = self
+                .authoritative_display_state
+                .note_configure_acked(serial);
             if let Some(generation) = self.kwin_generation {
                 if self.readiness.mark_configure_acked_for(generation) {
-                    let serial = match configure {
-                        Configure::Toplevel(configure) => u32::from(configure.serial),
-                        Configure::Popup(configure) => u32::from(configure.serial),
-                    };
                     log::info!(
-                        "wayland.readiness stage=configure-acked generation={} serial={} surface={:?}",
+                        "wayland.readiness stage=configure-acked generation={} serial={} acked_resize_gen={:?} acked_size={:?} resize_gen={} surface={:?}",
                         generation,
                         serial,
+                        acked_gen,
+                        acked_size,
+                        self.authoritative_display_state.resize_generation,
                         surface.id()
                     );
                     crate::android::diagnostics::host_event(
                         "wayland-readiness",
                         &format!(
-                            "stage=configure-acked generation={} serial={} surface={:?}",
+                            "stage=configure-acked generation={} serial={} acked_resize_gen={acked_gen:?} surface={:?}",
                             generation,
                             serial,
                             surface.id()
@@ -488,6 +505,7 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        self.dirty = true;
         // `on_commit_buffer_handler` consumes the current BufferAssignment and
         // keeps only the renderer-owned buffer. Capture the protocol event
         // first so readiness cannot miss the only NewBuffer commit.
@@ -526,6 +544,7 @@ impl SeatHandler for State {
         self.update_text_input_focus(focused.cloned());
     }
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.dirty = true;
         self.cursor_image = image;
     }
 }
@@ -750,14 +769,17 @@ impl Compositor {
                 size.w,
                 size.h,
                 (scale_val * 160.0).round() as i32,
-                60000,
+                crate::core::android_integration::NOMINAL_OUTPUT_REFRESH_MILLIHZ,
             );
         auth_display_state.update_kwin_scale(scale_val);
         crate::android::backend::wayland::output_state::sync_kwin_output_scale(
             &mut auth_display_state,
         );
         let coordinate_transform = auth_display_state.coordinate_transform();
-        let kwin_surface_scale = auth_display_state.presentation_scale();
+        // Single uniform aspect-preserving scale (never anisotropic, allows
+        // <1 for transitional downscaling). Both axes identical by construction.
+        let uniform = auth_display_state.uniform_presentation_scale();
+        let kwin_surface_scale = (uniform, uniform);
 
         let state = State {
             compositor_state: CompositorState::new::<State>(&dh),
@@ -788,6 +810,7 @@ impl Compositor {
             authoritative_display_state: auth_display_state,
             kwin_surface_scale,
             coordinate_transform,
+            dirty: true,
             ahb_importer: match crate::android::backend::wayland::gl_import::AhbTextureImporter::new(
             ) {
                 Ok(imp) => {
@@ -828,6 +851,17 @@ impl Compositor {
     /// Start clipboard polling after the Android NativeActivity and the nested compositor exist.
     pub fn enable_android_clipboard(&mut self, android_app: AndroidApp) {
         self.state.clipboard_bridge = Some(ClipboardBridge::new(android_app));
+    }
+
+    /// Expose the listener and display raw file descriptors for background epoll/poll monitoring.
+    pub fn socket_fds(&self) -> (std::os::unix::io::RawFd, std::os::unix::io::RawFd) {
+        use std::os::unix::io::AsRawFd;
+        let listener_fd = self.listener.as_raw_fd();
+        let display_fd = {
+            use std::os::fd::AsFd;
+            self.display.as_fd().as_raw_fd()
+        };
+        (listener_fd, display_fd)
     }
 
     /// Apply completed Android -> Wayland clipboard changes without doing JNI or FD I/O on the
