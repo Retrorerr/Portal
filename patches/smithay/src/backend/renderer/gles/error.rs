@@ -73,6 +73,11 @@ pub enum GlesError {
     /// The blitting operation was unsuccessful
     #[error("Error blitting between framebuffers")]
     BlitError,
+    /// A SHM texture upload reported a GL error, so the texture contents are
+    /// uncertain. Callers must not advance any damage/proven-generation state
+    /// and must retry with a superset (full upload) next import.
+    #[error("Error uploading texture data (GL error after upload)")]
+    TextureUploadError,
     /// An error occured while creating the shader object.
     #[error("An error occured while creating the shader object.")]
     CreateShaderObject,
@@ -115,6 +120,7 @@ impl From<GlesError> for SwapBuffersError {
             | x @ GlesError::UnexpectedSize
             | x @ GlesError::UnknownSize
             | x @ GlesError::BlitError
+            | x @ GlesError::TextureUploadError
             | x @ GlesError::CreateShaderObject
             | x @ GlesError::UniformTypeMismatch { .. }
             | x @ GlesError::UnknownUniform(_)
@@ -143,6 +149,7 @@ impl From<GlesError> for SwapBuffersError {
             | x @ GlesError::UnexpectedSize
             | x @ GlesError::UnknownSize
             | x @ GlesError::BlitError
+            | x @ GlesError::TextureUploadError
             | x @ GlesError::CreateShaderObject
             | x @ GlesError::UniformTypeMismatch { .. }
             | x @ GlesError::UnknownUniform(_)
