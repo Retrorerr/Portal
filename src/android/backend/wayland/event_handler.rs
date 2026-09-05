@@ -234,25 +234,9 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 event_loop.set_control_flow(ControlFlow::Wait);
                 return;
             }
-
-            // Redraw the application.
-            //
-            // It's preferable for applications that do not render continuously to render in
-            // this event rather than in AboutToWait, since rendering in here allows
-            // the program to gracefully handle redraws requested by the OS.
-
-            // Draw.
-
-            // Queue a RedrawRequested event.
-            //
-            // You only need to call this if you've determined that you need to redraw in
-            // applications which do not always need to. Applications that redraw continuously
-            // can render here instead.
-            if let Some(winit) = backend.graphic_renderer.as_ref() {
-                winit.window().request_redraw();
-            }
         }
-        CentralizedEvent::Input(event) => match event {
+        CentralizedEvent::Input(event) => {
+            match event {
             InputEvent::Keyboard { event } => {
                 let compositor = &mut backend.compositor;
                 let state = &mut compositor.state;
@@ -476,7 +460,13 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 }
             }
             _ => {}
-        },
+        }
+        let _ = backend.compositor.display.flush_clients();
+        backend.output_dirty = true;
+        if let Some(winit) = backend.graphic_renderer.as_ref() {
+            winit.window().request_redraw();
+        }
+    }
         CentralizedEvent::Resized {
             size,
             guest_scale_factor,
@@ -550,6 +540,38 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             }
             log_presentation_state("host-resize", &backend.compositor.state);
 
+            // A resize can coincide with a physical VRR switch (rotation,
+            // window recreation). Track the live physical rate for
+            // diagnostics only: the `wl_output` mode below stays at the stable
+            // nominal rate so popup/fullscreen transitions can never gate
+            // whether the preferred rate is available.
+            {
+                let observed =
+                    crate::android::utils::ndk::active_refresh_millihz(&backend.android_app);
+                if crate::core::android_integration::refresh_changed(
+                    backend.physical_refresh_millihz,
+                    observed,
+                ) {
+                    let previous = backend.physical_refresh_millihz;
+                    backend.physical_refresh_millihz = observed;
+                    backend
+                        .compositor
+                        .state
+                        .authoritative_display_state
+                        .note_physical_refresh_millihz(observed);
+                    log::info!(
+                        "display.refresh physical changed on resize previous_millihz={previous} current_millihz={observed} nominal_millihz={}",
+                        backend.refresh_rate_millihz,
+                    );
+                    crate::android::diagnostics::host_event(
+                        "display-refresh",
+                        &format!(
+                            "trigger=resize previous_physical_millihz={previous} current_physical_millihz={observed}"
+                        ),
+                    );
+                }
+            }
+
             if let Some(output) = &backend.compositor.output {
                 let mode = Mode {
                     size: size.into(),
@@ -572,7 +594,10 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 .state
                 .authoritative_display_state
                 .configure_size();
-            if let Some(surface) = get_surface(&backend.compositor.state) {
+            for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
+                if let Some(output) = &backend.compositor.output {
+                    output.enter(surface.wl_surface());
+                }
                 let serial =
                     configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
                 // Record the serial against the current request so later KWin
@@ -584,6 +609,10 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                         .authoritative_display_state
                         .note_configure_sent(serial);
                 }
+            }
+            backend.output_dirty = true;
+            if let Some(winit) = backend.graphic_renderer.as_ref() {
+                winit.window().request_redraw();
             }
         }
         CentralizedEvent::Focus(focused) => {
@@ -761,8 +790,248 @@ fn maybe_poll_plasma_scale(backend: &mut WaylandBackend) {
             .authoritative_display_state
             .uniform_presentation_scale();
         backend.compositor.state.kwin_surface_scale = (uniform, uniform);
+        let configure_size = backend
+            .compositor
+            .state
+            .authoritative_display_state
+            .configure_size();
+        for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
+            let serial =
+                configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+            if let Some(serial) = serial {
+                backend
+                    .compositor
+                    .state
+                    .authoritative_display_state
+                    .note_configure_sent(serial);
+            }
+        }
+        backend.output_dirty = true;
         log_presentation_state("plasma-scale", &backend.compositor.state);
     }
+}
+
+/// Throttled host physical-refresh sampler (diagnostics only, never `wl_output`).
+///
+/// OxygenOS VRR moves the OnePlus Pad 3 between 50/60/90/120/144 Hz at runtime. This
+/// polls the active `Display.Mode` at most once per second and tracks the
+/// instantaneous physical rate separately. The `wl_output` mode stays at the
+/// stable nominal rate: physical changes are logged but never rewrite the
+/// Wayland output, so idle VRR (e.g. 50 Hz) leaves Plasma's configured
+/// preferred mode untouched and no feedback loop can form.
+fn maybe_poll_refresh_rate(backend: &mut WaylandBackend) {
+    const POLL_INTERVAL_MS: u64 = 1000;
+    let now_ms = backend.clock.now().as_millis() as u64;
+    if let Some(last) = backend.last_refresh_poll_ms {
+        if now_ms.saturating_sub(last) < POLL_INTERVAL_MS {
+            return;
+        }
+    }
+    backend.last_refresh_poll_ms = Some(now_ms);
+
+    let observed = crate::android::utils::ndk::active_refresh_millihz(&backend.android_app);
+    if !crate::core::android_integration::is_valid_refresh_millihz(observed) {
+        return;
+    }
+    if !crate::core::android_integration::refresh_changed(
+        backend.physical_refresh_millihz,
+        observed,
+    ) {
+        return;
+    }
+    let previous = backend.physical_refresh_millihz;
+    backend.physical_refresh_millihz = observed;
+    // Keep the authoritative copy in sync for diagnostics; nominal output
+    // mode and geometry are untouched.
+    backend
+        .compositor
+        .state
+        .authoritative_display_state
+        .note_physical_refresh_millihz(observed);
+
+    log::info!(
+        "display.refresh physical changed previous_millihz={previous} current_millihz={observed} nominal_millihz={}",
+        backend.refresh_rate_millihz,
+    );
+    crate::android::diagnostics::host_event(
+        "display-refresh",
+        &format!("previous_physical_millihz={previous} current_physical_millihz={observed}"),
+    );
+}
+
+/// Dispatch incoming Wayland protocol requests, accept new clients, and flush responses.
+///
+/// Decoupled from `redraw()` so Wayland protocol exchanges (including KWin commits, configure ACKs,
+/// and clipboard synchronization) are never blocked behind Android's `dequeueBuffer` or frame clock.
+/// Returns Ok(true) if any client activity occurred or if visual state was updated.
+pub fn dispatch_wayland(backend: &mut WaylandBackend) -> Result<bool, String> {
+    let mut activity = false;
+
+    // 1. Accept any pending client connections.
+    match backend.compositor.listener.accept() {
+        Ok(Some(stream)) => {
+            match backend
+                .compositor
+                .display
+                .handle()
+                .insert_client(stream, Arc::new(ClientState::default()))
+            {
+                Ok(client) => {
+                    backend.compositor.clients.push(client);
+                    activity = true;
+                }
+                Err(error) => log::error!("Failed to insert Wayland client: {error}"),
+            }
+        }
+        Ok(None) => {}
+        Err(error) => log::error!("Failed to accept Wayland client: {error}"),
+    }
+
+    // 2. Dispatch pending messages from connected clients.
+    match backend
+        .compositor
+        .display
+        .dispatch_clients(&mut backend.compositor.state)
+    {
+        Ok(count) => {
+            if count > 0 {
+                activity = true;
+            }
+        }
+        Err(error) => return Err(format!("Failed to dispatch clients: {error}")),
+    }
+
+    // 3. Flush pending outgoing protocol messages immediately to minimize latency.
+    backend
+        .compositor
+        .display
+        .flush_clients()
+        .map_err(|error| format!("Failed to flush clients: {error}"))?;
+
+    backend.compositor.observe_kwin_surfaces();
+    backend.compositor.sync_data_device_focus();
+
+    // 4. Low-frequency cached Plasma scale sampler.
+    maybe_poll_plasma_scale(backend);
+
+    // 4b. Low-frequency host refresh sampler (change-only wl_output update).
+    maybe_poll_refresh_rate(backend);
+
+    // 5. Check if any client commit or visual state change marked the compositor dirty.
+    if backend.compositor.state.dirty {
+        backend.output_dirty = true;
+        backend.compositor.state.dirty = false;
+        activity = true;
+    }
+
+    // 6. Check KWin toplevel surfaces for newly committed frames and configure repairs.
+    let toplevels = backend
+        .compositor
+        .state
+        .xdg_shell_state
+        .toplevel_surfaces()
+        .to_vec();
+
+    for surface in &toplevels {
+        if backend.compositor.state.is_known_kwin_surface(surface.wl_surface()) {
+            let observed = smithay::backend::renderer::utils::with_renderer_surface_state(
+                surface.wl_surface(),
+                |state| {
+                    let surface_size = state
+                        .surface_size()
+                        .and_then(|s| (s.w > 0 && s.h > 0).then_some((s.w as f64, s.h as f64)));
+                    let buffer_size = state
+                        .buffer_size()
+                        .and_then(|s| (s.w > 0 && s.h > 0).then_some((s.w as f64, s.h as f64)));
+                    let buffer_scale = state.buffer_scale();
+                    let commit = state.current_commit();
+                    (surface_size, buffer_size, buffer_scale, commit)
+                },
+            );
+            if let Some((surface_size, buffer_size, buffer_scale, commit)) = observed {
+                let is_new_frame = backend
+                    .kwin_commit_gate
+                    .check_and_record(backend.compositor.state.kwin_generation.unwrap_or(0), commit);
+                if is_new_frame {
+                    activity = true;
+                    backend.output_dirty = true;
+                    let was_converged = backend
+                        .compositor
+                        .state
+                        .authoritative_display_state
+                        .presentation_snapshot()
+                        .converged;
+                    if backend
+                        .compositor
+                        .state
+                        .authoritative_display_state
+                        .note_kwin_commit(surface_size, buffer_size, Some(buffer_scale))
+                    {
+                        backend.compositor.state.coordinate_transform = backend
+                            .compositor
+                            .state
+                            .authoritative_display_state
+                            .coordinate_transform();
+                        let snap = backend
+                            .compositor
+                            .state
+                            .authoritative_display_state
+                            .presentation_snapshot();
+                        backend.compositor.state.kwin_surface_scale =
+                            (snap.uniform_scale, snap.uniform_scale);
+                        log_presentation_state(
+                            if snap.converged && !was_converged {
+                                "commit-converged"
+                            } else if !snap.converged && was_converged {
+                                "commit-stale"
+                            } else {
+                                "commit"
+                            },
+                            &backend.compositor.state,
+                        );
+                    }
+                    if backend
+                        .compositor
+                        .state
+                        .authoritative_display_state
+                        .needs_configure_repair()
+                    {
+                        let configure_size = backend
+                            .compositor
+                            .state
+                            .authoritative_display_state
+                            .configure_size();
+                        if let Some(output) = &backend.compositor.output {
+                            output.enter(surface.wl_surface());
+                        }
+                        if let Some(serial) =
+                            configure_toplevel(surface, (configure_size.0, configure_size.1).into())
+                        {
+                            backend
+                                .compositor
+                                .state
+                                .authoritative_display_state
+                                .note_configure_sent(serial);
+                            backend
+                                .compositor
+                                .state
+                                .authoritative_display_state
+                                .record_configure_repair();
+                            log_presentation_state("configure-repair", &backend.compositor.state);
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    // 7. Inform background watcher that pending messages are drained so it may resume kernel polling.
+    if let Some(watcher) = &backend.socket_watcher {
+        watcher.resume_polling();
+    }
+
+    Ok(activity)
 }
 
 fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
@@ -784,12 +1053,18 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     // completed, immutable changes here before dispatching the next batch of Wayland requests.
     backend.compositor.process_android_clipboard();
 
-    // Low-frequency cached-scale sampler (filesystem stat at most every 2s,
-    // JSON parse only on mtime change). Runs before any renderer borrow so the
-    // frame below consumes cache only.
-    maybe_poll_plasma_scale(backend);
+    // Drain any pending Wayland messages and detect new commits before deciding whether to draw.
+    let _ = dispatch_wayland(backend);
+
+    // Event-driven rendering: skip EGL surface binding and swap if visual state hasn't changed.
+    if !backend.output_dirty {
+        return Ok(());
+    }
+    backend.output_dirty = false;
+    backend.frame_in_flight = true;
 
     let Some(winit) = backend.graphic_renderer.as_mut() else {
+        backend.frame_in_flight = false;
         return Ok(());
     };
 
@@ -808,6 +1083,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                 .authoritative_display_state
                 .physical_size,
         );
+        backend.frame_in_flight = false;
         return Ok(());
     }
     // Backup host sync: Resized events should already have updated the host,
@@ -847,6 +1123,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                     backend.button_tracker.reevaluate(&snapshot);
                 }
                 if let Some(output) = &backend.compositor.output {
+                    // Missed-resize convergence: nominal mode only.
                     let mode = Mode {
                         size: size.into(),
                         refresh: backend.refresh_rate_millihz,
@@ -885,41 +1162,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     let damage = Rectangle::from_size(size);
     let mut presentation_feedbacks = Vec::new();
     let mut frame_trace = FrameTrace::new();
-
-    // Process requests before taking the renderer snapshot.  The previous ordering rendered
-    // the old committed state, dispatched the next wl_surface.commit, then acknowledged that
-    // commit's wl_surface.frame callback after the swap.  KWin uses the callback as the host
-    // compositor's compositing/presentation point, so that ordering could make it submit the
-    // next frame while its acknowledged buffer was still not on the Android surface.  Keeping
-    // dispatch before rendering makes frame.done and wp_presentation refer to the state rendered
-    // by this iteration.
-    {
-        let compositor = &mut backend.compositor;
-        match compositor.listener.accept() {
-            Ok(Some(stream)) => match compositor
-                .display
-                .handle()
-                .insert_client(stream, Arc::new(ClientState::default()))
-            {
-                Ok(client) => compositor.clients.push(client),
-                Err(error) => log::error!("Failed to insert Wayland client: {error}"),
-            },
-            Ok(None) => {}
-            Err(error) => log::error!("Failed to accept Wayland client: {error}"),
-        }
-
-        compositor
-            .display
-            .dispatch_clients(&mut compositor.state)
-            .map_err(|error| format!("Failed to dispatch clients: {error}"))?;
-        compositor
-            .display
-            .flush_clients()
-            .map_err(|error| format!("Failed to flush clients: {error}"))?;
-        compositor.observe_kwin_surfaces();
-        compositor.sync_data_device_focus();
-        record_protocol_event(&mut frame_trace, FrameEvent::Dispatch);
-    }
+    record_protocol_event(&mut frame_trace, FrameEvent::Dispatch);
 
     // Keep the render elements alive through submit().  Smithay releases a client wl_buffer
     // when its last render-element reference is dropped; releasing it before the EGL swap can
@@ -929,83 +1172,18 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     let rendered_elements = {
         let (renderer, mut framebuffer) = winit
             .bind()
-            .map_err(|error| format!("Failed to bind EGL surface: {error}"))?;
+            .map_err(|error| {
+                backend.frame_in_flight = false;
+                format!("Failed to bind EGL surface: {error}")
+            })?;
 
-        // Disjoint field borrows: compositor geometry state vs commit gate.
         let compositor = &mut backend.compositor;
-        let backend_gate = &mut backend.kwin_commit_gate;
 
         let toplevels = compositor
             .state
             .xdg_shell_state
             .toplevel_surfaces()
             .to_vec();
-
-        // Attribute the live KWin frame to its owning request (newest-first
-        // history, ack-serial tie-break) — but ONLY for a genuinely new
-        // frame. The gate suppresses re-attribution when neither the surface
-        // identity generation nor the commit counter moved, so a configure
-        // ACK by itself can never hand the old unchanged texture to a newer
-        // request. Same-size recommits still process (counter changed). Pure
-        // state math here — no filesystem access; Plasma scale arrives via
-        // explicit refreshes and the low-frequency sampler only.
-        for surface in &toplevels {
-            if compositor.state.is_known_kwin_surface(surface.wl_surface()) {
-                let observed = smithay::backend::renderer::utils::with_renderer_surface_state(
-                    surface.wl_surface(),
-                    |state| {
-                        let surface_size = state
-                            .surface_size()
-                            .and_then(|s| (s.w > 0 && s.h > 0).then_some((s.w as f64, s.h as f64)));
-                        let buffer_size = state
-                            .buffer_size()
-                            .and_then(|s| (s.w > 0 && s.h > 0).then_some((s.w as f64, s.h as f64)));
-                        let buffer_scale = state.buffer_scale();
-                        let commit = state.current_commit();
-                        (surface_size, buffer_size, buffer_scale, commit)
-                    },
-                );
-                if let Some((surface_size, buffer_size, buffer_scale, commit)) = observed {
-                    let is_new_frame = backend_gate
-                        .check_and_record(compositor.state.kwin_generation.unwrap_or(0), commit);
-                    if !is_new_frame {
-                        break;
-                    }
-                    let was_converged = compositor
-                        .state
-                        .authoritative_display_state
-                        .presentation_snapshot()
-                        .converged;
-                    if compositor
-                        .state
-                        .authoritative_display_state
-                        .note_kwin_commit(surface_size, buffer_size, Some(buffer_scale))
-                    {
-                        compositor.state.coordinate_transform = compositor
-                            .state
-                            .authoritative_display_state
-                            .coordinate_transform();
-                        let snap = compositor
-                            .state
-                            .authoritative_display_state
-                            .presentation_snapshot();
-                        compositor.state.kwin_surface_scale =
-                            (snap.uniform_scale, snap.uniform_scale);
-                        log_presentation_state(
-                            if snap.converged && !was_converged {
-                                "commit-converged"
-                            } else if !snap.converged && was_converged {
-                                "commit-stale"
-                            } else {
-                                "commit"
-                            },
-                            &compositor.state,
-                        );
-                    }
-                }
-                break;
-            }
-        }
 
         // Single coherent snapshot for this frame: desktop rendering, cursor
         // placement, hotspot and sprite scale all derive from it. Uniform
@@ -1146,9 +1324,16 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
 
     // It is important that all events on the display have been dispatched and flushed to clients
     // before swapping buffers because this operation may block.
-    let submitted_frame_id = winit
-        .submit(Some(&[damage]))
-        .map_err(|error| format!("Failed to submit frame: {error}"))?;
+    let submitted_frame_id = match winit.submit(Some(&[damage])) {
+        Ok(id) => {
+            backend.frame_in_flight = false;
+            id
+        }
+        Err(error) => {
+            backend.frame_in_flight = false;
+            return Err(format!("Failed to submit frame: {error}"));
+        }
+    };
     let timestamp_support = winit.android_frame_timestamp_support();
     record_protocol_event(&mut frame_trace, FrameEvent::Submit);
 
@@ -1168,6 +1353,10 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     record_protocol_event(&mut frame_trace, FrameEvent::FrameDone);
 
     if let Some(output) = &backend.compositor.output {
+        // `presentation_time` is the real EGL submit time; `refresh` is the
+        // stable nominal output period (never transient VRR). Hardware
+        // scanout proof arrives separately via Android frame timestamps
+        // (`pending_kwin_presentation`).
         let presentation_time: std::time::Duration = backend.clock.now().into();
         let refresh = Refresh::fixed(std::time::Duration::from_nanos(
             crate::core::android_integration::refresh_period_nanos(backend.refresh_rate_millihz),
@@ -1291,6 +1480,7 @@ fn configure_toplevel(
         state.states.set(xdg_toplevel::State::Fullscreen);
         state.states.set(xdg_toplevel::State::Maximized);
     });
-    // Capture the serial so later KWin commits attribute to this request.
-    surface.send_pending_configure().map(u32::from)
+    // Unconditionally send the configure so KWin re-evaluates its output mode
+    // under its current scale, even when dimensions are unchanged.
+    Some(u32::from(surface.send_configure()))
 }

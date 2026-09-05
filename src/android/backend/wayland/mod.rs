@@ -7,6 +7,7 @@ mod input;
 mod keymap;
 pub mod output_state;
 pub mod protocol;
+pub mod socket_watcher;
 mod text_input_v2;
 mod winit_backend;
 pub mod wlegl;
@@ -15,7 +16,8 @@ pub use output_state::{read_kwin_output_scale, sync_kwin_output_scale, write_gue
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
-pub use event_handler::{handle, log_presentation_state};
+pub use event_handler::{dispatch_wayland, handle, log_presentation_state};
+pub use socket_watcher::WaylandSocketWatcher;
 pub use winit_backend::{
     bind, AndroidFrameTimestampSample, AndroidFrameTimestampSupport, WinitGraphicsBackend,
 };
@@ -75,8 +77,25 @@ pub struct WaylandBackend {
     /// timestamp. The frame id prevents a later recovery or KWin generation
     /// from satisfying this attempt.
     pub pending_kwin_presentation: Option<PendingKwinPresentation>,
-    /// Android display refresh rate in Wayland mode units (millihertz).
+    /// Stable nominal Android display refresh in Wayland mode units (millihertz).
+    /// Resolved once from `Display.getSupportedModes()` (preferred target;
+    /// 144 Hz on the OnePlus Pad 3, otherwise the device maximum):
+    /// advertised as the `wl_output` mode and used for presentation-feedback
+    /// `Refresh`. Never mirrors transient VRR scanout changes.
     pub refresh_rate_millihz: i32,
+    /// Last observed instantaneous Android physical/VRR scanout rate
+    /// (millihertz). Diagnostics and pacing only; never advertised via
+    /// `wl_output`.
+    pub physical_refresh_millihz: i32,
+    /// Last `clock` millisecond a host refresh-rate sample ran. The render
+    /// loop consumes the cached nominal rate; `Display.getMode()` is queried
+    /// at low frequency only (never per-frame) to track the instantaneous
+    /// physical/VRR rate for diagnostics. Physical changes never rewrite
+    /// `wl_output` and never recreate the output.
+    pub last_refresh_poll_ms: Option<u64>,
+    /// Whether the preferred `ANativeWindow` hint has been issued for the current
+    /// native window. Reset on suspend (window destroyed); re-issued on resume.
+    pub frame_rate_requested: bool,
     /// Currently pressed evdev physical scancodes.
     pub pressed_keys: HashSet<u32>,
     /// Guest-side mouse button policy: presses in letterbox borders are
@@ -96,6 +115,12 @@ pub struct WaylandBackend {
     /// the currently rendered buffer to a newer request.
     pub kwin_commit_gate:
         crate::core::presentation::KwinCommitGate<smithay::backend::renderer::utils::CommitCounter>,
+    /// Background socket watcher that unblocks the event loop on Wayland socket traffic.
+    pub socket_watcher: Option<WaylandSocketWatcher>,
+    /// Whether the output needs a redraw (commits received, input motion, resize, etc.).
+    pub output_dirty: bool,
+    /// Whether a frame is currently in flight to the Android compositor.
+    pub frame_in_flight: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

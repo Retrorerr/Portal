@@ -112,6 +112,8 @@ pub struct State {
     pub kwin_surface_scale: (f64, f64),
     /// Single source of truth for Android physical, rendered viewport, and KWin logical space.
     pub coordinate_transform: crate::core::coordinate_transform::CoordinateTransform,
+    /// Whether client visual state (buffers, cursor, geometry) has changed since last render.
+    pub dirty: bool,
 }
 
 impl State {
@@ -503,6 +505,7 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        self.dirty = true;
         // `on_commit_buffer_handler` consumes the current BufferAssignment and
         // keeps only the renderer-owned buffer. Capture the protocol event
         // first so readiness cannot miss the only NewBuffer commit.
@@ -541,6 +544,7 @@ impl SeatHandler for State {
         self.update_text_input_focus(focused.cloned());
     }
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.dirty = true;
         self.cursor_image = image;
     }
 }
@@ -765,7 +769,7 @@ impl Compositor {
                 size.w,
                 size.h,
                 (scale_val * 160.0).round() as i32,
-                60000,
+                crate::core::android_integration::NOMINAL_OUTPUT_REFRESH_MILLIHZ,
             );
         auth_display_state.update_kwin_scale(scale_val);
         crate::android::backend::wayland::output_state::sync_kwin_output_scale(
@@ -806,6 +810,7 @@ impl Compositor {
             authoritative_display_state: auth_display_state,
             kwin_surface_scale,
             coordinate_transform,
+            dirty: true,
             ahb_importer: match crate::android::backend::wayland::gl_import::AhbTextureImporter::new(
             ) {
                 Ok(imp) => {
@@ -846,6 +851,17 @@ impl Compositor {
     /// Start clipboard polling after the Android NativeActivity and the nested compositor exist.
     pub fn enable_android_clipboard(&mut self, android_app: AndroidApp) {
         self.state.clipboard_bridge = Some(ClipboardBridge::new(android_app));
+    }
+
+    /// Expose the listener and display raw file descriptors for background epoll/poll monitoring.
+    pub fn socket_fds(&self) -> (std::os::unix::io::RawFd, std::os::unix::io::RawFd) {
+        use std::os::unix::io::AsRawFd;
+        let listener_fd = self.listener.as_raw_fd();
+        let display_fd = {
+            use std::os::fd::AsFd;
+            self.display.as_fd().as_raw_fd()
+        };
+        (listener_fd, display_fd)
     }
 
     /// Apply completed Android -> Wayland clipboard changes without doing JNI or FD I/O on the
