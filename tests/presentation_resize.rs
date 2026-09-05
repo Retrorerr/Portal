@@ -644,7 +644,8 @@ fn repeated_dimensions_across_generations() {
 #[test]
 fn surface_commits_carry_authoritative_logical_across_scale_change() {
     // Viewporter path: surface size IS the KWin logical. It survives a Plasma
-    // scale change verbatim, while buffer-derived frames re-pair by origin.
+    // scale change verbatim, and so does every other rendered frame: a scale
+    // change alone never rewrites the displayed frame's pairing.
     let h = (1600, 1200);
     let mut s = AuthoritativeDisplayState::new(h.0, h.1, DENSITY_DPI, 144_000);
     s.update_kwin_scale(PLASMA);
@@ -657,7 +658,8 @@ fn surface_commits_carry_authoritative_logical_across_scale_change() {
     // Plasma scale change: the surface frame keeps KWin's own logical.
     assert!(s.update_kwin_scale(2.0));
     assert_eq!(s.logical_geometry(), surface);
-    // A buffer-derived frame instead re-pairs with its origin host.
+    // A buffer-derived frame likewise keeps its OLD logical: the displayed
+    // old texture retains its committed geometry until a genuine new commit.
     let mut t = AuthoritativeDisplayState::new(h.0, h.1, DENSITY_DPI, 144_000);
     t.update_kwin_scale(PLASMA);
     assert!(t.note_kwin_commit(None, Some(buffer), Some(BUFFER_SCALE)));
@@ -665,8 +667,13 @@ fn surface_commits_carry_authoritative_logical_across_scale_change() {
     assert!(t.update_kwin_scale(2.0));
     assert_eq!(
         t.logical_geometry(),
-        ((h.0 as f64 / 2.0).round(), (h.1 as f64 / 2.0).round())
+        guest_for(h),
+        "old frame keeps old logical across scale change"
     );
+    // The genuine new commit then pairs atomically with the new scale.
+    let new_guest = ((h.0 as f64 / 2.0).round(), (h.1 as f64 / 2.0).round());
+    assert!(t.note_kwin_commit(None, Some(buffer), Some(BUFFER_SCALE)));
+    assert_eq!(t.logical_geometry(), new_guest);
 }
 
 #[test]
@@ -731,8 +738,9 @@ fn ack_without_commit_never_reattributes_rendered_frame() {
 #[test]
 fn scale_ack_without_commit_keeps_old_frame_ownership() {
     // A (old scale) → same host dimensions → Plasma scale change + config ACK
-    // → no new KWin commit. Ownership (generation/host/texture) must not move
-    // merely because config metadata changed.
+    // → no new KWin commit. Ownership (generation/host/texture) AND the old
+    // frame's logical geometry must not move merely because config metadata
+    // changed.
     let a = (3392, 2400);
     let mut s = fresh_converged_fullscreen();
     assert!(s.update_kwin_scale(2.0));
@@ -744,20 +752,22 @@ fn scale_ack_without_commit_keeps_old_frame_ownership() {
         assert_eq!(snap.rendered_host, a);
         assert_eq!(snap.committed, Some(committed));
         assert_eq!(snap.host, a);
-        // Documented re-pairing: the buffer frame tracks its origin host
-        // under the live scale, but that is not a new commit.
-        assert_eq!(
-            snap.guest_logical,
-            ((a.0 as f64 / 2.0).round(), (a.1 as f64 / 2.0).round())
-        );
+        // The cached scale IS new, but the displayed old texture keeps the
+        // logical geometry of its committed frame.
+        assert!((snap.plasma_scale - 2.0).abs() < 1e-9);
+        assert_eq!(snap.guest_logical, guest_for(a));
     }
-    // When the real same-size commit arrives it attributes cleanly with no
-    // churn: same entry, same guest, same texture.
-    assert!(!s.note_kwin_commit(None, Some(committed), Some(BUFFER_SCALE)));
+    // The genuine same-size commit then pairs atomically with the new scale:
+    // same entry, same texture, new logical.
+    let new_guest = ((a.0 as f64 / 2.0).round(), (a.1 as f64 / 2.0).round());
+    assert!(s.note_kwin_commit(None, Some(committed), Some(BUFFER_SCALE)));
     let snap = s.presentation_snapshot();
     assert_eq!(snap.rendered_generation, 0);
     assert_eq!(snap.rendered_host, a);
+    assert_eq!(snap.guest_logical, new_guest);
     assert!(snap.converged);
+    // Repeating it is then a no-op.
+    assert!(!s.note_kwin_commit(None, Some(committed), Some(BUFFER_SCALE)));
 }
 
 #[test]
