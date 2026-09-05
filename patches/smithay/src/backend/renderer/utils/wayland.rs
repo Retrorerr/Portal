@@ -22,6 +22,7 @@ use tracing::{error, instrument, warn};
 
 use wayland_server::protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface};
 
+use super::shm_damage::{CommitSyncEvent, ShmSyncTracker, SyncDecision, SyncFingerprint};
 use super::{CommitCounter, DamageBag, DamageSet, SurfaceView};
 
 /// Type stored in WlSurface states data_map
@@ -44,6 +45,9 @@ pub struct RendererSurfaceState {
     pub(crate) damage: DamageBag<i32, BufferCoord>,
     pub(crate) renderer_seen: HashMap<(TypeId, usize), CommitCounter>,
     pub(crate) textures: HashMap<(TypeId, usize), Box<dyn std::any::Any>>,
+    /// Explicit SHM content-generation gate (ghosting fix): proves a partial
+    /// upload's damage chain before the GLES cache may be partially updated.
+    pub(crate) shm_sync: ShmSyncTracker,
     pub(crate) surface_view: Option<SurfaceView>,
     pub(crate) opaque_regions: Vec<Rectangle<i32, Logical>>,
 }
@@ -150,6 +154,9 @@ impl RendererSurfaceState {
         let attrs = guard.current();
 
         let new_buffer = matches!(attrs.buffer, Some(BufferAssignment::NewBuffer(_)));
+        // Whether the committed wl_buffer object differs from the one the
+        // cached texture was synced to. Captured before replacement below.
+        let mut new_object = false;
         match attrs.buffer.take() {
             Some(BufferAssignment::NewBuffer(buffer)) => {
                 self.buffer_dimensions = buffer_dimensions(&buffer);
@@ -163,7 +170,8 @@ impl RendererSurfaceState {
                 self.buffer_scale = attrs.buffer_scale;
                 self.buffer_transform = attrs.buffer_transform.into();
 
-                if !self.buffer.as_ref().is_some_and(|b| b == buffer) {
+                new_object = !self.buffer.as_ref().is_some_and(|b| b == buffer);
+                if new_object {
                     self.buffer = Some(Buffer {
                         inner: Arc::new(InnerBuffer {
                             buffer,
@@ -193,20 +201,97 @@ impl RendererSurfaceState {
         let surface_view = SurfaceView::from_states(states, surface_size, attrs.client_scale);
         let surface_view_changed = self.surface_view.replace(surface_view) != Some(surface_view);
 
-        // if we received a new buffer also process the attached damage
-        if new_buffer {
-            let buffer_damage = attrs.damage.drain(..).flat_map(|dmg| {
+        // Performance Pass 2 (+ghosting fix): authoritative damage in physical
+        // SHM buffer pixels. Damage is drained and converted EAGERLY on every
+        // commit under that commit's own viewporter state, so a later view
+        // change can never reinterpret damage recorded under an older view.
+        // Every NewBuffer commit advances an explicit content generation in
+        // `shm_sync`; a partial texture upload is allowed only while the
+        // tracker proves the complete damage chain from the last successful
+        // GL upload (same buffer object, same geometry, same
+        // viewport/scale/transform interpretation, no history gap). Anything
+        // else forces exactly one full resync at import time.
+        {
+            use super::shm_damage::{buffer_to_buffer, surface_to_buffer};
+            let view_src = Some(surface_view.src);
+            let view_dst = Some(surface_view.dst);
+            let mut validated: Vec<Rectangle<i32, BufferCoord>> = Vec::new();
+            let mut ambiguous = false;
+            for dmg in attrs.damage.drain(..) {
                 match dmg {
-                    Damage::Buffer(rect) => rect,
-                    Damage::Surface(rect) => surface_view.rect_to_local(rect).to_i32_up().to_buffer(
+                    Damage::Buffer(rect) => match buffer_to_buffer(rect, buffer_dimensions) {
+                        Ok(Some(r)) => validated.push(r),
+                        Ok(None) => {}
+                        Err(_) => {
+                            ambiguous = true;
+                            break;
+                        }
+                    },
+                    Damage::Surface(rect) => match surface_to_buffer(
+                        rect,
+                        buffer_dimensions,
+                        surface_size,
+                        view_src,
+                        view_dst,
                         self.buffer_scale,
                         self.buffer_transform,
-                        &surface_size,
-                    ),
+                    ) {
+                        Ok(Some(r)) => validated.push(r),
+                        Ok(None) => {}
+                        Err(_) => {
+                            ambiguous = true;
+                            break;
+                        }
+                    },
                 }
-                .intersection(Rectangle::from_size(buffer_dimensions))
-            });
-            self.damage.add(buffer_damage);
+            }
+            let damage_complete = !ambiguous && !validated.is_empty();
+            let damage_reason = if ambiguous {
+                Some("ambiguous-damage")
+            } else if validated.is_empty() {
+                Some("missing-damage")
+            } else {
+                None
+            };
+            let fingerprint = shm_sync_fingerprint(
+                buffer_dimensions,
+                self.buffer_scale,
+                self.buffer_transform,
+                surface_view,
+            );
+            if new_buffer {
+                if ambiguous || validated.is_empty() {
+                    // Full-buffer fallback covers ambiguous transforms,
+                    // invalid viewports/scales, and missing damage. An empty
+                    // validated set with a new buffer means unknown pixels.
+                    self.damage
+                        .add(std::iter::once(Rectangle::from_size(buffer_dimensions)));
+                } else {
+                    self.damage.add(validated);
+                }
+                self.shm_sync.note_commit(CommitSyncEvent {
+                    new_content: true,
+                    new_object,
+                    fingerprint,
+                    damage_complete,
+                    damage_reason,
+                });
+            } else {
+                // No new pixels: union converted damage conservatively (a
+                // superset for the next upload) without advancing the content
+                // generation. The fingerprint still participates in drift
+                // detection so a reinterpretation forces a resync.
+                if !validated.is_empty() {
+                    self.damage.add(validated);
+                }
+                self.shm_sync.note_commit(CommitSyncEvent {
+                    new_content: false,
+                    new_object: false,
+                    fingerprint,
+                    damage_complete: true,
+                    damage_reason: None,
+                });
+            }
         }
 
         // if the buffer or our view changed rebuild our opaque regions
@@ -350,6 +435,7 @@ impl RendererSurfaceState {
         self.buffer = None;
         self.textures.clear();
         self.damage.reset();
+        self.shm_sync.reset();
         self.surface_view = None;
         self.buffer_has_alpha = None;
         self.opaque_regions.clear();
@@ -407,6 +493,40 @@ pub fn on_commit_buffer_handler<D: 'static>(surface: &WlSurface) {
                 });
             });
         }
+    }
+}
+
+/// Build the content-generation fingerprint for the sync gate from live
+/// surface state. Any drift versus the last proven upload forces one full
+/// resync at import time.
+pub(crate) fn shm_sync_fingerprint(
+    buffer_dimensions: Size<i32, BufferCoord>,
+    buffer_scale: i32,
+    buffer_transform: Transform,
+    surface_view: SurfaceView,
+) -> SyncFingerprint {
+    let transform = match buffer_transform {
+        Transform::Normal => 0,
+        Transform::_90 => 1,
+        Transform::_180 => 2,
+        Transform::_270 => 3,
+        Transform::Flipped => 4,
+        Transform::Flipped90 => 5,
+        Transform::Flipped180 => 6,
+        Transform::Flipped270 => 7,
+    };
+    SyncFingerprint {
+        buffer_w: buffer_dimensions.w,
+        buffer_h: buffer_dimensions.h,
+        buffer_scale,
+        transform,
+        view_src: [
+            surface_view.src.loc.x.to_bits(),
+            surface_view.src.loc.y.to_bits(),
+            surface_view.src.size.w.to_bits(),
+            surface_view.src.size.h.to_bits(),
+        ],
+        view_dst: [surface_view.dst.w, surface_view.dst.h],
     }
 }
 
@@ -497,7 +617,21 @@ where
         let data = &mut *data_ref;
 
         let last_commit = data.renderer_seen.get(&texture_id);
+        // `DamageBag::damage_since` returns `None` on evicted/reset history:
+        // completeness of the chain can then no longer be demonstrated.
+        if data.damage.damage_since(last_commit.copied()).is_none() {
+            data.shm_sync.note_history_gap("history-gap");
+        }
         let buffer_damage = data.damage_since(last_commit.copied());
+        // Explicit content-generation gate (ghosting fix): a partial upload
+        // is allowed only while the tracker proves the complete damage chain
+        // from the last successful GL upload. Anything else uploads the whole
+        // buffer once, which resynchronizes the generation.
+        let gate = data.shm_sync.decide();
+        if let SyncDecision::Full { reason } = gate {
+            tracing::debug!("shm.sync resync reason={reason}");
+        }
+        let force_full = !matches!(gate, SyncDecision::Partial | SyncDecision::UpToDate);
         if let Entry::Vacant(e) = data.textures.entry(texture_id) {
             if let Some(buffer) = data.buffer.as_ref() {
                 // There is no point in importing a single pixel buffer
@@ -508,17 +642,38 @@ where
                     return Ok(());
                 }
 
-                match renderer.import_buffer(buffer, Some(states), &buffer_damage) {
+                // Forced resync passes whole-buffer damage so the upload path
+                // below performs one full upload regardless of DamageBag
+                // state; otherwise the accumulated union since the last
+                // successful upload is uploaded (partial when small).
+                let full_damage: Vec<Rectangle<i32, BufferCoord>> = data
+                    .buffer_dimensions
+                    .map(|size| vec![Rectangle::from_size(size)])
+                    .unwrap_or_default();
+                let partial_damage: Vec<Rectangle<i32, BufferCoord>> = buffer_damage.into_iter().collect();
+                // A missing history notes a gap above, which forces
+                // `force_full`, so `partial_damage` here is always the proven
+                // union (possibly empty for an already-synced texture, which
+                // the SHM upload path treats as a full fallback anyway).
+                let damage: &[Rectangle<i32, BufferCoord>] =
+                    if force_full { &full_damage } else { &partial_damage };
+                match renderer.import_buffer(buffer, Some(states), damage) {
                     Some(Ok(m)) => {
                         e.insert(Box::new(m));
                         data.renderer_seen.insert(texture_id, data.current_commit());
+                        // Only success advances the proven generation; the
+                        // upload path reports GL failures as errors so a
+                        // silent partial can never be mistaken for synced.
+                        data.shm_sync.mark_uploaded(true);
                     }
                     Some(Err(err)) => {
                         warn!("Error loading buffer: {}", err);
+                        data.shm_sync.mark_uploaded(false);
                         return Err(err);
                     }
                     None => {
                         error!("Unknown buffer format for: {:?}", buffer);
+                        data.shm_sync.note_history_gap("unknown-buffer");
                     }
                 }
             }
