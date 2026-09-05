@@ -37,8 +37,8 @@ impl PRootRuntime {
         }
     }
 
-    pub fn default_arch() -> Self {
-        Self::new(config::ARCH_FS_ROOT)
+    pub fn production() -> Self {
+        Self::new(config::PRODUCTION_FS_ROOT)
     }
 
     pub fn debian_slot(path: impl Into<PathBuf>) -> Self {

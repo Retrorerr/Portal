@@ -7,11 +7,10 @@ use std::{
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(not(test))]
-pub const ARCH_FS_ROOT: &str = "/data/data/app.polarbear/files/arch";
+pub const PRODUCTION_FS_ROOT: &str = "/data/data/app.polarbear/files/runtime-B";
 #[cfg(test)]
-pub const ARCH_FS_ROOT: &str = "/data/local/tmp/arch";
+pub const PRODUCTION_FS_ROOT: &str = "/data/local/tmp/runtime-B";
 
-pub const ARCH_FS_ARCHIVE: &str = "https://github.com/termux/proot-distro/releases/download/v4.29.0/archlinux-aarch64-pd-v4.29.0.tar.xz";
 
 /// Project homepage, also the online documentation entry point.
 pub const DOCS_HOME_URL: &str = "https://github.com/Retrorerr/Portal#readme";
@@ -79,13 +78,12 @@ pub struct CommandConfig {
 }
 
 fn default_check() -> String {
-    "pacman -Q plasma-desktop && pacman -Q plasma-workspace && pacman -Q kwin && pacman -Q kscreen && pacman -Q qt6-wayland && pacman -Q kwayland-integration && pacman -Q kde-cli-tools && pacman -Q konsole && pacman -Q dolphin && pacman -Q kate && pacman -Q okular && pacman -Q kdialog && pacman -Q plasma-pa && pacman -Q xdg-desktop-portal && pacman -Q xdg-desktop-portal-kde && pacman -Q xorg-xwayland && pacman -Q labwc && pacman -Q noto-fonts && pacman -Q firefox && pacman -Q pipewire && pacman -Q pipewire-audio && pacman -Q pipewire-alsa"
-        .to_string()
+    "dpkg-query -W plasma-desktop kwin-wayland kscreen dolphin konsole".to_string()
 }
 
 fn default_install() -> String {
-    "stdbuf -oL pacman -Syu --needed --noconfirm --noprogressbar plasma-desktop plasma-workspace kwin kscreen qt6-wayland kwayland-integration kde-cli-tools konsole dolphin kate okular kdialog plasma-pa xdg-desktop-portal xdg-desktop-portal-kde xorg-xwayland labwc noto-fonts firefox pipewire pipewire-audio pipewire-alsa"
-        .to_string()
+    // The desktop is installed at release time. Never assemble it on the device.
+    "true".to_string()
 }
 /// Direct the desktop session to the compositor and the host PipeWire socket.
 fn default_launch() -> String {
@@ -284,12 +282,8 @@ mod tests {
 
         assert!(config.check.contains("plasma-desktop"));
         assert!(config.check.contains("kwin"));
-        assert!(config.check.contains("pacman -Q kscreen"));
-        assert!(config.install.contains("xdg-desktop-portal-kde"));
-        assert!(config
-            .install
-            .split_whitespace()
-            .any(|package| package == "kscreen"));
+        assert!(config.check.contains("kscreen"));
+        assert_eq!(config.install, "true");
         assert!(config.launch.contains("startplasma-localdesktop"));
         assert!(config.launch.contains("WAYLAND_DISPLAY=wayland-0"));
         assert!(config.launch.contains("XDG_CURRENT_DESKTOP=KDE"));

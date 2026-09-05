@@ -7,6 +7,7 @@ pub mod core {
     pub mod coordinate_transform;
     pub mod ime_policy;
     pub mod runtime;
+    pub mod provisioning;
     pub mod startup;
     pub mod tablet_mode;
     pub mod wayland_protocol;

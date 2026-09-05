@@ -22,8 +22,8 @@
   <body>
     <main>
       <h1>Opening Portal</h1>
-      <p>Portal is setting up a native Wayland Plasma session. This can take a few minutes on the first launch.</p>
-      <progress id="progress" max="100" value="0"></progress>
+      <p>Portal is preparing Debian 13 and Plasma. Keep Portal open. Download and extraction time depends on your connection and storage.</p>
+      <progress id="progress"></progress>
       <div class="status" id="status" role="status">Connecting to the installer…</div>
       <div class="error" id="error" hidden></div>
       <div class="logs" id="logs" aria-label="Setup log"></div>
@@ -53,7 +53,8 @@
         }
       }
       function handle(data) {
-        if (typeof data.progress === "number") progress.value = data.progress;
+        // Stage count is not a measure of bytes downloaded or extracted.
+        if (data.progress === 100) { progress.max = 100; progress.value = 100; }
         if (data.message) { status.textContent = data.message; append(data.message); }
         if (data.isError) { error.hidden = false; error.textContent = data.message || "Setup failed."; retryButton.hidden = false; }
         if (data.exported) status.textContent = data.message || "Diagnostics exported.";

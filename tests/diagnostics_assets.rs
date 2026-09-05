@@ -66,7 +66,7 @@ fn plasma_launcher_waits_for_host_presented_marker() {
     assert!(PLASMA_LAUNCHER.contains("attempt=$attempt_id"));
     assert!(PLASMA_LAUNCHER.contains("WAYLAND_DEBUG=${WAYLAND_DEBUG:-1}"));
     assert!(PLASMA_LAUNCHER.contains("stage=backend compositor=kwin_wayland"));
-    assert!(PLASMA_LAUNCHER.contains("package in kwin plasma-workspace"));
+    assert!(PLASMA_LAUNCHER.contains("package in kwin-wayland plasma-workspace"));
     assert!(PLASMA_LAUNCHER.contains("signal_tree \"$session_pid\" KILL"));
     assert!(PLASMA_LAUNCHER
         .contains("LOCALDESKTOP_GDB_BACKTRACE=${LOCALDESKTOP_GDB_BACKTRACE:-@GDB_BACKTRACE@}"));
@@ -115,12 +115,12 @@ fn setup_installs_versioned_classic_startup_assets_and_profile() {
     assert!(SETUP.contains("setup_with_completion"));
     assert!(SETUP.contains("systemdBoot"));
     assert!(SETUP.contains("@GDB_BACKTRACE@"));
-    assert!(SETUP.contains("require_gdb"));
-    assert!(SETUP.contains("command -v gcc"));
+    assert!(SETUP.contains("CRASH_HANDLER_BINARY"));
+    assert!(!SETUP.contains("command -v gcc"));
     assert!(SETUP.contains("localdesktop-crash-handler.c"));
     assert!(SETUP.contains("localdesktop-crash-handler.so"));
-    assert!(SETUP.contains("localdesktop-crash-handler.so.tmp"));
-    assert!(SETUP.contains("command -v gdb"));
+    assert!(SETUP.contains("handler.with_extension(\"so.tmp\")"));
+    assert!(SETUP.contains("fs::rename(&temporary, &handler)"));
     assert!(SETUP.contains(".config/konsolerc"));
     assert!(SETUP.contains(".local/share/konsole"));
     assert!(KONSOLE_PROFILE.contains("Command=/bin/bash"));
