@@ -1,0 +1,12 @@
+{
+  "libc6-dev": {
+    "Filename": "pool/main/g/glibc/libc6-dev_2.41-12+deb13u3_arm64.deb",
+    "SHA256": "b2d2660900bd0bfe110b485532367774589d86d2e57b4ed74d8f06e3208a6959",
+    "Version": "2.41-12+deb13u3"
+  },
+  "linux-libc-dev": {
+    "Filename": "pool/main/l/linux/linux-libc-dev_6.12.94-1_all.deb",
+    "SHA256": "6183985d8fa4b97d277e8b55b10ad247bd98bc23aa8b531c1f79f05bfbf50997",
+    "Version": "6.12.94-1"
+  }
+}

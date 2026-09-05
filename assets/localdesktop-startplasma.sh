@@ -11,6 +11,7 @@ export XDG_RUNTIME_DIR=/tmp
 export WAYLAND_DISPLAY=wayland-0
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=KDE
+export XDG_MENU_PREFIX=plasma-
 export DESKTOP_SESSION=plasma
 export KDE_FULL_SESSION=true
 export KDE_SESSION_VERSION=6
@@ -54,9 +55,9 @@ printf 'stage=backend compositor=kwin_wayland session=plasma-wayland launcher=%s
 # Package versions make a crash archive actionable without dumping the full
 # guest package database. Keep this allowlist limited to the components that
 # own the startup path and record a clear unavailable value on partial images.
-for package in kwin plasma-workspace plasma-desktop qt6-wayland kwayland-integration; do
-    if command -v pacman >/dev/null 2>&1; then
-        version=$(pacman -Q "$package" 2>/dev/null || true)
+for package in kwin-wayland plasma-workspace plasma-desktop qt6-wayland; do
+    if command -v dpkg-query >/dev/null 2>&1; then
+        version=$(dpkg-query -W "$package" 2>/dev/null || true)
     else
         version="unavailable"
     fi

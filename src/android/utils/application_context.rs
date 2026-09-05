@@ -1,7 +1,7 @@
 use crate::core::runtime::LinuxRuntime;
 use crate::{
     android::utils::ndk::run_in_jvm,
-    core::config::{parse_config, LocalConfig, ARCH_FS_ROOT, CONFIG_FILE},
+    core::config::{parse_config, LocalConfig, PRODUCTION_FS_ROOT, CONFIG_FILE},
 };
 use jni::{
     objects::{JObject, JString},
@@ -55,7 +55,7 @@ impl ApplicationContext {
         let full_config_path = if config_candidate.exists() {
             config_candidate.to_string_lossy().to_string()
         } else {
-            format!("{}{}", ARCH_FS_ROOT, CONFIG_FILE)
+            format!("{}{}", PRODUCTION_FS_ROOT, CONFIG_FILE)
         };
         let local_config = parse_config(full_config_path);
         let permission_all_files_access = Self::is_all_files_access_granted(android_app);

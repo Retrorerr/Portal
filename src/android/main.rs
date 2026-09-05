@@ -20,6 +20,17 @@ use winit::{
 #[no_mangle]
 fn android_main(android_app: AndroidApp) {
     std::env::set_var("RUST_BACKTRACE", "full");
+    // The host libxkbcommon runs outside PRoot. Its historical compiled-in
+    // directory points at Arch, so bind its data search to the production
+    // runtime before any keyboard context (or background worker) is created.
+    std::env::set_var(
+        "XKB_CONFIG_ROOT",
+        format!("{}/usr/share/X11/xkb", config::PRODUCTION_FS_ROOT),
+    );
+    std::env::set_var(
+        "XLOCALEDIR",
+        format!("{}/usr/share/X11/locale", config::PRODUCTION_FS_ROOT),
+    );
 
     // Build the context before touching the persistent diagnostic paths.  The
     // context owns the app-private directory used by diagnostics, and this

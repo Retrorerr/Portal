@@ -1,0 +1,6 @@
+{
+  "version": "debian13-arm64-2026.09.05.2",
+  "url": "https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.09.05.2/portal-debian13-arm64-2026.09.05.2.tar.xz",
+  "sha256": "bc31f6511534a4535c0437cb6b7b180c2c1420e93ef0b8f33dcf32998539dc98",
+  "compressed_bytes": 823512456
+}

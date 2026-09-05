@@ -171,26 +171,11 @@ impl RuntimeLayout {
         }
     }
 
+    /// Debian is the production runtime even on fresh app data or old Arch installs.
     pub fn active_slot(&self) -> RuntimeSlot {
-        let state_file = self.platform_state.join("active-slot");
-        if let Ok(active_id) = std::fs::read_to_string(&state_file) {
-            let active_id = active_id.trim();
-            if active_id == "slot-b" {
-                let mut slot = self.slot_b();
-                slot.is_active = true;
-                return slot;
-            }
-            if active_id == "slot-a" {
-                return self.slot_a();
-            }
-        }
-        let slot_b_path = self.base_dir.join("runtime-B");
-        if slot_b_path.exists() {
-            let mut slot = self.slot_b();
-            slot.is_active = true;
-            return slot;
-        }
-        self.slot_a()
+        let mut slot = self.slot_b();
+        slot.is_active = true;
+        slot
     }
 
     pub fn set_active_slot(&self, slot_id: &str) -> std::io::Result<()> {
@@ -233,12 +218,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_layout_defaults_to_slot_a() {
+    fn runtime_layout_defaults_to_debian() {
         let temp_dir = std::env::temp_dir().join(format!("portal-test-{}", std::process::id()));
         let layout = RuntimeLayout::new(&temp_dir);
         let active = layout.active_slot();
-        assert_eq!(active.id, "slot-a");
-        assert_eq!(active.distro_name, "Arch Linux ARM64");
+        assert_eq!(active.id, "slot-b");
+        assert_eq!(active.distro_name, "Debian 13 (Trixie) ARM64");
 
         let binds = layout.standard_bind_mounts();
         assert_eq!(binds.len(), 1);
