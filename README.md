@@ -1,50 +1,56 @@
 <p align="center">
-  <img src="assets/portal-icon.png" width="144" alt="Portal icon" />
+  <img src="assets/portal-icon.svg" width="112" alt="Portal" />
 </p>
 
 <h1 align="center">Portal</h1>
 
 <p align="center">
-  <strong>A real Debian 13 + KDE Plasma 6 workspace, running rootlessly on Android.</strong>
+  Debian 13 and KDE Plasma 6 on Android, without root or a remote machine.
 </p>
 
 <p align="center">
-  <a href="https://github.com/Retrorerr/Portal/actions/workflows/build.yml"><img alt="Build" src="https://github.com/Retrorerr/Portal/actions/workflows/build.yml/badge.svg" /></a>
-  <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-6d7cff" /></a>
-  <img alt="Android ARM64" src="https://img.shields.io/badge/Android-ARM64-52e4ff" />
+  <a href="https://github.com/Retrorerr/Portal/actions/workflows/build.yml"><img alt="Android build" src="https://github.com/Retrorerr/Portal/actions/workflows/build.yml/badge.svg" /></a>
+  <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-6f78ff" /></a>
+  <img alt="ARM64" src="https://img.shields.io/badge/Android-ARM64-43d7f2" />
 </p>
 
-Portal turns a capable Android tablet into a self-contained Linux workstation. It boots a Debian userspace, launches KDE Plasma on native Wayland, and bridges the Android hardware, lifecycle, input, clipboard, audio, storage, and display into the desktop session—all without root access or a remote computer.
+Portal is an Android-native host for a local Debian desktop. A Rust/Smithay compositor presents a Wayland display to KDE Plasma inside PRoot, while Android remains responsible for the physical display, lifecycle, input devices, clipboard, audio, and shared storage.
 
-> [!IMPORTANT]
-> Portal is currently developed and hardware-verified on the **OnePlus Pad 3 (ARM64)**. Other devices are experimental. A large display and physical keyboard are strongly recommended.
+This is development software. The current hardware target is the **OnePlus Pad 3**; other ARM64 devices should be treated as unverified until they pass the same device checks.
 
-## What makes Portal different
+## Current scope
 
-- **Native Wayland:** Plasma renders through Portal's Rust compositor rather than an X server, VNC stream, or cloud VM.
-- **A complete Debian desktop:** Debian 13 (Trixie), KDE Plasma 6, desktop applications, package management, and shell access live on-device.
-- **Rootless:** the Android device does not need to be unlocked, rooted, or flashed.
-- **Tablet-aware:** high-density display scaling, physical keyboard forwarding, pointer input, Android clipboard integration, and AAudio are first-class paths.
-- **Recoverable:** A/B runtime slots, diagnostics export, and a native-Wayland recovery session make failures inspectable and reversible.
-- **One app:** setup, runtime management, compositor, and Android integration ship together.
+| Area | Current path |
+| --- | --- |
+| Linux guest | Debian GNU/Linux 13 (Trixie) |
+| Desktop | KDE Plasma 6 on native Wayland |
+| Host | Rust, Smithay, Android NativeActivity |
+| Runtime | Rootless PRoot with recoverable A/B slots |
+| Audio | PipeWire/Pulse compatibility over Android AAudio |
+| Input | Touch, pointer, physical keyboard, Android IME, clipboard |
+| Supported ABI | `arm64-v8a` |
 
-## Architecture
+Portal does not stream a desktop from another computer and does not place VNC or X11 between Plasma and the Android surface. Xwayland remains available only for Linux applications that still require X11.
+
+## How it fits together
 
 ```text
-┌──────────────────────────────── Android ────────────────────────────────┐
-│  Activity · lifecycle · touch · keyboard · clipboard · AAudio · files  │
-│                                │                                       │
-│                    Portal host (Rust / Smithay)                         │
-│                                │ native Wayland                        │
-│             Debian 13 rootfs → KDE Plasma 6 → Linux apps              │
-└────────────────────────────────────────────────────────────────────────┘
+Android activity and hardware
+        │
+        ├── lifecycle · display · input · clipboard · audio · files
+        │
+Portal host (Rust / Smithay)
+        │ native Wayland
+Debian 13 guest (PRoot)
+        │
+KDE Plasma 6 and Linux applications
 ```
 
-The Linux guest is isolated with PRoot and managed in two runtime slots. Portal's compositor is the display boundary; the guest remains a standard Debian environment above it.
+The setup pipeline is restartable. Runtime state is versioned in two slots, and an early Plasma failure enters an explicit native-Wayland recovery path rather than changing the normal session behind the user's back.
 
 ## Build
 
-The supported release target is Android ARM64. From a configured Linux, WSL, or Termux environment:
+The release build uses the vendored Android-aware `xbuild` toolchain:
 
 ```bash
 git clone https://github.com/Retrorerr/Portal.git
@@ -53,35 +59,51 @@ cargo install --path patches/xbuild/xbuild --force
 x build --release --platform android --arch arm64 --format apk
 ```
 
-The release APK is written to:
+The APK is written to `target/x/release/android/localdesktop.apk`.
 
-```text
-target/x/release/android/localdesktop.apk
-```
-
-The internal crate, APK filename, Android package (`app.polarbear`), and guest paths under `/etc/localdesktop` intentionally retain their historical identifiers. Keeping them stable preserves in-place Android upgrades and existing guest data while the product name is Portal.
-
-For toolchain details and on-device builds, see the [developer guide](https://retrorerr.github.io/Portal/docs/developer/how-to-build).
-
-## Verification
+An on-device Termux build is also supported:
 
 ```bash
-cargo test --tests
-cargo fmt --all -- --check
+bash scripts/build-termux.sh
 ```
 
-For a device build, also verify the APK signature, 16 KiB zip alignment, package identity, install, launch, and Android logs. A green host test suite is not a substitute for real ARM64 hardware validation.
+See [the user guide](docs/user-guide.md) for installation and recovery notes and [the validation guide](docs/arm64-validation.md) for the hardware acceptance process.
 
-## Project status
+## Development checks
 
-- Debian GNU/Linux 13 (Trixie)
-- KDE Plasma 6 native-Wayland session
-- Android 5.0+ API compatibility target; current validation focuses on modern ARM64 tablets
-- 107 Rust host tests in the current consolidated tree
-- Active development; releases may change runtime images and device compatibility
+Run the host suite before producing an APK:
 
-## Lineage and license
+```bash
+cargo fmt --all -- --check
+cargo test --tests
+```
 
-Portal began as a substantially modified continuation of [Local Desktop](https://github.com/localdesktop/localdesktop.github.io). Its commit history is retained for authorship and traceability. New Portal-specific development is maintained independently in this repository.
+Shell and Python assets should also receive their language-level syntax checks. A release candidate is not considered validated until its package identity, signature, 16 KiB alignment, install/upgrade behaviour, launch, logs, and real ARM64 Plasma session have been checked.
 
-Licensed under [GPL-3.0](LICENSE). Contributions and issue reports are welcome.
+Useful engineering references:
+
+- [Runtime and compositor architecture](docs/architecture.md)
+- [ARM64 validation matrix](docs/arm64-validation.md)
+- [Diagnostics integration](docs/diagnostics-integration.md)
+- [Startup investigation notes](docs/startup-investigation.md)
+
+## Stable compatibility identifiers
+
+The product name is Portal, but several internal identifiers deliberately retain their original values:
+
+- Android package: `app.polarbear`
+- Rust crate and native library: `localdesktop`
+- guest configuration root: `/etc/localdesktop`
+- build artifact basename: `localdesktop.apk`
+
+Changing them would break Android upgrades or existing guest installations. They are compatibility boundaries, not unfinished branding.
+
+## Contributing and security
+
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). Please use the issue templates and include evidence appropriate to the layer being diagnosed; emulator package tests do not establish that an ARM64 Debian/Plasma session works on physical hardware.
+
+For sensitive reports, follow [SECURITY.md](SECURITY.md) rather than opening a public issue.
+
+## Lineage
+
+Portal is an independent continuation of [Local Desktop](https://github.com/localdesktop/localdesktop.github.io). The original commit history and GPL-3.0 licensing are retained for attribution and traceability.

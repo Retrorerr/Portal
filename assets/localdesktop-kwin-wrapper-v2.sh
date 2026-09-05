@@ -98,7 +98,7 @@ run_real_kwin() {
     # session. This captures loader, protocol and signal-handler diagnostics
     # even when the guest process exits before a host frame exists.
     # Always disable KWin's internal guest screen locker; device locking belongs to Android.
-    /usr/bin/kwin_wayland --no-lockscreen "$@" 2>&1 | tee -a "$log_file"
+    /usr/bin/kwin_wayland --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" 2>&1 | tee -a "$log_file"
     return "${PIPESTATUS[0]}"
 }
 
@@ -114,14 +114,14 @@ if [ "${LOCALDESKTOP_GDB_BACKTRACE:-0}" = "1" ] && command -v gdb >/dev/null 2>&
             -ex 'set pagination off' \
             -ex run \
             -ex 'thread apply all bt full' \
-            --args /usr/bin/kwin_wayland --no-lockscreen "$@" \
+            --args /usr/bin/kwin_wayland --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" \
             > "$debugger_output" 2>&1
     else
         gdb --batch --quiet \
             -ex 'set pagination off' \
             -ex run \
             -ex 'thread apply all bt full' \
-            --args /usr/bin/kwin_wayland --no-lockscreen "$@" \
+            --args /usr/bin/kwin_wayland --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" \
             > "$debugger_output" 2>&1
     fi
     gdb_status=$?

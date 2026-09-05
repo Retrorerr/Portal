@@ -8,7 +8,7 @@
 
 use crate::{
     android::utils::{application_context::get_application_context, ndk::run_in_jvm},
-    core::config::{ARCH_FS_ROOT, VERSION},
+    core::config::{PRODUCTION_FS_ROOT, VERSION},
 };
 use jni::{
     objects::{JObject, JValue},
@@ -99,7 +99,7 @@ pub fn initialize() {
             "os={} arch={} rootfs={} wayland_socket=/tmp/wayland-0",
             std::env::consts::OS,
             std::env::consts::ARCH,
-            ARCH_FS_ROOT
+            PRODUCTION_FS_ROOT
         ),
     );
 }
@@ -433,7 +433,7 @@ fn add_tree(
 }
 
 /// Build one bounded, shareable diagnostics archive.  Only app diagnostics
-/// and the guest's Local Desktop state directory are included; unrelated user
+/// and the guest's Portal state directory are included; unrelated user
 /// files in the guest are never traversed.
 pub fn export_archive() -> Result<PathBuf, String> {
     let paths = paths().ok_or_else(|| "Diagnostics are not initialized yet".to_string())?;
@@ -478,7 +478,7 @@ pub fn export_archive() -> Result<PathBuf, String> {
     )
     .map_err(|error| error.to_string())?;
 
-    let guest_state = Path::new(ARCH_FS_ROOT).join("var/lib/localdesktop");
+    let guest_state = Path::new(PRODUCTION_FS_ROOT).join("var/lib/localdesktop");
     let guest_state_status = if guest_state.is_dir() {
         "present"
     } else {
@@ -497,7 +497,7 @@ pub fn export_archive() -> Result<PathBuf, String> {
         "Portal diagnostics\nversion={VERSION}\ntimestamp_ms={}\narch={}\nrootfs={}\nguest_state={guest_state_status}\nbytes={}\n",
         now_ms(),
         std::env::consts::ARCH,
-        ARCH_FS_ROOT,
+        PRODUCTION_FS_ROOT,
         total
     );
     writer

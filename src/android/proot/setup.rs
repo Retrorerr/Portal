@@ -9,22 +9,20 @@ use crate::{
         diagnostics,
         utils::application_context::get_application_context,
         utils::ndk::{
-            density_dpi, long_press_timeout_ms, refresh_rate_millihz, scale_factor, touch_slop_px,
+            long_press_timeout_ms, refresh_rate_millihz, scale_factor, touch_slop_px,
         },
     },
     core::{
         config::{
-            CommandConfig, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL,
-            PIPEWIRE_GUEST_RUNTIME_DIR, PULSE_GUEST_SERVER,
+            PRODUCTION_FS_ROOT, DOCS_HOME_URL,
         },
-        runtime::LinuxRuntime,
     },
 };
 use pathdiff::diff_paths;
 use smithay::utils::Clock;
 use std::{
-    fs::{self, File},
-    io::{ErrorKind, Read, Write},
+    fs,
+    io::ErrorKind,
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
     process,
@@ -33,11 +31,11 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tar::Archive;
+
 use winit::platform::android::activity::AndroidApp;
-use xz2::read::XzDecoder;
+
 
 #[derive(Debug)]
 pub enum SetupMessage {
@@ -62,8 +60,10 @@ const RECOVERY_LAUNCHER: &str = include_str!("../../../assets/localdesktop-recov
 const RETRY_PLASMA: &str = include_str!("../../../assets/localdesktop-retry-plasma.sh");
 const KONSOLE_CONFIG: &str = include_str!("../../../assets/konsole/konsolerc");
 const KONSOLE_PROFILE: &str = include_str!("../../../assets/konsole/LocalDesktop.profile");
+const CRASH_HANDLER_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/localdesktop-crash-handler.so");
 const CRASH_HANDLER_SOURCE: &str = include_str!("../../../assets/localdesktop-crash-handler.c");
-const PATCHED_LIBKWIN: &[u8] = include_bytes!("../../../assets/kwin-arm64/libkwin.so.6.7.4");
+const PORTAL_IME_BRIDGE: &str = include_str!("../../../assets/portal-ime-bridge.py");
+const PORTAL_IME_DESKTOP: &str = include_str!("../../../assets/portal-ime.desktop");
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -80,170 +80,21 @@ type NamedSetupStage = (&'static str, SetupStage);
 /// - Simple/light tasks or important settings that must be run every launch (e.g. the Firefox config) can be done inline on the `None` path.
 type StageOutput = Option<JoinHandle<()>>;
 
-const PIPEWIRE_GUEST_LOCK_PACKAGES: &[&str] = &[
-    "libpipewire",
-    "pipewire",
-    "pipewire-alsa",
-    "pipewire-audio",
-    "pipewire-jack",
-    "pipewire-pulse",
-    "pipewire-v4l2",
-    "pipewire-zeroconf",
-    "gst-plugin-pipewire",
-    "wireplumber",
-];
-
-const ARCH_FS_MAX_ATTEMPTS: usize = 3;
-const ARCH_FS_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const ARCH_FS_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-
-fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
-    let context = get_application_context();
-    let temp_file = context.data_dir.join("archlinux-fs.tar.xz");
-    let fs_root = Path::new(ARCH_FS_ROOT);
-    let extracted_dir = context.data_dir.join("archlinux-aarch64");
-    let mpsc_sender = options.mpsc_sender.clone();
-
-    // Only run if the fs_root is missing or empty
-    // TODO: Setup integration test to make sure on clean install, the fs_root is either non existent or empty
-    let need_setup = fs_root.read_dir().map_or(true, |mut d| d.next().is_none());
-    if need_setup {
-        return Some(thread::spawn(move || {
-            // Bound both network and extraction retries. An Android network
-            // failure must become an actionable setup error rather than an
-            // unbounded worker that leaves the WebView waiting forever.
-            let client = reqwest::blocking::Client::builder()
-                .connect_timeout(ARCH_FS_CONNECT_TIMEOUT)
-                .timeout(ARCH_FS_REQUEST_TIMEOUT)
-                .build()
-                .expect("Failed to build Arch Linux FS HTTP client");
-            let mut attempt = 0;
-            loop {
-                attempt += 1;
-                if !temp_file.exists() {
-                    mpsc_sender
-                        .send(SetupMessage::Progress(
-                            format!(
-                                "Downloading Arch Linux FS (attempt {attempt}/{ARCH_FS_MAX_ATTEMPTS})..."
-                            ),
-                        ))
-                        .expect("Failed to send log message");
-
-                    let response = match client
-                        .get(ARCH_FS_ARCHIVE)
-                        .send()
-                        .and_then(|response| response.error_for_status())
-                    {
-                        Ok(response) => response,
-                        Err(error) => {
-                            let _ = fs::remove_file(&temp_file);
-                            if attempt >= ARCH_FS_MAX_ATTEMPTS {
-                                panic!(
-                                    "Failed to download Arch Linux FS after {attempt} attempts: {error}"
-                                );
-                            }
-                            let _ = mpsc_sender.send(SetupMessage::Error(format!(
-                                "Arch Linux FS download failed ({error}); retrying attempt {}/{ARCH_FS_MAX_ATTEMPTS}.",
-                                attempt + 1
-                            )));
-                            continue;
-                        }
-                    };
-
-                    let total_size = response.content_length().unwrap_or(0);
-                    let mut file = File::create(&temp_file)
-                        .expect("Failed to create temp file for Arch Linux FS");
-
-                    let mut downloaded = 0u64;
-                    let mut buffer = [0u8; 8192];
-                    let mut reader = response;
-                    let mut last_percent = 0;
-
-                    loop {
-                        let n = reader
-                            .read(&mut buffer)
-                            .expect("Failed to read from response");
-                        if n == 0 {
-                            break;
-                        }
-                        file.write_all(&buffer[..n])
-                            .expect("Failed to write to file");
-                        downloaded += n as u64;
-                        if total_size > 0 {
-                            let percent = (downloaded * 100 / total_size).min(100) as u8;
-                            if percent != last_percent {
-                                let downloaded_mb = downloaded as f64 / 1024.0 / 1024.0;
-                                let total_mb = total_size as f64 / 1024.0 / 1024.0;
-                                mpsc_sender
-                                    .send(SetupMessage::Progress(format!(
-                                        "Downloading Arch Linux FS... {}% ({:.2} MB / {:.2} MB)",
-                                        percent, downloaded_mb, total_mb
-                                    )))
-                                    .unwrap_or(());
-                                last_percent = percent;
-                            }
-                        }
-                    }
-                }
-
-                mpsc_sender
-                    .send(SetupMessage::Progress(
-                        "Extracting Arch Linux FS...".to_string(),
-                    ))
-                    .expect("Failed to send log message");
-
-                // Ensure the extracted directory is clean
-                let _ = fs::remove_dir_all(&extracted_dir);
-
-                // Extract tar file directly to the final destination
-                let tar_file =
-                    File::open(&temp_file).expect("Failed to open downloaded Arch Linux FS file");
-                let tar = XzDecoder::new(tar_file);
-                let mut archive = Archive::new(tar);
-
-                // Try to extract, if it fails, remove temp file and restart download
-                if let Err(e) = archive.unpack(context.data_dir.clone()) {
-                    // Clean up the failed extraction
-                    let _ = fs::remove_dir_all(&extracted_dir);
-                    let _ = fs::remove_file(&temp_file);
-
-                    if attempt >= ARCH_FS_MAX_ATTEMPTS {
-                        panic!("Failed to extract Arch Linux FS after {attempt} attempts: {e}");
-                    }
-
-                    let _ = mpsc_sender.send(SetupMessage::Error(format!(
-                        "Failed to extract Arch Linux FS: {e}. Restarting download (attempt {}/{ARCH_FS_MAX_ATTEMPTS})...",
-                        attempt + 1
-                    )));
-
-                    // Continue the outer loop to retry the download.
-                    continue;
-                }
-
-                // If we get here, extraction was successful
-                break;
-            }
-
-            // Move the extracted files to the final destination
-            if fs_root
-                .read_dir()
-                .is_ok_and(|mut entries| entries.next().is_none())
-            {
-                fs::remove_dir(fs_root)
-                    .expect("Failed to remove stale empty Arch Linux root directory");
-            }
-            fs::rename(&extracted_dir, fs_root)
-                .expect("Failed to rename extracted files to final destination");
-
-            // Clean up the temporary file
-            fs::remove_file(&temp_file).expect("Failed to remove temporary file");
-        }));
-    }
-    None
+fn setup_debian_runtime(options: &SetupOptions) -> StageOutput {
+    let artifact = crate::core::provisioning::RuntimeArtifact::production();
+    if artifact.is_ready(Path::new(PRODUCTION_FS_ROOT)) { return None; }
+    let sender = options.mpsc_sender.clone();
+    let base = get_application_context().data_dir.clone();
+    Some(thread::spawn(move || {
+        artifact.provision(&base, |message| {
+            diagnostics::host_event("runtime-provisioning", &message);
+            let _ = sender.send(SetupMessage::Progress(message));
+        }).unwrap_or_else(|error| panic!("Debian provisioning failed: {error:#}"));
+    }))
 }
 
 fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(ARCH_FS_ROOT);
+    let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let mpsc_sender = options.mpsc_sender.clone();
 
     if !fs_root.join("proc/.version").exists() {
@@ -293,7 +144,7 @@ fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
 }
 
 fn setup_machine_id(_: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(ARCH_FS_ROOT);
+    let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let machine_id = fs_root.join("etc/machine-id");
 
     let existing = fs::read_to_string(&machine_id).unwrap_or_default();
@@ -344,189 +195,6 @@ fn generate_machine_id() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!("{:016x}{:016x}", nanos as u64, process::id() as u64)
-}
-
-fn install_dependencies(options: &SetupOptions) -> StageOutput {
-    let SetupOptions {
-        mpsc_sender,
-        android_app: _,
-    } = options;
-
-    let context = get_application_context();
-    let CommandConfig {
-        check,
-        install: configured_install,
-        launch: _,
-    } = context.local_config.command;
-    // Diagnostic/debug APKs should be able to collect an actual KWin stack
-    // without requiring a manual package-management step on the device. Keep
-    // release provisioning light: its wrapper default remains gdb=0 and only
-    // the opt-in diagnostic build requests the debugger package.
-    let require_gdb = cfg!(debug_assertions)
-        || std::env::var("LOCALDESKTOP_GDB_BACKTRACE").ok().as_deref() == Some("1");
-    let mut install = configured_install;
-    if require_gdb {
-        for package in ["gdb", "gcc"] {
-            if !install.split_whitespace().any(|token| token == package) {
-                install.push(' ');
-                install.push_str(package);
-            }
-        }
-    }
-
-    let installed = move || {
-        let runtime = crate::android::runtime::proot::PRootRuntime::active();
-        if runtime.rootfs_path().join("usr/bin/kwin_wayland").exists()
-            && runtime.rootfs_path().join("usr/bin/plasmashell").exists()
-        {
-            return true;
-        }
-
-        let dependencies_present = ArchProcess {
-            command: check.clone(),
-            user: None,
-            log: None,
-        }
-        .run()
-        .status
-        .success();
-        dependencies_present
-            && (!require_gdb
-                || ArchProcess {
-                    command: "command -v gdb >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1"
-                        .to_string(),
-                    user: None,
-                    log: None,
-                }
-                .run()
-                .status
-                .success())
-    };
-
-    if installed() {
-        return None;
-    }
-
-    clear_pipewire_package_lock_for_install();
-
-    let mpsc_sender = mpsc_sender.clone();
-    return Some(thread::spawn(move || {
-        const MAX_INSTALL_ATTEMPTS: usize = 10;
-
-        // Install dependencies until `check` succeeds.
-        for attempt in 1..=MAX_INSTALL_ATTEMPTS {
-            let output = ArchProcess {
-                command: "rm -f /var/lib/pacman/db.lck".into(),
-                user: None,
-                log: None,
-            }
-            .run();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let sender = mpsc_sender.clone();
-            ArchProcess {
-                command: install.clone(),
-                user: None,
-                log: Some(Arc::new(move |it| {
-                    sender
-                        .send(SetupMessage::Progress(it))
-                        .expect("Failed to send log message");
-                })),
-            }
-            .run();
-
-            if installed() {
-                download_user_manual();
-                return;
-            }
-            mpsc_sender
-                .send(SetupMessage::Progress(format!(
-                    "Retrying installation... (attempt {}/{})",
-                    attempt, MAX_INSTALL_ATTEMPTS
-                )))
-                .expect("Failed to send dependency install progress");
-
-            if attempt == MAX_INSTALL_ATTEMPTS {
-                let error_message = format!(
-                    "Failed to install desktop dependencies after {} attempts. Please check your net connection and try restarting the app.",
-                    MAX_INSTALL_ATTEMPTS
-                );
-                mpsc_sender
-                    .send(SetupMessage::Error(error_message.clone()))
-                    .unwrap_or(());
-                panic!("{}", error_message);
-            }
-        }
-    }));
-}
-
-/// Drop the offline User Manual for this app version onto the guest desktop.
-///
-/// The filename carries no version so an update overwrites the previous copy instead of landing
-/// beside it. Called once a fresh install or update has just succeeded — the only moment the
-/// manual on disk can be out of date — and best-effort: a failed download is not worth a retry.
-fn download_user_manual() {
-    let username = get_application_context().local_config.user.username;
-    let desktop_dir = chroot_home_dir(Path::new(ARCH_FS_ROOT), &username).join("Desktop");
-    if fs::create_dir_all(&desktop_dir).is_err() {
-        return;
-    }
-
-    let url = crate::core::config::user_manual_url();
-    let response = reqwest::blocking::get(&url).and_then(|it| it.error_for_status());
-    if let Ok(bytes) = response.and_then(|it| it.bytes()) {
-        let _ = fs::write(desktop_dir.join("Portal - User Manual.pdf"), &bytes);
-    }
-}
-
-fn clear_pipewire_package_lock_for_install() {
-    let pacman_conf = Path::new(ARCH_FS_ROOT).join("etc/pacman.conf");
-    let content = match fs::read_to_string(&pacman_conf) {
-        Ok(content) => content,
-        Err(error) => {
-            log::warn!(
-                "Skipping PipeWire pacman unlock before install; failed to read {}: {error}",
-                pacman_conf.display()
-            );
-            return;
-        }
-    };
-
-    let updated = remove_pacman_ignore_pkg(&content, PIPEWIRE_GUEST_LOCK_PACKAGES);
-    if updated != content {
-        fs::write(&pacman_conf, updated)
-            .expect("Failed to clear PipeWire pacman lock before install");
-        log::info!("Temporarily cleared guest PipeWire package lock before dependency install");
-    }
-}
-
-fn setup_pipewire_package_lock(_: &SetupOptions) -> StageOutput {
-    let pacman_conf = Path::new(ARCH_FS_ROOT).join("etc/pacman.conf");
-    let content = match fs::read_to_string(&pacman_conf) {
-        Ok(content) => content,
-        Err(error) => {
-            log::warn!(
-                "Skipping PipeWire pacman lock; failed to read {}: {error}",
-                pacman_conf.display()
-            );
-            return None;
-        }
-    };
-
-    let updated = ensure_pacman_ignore_pkg(&content, PIPEWIRE_GUEST_LOCK_PACKAGES);
-    if updated != content {
-        fs::write(&pacman_conf, updated).expect("Failed to write PipeWire pacman lock");
-        log::info!(
-            "Locked guest PipeWire packages in {}: {}",
-            pacman_conf.display(),
-            PIPEWIRE_GUEST_LOCK_PACKAGES.join(" ")
-        );
-    }
-
-    None
 }
 
 pub fn sync_firefox_config(fs_root: &Path) {
@@ -667,132 +335,8 @@ fn upsert_kv_file(path: &Path, delimiter: char, updates: &[(&str, String)]) {
     fs::write(path, content).expect("Failed to write key/value file");
 }
 
-fn ensure_pacman_ignore_pkg(content: &str, packages: &[&str]) -> String {
-    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
-    let value = packages.join(" ");
-
-    let Some(options_start) = lines.iter().position(|line| line.trim() == "[options]") else {
-        if !lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines.push("[options]".to_string());
-        lines.push(format!("IgnorePkg   = {value}"));
-        let mut out = lines.join("\n");
-        out.push('\n');
-        return out;
-    };
-
-    let options_end = lines
-        .iter()
-        .enumerate()
-        .skip(options_start + 1)
-        .find(|(_, line)| {
-            let trimmed = line.trim();
-            trimmed.starts_with('[') && trimmed.ends_with(']')
-        })
-        .map(|(index, _)| index)
-        .unwrap_or(lines.len());
-
-    let mut insert_after_comment = None;
-    for index in options_start + 1..options_end {
-        let trimmed = lines[index].trim_start();
-        let active = !trimmed.starts_with('#');
-        let candidate = if active {
-            trimmed
-        } else {
-            trimmed.trim_start_matches('#').trim_start()
-        };
-
-        let Some((key, existing)) = candidate.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "IgnorePkg" {
-            continue;
-        }
-
-        if active {
-            let merged = merge_pacman_list(existing, packages);
-            lines[index] = format!("IgnorePkg   = {merged}");
-            let mut out = lines.join("\n");
-            out.push('\n');
-            return out;
-        }
-
-        insert_after_comment = Some(index + 1);
-    }
-
-    lines.insert(
-        insert_after_comment.unwrap_or(options_start + 1),
-        format!("IgnorePkg   = {value}"),
-    );
-
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
-}
-
-fn merge_pacman_list(existing: &str, packages: &[&str]) -> String {
-    let mut values: Vec<String> = existing.split_whitespace().map(str::to_string).collect();
-    for package in packages {
-        if !values.iter().any(|value| value == package) {
-            values.push((*package).to_string());
-        }
-    }
-    values.join(" ")
-}
-
-fn remove_pacman_ignore_pkg(content: &str, packages: &[&str]) -> String {
-    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
-
-    let Some(options_start) = lines.iter().position(|line| line.trim() == "[options]") else {
-        let mut out = lines.join("\n");
-        out.push('\n');
-        return out;
-    };
-
-    let options_end = lines
-        .iter()
-        .enumerate()
-        .skip(options_start + 1)
-        .find(|(_, line)| {
-            let trimmed = line.trim();
-            trimmed.starts_with('[') && trimmed.ends_with(']')
-        })
-        .map(|(index, _)| index)
-        .unwrap_or(lines.len());
-
-    for line in lines.iter_mut().take(options_end).skip(options_start + 1) {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-
-        let Some((key, existing)) = trimmed.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "IgnorePkg" {
-            continue;
-        }
-
-        let remaining = existing
-            .split_whitespace()
-            .filter(|value| !packages.iter().any(|package| package == value))
-            .collect::<Vec<_>>()
-            .join(" ");
-        *line = if remaining.is_empty() {
-            "IgnorePkg   =".to_string()
-        } else {
-            format!("IgnorePkg   = {remaining}")
-        };
-    }
-
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
-}
-
 fn setup_fake_bwrap(_: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(ARCH_FS_ROOT);
+    let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let wrapper_path = fs_root.join("usr/local/bin/bwrap");
 
     // bwrap (Bubblewrap) requires Linux user namespaces (CLONE_NEWUSER) which are
@@ -839,7 +383,7 @@ exec "$@"
 }
 
 fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(ARCH_FS_ROOT);
+    let fs_root = Path::new(PRODUCTION_FS_ROOT);
 
     // Chromium's sandbox needs CLONE_NEWUSER, which Android SELinux blocks, so every
     // Chromium/Electron app has to be started with --no-sandbox. Electron apps pick that up
@@ -898,7 +442,7 @@ exec /usr/bin/chromium --no-sandbox "$@"
 }
 
 fn setup_onboard_signal_fix(_: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(ARCH_FS_ROOT);
+    let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let wrapper_path = fs_root.join("usr/local/bin/onboard");
 
     // proot intercepts fstat() on socket fds and follows /proc/self/fd/N which points
@@ -1110,6 +654,16 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     let home_dir = chroot_home_dir(fs_root, &username);
     let xft_dpi = ui_scale * 96;
 
+    // Normally created by systemd-tmpfiles, which does not run in PRoot.
+    // KWin refuses to start Xwayland without this socket directory, and
+    // Debian's ksmserver still needs that X connection in a Wayland session.
+    for relative in ["tmp/.X11-unix", "tmp/.ICE-unix", "var/tmp"] {
+        let directory = fs_root.join(relative);
+        fs::create_dir_all(&directory).expect("Failed to create guest session directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o1777))
+            .expect("Failed to set guest session directory permissions");
+    }
+
     sync_android_timezone(fs_root);
     sync_firefox_config(fs_root);
     sync_konsole_profile(fs_root, &home_dir);
@@ -1258,6 +812,15 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/plasma_waitforname"),
         "#!/bin/sh\nif [ \"$1\" = \"org.kde.KSplash\" ]; then\n    exit 0\nfi\nexec /usr/bin/plasma_waitforname \"$@\"\n",
     );
+    write_executable(
+        &fs_root.join("usr/local/bin/portal-ime-bridge"),
+        PORTAL_IME_BRIDGE,
+    );
+    let ime_desktop_path = fs_root.join("usr/share/applications/portal-ime.desktop");
+    if let Some(parent) = ime_desktop_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
 
     sync_guest_network_config(fs_root);
 }
@@ -1420,7 +983,7 @@ pub fn sync_guest_ssl_certificates(fs_root: &Path) {
 }
 
 fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(ARCH_FS_ROOT);
+    let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let username = get_application_context().local_config.user.username;
     let home_dir = chroot_home_dir(fs_root, &username);
     // The host Wayland compositor already establishes a logical viewport scaled by
@@ -1428,29 +991,9 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     let ui_scale = 1;
     sync_session_runtime_files(fs_root, ui_scale);
 
-    // Deploy the patched KWin shared object that tolerates missing netlink udev monitors.
-    let local_lib = fs_root.join("usr/local/lib");
-    let _ = fs::create_dir_all(&local_lib);
-    let staged_kwin = local_lib.join("libkwin.so.6.7.4");
-    if let Ok(()) = fs::write(&staged_kwin, PATCHED_LIBKWIN) {
-        let _ = fs::set_permissions(&staged_kwin, fs::Permissions::from_mode(0o755));
-        let _ = fs::remove_file(local_lib.join("libkwin.so.6"));
-        let _ = fs::remove_file(local_lib.join("libkwin.so"));
-        let _ = symlink("libkwin.so.6.7.4", local_lib.join("libkwin.so.6"));
-        let _ = symlink("libkwin.so.6", local_lib.join("libkwin.so"));
-        log::info!("Staged patched libkwin.so.6.7.4 into /usr/local/lib");
-    }
-    let usr_lib = fs_root.join("usr/lib");
-    let usr_kwin = usr_lib.join("libkwin.so.6.7.4");
-    if usr_kwin.exists() {
-        if !usr_lib.join("libkwin.so.6.7.4.orig").exists() {
-            let _ = fs::copy(&usr_kwin, usr_lib.join("libkwin.so.6.7.4.orig"));
-        }
-        let _ = fs::write(&usr_kwin, PATCHED_LIBKWIN);
-        let _ = fs::set_permissions(&usr_kwin, fs::Permissions::from_mode(0o755));
-    }
-
-    // Debug/diagnostic builds provision a tiny in-process signal handler.  A
+    // Debian supplies its matching KWin library; the former Arch 6.7 library
+    // is ABI-incompatible with the Debian 6.3 executable and is not installed.
+    // All builds need the socket fstat fix in this existing library. A
     // nested gdb frequently dies before it can attach under Android's PRoot;
     // this preload still records the fault PC/LR/SP, loader maps and a best-
     // effort glibc backtrace from inside KWin.  Keep the source in the guest
@@ -1467,44 +1010,13 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     fs::set_permissions(&crash_handler_source, fs::Permissions::from_mode(0o644))
         .expect("Failed to set crash handler source permissions");
 
-    let compile_result = std::panic::catch_unwind(|| {
-        ArchProcess {
-            command: "if command -v gcc >/dev/null 2>&1; then rm -f /usr/local/lib/localdesktop-crash-handler.so.tmp && gcc -shared -fPIC -fno-omit-frame-pointer -O2 -Wall -Wextra -o /usr/local/lib/localdesktop-crash-handler.so.tmp /usr/local/lib/localdesktop-crash-handler.c -ldl && chmod 0755 /usr/local/lib/localdesktop-crash-handler.so.tmp && mv -f /usr/local/lib/localdesktop-crash-handler.so.tmp /usr/local/lib/localdesktop-crash-handler.so; else exit 127; fi".to_string(),
-            user: None,
-            log: None,
-        }
-        .run()
-    });
-    match compile_result {
-        Ok(output) if output.status.success() => {
-            diagnostics::guest_event(
-                "crash-handler",
-                "compiled path=/usr/local/lib/localdesktop-crash-handler.so",
-            );
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            diagnostics::guest_event(
-                "crash-handler",
-                &format!(
-                    "unavailable status={:?} stderr={}",
-                    output.status.code(),
-                    stderr.trim()
-                ),
-            );
-            log::warn!(
-                "Guest crash handler was not compiled (status {:?}); continuing without preload",
-                output.status.code()
-            );
-        }
-        Err(_) => {
-            diagnostics::guest_event(
-                "crash-handler",
-                "unavailable reason=guest compiler invocation panicked",
-            );
-            log::warn!("Guest crash handler invocation failed; continuing without preload");
-        }
-    }
+    let handler = fs_root.join("usr/local/lib/localdesktop-crash-handler.so");
+    let temporary = handler.with_extension("so.tmp");
+    fs::write(&temporary, CRASH_HANDLER_BINARY).expect("Failed to stage required guest support library");
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
+        .expect("Failed to set guest support library permissions");
+    fs::rename(&temporary, &handler).expect("Failed to install required guest support library");
+    diagnostics::guest_event("guest-support", "installed bundled ARM64 glibc socket-stat shim");
 
     // Recovery creates its labwc autostart at runtime, after writing the
     // actionable kdialog message. Do not pre-seed an autostart that launches
@@ -1577,7 +1089,7 @@ X-KDE-autostart-after=panel
     None
 }
 fn fix_xkb_symlink(options: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(ARCH_FS_ROOT);
+    let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let xkb_path = fs_root.join("usr/share/X11/xkb");
     let mpsc_sender = options.mpsc_sender.clone();
 
@@ -1800,11 +1312,9 @@ pub fn setup_with_completion(
     };
 
     let stages: Vec<NamedSetupStage> = vec![
-        ("arch-fs", Box::new(setup_arch_fs)),
+        ("debian-runtime", Box::new(setup_debian_runtime)),
         ("linux-sysdata", Box::new(simulate_linux_sysdata_stage)),
-        ("dependencies", Box::new(install_dependencies)),
         ("machine-id", Box::new(setup_machine_id)),
-        ("pipewire-lock", Box::new(setup_pipewire_package_lock)),
         ("firefox-config", Box::new(setup_firefox_config)),
         ("bwrap-shim", Box::new(setup_fake_bwrap)),
         ("chromium-no-sandbox", Box::new(setup_chromium_no_sandbox)),

@@ -1,4 +1,4 @@
-//! build_docs — render Local Desktop's offline PDF manuals, fully in Rust.
+//! build_docs — render Portal's offline PDF manuals, fully in Rust.
 //!
 //! No pandoc, no LaTeX, no Python: markdown is converted to Typst markup and
 //! rendered to PDF via the embedded Typst compiler (`typst-as-lib`). Images
@@ -9,10 +9,9 @@
 //!   cargo run --bin build_docs -- [developer|user] [curated|callgraph]
 //!                                 [light|dark] [compact] | all
 //!
-//!   developer (default)  README + full gh-pages docs/blog + an architecture
+//!   developer (default)  README + repository docs + an architecture
 //!                        walkthrough of the code (book-like serif).
-//!   user                 the gh-pages user guide + blog, website-styled
-//!                        (sans, teal accents), light or dark.
+//!   user                 the concise repository user guide, light or dark.
 //! Knobs: callgraph (developer only), compact (either), dark (user only).
 //! Outputs land in manuals/ (gitignored).
 
@@ -329,7 +328,7 @@ impl<'a> MdToTypst<'a> {
 }
 
 // ----------------------------------------------------------------------------
-// Image cache (resolve gh-pages /img paths, convert webp → png, size-cap)
+// Image cache (resolve repository asset paths, convert webp → png, size-cap)
 // ----------------------------------------------------------------------------
 
 struct ImageCache {
@@ -342,7 +341,7 @@ impl ImageCache {
     fn new() -> Self {
         let root = repo_root();
         ImageCache {
-            static_root: root.join("gh-pages/static"),
+            static_root: root.join("assets"),
             out_dir: root.join("build/docs/img"),
             done: HashMap::new(),
         }
@@ -554,7 +553,7 @@ fn fonts(family: &str, subdir: &str) -> Result<Vec<Vec<u8>>> {
 
 /// Recolour the monochrome brand logo to `hex` on transparent, return repo-relative path.
 fn cover_logo(hex: &str) -> Result<String> {
-    let src = repo_root().join("gh-pages/static/img/logo.png");
+    let src = repo_root().join("assets/portal-icon.png");
     let dir = repo_root().join("build/docs");
     fs::create_dir_all(&dir)?;
     let dst = dir.join(format!("cover-logo-{hex}.png"));
@@ -1379,58 +1378,30 @@ fn assemble(opts: &Opts) -> Result<String> {
     doc.push_str(&cover_and_toc(opts, &version)?);
 
     if opts.manual == Manual::User {
-        // gh-pages user guide, then blog (nested under a "Blog" heading).
-        let mut first = true;
-        let mut user_docs = glob_sorted("gh-pages/docs/user", "md");
-        user_docs.extend(glob_sorted("gh-pages/docs/user/app-compatibility", "md"));
-        for p in &user_docs {
-            if !first {
-                doc.push_str("#pagebreak(weak: true)\n");
-            }
-            first = false;
-            let md = clean_markdown(p)?;
-            doc.push_str(
-                &MdToTypst::new(p.parent().unwrap().to_path_buf(), 0, &mut images).convert(&md),
-            );
-        }
-        doc.push_str("#pagebreak()\n= Blog\n\n");
-        let mut blog = glob_sorted("gh-pages/blog", "md");
-        blog.reverse(); // newest first
-        for p in &blog {
-            doc.push_str("#pagebreak(weak: true)\n");
-            let md = clean_markdown(p)?;
-            doc.push_str(
-                &MdToTypst::new(p.parent().unwrap().to_path_buf(), 1, &mut images).convert(&md),
-            );
-        }
+        let guide = repo_root().join("docs/user-guide.md");
+        let md = clean_markdown(&guide)?;
+        doc.push_str(
+            &MdToTypst::new(guide.parent().unwrap().to_path_buf(), 0, &mut images).convert(&md),
+        );
     } else {
-        // Developer manual: README, gh-pages docs + blog, then architecture.
+        // Developer manual: README, maintained repository docs, then architecture.
         doc.push_str(&part("Portal"));
         let readme = repo_root().join("README.md");
         let md = clean_markdown(&readme)?;
         doc.push_str(&MdToTypst::new(repo_root(), 1, &mut images).convert(&md));
 
         doc.push_str(&part("Documentation"));
-        let mut docs = glob_sorted("gh-pages/docs/user", "md");
-        docs.extend(glob_sorted("gh-pages/docs/user/app-compatibility", "md"));
-        docs.extend(glob_sorted("gh-pages/docs/developer", "md"));
-        docs.extend(glob_sorted("gh-pages/docs/developer/bug-cheat-sheet", "md"));
+        let docs = glob_sorted("docs", "md");
         for p in &docs {
+            if p.file_name().is_some_and(|name| name == "architecture.md") {
+                continue;
+            }
             doc.push_str("#pagebreak(weak: true)\n");
             let md = clean_markdown(p)?;
             doc.push_str(
                 &MdToTypst::new(p.parent().unwrap().to_path_buf(), 1, &mut images).convert(&md),
             );
         }
-        doc.push_str(&part("Blog"));
-        for p in &glob_sorted("gh-pages/blog", "md") {
-            doc.push_str("#pagebreak(weak: true)\n");
-            let md = clean_markdown(p)?;
-            doc.push_str(
-                &MdToTypst::new(p.parent().unwrap().to_path_buf(), 1, &mut images).convert(&md),
-            );
-        }
-
         if opts.callgraph {
             doc.push_str(&part("Architecture — Generated Call Graph"));
             doc.push_str(&rustsrc::callgraph_typst());

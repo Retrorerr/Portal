@@ -1,7 +1,6 @@
 icon: assets/portal-icon.png
 android:
   assets:
-    - assets/setup-progress.html
     - assets/setup-progress-v2.html
     - assets/runtime-error.html
     - assets/unsupported.html
@@ -18,7 +17,7 @@ android:
     application:
       label: "Portal"
       extract_native_libs: true # Required for proot invocations
-      use_cleartext_traffic: true # Required for connecting to ws://127.0.0.1, see assets/setup-progress.html
+      use_cleartext_traffic: true # Required for the loopback setup-progress WebSocket.
       services:
         - name: app.polarbear.KeyboardAccessibilityService
           permission: android.permission.BIND_ACCESSIBILITY_SERVICE

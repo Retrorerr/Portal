@@ -7,7 +7,7 @@ Downloads the official Debian Trixie package catalog, resolves the transitive
 dependency closure for Plasma 6, KWin, Dolphin, System Settings, Konsole, KScreen,
 Breeze, D-Bus, XWayland, PipeWire, and Firefox ESR, downloads the .deb files
 concurrently, and extracts them into a clean rootfs directory ready for packaging
-and deployment into Local Desktop's Slot B.
+and deployment into Portal's runtime slots.
 """
 
 import os
@@ -19,10 +19,12 @@ import lzma
 import gzip
 import tarfile
 import urllib.request
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-DEBIAN_MIRROR = "http://deb.debian.org/debian"
+DEBIAN_MIRROR = "https://deb.debian.org/debian"
 PACKAGES_URL = f"{DEBIAN_MIRROR}/dists/trixie/main/binary-arm64/Packages.xz"
 
 SEED_PACKAGES = [
@@ -115,6 +117,8 @@ SEED_PACKAGES = [
     "unzip",
     "zip",
     "zstd",
+    "python3",  # Portal IME bridge
+    "kdialog",
 ]
 
 # Packages to skip if pulled in as optional/heavy non-critical dependencies
@@ -227,7 +231,7 @@ def decompress_tar_data(name: str, data: bytes) -> bytes:
         return zstandard.ZstdDecompressor().decompress(data)
     return data
 
-def extract_deb_package(deb_path: Path, dest_dir: Path, dpkg_info_dir: Path) -> str:
+def extract_deb_package(deb_path: Path, dest_dir: Path, dpkg_info_dir: Path, payload_tar=None, payload_names=None) -> str:
     """
     Extracts data.tar.* to dest_dir,
     captures extracted paths to /var/lib/dpkg/info/<pkg_id>.list,
@@ -304,6 +308,7 @@ def extract_deb_package(deb_path: Path, dest_dir: Path, dpkg_info_dir: Path) -> 
             target_path = dpkg_info_dir / f"{pkg_id}.{fname}"
             with open(target_path, "wb") as out_f:
                 out_f.write(f.read())
+            target_path.chmod(m.mode)
 
     # Build status stanza: add Status: install ok installed after Package:
     status_lines = []
@@ -332,26 +337,39 @@ def extract_deb_package(deb_path: Path, dest_dir: Path, dpkg_info_dir: Path) -> 
             p = "/."
         list_lines.append(p)
 
-    try:
+    if payload_tar is not None:
+        import posixpath
+        for member in data_tar.getmembers():
+            member.name = member.name.removeprefix("./").rstrip("/")
+            if member.name in ("", "."):
+                continue
+            if member.name.startswith("/") or ".." in member.name.split("/"):
+                raise ValueError(f"Unsafe package path: {member.name}")
+            member.uid = member.gid = 0
+            member.uname = member.gname = "root"
+            member.mtime = 0
+            if member.islnk():
+                # Android disallows hardlinks; materialize their package contents.
+                content = data_tar.extractfile(member).read()
+                member.type = tarfile.REGTYPE
+                member.linkname = ""
+                member.size = len(content)
+                payload_tar.addfile(member, io.BytesIO(content))
+                if payload_names is not None:
+                    payload_names.append(member.name)
+                continue
+            if member.issym() and member.linkname.startswith("/"):
+                member.linkname = posixpath.relpath(member.linkname.lstrip("/"), posixpath.dirname(member.name))
+            if member.isreg():
+                payload_tar.addfile(member, data_tar.extractfile(member))
+            elif member.isdir() or member.issym():
+                payload_tar.addfile(member)
+            else:
+                raise ValueError(f"Unsupported package entry: {member.name}")
+            if payload_names is not None:
+                payload_names.append(member.name)
+    else:
         data_tar.extractall(path=dest_dir, filter="tar")
-    except PermissionError:
-        for member in data_tar.getmembers():
-            target = dest_dir / member.name
-            if target.exists() and not target.is_dir():
-                try:
-                    os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
-                except Exception:
-                    pass
-            try:
-                data_tar.extract(member, path=dest_dir, filter="tar")
-            except Exception:
-                pass
-    except Exception:
-        for member in data_tar.getmembers():
-            try:
-                data_tar.extract(member, path=dest_dir, filter="tar")
-            except Exception:
-                pass
 
     # Write .list file
     list_path = dpkg_info_dir / f"{pkg_id}.list"
@@ -360,13 +378,13 @@ def extract_deb_package(deb_path: Path, dest_dir: Path, dpkg_info_dir: Path) -> 
 
     return status_stanza
 
-def build_rootfs(output_dir: Path, deb_cache_dir: Path):
+def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked_packages=None, payload_names=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     deb_cache_dir.mkdir(parents=True, exist_ok=True)
 
     packages_cache = deb_cache_dir / "Packages.txt"
-    packages = fetch_package_index(packages_cache)
-    pkg_list = resolve_dependencies(packages, SEED_PACKAGES)
+    packages = locked_packages or fetch_package_index(packages_cache)
+    pkg_list = sorted(packages) if locked_packages else resolve_dependencies(packages, SEED_PACKAGES)
 
     total_bytes = sum(int(packages[p].get("Size", 0)) for p in pkg_list)
     print(f"Total download payload: {total_bytes / (1024*1024):.2f} MB across {len(pkg_list)} packages.")
@@ -389,6 +407,8 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path):
                 completed += 1
                 if completed % 50 == 0 or completed == len(download_tasks):
                     print(f"  Downloaded {completed}/{len(download_tasks)} debs...")
+            else:
+                raise RuntimeError("Package download failed; refusing incomplete runtime")
     print(f"Download complete in {time.time() - start_dl:.1f} s.")
 
     # 2. Setup standard packaging directories
@@ -407,11 +427,11 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path):
     for idx, pkg_name in enumerate(pkg_list, 1):
         pkg = packages[pkg_name]
         deb_file = deb_cache_dir / os.path.basename(pkg["Filename"])
-        try:
-            stanza = extract_deb_package(deb_file, output_dir, dpkg_info_dir)
-            status_stanzas.append(stanza)
-        except Exception as e:
-            print(f"Error extracting {deb_file.name}: {e}")
+        if hashlib.file_digest(deb_file.open("rb"), "sha256").hexdigest() != pkg["SHA256"]:
+            raise ValueError(f"Package integrity failure: {deb_file}")
+        stanza = extract_deb_package(deb_file, output_dir, dpkg_info_dir,
+                                       payload_tar, payload_names)
+        status_stanzas.append(stanza)
         if idx % 50 == 0 or idx == len(pkg_list):
             print(f"  Processed {idx}/{len(pkg_list)} packages...")
     print(f"Extraction and dpkg database generation complete in {time.time() - start_ext:.1f} s.")

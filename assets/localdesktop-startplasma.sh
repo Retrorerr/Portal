@@ -11,6 +11,7 @@ export XDG_RUNTIME_DIR=/tmp
 export WAYLAND_DISPLAY=wayland-0
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=KDE
+export XDG_MENU_PREFIX=plasma-
 export DESKTOP_SESSION=plasma
 export KDE_FULL_SESSION=true
 export KDE_SESSION_VERSION=6
@@ -54,9 +55,9 @@ printf 'stage=backend compositor=kwin_wayland session=plasma-wayland launcher=%s
 # Package versions make a crash archive actionable without dumping the full
 # guest package database. Keep this allowlist limited to the components that
 # own the startup path and record a clear unavailable value on partial images.
-for package in kwin plasma-workspace plasma-desktop qt6-wayland kwayland-integration; do
-    if command -v pacman >/dev/null 2>&1; then
-        version=$(pacman -Q "$package" 2>/dev/null || true)
+for package in kwin-wayland plasma-workspace plasma-desktop qt6-wayland; do
+    if command -v dpkg-query >/dev/null 2>&1; then
+        version=$(dpkg-query -W "$package" 2>/dev/null || true)
     else
         version="unavailable"
     fi
@@ -188,17 +189,52 @@ if [ ! -e "$cache_marker" ]; then
     : > "$cache_marker"
 fi
 
-# Configure TabletMode=auto in kwinrc so KWin adapts intelligently to input state
+# Configure TabletMode default in kwinrc only if not already set; dynamic host bridge manages it
 kwinrc="$config_dir/kwinrc"
-if command -v kwriteconfig6 >/dev/null 2>&1; then
-    kwriteconfig6 --file "$kwinrc" --group Input --key TabletMode auto
-else
-    if [ ! -f "$kwinrc" ]; then
-        printf '[Input]\nTabletMode=auto\n' > "$kwinrc"
-    elif ! grep -q 'TabletMode=' "$kwinrc"; then
-        printf '\n[Input]\nTabletMode=auto\n' >> "$kwinrc"
+if ! grep -q 'TabletMode=' "$kwinrc" 2>/dev/null; then
+    if command -v kwriteconfig6 >/dev/null 2>&1; then
+        kwriteconfig6 --file "$kwinrc" --group Input --key TabletMode off
+    else
+        if [ ! -f "$kwinrc" ]; then
+            printf '[Input]\nTabletMode=off\n' > "$kwinrc"
+        else
+            printf '\n[Input]\nTabletMode=off\n' >> "$kwinrc"
+        fi
     fi
 fi
+
+# Configure Virtual Keyboard bridge in kwinrc
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file "$kwinrc" --group Wayland --key InputMethod "/usr/share/applications/portal-ime.desktop"
+    kwriteconfig6 --file "$kwinrc" --group Wayland --key VirtualKeyboardMode 1
+elif ! grep -q 'InputMethod=' "$kwinrc" 2>/dev/null; then
+    printf '\n[Wayland]\nInputMethod=/usr/share/applications/portal-ime.desktop\nVirtualKeyboardMode=1\n' >> "$kwinrc"
+fi
+
+# Session command runner for in-session D-Bus queries and diagnostics
+mkdir -p "$config_dir/autostart"
+cat << 'RUNNER_EOF' > /usr/local/bin/portal-session-cmd
+#!/bin/bash
+fifo=/tmp/portal-session-cmd.fifo
+out=/tmp/portal-session-cmd.out
+rm -f "$fifo" "$out"
+mkfifo "$fifo" 2>/dev/null || true
+while true; do
+    while read -r cmd; do
+        eval "$cmd" > "$out" 2>&1
+        echo "---PORTAL_CMD_EOF---" >> "$out"
+    done < "$fifo"
+done
+RUNNER_EOF
+chmod +x /usr/local/bin/portal-session-cmd 2>/dev/null || true
+
+cat << 'AUTOS_EOF' > "$config_dir/autostart/portal-session-cmd.desktop"
+[Desktop Entry]
+Type=Application
+Name=Portal Session Runner
+Exec=/usr/local/bin/portal-session-cmd
+X-KDE-autostart-phase=1
+AUTOS_EOF
 
 # Disable ksplash to avoid hanging on splash animation under PRoot
 ksplashrc="$config_dir/ksplashrc"

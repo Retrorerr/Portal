@@ -352,6 +352,7 @@ impl PolarBearApp {
         self.backend = backend;
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             let _ = resume_wayland(backend, event_loop, &self.frontend.android_app);
+            crate::android::tablet_mode_manager::apply_kwin_tablet_mode(ime::is_desktop_input_present());
         }
         true
     }
@@ -380,6 +381,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             let failed = !resume_wayland(backend, event_loop, &self.frontend.android_app);
             if !failed {
                 ime::refresh_visibility();
+                crate::android::tablet_mode_manager::apply_kwin_tablet_mode(ime::is_desktop_input_present());
             }
             failed
         } else {
@@ -427,6 +429,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         };
 
         if let Some(show) = ime::take_visibility_request() {
+            log::info!("Portal event loop: applying ime visibility request show={show}");
             let result = if show {
                 ime::show(&backend.android_app)
             } else {
@@ -434,6 +437,8 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             };
             if let Err(error) = result {
                 log::warn!("Could not update Android software-keyboard visibility: {error}");
+            } else {
+                log::info!("Portal event loop: ime visibility updated successfully show={show}");
             }
         }
 

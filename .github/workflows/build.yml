@@ -95,6 +95,9 @@ jobs:
         id: extract_version
         run: echo "version=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[0].version')" >> "$GITHUB_OUTPUT"
 
+      - name: Verify pinned production runtime is publicly available
+        run: python3 scripts/verify_runtime_release.py
+
       - name: Extract release notes
         if: github.ref_type == 'tag'
         id: release_notes
@@ -182,8 +185,8 @@ jobs:
 
       - name: Rename APK
         run: |
-          mv target/x/release/android/gradle/app/build/outputs/apk/debug/app-debug.apk target/x/localdesktop-${{ steps.extract_version.outputs.version }}-debug.apk
-          mv target/x/release/android/gradle/app/build/outputs/apk/release/app-release.apk target/x/localdesktop-${{ steps.extract_version.outputs.version }}.apk
+          mv target/x/release/android/gradle/app/build/outputs/apk/debug/app-debug.apk target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
+          mv target/x/release/android/gradle/app/build/outputs/apk/release/app-release.apk target/x/Portal-${{ steps.extract_version.outputs.version }}.apk
 
       - name: Prepare PR APK artifact
         id: pr_apk_artifact
@@ -199,9 +202,9 @@ jobs:
             SAFE_REF="pr-${PR_NUMBER}"
           fi
           SHORT_SHA="${HEAD_SHA:0:7}"
-          ARTIFACT_FILE="localdesktop-${VERSION}-${SAFE_REF}-${SHORT_SHA}-release.apk"
+          ARTIFACT_FILE="Portal-${VERSION}-${SAFE_REF}-${SHORT_SHA}-release.apk"
           ARTIFACT_PATH="target/x/${ARTIFACT_FILE}"
-          cp "target/x/localdesktop-${VERSION}.apk" "$ARTIFACT_PATH"
+          cp "target/x/Portal-${VERSION}.apk" "$ARTIFACT_PATH"
           echo "path=${ARTIFACT_PATH}" >> "$GITHUB_OUTPUT"
 
       - name: Upload PR release APK
@@ -219,8 +222,8 @@ jobs:
       - name: Rename AAB
         if: github.event_name != 'pull_request'
         run: |
-          mv target/x/release/android/gradle/app/build/outputs/bundle/debug/app-debug.aab target/x/localdesktop-${{ steps.extract_version.outputs.version }}-debug.aab
-          mv target/x/release/android/gradle/app/build/outputs/bundle/release/app-release.aab target/x/localdesktop-${{ steps.extract_version.outputs.version }}.aab
+          mv target/x/release/android/gradle/app/build/outputs/bundle/debug/app-debug.aab target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.aab
+          mv target/x/release/android/gradle/app/build/outputs/bundle/release/app-release.aab target/x/Portal-${{ steps.extract_version.outputs.version }}.aab
       - name: Build User Manual PDFs
         if: github.ref_type == 'tag'
         run: |
@@ -247,15 +250,15 @@ jobs:
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          token: ${{ secrets.PAT }}
+          token: ${{ github.token }}
           name: Portal v${{ steps.extract_version.outputs.version }}
           tag_name: v${{ steps.extract_version.outputs.version }}
           body_path: ${{ steps.release_notes.outputs.path }}
           files: |
-            target/x/localdesktop-${{ steps.extract_version.outputs.version }}.apk
-            target/x/localdesktop-${{ steps.extract_version.outputs.version }}-debug.apk
-            target/x/localdesktop-${{ steps.extract_version.outputs.version }}.aab
-            target/x/localdesktop-${{ steps.extract_version.outputs.version }}-debug.aab
+            target/x/Portal-${{ steps.extract_version.outputs.version }}.apk
+            target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
+            target/x/Portal-${{ steps.extract_version.outputs.version }}.aab
+            target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.aab
             manuals/Portal-v${{ steps.extract_version.outputs.version }}-User-Manual.pdf
             manuals/Portal-v${{ steps.extract_version.outputs.version }}-User-Manual-Dark.pdf
             manuals/Portal-v${{ steps.extract_version.outputs.version }}-User-Manual-Fold.pdf

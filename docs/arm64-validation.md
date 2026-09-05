@@ -15,7 +15,7 @@ and translated emulator execution do not satisfy the native ARM64 gate.
 - Primary device: OnePlus Pad 3 / OPD2415, Android 16 / API 36, native
   `arm64-v8a`. Display reports 2400 x 3392 pixels and 144 Hz in the observed
   landscape session. Device data must not be cleared.
-- Installed baseline: Local Desktop 2.2.0, versionCode 16908800. Its APK was
+- Installed baseline: pre-rebrand Local Desktop 2.2.0, versionCode 16908800. Its APK was
   copied to `artifacts/qa/oneplus-baseline/installed-before-update.apk` before
   updates. SHA-256:
   `6e35a03ccd0a64eb0ea576290d4c94eead9bc27ec8c7c96cde6e75aecc806b23`.
