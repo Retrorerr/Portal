@@ -8,7 +8,6 @@ use crate::android::backend::wayland::{
     TouchMode, WaylandBackend,
 };
 use crate::android::utils::ndk;
-use crate::core::coordinate_transform::PhysicalPoint;
 use smithay::backend::input::InputEvent;
 use smithay::utils::{Physical, Size};
 use winit::dpi::PhysicalPosition;
@@ -165,13 +164,10 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
         }
         WindowEvent::ScaleFactorChanged { .. } => {
             backend.guest_scale_factor = ndk::scale_factor(&backend.android_app);
-            let (w, h): (i32, i32) = backend
-                .graphic_renderer
-                .as_ref()
-                .unwrap()
-                .window()
-                .inner_size()
-                .into();
+            let Some(renderer) = backend.graphic_renderer.as_ref() else {
+                return CentralizedEvent::Unsupported;
+            };
+            let (w, h): (i32, i32) = renderer.window().inner_size().into();
             CentralizedEvent::Resized {
                 size: (w, h).into(),
                 guest_scale_factor: backend.guest_scale_factor,
@@ -195,7 +191,18 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             centralize_keyboard(scancode, event.state, time, backend)
         }
         WindowEvent::CursorMoved { position, .. } => {
-            let logical = physical_to_logical_position(backend, position);
+            // Border (letterbox) moves are outside the guest: drop instead of
+            // warping the Plasma cursor to the nearest edge, and remember the
+            // outside state so a later click cannot fire at stale coordinates.
+            let Some(logical) = physical_to_logical_position(backend, position) else {
+                backend
+                    .button_tracker
+                    .note_motion(false, (position.x, position.y));
+                return CentralizedEvent::Unsupported;
+            };
+            backend
+                .button_tracker
+                .note_motion(true, (position.x, position.y));
             let event = InputEvent::PointerMotionAbsolute {
                 event: WinitMouseMovedEvent {
                     time,
@@ -216,7 +223,15 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             tool_type,
             ..
         } => {
-            let logical = physical_to_logical_position(backend, position);
+            let Some(logical) = physical_to_logical_position(backend, position) else {
+                backend
+                    .button_tracker
+                    .note_motion(false, (position.x, position.y));
+                return CentralizedEvent::Unsupported;
+            };
+            backend
+                .button_tracker
+                .note_motion(true, (position.x, position.y));
             CentralizedEvent::Input(InputEvent::PointerMotionAbsolute {
                 event: WinitMouseMovedEvent {
                     time,
@@ -236,14 +251,26 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             CentralizedEvent::Input(event)
         }
         WindowEvent::MouseInput { state, button, .. } => {
-            let event = InputEvent::PointerButton {
-                event: WinitMouseInputEvent {
-                    time,
-                    button,
-                    state,
-                    is_x11: false,
-                },
+            // Mouse button events carry no position: consult the tracked
+            // inside/outside state from the last motion. Border presses never
+            // reach the guest (no click at stale coordinates); releases land
+            // exactly for previously forwarded presses (no stuck buttons).
+            use smithay::backend::input::PointerButtonEvent;
+            let probe = WinitMouseInputEvent {
+                time,
+                button,
+                state,
+                is_x11: false,
             };
+            let code = probe.button_code();
+            let forward = match state {
+                ElementState::Pressed => backend.button_tracker.press(code),
+                ElementState::Released => backend.button_tracker.release(code),
+            };
+            if !forward {
+                return CentralizedEvent::Unsupported;
+            }
+            let event = InputEvent::PointerButton { event: probe };
             CentralizedEvent::Input(event)
         }
         WindowEvent::Touch(Touch {
@@ -252,7 +279,13 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             id,
             ..
         }) => {
-            let logical = physical_to_logical_position(backend, location);
+            // A touch starting in transitional letterbox is outside the guest:
+            // suppress the whole gesture (a border press sliding inside must
+            // still never click) without disturbing guest gesture state.
+            let Some(logical) = physical_to_logical_position(backend, location) else {
+                backend.suppressed_touch_ids.insert(id);
+                return CentralizedEvent::Unsupported;
+            };
             backend.touch_points.insert(id, location);
             backend.scroll_centroid = Some(centroid(&backend.touch_points));
 
@@ -265,6 +298,13 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             backend.touch_mode = TouchMode::Undecided;
             backend.touch_down_position = Some(location);
             backend.touch_down_time = Some(time);
+            backend.touch_down_generation = Some(
+                backend
+                    .compositor
+                    .state
+                    .authoritative_display_state
+                    .resize_generation,
+            );
             CentralizedEvent::Input(InputEvent::TouchDown {
                 event: WinitTouchStartedEvent {
                     time,
@@ -280,6 +320,11 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             id,
             ..
         }) => {
+            // Suppressed (border-started) touches never affect guest state —
+            // not the points, mode, centroid, or slop anchor.
+            if backend.suppressed_touch_ids.contains(&id) {
+                return CentralizedEvent::Unsupported;
+            }
             backend.touch_points.insert(id, location);
 
             if backend.touch_mode == TouchMode::Undecided && travelled_past_slop(backend, location)
@@ -320,14 +365,22 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
                         },
                     })
                 }
-                TouchMode::Drag => CentralizedEvent::Input(InputEvent::TouchMotion {
-                    event: WinitTouchMovedEvent {
-                        time,
-                        position: relative_position(backend, location),
-                        global_position: physical_to_logical_position(backend, location),
-                        id,
-                    },
-                }),
+                TouchMode::Drag => {
+                    // A drag sliding through letterbox is outside the guest for
+                    // that segment: drop the move (cursor stays) rather than
+                    // clamping to the viewport edge.
+                    let Some(logical) = physical_to_logical_position(backend, location) else {
+                        return CentralizedEvent::Unsupported;
+                    };
+                    CentralizedEvent::Input(InputEvent::TouchMotion {
+                        event: WinitTouchMovedEvent {
+                            time,
+                            position: relative_position(backend, location),
+                            global_position: logical,
+                            id,
+                        },
+                    })
+                }
             }
         }
 
@@ -337,6 +390,10 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             id,
             ..
         }) => {
+            if backend.suppressed_touch_ids.remove(&id) {
+                // A suppressed gesture ending changes nothing guest-side.
+                return CentralizedEvent::Unsupported;
+            }
             backend.touch_points.remove(&id);
             if !backend.touch_points.is_empty() {
                 // Don't forward a stray TouchUp while other fingers are still down; re-anchor
@@ -346,7 +403,22 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             }
 
             let mode = backend.touch_mode;
-            let logical = physical_to_logical_position(backend, location);
+            // Border lift: taps/long-presses must NOT become edge clicks.
+            // Scroll/Drag lifts in a border still terminate the gesture, but
+            // carry dummy coordinates flagged `in_guest = false`: the handler
+            // releases at the current guest location without synthesizing any
+            // edge movement.
+            let (logical, in_guest) = match physical_to_logical_position(backend, location) {
+                Some(logical) => (logical, true),
+                None => {
+                    if matches!(mode, TouchMode::Scroll | TouchMode::Drag) {
+                        (PhysicalPosition::new(0.0, 0.0), false)
+                    } else {
+                        backend.reset_touch_state();
+                        return CentralizedEvent::Unsupported;
+                    }
+                }
+            };
             backend.reset_touch_state();
             CentralizedEvent::Input(InputEvent::TouchUp {
                 event: WinitTouchEndedEvent {
@@ -355,6 +427,7 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
                     mode,
                     x: logical.x,
                     y: logical.y,
+                    in_guest,
                 },
             })
         }
@@ -363,6 +436,9 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             id,
             ..
         }) => {
+            if backend.suppressed_touch_ids.remove(&id) {
+                return CentralizedEvent::Unsupported;
+            }
             backend.touch_points.remove(&id);
             if !backend.touch_points.is_empty() {
                 backend.scroll_centroid = Some(centroid(&backend.touch_points));
@@ -383,36 +459,42 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
 }
 
 /// Normalize a window-relative pixel position into the 0..1 range the input backend expects.
+///
+/// Uses the single authoritative host size from the presentation snapshot —
+// never a separate `window.inner_size()` query that could belong to a
+/// different resize generation than the coordinate transform used for mapping.
 fn relative_position(
     backend: &WaylandBackend,
     location: PhysicalPosition<f64>,
 ) -> RelativePosition {
-    let size = backend
-        .graphic_renderer
-        .as_ref()
-        .unwrap()
-        .window()
-        .inner_size();
+    let (host_w, host_h) = backend
+        .compositor
+        .state
+        .authoritative_display_state
+        .physical_size;
     RelativePosition::new(
-        location.x / size.width.max(1) as f64,
-        location.y / size.height.max(1) as f64,
+        location.x / host_w.max(1) as f64,
+        location.y / host_h.max(1) as f64,
     )
 }
 
 /// Convert an Android physical surface position exactly once at the ingestion boundary.
+///
+/// Uses one coherent presentation snapshot for the operation. Returns `None`
+/// for touches/clicks in transitional letterbox borders — they are outside the
+/// guest desktop and must NOT be clamped into edge clicks.
 fn physical_to_logical_position(
     backend: &WaylandBackend,
     location: PhysicalPosition<f64>,
-) -> PhysicalPosition<f64> {
-    let logical = backend
+) -> Option<PhysicalPosition<f64>> {
+    let snapshot = backend
         .compositor
         .state
-        .coordinate_transform
-        .physical_to_logical(PhysicalPoint {
-            x: location.x,
-            y: location.y,
-        });
-    PhysicalPosition::new(logical.x, logical.y)
+        .authoritative_display_state
+        .presentation_snapshot();
+    snapshot
+        .physical_to_logical(location.x, location.y)
+        .map(|(lx, ly)| PhysicalPosition::new(lx, ly))
 }
 
 /// Whether the finger has moved far enough from where it landed to stop being a tap.

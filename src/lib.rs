@@ -6,6 +6,8 @@ pub mod core {
     pub mod config;
     pub mod coordinate_transform;
     pub mod ime_policy;
+    pub mod pointer_buttons;
+    pub mod presentation;
     pub mod runtime;
     pub mod provisioning;
     pub mod shm_damage;
@@ -42,6 +44,7 @@ pub mod android {
     }
     pub mod utils {
         pub mod application_context;
+        pub mod frame_rate;
         pub mod fullscreen_immersive;
         pub mod ndk;
         pub mod webview;

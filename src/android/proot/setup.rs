@@ -9,7 +9,7 @@ use crate::{
         diagnostics,
         utils::application_context::get_application_context,
         utils::ndk::{
-            long_press_timeout_ms, refresh_rate_millihz, scale_factor, touch_slop_px,
+            active_refresh_millihz, long_press_timeout_ms, scale_factor, touch_slop_px,
         },
     },
     core::{
@@ -1257,13 +1257,32 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         touch_mode: TouchMode::Undecided,
         touch_down_position: None,
         touch_down_time: None,
+        touch_down_generation: None,
         touch_slop_px: touch_slop_px(&android_app),
         long_press_timeout_ms: long_press_timeout_ms(&android_app),
         pointer_pressed: false,
         presentation_sequence: 0,
         pending_kwin_presentation: None,
-        refresh_rate_millihz: refresh_rate_millihz(&android_app),
+        // Nominal output mode is the stable preferred target resolved from
+        // `Display.getSupportedModes()` (144 Hz on the OnePlus Pad 3,
+        // otherwise the device maximum): never the transient cold-start VRR
+        // reading. The live physical rate is tracked separately in
+        // `physical_refresh_millihz` for diagnostics/pacing and never
+        // rewrites `wl_output`.
+        refresh_rate_millihz: crate::android::utils::ndk::preferred_high_refresh_millihz(
+            &android_app,
+        ),
+        physical_refresh_millihz: active_refresh_millihz(&android_app),
         pressed_keys: std::collections::HashSet::new(),
+        button_tracker: crate::core::pointer_buttons::PointerButtonTracker::new(),
+        suppressed_touch_ids: std::collections::HashSet::new(),
+        last_plasma_poll_ms: None,
+        last_refresh_poll_ms: None,
+        frame_rate_requested: false,
+        kwin_commit_gate: crate::core::presentation::KwinCommitGate::new(),
+        socket_watcher: None,
+        output_dirty: true,
+        frame_in_flight: false,
         android_app,
     })
 }
