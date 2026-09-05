@@ -59,7 +59,53 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     // default on the first launch and only becomes accurate after a configuration change.
     let guest_scale_factor = ndk::scale_factor(&backend.android_app);
     backend.guest_scale_factor = guest_scale_factor;
-    backend.refresh_rate_millihz = ndk::refresh_rate_millihz(&backend.android_app);
+    // Nominal vs physical separation (VRR bootstrap fix):
+    // - `wl_output` advertises the stable preferred target resolved from
+    //   `Display.getSupportedModes()` (144 Hz on the OnePlus Pad 3, otherwise
+    //   the device maximum) so KWin sees it on cold-start fullscreen without
+    //   a popup transition.
+    // - The instantaneous Android physical/VRR rate (50/60/90/120/144 Hz) is
+    //   tracked separately for diagnostics/pacing and never rewrites the
+    //   output mode.
+    // - Actual presentation timing is communicated through frame/presentation
+    //   feedback, not mode rewrites.
+    let observed_physical = ndk::active_refresh_millihz(&backend.android_app);
+    if crate::core::android_integration::is_valid_refresh_millihz(observed_physical) {
+        backend.physical_refresh_millihz = observed_physical;
+        backend
+            .compositor
+            .state
+            .authoritative_display_state
+            .note_physical_refresh_millihz(observed_physical);
+    }
+    let supported = ndk::supported_refresh_rates_millihz(&backend.android_app);
+    if supported
+        .iter()
+        .any(|rate| crate::core::android_integration::is_valid_refresh_millihz(*rate))
+    {
+        let preferred =
+            crate::core::android_integration::select_preferred_refresh_millihz(&supported);
+        backend.refresh_rate_millihz = preferred;
+        backend
+            .compositor
+            .state
+            .authoritative_display_state
+            .refresh_rate_millihz = preferred;
+    } else if !crate::core::android_integration::is_valid_refresh_millihz(
+        backend.refresh_rate_millihz,
+    ) {
+        // No cache yet and no enumeration: use the resolved fallback once
+        // (supported -> active -> default chain).
+        let preferred = ndk::preferred_high_refresh_millihz(&backend.android_app);
+        backend.refresh_rate_millihz = preferred;
+        backend
+            .compositor
+            .state
+            .authoritative_display_state
+            .refresh_rate_millihz = preferred;
+    }
+    // Otherwise: preserve the cached nominal (enumeration unavailable this
+    // resume; a transient failure must never downgrade it to the VRR rate).
     backend.compositor.state.size = size.into();
 
     // Mutate the existing authoritative state in place so resize generations,
@@ -128,6 +174,7 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
         backend.compositor.output_global = Some(output.create_global::<State>(&dh));
     }
 
+    // Stable nominal mode: VRR physical changes never reach this `Mode`.
     let mode = Mode {
         size: size.into(),
         refresh: backend.refresh_rate_millihz,
@@ -177,7 +224,44 @@ fn resume_wayland(
         log::info!("Ignoring redundant resume while renderer is already active");
     }
 
+    if backend.socket_watcher.is_none() {
+        let (listener_fd, display_fd) = backend.compositor.socket_fds();
+        if let Some(proxy) = accessibility::event_loop_proxy() {
+            match crate::android::backend::wayland::WaylandSocketWatcher::spawn(
+                listener_fd,
+                display_fd,
+                proxy,
+            ) {
+                Ok(watcher) => backend.socket_watcher = Some(watcher),
+                Err(error) => log::error!("Failed to spawn WaylandSocketWatcher: {error}"),
+            }
+        }
+    }
+
+    backend.output_dirty = true;
     configure_output(backend);
+    // High-refresh-rate hint is sticky per ANativeWindow: issue once per
+    // window creation (resume), not per-frame. Uses only the supported NDK
+    // `ANativeWindow_setFrameRate[WithChangeStrategy]` path (preferred rate
+    // from the supported modes, DEFAULT, seamless) — no global settings, no
+    // root, no OEM hacks. Re-issued after every suspend because suspend
+    // destroys the native window; redundant resumes on the same window skip
+    // the re-request. The hint rate matches the nominal `wl_output` target
+    // resolved in `configure_output` so KWin, the output mode, and Android
+    // all agree.
+    if !backend.frame_rate_requested {
+        let rate_hz = backend.refresh_rate_millihz as f32 / 1000.0;
+        crate::android::utils::frame_rate::ensure_high_refresh_rate_hz(
+            &backend.android_app,
+            rate_hz,
+        );
+        backend.frame_rate_requested = true;
+        // On-device mode evidence for OxygenOS policy verification (dumpsys).
+        ndk::log_display_modes(&backend.android_app);
+    }
+    // Prime the change detector so the first throttled poll compares against
+    // the fresh resume snapshot instead of a stale pre-suspend rate.
+    backend.last_refresh_poll_ms = Some(backend.clock.now().as_millis() as u64);
     accessibility::set_runtime_active(true);
 
     if let Some(winit) = backend.graphic_renderer.as_ref() {
@@ -457,6 +541,16 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             );
             handle(event, backend, event_loop);
         }
+
+        if _event == AppUserEvent::WaylandTraffic {
+            if let Ok(dirty) = crate::android::backend::wayland::dispatch_wayland(backend) {
+                if dirty || backend.output_dirty {
+                    if let Some(winit) = backend.graphic_renderer.as_ref() {
+                        winit.window().request_redraw();
+                    }
+                }
+            }
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -524,10 +618,47 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             if let Err(error) = ime::hide(&backend.android_app) {
                 log::debug!("Software keyboard bridge could not be hidden on suspend: {error}");
             }
+            backend.socket_watcher = None;
             backend.graphic_renderer = None;
             backend.suspend_input_and_presentation();
+            // The ANativeWindow is destroyed on suspend; the preferred-rate hint
+            // must be re-issued on the next resume's fresh window.
+            backend.frame_rate_requested = false;
+            backend.last_refresh_poll_ms = None;
             // Kill the standalone-client PipeWire/AAudio backend if it was started.
             pipewire_standalone_aaudio::shutdown();
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let PolarBearBackend::Wayland(backend) = &mut self.backend {
+            if let Ok(dirty) = crate::android::backend::wayland::dispatch_wayland(backend) {
+                if dirty || backend.output_dirty {
+                    if let Some(winit) = backend.graphic_renderer.as_ref() {
+                        winit.window().request_redraw();
+                    }
+                }
+            }
+
+            if backend.touch_mode == crate::android::backend::wayland::TouchMode::Undecided
+                && backend.touch_points.len() == 1
+            {
+                if let Some(down_time) = backend.touch_down_time {
+                    let now = backend.clock.now().as_millis() as u64;
+                    let elapsed = now.saturating_sub(down_time);
+                    if elapsed >= backend.long_press_timeout_ms {
+                        handle(CentralizedEvent::Redraw, backend, event_loop);
+                    } else {
+                        let remaining = backend.long_press_timeout_ms - elapsed;
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(
+                            std::time::Instant::now() + std::time::Duration::from_millis(remaining),
+                        ));
+                        return;
+                    }
+                }
+            }
+
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 }
