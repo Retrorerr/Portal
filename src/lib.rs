@@ -1,6 +1,7 @@
 pub mod core {
     pub mod android_input;
     pub mod android_integration;
+    pub mod clipboard_broker;
     pub mod clipboard_policy;
     pub mod config;
     pub mod coordinate_transform;
@@ -8,7 +9,9 @@ pub mod core {
     pub mod pointer_buttons;
     pub mod presentation;
     pub mod runtime;
+    pub mod provisioning;
     pub mod startup;
+    pub mod tablet_mode;
     pub mod wayland_protocol;
 }
 
@@ -18,6 +21,7 @@ pub mod android {
     pub mod clipboard;
     pub mod diagnostics;
     pub mod ime;
+    pub mod tablet_mode_manager;
 
     pub mod main;
     pub mod app {

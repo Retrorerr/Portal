@@ -1,15 +1,30 @@
 import subprocess
 import sys
 
+def get_device():
+    import os
+    if os.environ.get("ANDROID_SERIAL"):
+        return os.environ["ANDROID_SERIAL"]
+    try:
+        out = subprocess.check_output(["adb", "devices"], text=True)
+        for line in out.strip().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "device":
+                return parts[0]
+    except Exception:
+        pass
+    raise RuntimeError("No active authorized ADB device found")
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: guest_exec.py <command>")
         sys.exit(1)
 
     cmd = " ".join(sys.argv[1:])
+    device_id = get_device()
 
     pm_path = subprocess.check_output([
-        "adb", "-s", "f105b146", "shell", "pm path app.polarbear"
+        "adb", "-s", device_id, "shell", "pm path app.polarbear"
     ], text=True).strip().replace("package:", "")
 
     lib_dir = pm_path.rsplit("/", 1)[0] + "/lib/arm64"
@@ -17,7 +32,7 @@ def main():
     libproot = lib_dir + "/libproot.so"
 
     pid_str = subprocess.check_output([
-        "adb", "-s", "f105b146", "shell", "pidof plasmashell"
+        "adb", "-s", device_id, "shell", "pidof plasmashell"
     ], text=True).strip().split()
     if not pid_str:
         print("plasmashell not running")
@@ -25,7 +40,7 @@ def main():
     plasma_pid = pid_str[0]
 
     env_raw = subprocess.check_output([
-        "adb", "-s", "f105b146", "exec-out",
+        "adb", "-s", device_id, "exec-out",
         f"run-as app.polarbear cat /proc/{plasma_pid}/environ"
     ])
 
@@ -59,13 +74,13 @@ def main():
         local_tmp = f.name
 
     try:
-        subprocess.check_call(["adb", "-s", "f105b146", "push", local_tmp, "/data/local/tmp/guest_exec.sh"])
+        subprocess.check_call(["adb", "-s", device_id, "push", local_tmp, "/data/local/tmp/guest_exec.sh"])
     finally:
         os.unlink(local_tmp)
 
     # Copy into guest /tmp
     subprocess.check_call([
-        "adb", "-s", "f105b146", "shell",
+        "adb", "-s", device_id, "shell",
         "run-as app.polarbear cp /data/local/tmp/guest_exec.sh /data/data/app.polarbear/files/runtime-B/tmp/exec.sh"
     ])
 
@@ -86,7 +101,7 @@ def main():
     )
 
     res = subprocess.run([
-        "adb", "-s", "f105b146", "shell",
+        "adb", "-s", device_id, "shell",
         f"run-as app.polarbear sh -c '{remote_cmd}'"
     ], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if hasattr(sys.stdout, "reconfigure"):

@@ -181,7 +181,7 @@ pub fn show_webview_popup(env: &mut JNIEnv<'_>, android_app: &AndroidApp, url: &
         "(Ljava/lang/String;)V",
         &[JValue::Object(&jurl)],
     ) {
-        log::error!("Failed to load Local Desktop WebView page: {error}");
+        log::error!("Failed to load Portal WebView page: {error}");
         clear_exception(env, "loadUrl");
         return;
     }
@@ -202,18 +202,8 @@ pub fn show_webview_popup(env: &mut JNIEnv<'_>, android_app: &AndroidApp, url: &
             return;
         }
     };
-    let _ = env.call_method(
-        &popup,
-        "setFocusable",
-        "(Z)V",
-        &[JValue::Bool(1)],
-    );
-    let _ = env.call_method(
-        &popup,
-        "setOutsideTouchable",
-        "(Z)V",
-        &[JValue::Bool(0)],
-    );
+    let _ = env.call_method(&popup, "setFocusable", "(Z)V", &[JValue::Bool(1)]);
+    let _ = env.call_method(&popup, "setOutsideTouchable", "(Z)V", &[JValue::Bool(0)]);
 
     let looper = looper(env);
     if looper.is_null() || !webview_handoff::install(env, &looper, &popup) {
@@ -234,7 +224,7 @@ pub fn show_webview_popup(env: &mut JNIEnv<'_>, android_app: &AndroidApp, url: &
             JValue::Int(0),
         ],
     ) {
-        log::error!("Failed to show Local Desktop WebView: {error}");
+        log::error!("Failed to show Portal WebView: {error}");
         clear_exception(env, "showAtLocation");
         webview_handoff::clear();
         return;
@@ -243,7 +233,7 @@ pub fn show_webview_popup(env: &mut JNIEnv<'_>, android_app: &AndroidApp, url: &
     // This call blocks only the dedicated WebView thread. The setup/runtime owner quits it when
     // the page is no longer needed; it is deliberately not guarded by an arbitrary timeout.
     if let Err(error) = env.call_static_method("android/os/Looper", "loop", "()V", &[]) {
-        log::warn!("Local Desktop WebView Looper exited with an error: {error}");
+        log::warn!("Portal WebView Looper exited with an error: {error}");
         clear_exception(env, "Looper.loop");
     }
 
@@ -269,8 +259,14 @@ mod tests {
 
     #[test]
     fn query_values_are_percent_encoded() {
-        assert_eq!(encode_query_component("KWin failed: 50%\n"), "KWin%20failed%3A%2050%25%0A");
-        assert_eq!(setup_page_url(1234, "a/b"), "file:///android_asset/setup-progress-v2.html?port=1234&token=a%2Fb");
+        assert_eq!(
+            encode_query_component("KWin failed: 50%\n"),
+            "KWin%20failed%3A%2050%25%0A"
+        );
+        assert_eq!(
+            setup_page_url(1234, "a/b"),
+            "file:///android_asset/setup-progress-v2.html?port=1234&token=a%2Fb"
+        );
         assert!(runtime_error_page_url(1234, "token", "bad reason").contains("reason=bad%20reason"));
     }
 }

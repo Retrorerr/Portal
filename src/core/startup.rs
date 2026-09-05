@@ -305,8 +305,10 @@ mod tests {
 
     #[test]
     fn only_kwin_nested_title_is_an_identity_match() {
-        assert!(is_kwin_wayland_title("KDE Wayland Compositor Local Desktop"));
-        assert!(is_kwin_wayland_title("KDE Wayland Compositor Local Desktop - Output disabled"));
+        assert!(is_kwin_wayland_title("KDE Wayland Compositor Portal"));
+        assert!(is_kwin_wayland_title(
+            "KDE Wayland Compositor Portal - Output disabled"
+        ));
         assert!(!is_kwin_wayland_title("labwc"));
         assert!(!is_kwin_wayland_title("KDE Wayland Compositorist"));
     }

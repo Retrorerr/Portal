@@ -149,14 +149,16 @@ pub fn launch() {
         *failure = None;
     }
 
-    let layout = crate::core::runtime::RuntimeLayout::new("/data/data/app.polarbear/files");
-    if layout.base_dir.join("runtime-B").exists() {
-        let _ = layout.set_active_slot("slot-b");
-    }
     let runtime = crate::android::runtime::proot::PRootRuntime::active();
     let rootfs = runtime.rootfs_path();
+    if !crate::core::provisioning::RuntimeArtifact::production().is_ready(rootfs) {
+        log::error!("Refusing to launch an incomplete or mismatched Debian runtime");
+        LAUNCH_RUNNING.store(false, Ordering::Release);
+        return;
+    }
     log::info!("launch: active runtime rootfs is {}", rootfs.display());
     crate::android::proot::setup::sync_session_runtime_files(&rootfs, 1);
+    crate::android::ime::start_ime_fifo_listener(&rootfs);
 
     let cancel = Arc::new(AtomicBool::new(false));
     let Ok(mut state) = launch_state().lock() else {
