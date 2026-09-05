@@ -30,7 +30,8 @@ use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
     clamp_physical_coordinate, density_scale_factor, normalized_coordinate,
     normalized_rotation_degrees, physical_window_size, qt_scale_factor, refresh_period_nanos,
-    xft_dpi,
+    xft_dpi, NOMINAL_OUTPUT_REFRESH_MILLIHZ, DESIRED_REFRESH_MILLIHZ, is_valid_refresh_millihz,
+    refresh_changed, select_preferred_refresh_millihz,
 };
 use clipboard_policy::{
     choose_text_mime, is_valid_clip_text, supports_mime_type, validate_clip_text,
@@ -45,6 +46,89 @@ fn oneplus_pad_like_metrics_keep_fractional_scale_and_refresh_period() {
     assert_eq!(xft_dpi(scale), 168);
     assert_eq!(refresh_period_nanos(144_000), 6_944_444);
     assert_eq!(physical_window_size(2560, 1600), Some((2560, 1600)));
+}
+
+#[test]
+fn nominal_output_refresh_is_stable_preferred_target_and_physical_vrr_never_rewrites_mode() {
+    // Fallback constants stay sane when mode enumeration is unavailable.
+    assert_eq!(NOMINAL_OUTPUT_REFRESH_MILLIHZ, 120_000);
+    assert_eq!(DESIRED_REFRESH_MILLIHZ, 120_000);
+    assert_eq!(refresh_period_nanos(NOMINAL_OUTPUT_REFRESH_MILLIHZ), 8_333_333);
+    // Dynamic selection: OnePlus Pad 3's reported modes resolve to 144 Hz.
+    assert_eq!(
+        select_preferred_refresh_millihz(&[50_000, 60_000, 90_000, 120_000, 144_000]),
+        144_000
+    );
+    assert_eq!(refresh_period_nanos(144_000), 6_944_444);
+    // Portable fallback: 120/90/60 Hz devices keep their own maximum.
+    assert_eq!(select_preferred_refresh_millihz(&[60_000, 120_000]), 120_000);
+    assert_eq!(select_preferred_refresh_millihz(&[60_000, 90_000]), 90_000);
+    assert_eq!(select_preferred_refresh_millihz(&[60_000]), 60_000);
+    // Empty/unusable lists fall back to the sane default.
+    assert_eq!(select_preferred_refresh_millihz(&[]), 120_000);
+    assert_eq!(select_preferred_refresh_millihz(&[0, -1]), 120_000);
+    // Physical VRR steps are still observed (for diagnostics/pacing) ...
+    assert!(refresh_changed(60_000, 50_000));
+    assert!(refresh_changed(60_000, 120_000));
+    assert!(refresh_changed(120_000, 144_000));
+    assert!(refresh_changed(50_000, 60_000));
+    // ... but fractional noise never counts as a physical change.
+    assert!(!refresh_changed(60_000, 59_940));
+    assert!(!refresh_changed(60_000, 60_000));
+    assert!(!refresh_changed(60_000, 0));
+    assert!(is_valid_refresh_millihz(50_000));
+    assert!(is_valid_refresh_millihz(60_000));
+    assert!(is_valid_refresh_millihz(120_000));
+    assert!(is_valid_refresh_millihz(144_000));
+
+    // Structural policy: the nominal target is resolved from the supported
+    // modes (never a hardcoded 120 Hz), and the throttled physical sampler
+    // must not rewrite `wl_output`.
+    const EVENT_HANDLER: &str =
+        include_str!("../src/android/backend/wayland/event_handler.rs");
+    const RUN: &str = include_str!("../src/android/app/run.rs");
+    const BACKEND_MOD: &str = include_str!("../src/android/backend/wayland/mod.rs");
+    const NDK: &str = include_str!("../src/android/utils/ndk.rs");
+    const FRAME_RATE: &str = include_str!("../src/android/utils/frame_rate.rs");
+    const SETUP: &str = include_str!("../src/android/proot/setup.rs");
+    // Physical rate is tracked on its own field.
+    assert!(BACKEND_MOD.contains("physical_refresh_millihz"));
+    assert!(EVENT_HANDLER.contains("physical_refresh_millihz"));
+    assert!(RUN.contains("physical_refresh_millihz"));
+    // Nominal comes from the supported-mode enumeration, consistently used
+    // for the output mode and the frame-rate hint.
+    assert!(NDK.contains("getSupportedModes"));
+    assert!(NDK.contains("preferred_high_refresh_millihz"));
+    assert!(NDK.contains("select_preferred_refresh_millihz"));
+    assert!(RUN.contains("supported_refresh_rates_millihz"));
+    assert!(RUN.contains("select_preferred_refresh_millihz"));
+    assert!(RUN.contains("ensure_high_refresh_rate_hz"));
+    assert!(SETUP.contains("preferred_high_refresh_millihz"));
+    assert!(FRAME_RATE.contains("preferred_frame_rate_hz"));
+    assert!(FRAME_RATE.contains("ensure_high_refresh_rate_hz"));
+    // No device-name checks, OEM APIs, or global-setting writes: selection is
+    // purely from the supported-mode list. (`Build`/`MODEL` gating would show
+    // up as these strings; doc-comment device mentions are fine.)
+    for src in [NDK, FRAME_RATE, RUN, SETUP] {
+        assert!(!src.contains("os/Build"));
+        assert!(!src.contains("MANUFACTURER"));
+        assert!(!src.contains("Build.MODEL"));
+        assert!(!src.contains("Settings.Global"));
+        assert!(!src.contains("Settings.System"));
+    }
+    // The periodic poll logs physical changes but never calls
+    // set_preferred/change_current_state for them.
+    let poll_start = EVENT_HANDLER
+        .find("fn maybe_poll_refresh_rate")
+        .expect("physical sampler is present");
+    let dispatch_start = EVENT_HANDLER[poll_start..]
+        .find("fn dispatch_wayland")
+        .map(|i| poll_start + i)
+        .expect("dispatch follows sampler");
+    let poll_body = &EVENT_HANDLER[poll_start..dispatch_start];
+    assert!(poll_body.contains("physical_refresh_millihz"));
+    assert!(!poll_body.contains("set_preferred"));
+    assert!(!poll_body.contains("change_current_state"));
 }
 
 #[test]
