@@ -733,6 +733,18 @@ impl GlesRenderer {
     }
 }
 
+/// Cached SHM texture entry: the GL texture is reusable only for the
+/// identical buffer geometry AND pixel format it was proven to contain.
+/// Anything else forces a fresh allocation + full upload so the proven
+/// content generation restarts from certain pixels.
+#[cfg(feature = "wayland_frontend")]
+#[derive(Debug, Clone)]
+struct ShmTextureCacheEntry {
+    texture: Arc<GlesTextureInternal>,
+    size: Size<i32, BufferCoord>,
+    format: Fourcc,
+}
+
 #[cfg(feature = "wayland_frontend")]
 impl ImportMemWl for GlesRenderer {
     #[instrument(level = "trace", parent = &self.span, skip(self))]
@@ -747,7 +759,7 @@ impl ImportMemWl for GlesRenderer {
 
         // why not store a `GlesTexture`? because the user might do so.
         // this is guaranteed a non-public internal type, so we are good.
-        type CacheMap = HashMap<usize, Arc<GlesTextureInternal>>;
+        type CacheMap = HashMap<usize, ShmTextureCacheEntry>;
 
         let mut surface_lock = surface.as_ref().map(|surface_data| {
             surface_data
@@ -794,11 +806,17 @@ impl ImportMemWl for GlesRenderer {
             let mut upload_full = false;
 
             let id = self.id();
+            let buffer_size: Size<i32, BufferCoord> = (width, height).into();
+            // A cached texture is reusable only for the identical geometry
+            // AND pixel format it was proven to contain (see
+            // ShmTextureCacheEntry). A mismatch drops the entry so a fresh
+            // texture is allocated and fully uploaded below.
             let texture = GlesTexture(
                 surface_lock
                     .as_ref()
-                    .and_then(|cache| cache.get(&id).cloned())
-                    .filter(|texture| texture.size == (width, height).into())
+                    .and_then(|cache| cache.get(&id))
+                    .filter(|entry| entry.size == buffer_size && entry.format == fourcc)
+                    .map(|entry| entry.texture.clone())
                     .unwrap_or_else(|| {
                         let mut tex = 0;
                         unsafe { self.gl.GenTextures(1, &mut tex) };
@@ -816,7 +834,14 @@ impl ImportMemWl for GlesRenderer {
                             destruction_callback_sender: self.destruction_callback_sender.clone(),
                         });
                         if let Some(cache) = surface_lock.as_mut() {
-                            cache.insert(id, new.clone());
+                            cache.insert(
+                                id,
+                                ShmTextureCacheEntry {
+                                    texture: new.clone(),
+                                    size: buffer_size,
+                                    format: fourcc,
+                                },
+                            );
                         }
                         new
                     }),
@@ -826,6 +851,9 @@ impl ImportMemWl for GlesRenderer {
             unsafe {
                 self.egl.make_current()?;
                 sync_lock.wait_for_all(&self.gl);
+                // Clear stale GL errors so the post-upload check below
+                // attributes failures to this upload only.
+                self.gl.GetError();
                 self.gl.BindTexture(ffi::TEXTURE_2D, texture.0.texture);
                 self.gl
                     .TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
@@ -847,29 +875,166 @@ impl ImportMemWl for GlesRenderer {
                         type_,
                         ptr.offset(offset as isize) as *const _,
                     );
+                    // Profiling diagnostics (debug level only, silent in
+                    // normal sessions). Full initial upload before any
+                    // partial is allowed.
+                    {
+                        use crate::backend::renderer::utils::shm_damage::ShmUploadStats;
+                        let full = Rectangle::<i32, BufferCoord>::from_size((width, height).into());
+                        let stats = ShmUploadStats::for_rects(
+                            &[full],
+                            (width, height).into(),
+                            pixelsize as i64,
+                            true,
+                        );
+                        debug!(
+                            "shm.upload full buffer={}x{} rects=1 damaged={}/{} {:.2}% bytes={} reason=new-texture",
+                            width,
+                            height,
+                            stats.damaged_pixels,
+                            stats.total_pixels,
+                            stats.percent,
+                            stats.bytes_uploaded,
+                        );
+                        // Mirror to `log` so Android logcat (android_logger)
+                        // captures profiling without a tracing subscriber.
+                        log::debug!(
+                            "shm.upload full buffer={}x{} rects=1 damaged={}/{} {:.2}% bytes={} reason=new-texture",
+                            width,
+                            height,
+                            stats.damaged_pixels,
+                            stats.total_pixels,
+                            stats.percent,
+                            stats.bytes_uploaded,
+                        );
+                    }
                 } else {
-                    // Always perform full texture update for committed SHM buffers.
-                    // When fractional scaling is used by nested compositors like KWin (e.g. 2.25x),
-                    // KWin's logical damage coordinates do not align with integer buffer_scale
-                    // surface coordinates, causing partial glTexSubImage2D updates to misplace damage
-                    // and leave severe window drag trails/ghosting across the desktop.
-                    // Full buffer upload on Snapdragon 8 Gen 3 takes <0.5ms and completely guarantees
-                    // coherent presentation without fragile damage-coordinate tracking across scale boundaries.
-                    self.gl.TexSubImage2D(
-                        ffi::TEXTURE_2D,
-                        0,
-                        0,
-                        0,
-                        width,
-                        height,
-                        read_format,
-                        type_,
-                        ptr.offset(offset as isize) as *const _,
+                    // Performance Pass 2: damage-limited partial uploads in
+                    // authoritative SHM buffer pixels. `damage` arrives from
+                    // RendererSurfaceState (already converted conservatively
+                    // with viewport/fractional handling, clamped, and unioned
+                    // across all commits since the last successful upload).
+                    // Re-validate here, merge touching rects only (distant
+                    // tiny damages never coalesce into near-full), and fall
+                    // back to a single full TexSubImage on any ambiguity.
+                    // New/resized textures always take the TexImage2D path
+                    // above, so partials only ever touch a complete texture.
+                    use crate::backend::renderer::utils::shm_damage::{
+                        buffer_to_buffer, decide_upload,
+                    };
+                    let buffer_size: Size<i32, BufferCoord> = (width, height).into();
+                    let mut validated = Vec::with_capacity(damage.len());
+                    let mut ambiguous = false;
+                    for rect in damage.iter() {
+                        match buffer_to_buffer(*rect, buffer_size) {
+                            Ok(Some(r)) => validated.push(r),
+                            Ok(None) => {}
+                            Err(_) => {
+                                ambiguous = true;
+                                break;
+                            }
+                        }
+                    }
+                    // Empty damage with an existing texture means missing
+                    // information: fall back to full (never skip, never trust
+                    // stale pixels). Fully-clipped damage also falls back to
+                    // full via decide_upload: safer than a no-op if a buggy
+                    // client rewrote valid pixels but reported outside damage.
+                    let (rects, is_full, reason, stats) = decide_upload(
+                        validated,
+                        buffer_size,
+                        false,
+                        ambiguous || damage.is_empty(),
+                        pixelsize as i64,
                     );
+                    if is_full {
+                        debug!(
+                            "shm.upload full buffer={}x{} rects=1 damaged={}/{} {:.2}% bytes={} reason={}",
+                            width,
+                            height,
+                            stats.damaged_pixels,
+                            stats.total_pixels,
+                            stats.percent,
+                            stats.bytes_uploaded,
+                            reason,
+                        );
+                        log::debug!(
+                            "shm.upload full buffer={}x{} rects=1 damaged={}/{} {:.2}% bytes={} reason={}",
+                            width,
+                            height,
+                            stats.damaged_pixels,
+                            stats.total_pixels,
+                            stats.percent,
+                            stats.bytes_uploaded,
+                            reason,
+                        );
+                        self.gl.TexSubImage2D(
+                            ffi::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            width,
+                            height,
+                            read_format,
+                            type_,
+                            ptr.offset(offset as isize) as *const _,
+                        );
+                    } else {
+                        debug!(
+                            "shm.upload partial buffer={}x{} rects={} damaged={}/{} {:.2}% bytes={} reason={}",
+                            width,
+                            height,
+                            stats.num_rects,
+                            stats.damaged_pixels,
+                            stats.total_pixels,
+                            stats.percent,
+                            stats.bytes_uploaded,
+                            reason,
+                        );
+                        log::debug!(
+                            "shm.upload partial buffer={}x{} rects={} damaged={}/{} {:.2}% bytes={} reason={}",
+                            width,
+                            height,
+                            stats.num_rects,
+                            stats.damaged_pixels,
+                            stats.total_pixels,
+                            stats.percent,
+                            stats.bytes_uploaded,
+                            reason,
+                        );
+                        for region in rects.iter() {
+                            self.gl.PixelStorei(
+                                ffi::UNPACK_SKIP_PIXELS,
+                                region.loc.x,
+                            );
+                            self.gl.PixelStorei(ffi::UNPACK_SKIP_ROWS, region.loc.y);
+                            self.gl.TexSubImage2D(
+                                ffi::TEXTURE_2D,
+                                0,
+                                region.loc.x,
+                                region.loc.y,
+                                region.size.w,
+                                region.size.h,
+                                read_format,
+                                type_,
+                                ptr.offset(offset as isize) as *const _,
+                            );
+                            self.gl.PixelStorei(ffi::UNPACK_SKIP_PIXELS, 0);
+                            self.gl.PixelStorei(ffi::UNPACK_SKIP_ROWS, 0);
+                        }
+                    }
                 }
 
                 self.gl.PixelStorei(ffi::UNPACK_ROW_LENGTH, 0);
                 self.gl.BindTexture(ffi::TEXTURE_2D, 0);
+
+                // Only a clean GL upload may advance the proven generation.
+                // A silent partial failure here used to be baked into the
+                // cache as stale pixels forever (damage consumed, generation
+                // advanced); now it errors so the caller retries a superset.
+                if self.gl.GetError() != ffi::NO_ERROR {
+                    return Err(GlesError::TextureUploadError);
+                }
 
                 if self.capabilities.contains(&Capability::Fencing) {
                     sync_lock.update_write(&self.gl);

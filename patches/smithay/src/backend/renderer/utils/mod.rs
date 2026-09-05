@@ -9,6 +9,9 @@ mod wayland;
 #[cfg(feature = "wayland_frontend")]
 pub use self::wayland::*;
 
+#[cfg(feature = "wayland_frontend")]
+pub mod shm_damage;
+
 /// A simple wrapper for counting commits
 ///
 /// The purpose of the counter is to keep track
