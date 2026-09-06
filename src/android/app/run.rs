@@ -508,6 +508,17 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             handle(event, backend, event_loop);
         }
 
+        if _event == AppUserEvent::AndroidClipboardChanged {
+            // Dedicated wake for external clipboard changes. Apply the queued
+            // update and flush Wayland immediately so a later Ctrl+V observes
+            // the fresh selection. `process_android_clipboard` is non-blocking
+            // (no Binder/FD work) and already flushes.
+            log::info!("clipdiag wake received");
+            backend.compositor.sync_kwin_seat_focus();
+            let applied = backend.compositor.process_android_clipboard();
+            log::info!("clipdiag wake applied={applied}");
+        }
+
         if _event == AppUserEvent::WaylandTraffic {
             if let Ok(dirty) = crate::android::backend::wayland::dispatch_wayland(backend) {
                 if dirty || backend.output_dirty {

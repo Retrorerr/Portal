@@ -1,8 +1,5 @@
 use super::bind::bind_socket;
-use crate::android::clipboard::{
-    is_valid_clip_text, ClipboardBridge, ClipboardEvent, ClipboardSelectionData, TEXT_MIME,
-    UTF8_TEXT_MIME,
-};
+use crate::android::clipboard::ClipboardBridge;
 use crate::core::startup::{is_kwin_wayland_title, StartupReadiness};
 use smithay::{
     backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state},
@@ -18,7 +15,7 @@ use smithay::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{protocol::wl_seat, Display},
     },
-    utils::{Logical, Serial, Size},
+    utils::{Logical, Serial, Size, SERIAL_COUNTER},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -31,10 +28,10 @@ use smithay::{
         presentation::PresentationState,
         selection::{
             data_device::{
-                clear_data_device_selection, set_data_device_focus, set_data_device_selection,
-                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
+                ServerDndGrabHandler,
             },
-            SelectionHandler, SelectionSource, SelectionTarget,
+            SelectionHandler,
         },
         shell::xdg::{
             Configure, PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler,
@@ -433,55 +430,9 @@ impl XdgShellHandler for State {
 }
 
 impl SelectionHandler for State {
-    type SelectionUserData = ClipboardSelectionData;
-
-    fn new_selection(
-        &mut self,
-        ty: SelectionTarget,
-        source: Option<SelectionSource>,
-        _seat: Seat<Self>,
-    ) {
-        if ty != SelectionTarget::Clipboard {
-            return;
-        }
-        let Some(bridge) = self.clipboard_bridge.as_ref() else {
-            return;
-        };
-
-        match source {
-            Some(source) => {
-                let mime_types = source.mime_types();
-                let Some(mime_type) = crate::core::clipboard_policy::choose_text_mime(
-                    mime_types.iter().map(String::as_str),
-                )
-                .map(str::to_owned) else {
-                    log::debug!("Guest clipboard offered no supported text MIME type");
-                    return;
-                };
-                if let Err(error) = bridge.forward_guest_selection(source, mime_type) {
-                    log::debug!("Failed to start guest-to-Android clipboard transfer: {error}");
-                }
-            }
-            None => bridge.clear_guest_selection(),
-        }
-    }
-
-    fn send_selection(
-        &mut self,
-        ty: SelectionTarget,
-        mime_type: String,
-        fd: OwnedFd,
-        _seat: Seat<Self>,
-        user_data: &ClipboardSelectionData,
-    ) {
-        if ty != SelectionTarget::Clipboard {
-            return;
-        }
-        let Some(bridge) = self.clipboard_bridge.as_ref() else {
-            return;
-        };
-        bridge.send_selection(user_data, &mime_type, fd);
-    }
+    // Plasma applications use KWin's inner Wayland server. The outer server
+    // retains data-device support for drag and drop, but owns no clipboard.
+    type SelectionUserData = ();
 }
 
 impl DataDeviceHandler for State {
@@ -864,9 +815,9 @@ impl Compositor {
         (listener_fd, display_fd)
     }
 
-    /// Apply completed Android -> Wayland clipboard changes without doing JNI or FD I/O on the
-    /// render thread.
-    pub fn process_android_clipboard(&mut self) {
+    /// Publish completed Android clipboard changes to KWin's inner clipboard
+    /// broker without doing JNI or FD I/O on the render thread.
+    pub fn process_android_clipboard(&mut self) -> bool {
         let events = self
             .state
             .clipboard_bridge
@@ -874,46 +825,55 @@ impl Compositor {
             .map(ClipboardBridge::drain_events)
             .unwrap_or_default();
         if events.is_empty() {
-            return;
+            return false;
         }
 
-        let dh = self.display.handle();
-        for event in events {
-            match event {
-                ClipboardEvent::AndroidChanged(Some(text)) => {
-                    if !is_valid_clip_text(&text) {
-                        log::warn!("Ignoring empty or oversized Android clipboard selection");
-                        continue;
-                    }
-                    set_data_device_selection::<State>(
-                        &dh,
-                        &self.seat,
-                        vec![TEXT_MIME.to_owned(), UTF8_TEXT_MIME.to_owned()],
-                        ClipboardSelectionData::from_text(text),
-                    );
-                }
-                ClipboardEvent::AndroidChanged(None) => {
-                    clear_data_device_selection::<State>(&dh, &self.seat);
-                }
+        if let Some(bridge) = self.state.clipboard_bridge.as_ref() {
+            for value in events {
+                bridge.publish_android_clipboard(value.as_deref());
             }
+        }
+        true
+    }
+
+    /// Request an immediate Android clipboard resync (resume / focus regain).
+    ///
+    /// Non-blocking with no Binder work: wakes the clipboard worker early for
+    /// one prompt read. Safe on the event-loop thread.
+    pub fn request_android_clipboard_resync(&self) {
+        if let Some(bridge) = self.state.clipboard_bridge.as_ref() {
+            bridge.request_resync();
         }
     }
 
-    /// Keep wl_data_device focus aligned with the full-screen Plasma/KWin client. This is cheap
-    /// and idempotent, and also covers the first toplevel appearing after the initial dispatch.
+    /// Keep wl_data_device focus aligned with the identified Plasma/KWin client.
+    ///
+    /// Smithay sends compositor-owned clipboard offers only to this focus
+    /// client. Clearing the focus when KWin is absent also prevents a stale
+    /// client from retaining the selection during a KWin generation change.
     pub fn sync_data_device_focus(&self) {
         let client = self
             .state
-            .xdg_shell_state
-            .toplevel_surfaces()
-            .iter()
-            .next()
-            .and_then(|surface| surface.wl_surface().client());
-        if client.is_none() {
-            return;
-        }
+            .kwin_surface
+            .as_ref()
+            .and_then(|surface| surface.client());
         let dh = self.display.handle();
         set_data_device_focus::<State>(&dh, &self.seat, client);
+    }
+
+    /// Keep the keyboard and data-device seats focused on the same identified
+    /// KWin surface/client. KeyboardHandle::input drops events when no focus
+    /// is installed, independently of the text-input focus state in `State`.
+    pub fn sync_kwin_seat_focus(&mut self) {
+        let kwin_surface = self.state.kwin_surface.clone();
+        if self.keyboard.current_focus().as_ref() != kwin_surface.as_ref() {
+            self.keyboard.set_focus(
+                &mut self.state,
+                kwin_surface,
+                SERIAL_COUNTER.next_serial().into(),
+            );
+        }
+        self.sync_data_device_focus();
     }
 
     /// Re-scan all currently known xdg toplevels after dispatch. This catches

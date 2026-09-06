@@ -50,21 +50,25 @@ mkdir -p "$tmp_root"
 chmod 700 "$tmp_root"
 cleanup_pid=''
 push_pid=''
+initial_gate="$tmp_root/ignore-initial"
 cleanup() {
     trap - EXIT HUP INT TERM
     if [[ -n "$push_pid" ]] && kill -0 "$push_pid" 2>/dev/null; then
-        kill TERM "$push_pid" 2>/dev/null || true
+        kill -TERM "$push_pid" 2>/dev/null || true
+        wait "$push_pid" 2>/dev/null || true
     fi
     if [[ -n "$cleanup_pid" ]] && kill -0 "$cleanup_pid" 2>/dev/null; then
-        kill TERM "$cleanup_pid" 2>/dev/null || true
+        kill -TERM "$cleanup_pid" 2>/dev/null || true
+        wait "$cleanup_pid" 2>/dev/null || true
     fi
+    rmdir "$initial_gate" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 143' HUP INT TERM
 
 stop_injected_owner() {
     if [[ -n "$cleanup_pid" ]] && kill -0 "$cleanup_pid" 2>/dev/null; then
-        kill TERM "$cleanup_pid" 2>/dev/null || true
+        kill -TERM "$cleanup_pid" 2>/dev/null || true
         wait "$cleanup_pid" 2>/dev/null || true
     fi
     cleanup_pid=''
@@ -74,12 +78,23 @@ run_guest_watcher() {
     # --watch is backed by ext-data-control-v1 in wl-clipboard 2.3+.  The
     # command receives the complete text on stdin; it does not use shell
     # command substitution, which would lose trailing newlines or NUL bytes.
+    local watch_pid=''
+    trap 'if [[ -n "$watch_pid" ]]; then kill -TERM "$watch_pid" 2>/dev/null || true; wait "$watch_pid" 2>/dev/null || true; fi; exit 0' TERM HUP INT
     while :; do
-        wl-paste --type text/plain;charset=utf-8 --no-newline --watch "$PUSH_HELPER" >/dev/null 2>&1 || true
+        LOCALDESKTOP_CLIPBOARD_INITIAL_GATE="$initial_gate" \
+            wl-paste --type 'text/plain;charset=utf-8' --no-newline --watch "$PUSH_HELPER" &
+        watch_pid=$!
+        wait "$watch_pid" 2>/dev/null || true
+        watch_pid=''
         sleep 1
     done
 }
 
+# wl-paste --watch invokes its command once for the selection that already
+# exists when observation begins. That is session initialization, not a user
+# copy. The one-shot directory gate lets the push helper discard it atomically.
+rmdir "$initial_gate" 2>/dev/null || true
+mkdir "$initial_gate"
 run_guest_watcher &
 push_pid=$!
 
@@ -108,7 +123,7 @@ while :; do
                 [[ "$byte_count" =~ ^[1-9][0-9]{0,6}$ ]] || break
                 ((byte_count <= MAX_TEXT_BYTES)) || break
                 encoded_count=$(( ((byte_count + 2) / 3) * 4 ))
-                IFS= read -r encoded || break
+                IFS= read -r encoded <&3 || break
                 [[ "${#encoded}" -eq "$encoded_count" ]] || break
                 decoded_file="$tmp_root/value.$$"
                 rm -f -- "$decoded_file"
@@ -125,8 +140,12 @@ while :; do
                 stop_injected_owner
                 # Keep this source alive after the command returns so Plasma
                 # clients can paste even while no app owns the selection.
-                wl-copy --foreground --type text/plain;charset=utf-8 < "$decoded_file" >/dev/null 2>&1 &
+                # Open the file in the parent before spawning: unlinking it
+                # after '&' races the child's input redirection.
+                exec 4< "$decoded_file"
+                wl-copy --foreground --type 'text/plain;charset=utf-8' <&4 3>&- 4<&- &
                 cleanup_pid=$!
+                exec 4<&-
                 rm -f -- "$decoded_file"
                 ;;
             *)

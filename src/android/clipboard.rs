@@ -8,54 +8,22 @@ use jni::{
     objects::{JObject, JString, JValue},
     JNIEnv,
 };
-use smithay::wayland::selection::SelectionSource;
 use std::{
     fmt,
-    io::{Read, Write},
-    os::fd::OwnedFd,
-    os::unix::net::UnixStream,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, Sender, TryRecvError},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread,
-    time::Duration,
 };
+use winit::event_loop::EventLoopProxy;
 use winit::platform::android::activity::AndroidApp;
 
+use crate::android::accessibility::{event_loop_proxy, AppUserEvent};
+use crate::android::clipboard_broker::{self, BrokerHandle, GuestClipboardCallback};
 use crate::android::utils::ndk::run_in_jvm;
-pub use crate::core::clipboard_policy::{
-    choose_text_mime, is_valid_clip_text, supports_mime_type, validate_clip_text,
-    MAX_CLIPBOARD_BYTES, TEXT_MIME, UTF8_TEXT_MIME,
-};
-
-/// Data backing a compositor-provided Android clipboard selection.
-///
-/// The bytes are immutable and reference counted so `send_selection` can hand the transfer to a
-/// worker without borrowing the Smithay state or blocking its event loop.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClipboardSelectionData {
-    bytes: Arc<[u8]>,
-}
-
-impl ClipboardSelectionData {
-    pub fn from_text(text: String) -> Self {
-        Self {
-            bytes: Arc::from(text.into_bytes()),
-        }
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-/// Events produced by the Android clipboard polling worker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClipboardEvent {
-    AndroidChanged(Option<String>),
-}
+use crate::core::clipboard_policy::{validate_clip_text, MAX_CLIPBOARD_BYTES};
+use crate::core::clipboard_sync::ExternalClipboardSync;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardError(String);
@@ -237,225 +205,196 @@ pub fn write_text(android_app: &AndroidApp, text: &str) -> Result<(), ClipboardE
 /// Bridge between Smithay selection callbacks and Android's clipboard.
 ///
 /// Android clipboard reads and all Wayland selection FD I/O happen on worker threads. The
-/// compositor only enqueues protocol messages, drains already-completed Android changes, and
+/// compositor only drains already-completed Android changes, enqueues protocol messages, and
 /// hands immutable bytes to a writer. This keeps a slow Android binder call or a large paste from
 /// stalling frame dispatch and presentation.
+///
+/// Ordering: the worker reads once at startup and again only when resume or
+/// focus regain requests a resync, then queues external changes into the shared
+/// [`ExternalClipboardSync`] (the same host-testable state machine covered by
+/// `tests/clipboard_sync.rs`) and wakes the event loop immediately with the
+/// dedicated [`AppUserEvent::AndroidClipboardChanged`] event. The event loop
+/// drains and flushes before forwarding later keyboard/paste input, so the
+/// first Ctrl+V after returning from another app sees the fresh selection.
+/// `request_resync` wakes the worker early for one prompt read after resume
+/// or focus regain, because reads may be denied while backgrounded.
 pub struct ClipboardBridge {
-    android_app: AndroidApp,
-    events: Receiver<ClipboardEvent>,
+    sync: Arc<Mutex<ExternalClipboardSync>>,
+    resync_signal: Arc<(Mutex<bool>, Condvar)>,
     stop: Arc<AtomicBool>,
-    last_guest_write: Arc<Mutex<Option<String>>>,
+    broker: Option<BrokerHandle>,
 }
 
 impl ClipboardBridge {
     /// Start the Android -> Wayland polling worker.
     pub fn new(android_app: AndroidApp) -> Self {
-        let (event_sender, events) = mpsc::channel();
+        let sync = Arc::new(Mutex::new(ExternalClipboardSync::new()));
+        let resync_signal = Arc::new((Mutex::new(false), Condvar::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        let last_guest_write = Arc::new(Mutex::new(None));
+        let wake_proxy = event_loop_proxy();
+        let broker_android_app = android_app.clone();
+        let broker_sync = Arc::clone(&sync);
+        let on_guest_change: GuestClipboardCallback = Arc::new(move |value| {
+            spawn_guest_android_write(broker_android_app.clone(), Arc::clone(&broker_sync), value);
+        });
+        let broker = clipboard_broker::start(Arc::clone(&stop), on_guest_change);
         spawn_android_poller(
             android_app.clone(),
-            event_sender,
+            Arc::clone(&sync),
             Arc::clone(&stop),
-            Arc::clone(&last_guest_write),
+            Arc::clone(&resync_signal),
+            wake_proxy,
         );
         Self {
-            android_app,
-            events,
+            sync,
+            resync_signal,
             stop,
-            last_guest_write,
+            broker,
+        }
+    }
+
+    /// Inject the authenticated broker variables into the next PRoot Plasma
+    /// launch. The guest helper uses these to reach KWin's inner server.
+    pub fn broker_environment() -> Vec<(String, String)> {
+        clipboard_broker::launch_environment()
+    }
+
+    /// Publish an Android clipboard observation to the inner-KWin helper.
+    pub fn publish_android_clipboard(&self, value: Option<&str>) {
+        let Some(broker) = self.broker.as_ref() else {
+            return;
+        };
+        match broker.publish(value) {
+            Ok(true) => log::info!("clipdiag broker published Android clipboard update"),
+            Ok(false) => {}
+            Err(error) => log::warn!("clipdiag broker rejected Android clipboard update: {error}"),
         }
     }
 
     /// Drain Android clipboard changes observed since the previous compositor iteration.
-    pub fn drain_events(&self) -> Vec<ClipboardEvent> {
-        let mut changes = Vec::new();
-        loop {
-            match self.events.try_recv() {
-                Ok(event) => changes.push(event),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
-        }
-        changes
-    }
-
-    /// Request that a client-owned Wayland selection be copied into Android.
     ///
-    /// The source's `send` request is a small Smithay protocol enqueue. Reading the resulting FD,
-    /// decoding UTF-8, and calling Android's clipboard manager all happen off the compositor
-    /// thread.
-    pub fn forward_guest_selection(
-        &self,
-        source: SelectionSource,
-        mime_type: String,
-    ) -> Result<(), String> {
-        if !supports_mime_type(&mime_type) {
-            return Err(format!("unsupported clipboard MIME type: {mime_type}"));
+    /// Non-blocking: copies already-queued values under a short mutex without
+    /// Binder or FD work, so it is safe before input on the event-loop thread.
+    pub fn drain_events(&self) -> Vec<Option<String>> {
+        self.sync
+            .lock()
+            .map(|mut tracker| tracker.drain_pending())
+            .unwrap_or_default()
+    }
+
+    /// Request an immediate resync after Activity resume / focus regain.
+    ///
+    /// Non-blocking with no Binder work: marks the shared tracker and wakes
+    /// the worker early. The next successful read is evaluated promptly; an
+    /// unchanged value queues nothing. Safe on the event-loop thread.
+    pub fn request_resync(&self) {
+        if let Ok(mut tracker) = self.sync.lock() {
+            tracker.request_resync();
         }
-
-        let (reader, writer) = UnixStream::pair()
-            .map_err(|error| format!("create clipboard transfer pipe: {error}"))?;
-        let writer: OwnedFd = writer.into();
-        // Smithay's source owns and closes this FD after sending wl_data_source.send. The reader
-        // therefore observes EOF once the client finishes the transfer.
-        source.send(mime_type, writer);
-
-        let android_app = self.android_app.clone();
-        let last_guest_write = Arc::clone(&self.last_guest_write);
-        thread::spawn(move || {
-            let mut reader = reader.take((MAX_CLIPBOARD_BYTES + 1) as u64);
-            let mut bytes = Vec::new();
-            if let Err(error) = reader.read_to_end(&mut bytes) {
-                log::warn!("Failed reading guest clipboard selection: {error}");
-                return;
-            }
-            if bytes.len() > MAX_CLIPBOARD_BYTES {
-                log::warn!(
-                    "Ignoring guest clipboard selection larger than {} bytes",
-                    MAX_CLIPBOARD_BYTES
-                );
-                return;
-            }
-            let Ok(text) = String::from_utf8(bytes) else {
-                log::warn!("Ignoring guest clipboard selection that is not UTF-8");
-                return;
-            };
-            if text.is_empty() {
-                log::debug!("Ignoring empty guest clipboard selection");
-                return;
-            }
-
-            // Mark before the binder write so the poller cannot echo this own write if it races
-            // the Android clipboard notification. Clear the marker when the write fails.
-            if let Ok(mut previous) = last_guest_write.lock() {
-                *previous = Some(text.clone());
-            }
-            if let Err(error) = write_text(&android_app, &text) {
-                log::warn!("Failed copying guest clipboard to Android: {error}");
-                if let Ok(mut previous) = last_guest_write.lock() {
-                    if previous.as_deref() == Some(text.as_str()) {
-                        *previous = None;
-                    }
-                }
-            } else {
-                log::debug!(
-                    "Copied {} bytes from guest clipboard to Android",
-                    text.len()
-                );
-            }
-        });
-        Ok(())
-    }
-
-    /// Propagate a client clearing its Wayland clipboard to Android.
-    pub fn clear_guest_selection(&self) {
-        let android_app = self.android_app.clone();
-        let last_guest_write = Arc::clone(&self.last_guest_write);
-        thread::spawn(move || {
-            if let Ok(mut previous) = last_guest_write.lock() {
-                *previous = Some(String::new());
-            }
-            if let Err(error) = write_text(&android_app, "") {
-                log::warn!("Failed clearing Android clipboard after guest clear: {error}");
-                if let Ok(mut previous) = last_guest_write.lock() {
-                    *previous = None;
-                }
-            }
-        });
-    }
-
-    /// Send Android clipboard bytes to a Wayland client without blocking dispatch.
-    pub fn send_selection(&self, selection: &ClipboardSelectionData, mime_type: &str, fd: OwnedFd) {
-        if !supports_mime_type(mime_type) {
-            log::debug!("Dropping unsupported Android clipboard MIME request: {mime_type}");
-            return;
+        let (lock, cvar) = &*self.resync_signal;
+        if let Ok(mut requested) = lock.lock() {
+            *requested = true;
+            cvar.notify_one();
         }
-        let bytes = Arc::clone(&selection.bytes);
-        thread::spawn(move || {
-            let mut file = std::fs::File::from(fd);
-            if let Err(error) = file.write_all(&bytes) {
-                log::debug!("Wayland clipboard receiver closed early: {error}");
-            }
-            if let Err(error) = file.flush() {
-                log::debug!("Failed flushing Wayland clipboard transfer: {error}");
-            }
-        });
     }
+}
+
+fn spawn_guest_android_write(
+    android_app: AndroidApp,
+    sync: Arc<Mutex<ExternalClipboardSync>>,
+    value: Option<String>,
+) {
+    thread::spawn(move || {
+        if let Ok(mut tracker) = sync.lock() {
+            tracker.mark_guest_write(value.clone());
+        }
+        let text = value.as_deref().unwrap_or_default();
+        if let Err(error) = write_text(&android_app, text) {
+            log::warn!("Failed copying guest clipboard to Android: {error}");
+            if let Ok(mut tracker) = sync.lock() {
+                tracker.clear_echo_for(value);
+            }
+        }
+    });
 }
 
 impl Drop for ClipboardBridge {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        // Wake the worker so it can observe `stop` without waiting out the
+        // full poll interval.
+        let (lock, cvar) = &*self.resync_signal;
+        if let Ok(mut requested) = lock.lock() {
+            *requested = true;
+            cvar.notify_one();
+        }
     }
 }
 
 fn spawn_android_poller(
     android_app: AndroidApp,
-    event_sender: Sender<ClipboardEvent>,
+    sync: Arc<Mutex<ExternalClipboardSync>>,
     stop: Arc<AtomicBool>,
-    last_guest_write: Arc<Mutex<Option<String>>>,
+    resync_signal: Arc<(Mutex<bool>, Condvar)>,
+    wake_proxy: Option<EventLoopProxy<AppUserEvent>>,
 ) {
     thread::spawn(move || {
-        let mut last_seen: Option<Option<String>> = None;
-        while !stop.load(Ordering::Acquire) {
-            match read_text(&android_app) {
-                Ok(current) => {
-                    if last_seen.as_ref() != Some(&current) {
-                        last_seen = Some(current.clone());
-                        let suppress = last_guest_write.lock().ok().and_then(|value| value.clone());
-                        if suppress == current {
-                            // Consume the one matching observation; an external later change is
-                            // still delivered even if it happens to reuse the same text after a
-                            // different clipboard value.
-                            if let Ok(mut value) = last_guest_write.lock() {
-                                if *value == current {
-                                    *value = None;
-                                }
-                            }
-                        } else if event_sender
-                            .send(ClipboardEvent::AndroidChanged(current))
-                            .is_err()
-                        {
+        let mut first_read = true;
+        loop {
+            if !first_read {
+                let (lock, cvar) = &*resync_signal;
+                let Ok(mut requested) = lock.lock() else {
+                    break;
+                };
+                while !*requested && !stop.load(Ordering::Acquire) {
+                    let Ok(next) = cvar.wait(requested) else {
+                        return;
+                    };
+                    requested = next;
+                }
+                *requested = false;
+            } else {
+                first_read = false;
+            }
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            // Binder read happens off the event-loop/render thread.
+            let observed = match read_text(&android_app) {
+                Ok(current) => Ok(current),
+                Err(error) => {
+                    // Clipboard access can be denied while Android's activity is backgrounded.
+                    // Resume/focus regain will request the next read.
+                    log::debug!("Android clipboard read unavailable: {error}");
+                    Err(())
+                }
+            };
+            let (queued, pending_len) = sync
+                .lock()
+                .map(|mut tracker| {
+                    let queued = tracker.observe_poll(observed);
+                    (queued, tracker.pending_len())
+                })
+                .unwrap_or((false, 0));
+            log::debug!("clipdiag detect queued={queued} pending={pending_len}");
+            if queued {
+                // Wake the event loop immediately with the dedicated event so
+                // the queued update is applied and flushed before later
+                // keyboard/paste input. Fall back to the current global proxy
+                // when the stored one predates registration.
+                let proxy = wake_proxy.clone().or_else(event_loop_proxy);
+                if let Some(proxy) = proxy {
+                    match proxy.send_event(AppUserEvent::AndroidClipboardChanged) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            log::debug!("Android clipboard wake failed: {error}");
                             break;
                         }
                     }
-                }
-                Err(error) => {
-                    // Clipboard access can be denied while Android's activity is backgrounded;
-                    // retry after the normal interval without manufacturing a clear selection.
-                    log::debug!("Android clipboard poll unavailable: {error}");
+                } else {
+                    log::debug!("Android clipboard event loop is not ready");
                 }
             }
-            thread::sleep(Duration::from_millis(250));
         }
     });
-}
-
-/// Small state machine for polling Android -> Wayland clipboard changes.
-#[derive(Debug, Default)]
-pub struct ClipboardPoller {
-    last: Mutex<Option<Option<String>>>,
-}
-
-impl ClipboardPoller {
-    /// Read once and return `Some(new_value)` only when the Android clipboard changed. The inner
-    /// `None` represents a cleared or unavailable clipboard and is distinct from no change.
-    pub fn poll(&self, android_app: &AndroidApp) -> Result<Option<Option<String>>, ClipboardError> {
-        let current = read_text(android_app)?;
-        let mut last = self
-            .last
-            .lock()
-            .map_err(|_| ClipboardError("clipboard poller lock poisoned".into()))?;
-        if last.as_ref() == Some(&current) {
-            return Ok(None);
-        }
-        *last = Some(current.clone());
-        Ok(Some(current))
-    }
-
-    pub fn reset(&self) {
-        if let Ok(mut last) = self.last.lock() {
-            *last = None;
-        }
-    }
 }

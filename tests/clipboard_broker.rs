@@ -8,8 +8,8 @@ use std::io::Cursor;
 use broker::{
     base64_encoded_len, decode_base64, encode_base64, encode_clear, encode_clear_event,
     encode_hello, encode_push, encode_subscribe, encode_value_event, read_event, read_request,
-    AuthToken, BrokerEvent, BrokerState, ClientRequest, CodecError, EchoSuppressor, RequestKind,
-    MAX_TEXT_BYTES, TOKEN_BYTES,
+    AuthToken, BrokerEvent, BrokerState, ClientRequest, CodecError, RequestKind, MAX_TEXT_BYTES,
+    TOKEN_BYTES,
 };
 
 #[test]
@@ -23,6 +23,7 @@ fn token_roundtrip_and_constant_time_comparison_cover_lengths() {
         Ok(token.clone())
     );
     assert!(token.constant_time_eq(&[0x5a; TOKEN_BYTES]));
+    assert!(token.constant_time_eq_token(&token));
     assert!(!token.constant_time_eq(&[0x5a; TOKEN_BYTES - 1]));
     assert!(!token.constant_time_eq(&[0x5a; TOKEN_BYTES + 1]));
     assert!(!token.constant_time_eq(&[0x5b; TOKEN_BYTES]));
@@ -137,22 +138,6 @@ fn event_codec_handles_values_acknowledgements_and_explicit_clear() {
         read_event(&mut Cursor::new(b"VALUE 1\n/w==\n".as_slice())),
         Err(CodecError::InvalidUtf8)
     );
-}
-
-#[test]
-fn echo_suppression_consumes_only_one_matching_observation() {
-    let mut suppressor = EchoSuppressor::default();
-    suppressor.mark_host_update(Some("same text"));
-    assert!(!suppressor.should_forward_guest_observation(Some("same text")));
-    assert!(suppressor.should_forward_guest_observation(Some("same text")));
-
-    suppressor.mark_host_update(None);
-    assert!(!suppressor.should_forward_guest_observation(None));
-    assert!(suppressor.should_forward_guest_observation(Some("new text")));
-
-    suppressor.mark_host_update(Some("discarded"));
-    suppressor.clear();
-    assert!(suppressor.should_forward_guest_observation(Some("discarded")));
 }
 
 #[test]

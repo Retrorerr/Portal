@@ -18,12 +18,20 @@ fail() {
 host=${LOCALDESKTOP_CLIPBOARD_HOST:-127.0.0.1}
 port=${LOCALDESKTOP_CLIPBOARD_PORT:-}
 token=${LOCALDESKTOP_CLIPBOARD_TOKEN:-}
+initial_gate=${LOCALDESKTOP_CLIPBOARD_INITIAL_GATE:-}
 
 [[ "$host" =~ ^[A-Za-z0-9._:-]+$ ]] || fail 'invalid broker host'
 [[ "$port" =~ ^[0-9]{1,5}$ ]] || fail 'invalid broker port'
 port_number=$((10#$port))
 ((port_number >= 1 && port_number <= 65535)) || fail 'broker port is out of range'
 [[ "$token" =~ ^[0-9a-fA-F]{64}$ ]] || fail 'invalid broker token'
+
+# `wl-paste --watch` immediately reports the selection that predates this
+# Portal session. Consume the gate once and do not turn that observation into
+# a fresh Android `setPrimaryClip` call.
+if [[ -n "$initial_gate" ]] && rmdir "$initial_gate" 2>/dev/null; then
+    exit 0
+fi
 
 tmp_root=${TMPDIR:-/tmp}/localdesktop-clipboard
 mkdir -p "$tmp_root"
@@ -43,11 +51,21 @@ byte_count=$(wc -c < "$tmp_file")
 byte_count=${byte_count//[[:space:]]/}
 [[ "$byte_count" =~ ^[0-9]+$ ]] || fail 'could not measure clipboard data'
 ((byte_count <= MAX_TEXT_BYTES)) || fail 'clipboard selection exceeds 4 MiB'
-((byte_count > 0)) || exit 0
 
 exec 3<>"/dev/tcp/$host/$port_number" || fail 'could not connect to clipboard broker'
+printf 'LDCL/1 HELLO %s\n' "$token" >&3
+IFS= read -r -t 5 reply <&3 || fail 'broker handshake timed out'
+[[ "$reply" == 'ACK HELLO' ]] || fail 'broker rejected handshake'
+
+if ((byte_count == 0)); then
+    printf 'LDCL/1 CLEAR\n' >&3
+    IFS= read -r -t 5 reply <&3 || fail 'broker did not acknowledge clear'
+    [[ "$reply" == 'ACK CLEAR' ]] || fail 'broker rejected clear'
+    exec 3>&-
+    exit 0
+fi
+
 {
-    printf 'LDCL/1 HELLO %s\n' "$token"
     printf 'LDCL/1 PUSH %s\n' "$byte_count"
     # GNU coreutils (used by Arch) supports -w 0.  The fallback also strips
     # wrapping newlines for implementations with a different base64 CLI.
@@ -56,4 +74,6 @@ exec 3<>"/dev/tcp/$host/$port_number" || fail 'could not connect to clipboard br
     fi
     printf '\n'
 } >&3
+IFS= read -r -t 5 reply <&3 || fail 'broker did not acknowledge push'
+[[ "$reply" == 'ACK PUSH' ]] || fail 'broker rejected push'
 exec 3>&-

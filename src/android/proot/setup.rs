@@ -58,6 +58,10 @@ const CRASH_HANDLER_BINARY: &[u8] =
 const CRASH_HANDLER_SOURCE: &str = include_str!("../../../assets/localdesktop-crash-handler.c");
 const PORTAL_IME_BRIDGE: &str = include_str!("../../../assets/portal-ime-bridge.py");
 const PORTAL_IME_DESKTOP: &str = include_str!("../../../assets/portal-ime.desktop");
+const CLIPBOARD_SYNC: &str = include_str!("../../../assets/localdesktop-clipboard-sync.sh");
+const CLIPBOARD_PUSH: &str = include_str!("../../../assets/localdesktop-clipboard-push.sh");
+const WL_COPY_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-copy");
+const WL_PASTE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-paste");
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -492,6 +496,17 @@ fn write_executable(path: &Path, contents: &str) {
         .expect("Failed to mark executable script");
 }
 
+fn write_guest_binary(path: &Path, contents: &[u8]) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let temporary = path.with_extension("portal-tmp");
+    fs::write(&temporary, contents).expect("Failed to write guest binary");
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
+        .expect("Failed to mark guest binary executable");
+    fs::rename(&temporary, path).expect("Failed to install guest binary");
+}
+
 /// Install a shipped configuration without clobbering a user's later edits.
 /// Executable launch/recovery scripts are always refreshed above so upgrades
 /// receive fixes, while normal application preferences remain user-owned.
@@ -806,6 +821,20 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/localdesktop-retry-plasma"),
         RETRY_PLASMA,
     );
+    write_executable(
+        &fs_root.join("usr/local/bin/localdesktop-clipboard-sync"),
+        CLIPBOARD_SYNC,
+    );
+    write_executable(
+        &fs_root.join("usr/local/bin/localdesktop-clipboard-push"),
+        CLIPBOARD_PUSH,
+    );
+    // Debian Trixie's locked runtime still carries wl-clipboard 2.2.1,
+    // which predates KWin's ext-data-control support. Bundle the matching
+    // ARM64 2.3 clients into /usr/local/bin so the helper is authoritative
+    // across existing and newly provisioned runtime slots.
+    write_guest_binary(&fs_root.join("usr/local/bin/wl-copy"), WL_COPY_BINARY);
+    write_guest_binary(&fs_root.join("usr/local/bin/wl-paste"), WL_PASTE_BINARY);
     write_executable(
         &fs_root.join("usr/local/bin/ksplashqml"),
         "#!/bin/sh\nexit 0\n",
