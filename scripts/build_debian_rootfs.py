@@ -55,6 +55,8 @@ SEED_PACKAGES = [
     "plasma-pa",
     # Browser
     "firefox-esr",
+    "libgtk-3-bin",
+    "libglib2.0-bin",
     # Fonts
     "fonts-dejavu-core",
     "fonts-noto-core",
@@ -112,6 +114,38 @@ SEED_PACKAGES = [
     "plasma-widgets-addons",
     "plasma-workspace-wallpapers",
     "plasma-runners-addons",
+    # GTK/Qt integration, browser integration, fonts & spellcheck
+    "kde-config-gtk-style",
+    "xsettings-kde",
+    "plasma5-integration",
+    "plasma-browser-integration",
+    "webext-plasma-browser-integration",
+    "fonts-noto-color-emoji",
+    "fonts-hack",
+    "sonnet6-plugins",
+    "hunspell-en-gb",
+    # Thumbnails and image formats
+    "ffmpegthumbs",
+    "kimageformat6-plugins",
+    "qt6-image-formats-plugins",
+    # Plasma addons, window management, help & docs
+    "plasma-dataengines-addons",
+    "plasma-calendar-addons",
+    "plasma-wallpapers-addons",
+    "kwin-addons",
+    "kmenuedit",
+    "khelpcenter",
+    "plasma-desktop-doc",
+    # Utilities
+    "kcharselect",
+    "filelight",
+    "sweeper",
+    "kde-spectacle",
+    # Wallet, secrets & indexing
+    "kwallet6",
+    "kwalletmanager",
+    "ksshaskpass",
+    "baloo6",
     # Compression & archive tools
     "p7zip-full",
     "unzip",
@@ -123,6 +157,7 @@ SEED_PACKAGES = [
 
 # Packages to skip if pulled in as optional/heavy non-critical dependencies
 EXCLUDE_PACKAGES = {
+    "plasma-systemmonitor",
     "systemd",
     "systemd-boot",
     "systemd-resolved",

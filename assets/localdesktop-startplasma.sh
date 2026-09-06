@@ -31,8 +31,8 @@ export SHELL=/bin/bash
 # startup timing and ptrace is commonly denied by Android's sandbox.
 export LOCALDESKTOP_GDB_BACKTRACE=${LOCALDESKTOP_GDB_BACKTRACE:-@GDB_BACKTRACE@}
 # Keep a protocol trace in the bounded guest session log when startup needs
-# diagnosis.  Callers can explicitly set WAYLAND_DEBUG=0 for normal runs.
-export WAYLAND_DEBUG=${WAYLAND_DEBUG:-1}
+# diagnosis. Set WAYLAND_DEBUG=1 explicitly when tracing protocols.
+export WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}
 
 state_dir=/var/lib/localdesktop
 mkdir -p "$state_dir"
@@ -175,7 +175,24 @@ fi
 export LANG=en_GB.UTF-8
 export LC_ALL=en_GB.UTF-8
 
-cache_marker="$state_dir/desktop-caches-v2"
+# Package extraction also skips gawk's update-alternatives registration.
+if ! command -v awk >/dev/null 2>&1 && [ -x /usr/bin/gawk ]; then
+    update-alternatives --install /usr/bin/awk awk /usr/bin/gawk 10 >> "$session_log" 2>&1 || exit 1
+fi
+
+# Debian maintainer triggers are not run when extracting the rootfs. GLib's
+# absent schemas leave GTK's DPI unset (-1), yielding negative Firefox UI fonts.
+# GTK's missing module cache also prevents Wayland text-input from loading.
+glib-compile-schemas /usr/share/glib-2.0/schemas >> "$session_log" 2>&1 || exit 1
+/usr/lib/aarch64-linux-gnu/libgtk-3-0/gtk-query-immodules-3.0 --update-cache >> "$session_log" 2>&1 || exit 1
+
+# Android denies host CPU counters and hides other apps' processes. Stock
+# System Monitor must not present fabricated host-wide statistics.
+if [ -x /usr/bin/plasma-systemmonitor ]; then
+    dpkg --remove plasma-systemmonitor >> "$session_log" 2>&1 || exit 1
+fi
+
+cache_marker="$state_dir/desktop-caches-v3"
 if [ ! -e "$cache_marker" ]; then
     if command -v update-mime-database >/dev/null 2>&1; then
         update-mime-database /usr/share/mime >> "$session_log" 2>&1 || true

@@ -28,10 +28,10 @@ const PORTAL_IME_BRIDGE_SOURCE: &str = include_str!("../assets/portal-ime-bridge
 
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
-    clamp_physical_coordinate, density_scale_factor, normalized_coordinate,
-    normalized_rotation_degrees, physical_window_size, qt_scale_factor, refresh_period_nanos,
-    xft_dpi, NOMINAL_OUTPUT_REFRESH_MILLIHZ, DESIRED_REFRESH_MILLIHZ, is_valid_refresh_millihz,
-    refresh_changed, select_preferred_refresh_millihz,
+    clamp_physical_coordinate, density_scale_factor, is_valid_refresh_millihz,
+    normalized_coordinate, normalized_rotation_degrees, physical_window_size, qt_scale_factor,
+    refresh_changed, refresh_period_nanos, select_preferred_refresh_millihz, xft_dpi,
+    DESIRED_REFRESH_MILLIHZ, NOMINAL_OUTPUT_REFRESH_MILLIHZ,
 };
 use clipboard_policy::{
     choose_text_mime, is_valid_clip_text, supports_mime_type, validate_clip_text,
@@ -49,11 +49,14 @@ fn oneplus_pad_like_metrics_keep_fractional_scale_and_refresh_period() {
 }
 
 #[test]
-fn nominal_output_refresh_is_stable_preferred_target_and_physical_vrr_never_rewrites_mode() {
+fn effective_output_refresh_tracks_android_independently_of_requested_maximum() {
     // Fallback constants stay sane when mode enumeration is unavailable.
     assert_eq!(NOMINAL_OUTPUT_REFRESH_MILLIHZ, 120_000);
     assert_eq!(DESIRED_REFRESH_MILLIHZ, 120_000);
-    assert_eq!(refresh_period_nanos(NOMINAL_OUTPUT_REFRESH_MILLIHZ), 8_333_333);
+    assert_eq!(
+        refresh_period_nanos(NOMINAL_OUTPUT_REFRESH_MILLIHZ),
+        8_333_333
+    );
     // Dynamic selection: OnePlus Pad 3's reported modes resolve to 144 Hz.
     assert_eq!(
         select_preferred_refresh_millihz(&[50_000, 60_000, 90_000, 120_000, 144_000]),
@@ -61,13 +64,16 @@ fn nominal_output_refresh_is_stable_preferred_target_and_physical_vrr_never_rewr
     );
     assert_eq!(refresh_period_nanos(144_000), 6_944_444);
     // Portable fallback: 120/90/60 Hz devices keep their own maximum.
-    assert_eq!(select_preferred_refresh_millihz(&[60_000, 120_000]), 120_000);
+    assert_eq!(
+        select_preferred_refresh_millihz(&[60_000, 120_000]),
+        120_000
+    );
     assert_eq!(select_preferred_refresh_millihz(&[60_000, 90_000]), 90_000);
     assert_eq!(select_preferred_refresh_millihz(&[60_000]), 60_000);
     // Empty/unusable lists fall back to the sane default.
     assert_eq!(select_preferred_refresh_millihz(&[]), 120_000);
     assert_eq!(select_preferred_refresh_millihz(&[0, -1]), 120_000);
-    // Physical VRR steps are still observed (for diagnostics/pacing) ...
+    // Effective refresh changes are observed ...
     assert!(refresh_changed(60_000, 50_000));
     assert!(refresh_changed(60_000, 120_000));
     assert!(refresh_changed(120_000, 144_000));
@@ -81,11 +87,8 @@ fn nominal_output_refresh_is_stable_preferred_target_and_physical_vrr_never_rewr
     assert!(is_valid_refresh_millihz(120_000));
     assert!(is_valid_refresh_millihz(144_000));
 
-    // Structural policy: the nominal target is resolved from the supported
-    // modes (never a hardcoded 120 Hz), and the throttled physical sampler
-    // must not rewrite `wl_output`.
-    const EVENT_HANDLER: &str =
-        include_str!("../src/android/backend/wayland/event_handler.rs");
+    // Requested maximum and effective output are distinct; the output follows Android.
+    const EVENT_HANDLER: &str = include_str!("../src/android/backend/wayland/event_handler.rs");
     const RUN: &str = include_str!("../src/android/app/run.rs");
     const BACKEND_MOD: &str = include_str!("../src/android/backend/wayland/mod.rs");
     const NDK: &str = include_str!("../src/android/utils/ndk.rs");
@@ -100,10 +103,10 @@ fn nominal_output_refresh_is_stable_preferred_target_and_physical_vrr_never_rewr
     assert!(NDK.contains("getSupportedModes"));
     assert!(NDK.contains("preferred_high_refresh_millihz"));
     assert!(NDK.contains("select_preferred_refresh_millihz"));
-    assert!(RUN.contains("supported_refresh_rates_millihz"));
-    assert!(RUN.contains("select_preferred_refresh_millihz"));
+    assert!(RUN.contains("ndk::refresh_rate_millihz"));
+    assert!(RUN.contains("preferred_high_refresh_millihz"));
     assert!(RUN.contains("ensure_high_refresh_rate_hz"));
-    assert!(SETUP.contains("preferred_high_refresh_millihz"));
+    assert!(SETUP.contains("ndk::refresh_rate_millihz"));
     assert!(FRAME_RATE.contains("preferred_frame_rate_hz"));
     assert!(FRAME_RATE.contains("ensure_high_refresh_rate_hz"));
     // No device-name checks, OEM APIs, or global-setting writes: selection is
@@ -116,8 +119,7 @@ fn nominal_output_refresh_is_stable_preferred_target_and_physical_vrr_never_rewr
         assert!(!src.contains("Settings.Global"));
         assert!(!src.contains("Settings.System"));
     }
-    // The periodic poll logs physical changes but never calls
-    // set_preferred/change_current_state for them.
+    // The periodic poll must propagate effective changes to the nested compositor.
     let poll_start = EVENT_HANDLER
         .find("fn maybe_poll_refresh_rate")
         .expect("physical sampler is present");
@@ -127,8 +129,8 @@ fn nominal_output_refresh_is_stable_preferred_target_and_physical_vrr_never_rewr
         .expect("dispatch follows sampler");
     let poll_body = &EVENT_HANDLER[poll_start..dispatch_start];
     assert!(poll_body.contains("physical_refresh_millihz"));
-    assert!(!poll_body.contains("set_preferred"));
-    assert!(!poll_body.contains("change_current_state"));
+    assert!(poll_body.contains("set_preferred"));
+    assert!(poll_body.contains("change_current_state"));
 }
 
 #[test]
@@ -264,8 +266,13 @@ fn nested_kwin_text_input_uses_protocol_commits_and_authoritative_hotplug() {
 
 #[test]
 fn nested_android_owned_settings_are_truthful() {
-    assert!(ANDROID_SETUP_SOURCE.contains("browser.tabs.inTitlebar\", 0"));
+    // Firefox must use its normal GTK/Wayland client-side chrome; no Portal
+    // titlebar workaround may force a KWin/Breeze server-side decoration.
+    assert!(!ANDROID_SETUP_SOURCE.contains("browser.tabs.inTitlebar"));
     assert!(ANDROID_SETUP_SOURCE.contains("sync_firefox_config"));
+    // Sandbox/audio/runtime compatibility prefs must remain.
+    assert!(ANDROID_SETUP_SOURCE.contains("media.cubeb.sandbox"));
+    assert!(ANDROID_SETUP_SOURCE.contains("security.sandbox.content.level"));
     assert!(ANDROID_SETUP_SOURCE.contains("get_timezone_id()"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_touchscreen.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_tablet.so"));
@@ -297,8 +304,9 @@ fn debian_package_management_and_tablet_mode_policy() {
 fn automatic_tablet_and_laptop_mode_switching_policy() {
     use tablet_mode::{
         is_desktop_pointer, is_physical_alphabetic_keyboard, InputDeviceDescriptor,
-        SystemInputState, KEYBOARD_TYPE_ALPHABETIC, KEYBOARD_TYPE_NON_ALPHABETIC,
-        KEYBOARD_TYPE_NONE, SOURCE_KEYBOARD, SOURCE_MOUSE, SOURCE_TOUCHPAD, SOURCE_TOUCHSCREEN,
+        SystemInputState, KEYBOARD_TYPE_ALPHABETIC, KEYBOARD_TYPE_NONE,
+        KEYBOARD_TYPE_NON_ALPHABETIC, SOURCE_KEYBOARD, SOURCE_MOUSE, SOURCE_TOUCHPAD,
+        SOURCE_TOUCHSCREEN,
     };
 
     // 1. External physical alphabetic keyboard -> desktop mode, IME suppressed
@@ -313,8 +321,7 @@ fn automatic_tablet_and_laptop_mode_switching_policy() {
     assert!(kb_state.should_suppress_soft_keyboard());
 
     // 2. External pointer/touchpad -> desktop mode, IME NOT suppressed
-    let ext_touchpad =
-        InputDeviceDescriptor::new(true, false, SOURCE_TOUCHPAD, KEYBOARD_TYPE_NONE);
+    let ext_touchpad = InputDeviceDescriptor::new(true, false, SOURCE_TOUCHPAD, KEYBOARD_TYPE_NONE);
     assert!(!is_physical_alphabetic_keyboard(&ext_touchpad));
     assert!(is_desktop_pointer(&ext_touchpad));
     let tp_state = SystemInputState::evaluate([&ext_touchpad]);
@@ -353,8 +360,7 @@ fn automatic_tablet_and_laptop_mode_switching_policy() {
     assert!(!internal_state.should_suppress_soft_keyboard());
 
     // 5. Combined OnePlus Pad keyboard case (keyboard + touchpad) attached -> desktop mode
-    let attached_state =
-        SystemInputState::evaluate([&touchpanel, &ext_keyboard, &ext_touchpad]);
+    let attached_state = SystemInputState::evaluate([&touchpanel, &ext_keyboard, &ext_touchpad]);
     assert!(attached_state.physical_keyboard_present);
     assert!(attached_state.desktop_input_present);
     assert_eq!(attached_state.kwin_tablet_mode(), "off");
@@ -470,4 +476,3 @@ fn input_method_bridge_and_fallback_policy() {
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("commitText"));
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("deleteSurroundingText"));
 }
-
