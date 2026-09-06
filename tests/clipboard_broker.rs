@@ -8,8 +8,8 @@ use std::io::Cursor;
 use broker::{
     base64_encoded_len, decode_base64, encode_base64, encode_clear, encode_clear_event,
     encode_hello, encode_push, encode_subscribe, encode_value_event, read_event, read_request,
-    AuthToken, BrokerEvent, BrokerState, ClientRequest, CodecError, RequestKind, MAX_TEXT_BYTES,
-    TOKEN_BYTES,
+    AuthToken, BrokerEvent, BrokerState, ClientRequest, CodecError, HostEchoSuppressor,
+    RequestKind, MAX_TEXT_BYTES, TOKEN_BYTES,
 };
 
 #[test]
@@ -158,6 +158,19 @@ fn broker_state_uses_generation_for_real_changes_and_rejects_empty_values() {
 }
 
 #[test]
+fn host_echo_suppression_ignores_replacement_clear_and_applied_value() {
+    let mut suppressor = HostEchoSuppressor::default();
+    suppressor.mark_host_update(Some("new host text"));
+    assert!(!suppressor.should_forward_guest_observation(None));
+    assert!(!suppressor.should_forward_guest_observation(Some("new host text")));
+    assert!(suppressor.should_forward_guest_observation(Some("real guest copy")));
+
+    suppressor.mark_host_update(None);
+    assert!(!suppressor.should_forward_guest_observation(None));
+    assert!(suppressor.should_forward_guest_observation(Some("after clear")));
+}
+
+#[test]
 fn guest_helpers_require_inner_wayland_and_ext_capable_clipboard_tools() {
     let push = include_str!("../assets/localdesktop-clipboard-push.sh");
     let sync = include_str!("../assets/localdesktop-clipboard-sync.sh");
@@ -170,5 +183,6 @@ fn guest_helpers_require_inner_wayland_and_ext_capable_clipboard_tools() {
     assert!(sync.contains("version_minor < 3"));
     assert!(sync.contains("--watch"));
     assert!(sync.contains("--foreground"));
+    assert!(sync.contains("cmp -s \"$decoded_file\" \"$current_file\""));
     assert!(!sync.contains("WAYLAND_DISPLAY=wayland-1"));
 }

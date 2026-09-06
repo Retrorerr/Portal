@@ -439,6 +439,36 @@ pub fn write_all<W: Write>(writer: &mut W, frame: &[u8]) -> io::Result<()> {
     writer.write_all(frame)
 }
 
+/// Suppresses guest observations caused by applying a host update to KWin.
+/// Replacing a live `wl-copy` owner can briefly expose a clear selection
+/// before the new value, so clears are ignored while a text echo is pending.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct HostEchoSuppressor {
+    pending: Option<Option<String>>,
+}
+
+impl HostEchoSuppressor {
+    pub fn mark_host_update(&mut self, value: Option<&str>) {
+        self.pending = Some(value.map(str::to_owned));
+    }
+
+    pub fn should_forward_guest_observation(&mut self, value: Option<&str>) -> bool {
+        let observed = value.map(str::to_owned);
+        let Some(expected) = self.pending.as_ref() else {
+            return true;
+        };
+        if *expected == observed {
+            self.pending = None;
+            return false;
+        }
+        if expected.is_some() && observed.is_none() {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+}
+
 /// Last-value state for the broker.  Empty text is never represented as a
 /// value: `None` means an explicit clipboard clear and `Some` is valid UTF-8
 /// text within the byte bound.
