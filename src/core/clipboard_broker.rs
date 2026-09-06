@@ -62,6 +62,13 @@ impl AuthToken {
         }
         difference == 0
     }
+
+    /// Compare two decoded tokens without turning either one back into a
+    /// variable-length string. The broker uses this at the authenticated
+    /// client boundary.
+    pub fn constant_time_eq_token(&self, candidate: &Self) -> bool {
+        self.constant_time_eq(&candidate.0)
+    }
 }
 
 fn hex_nibble(value: u8) -> Option<u8> {
@@ -430,33 +437,6 @@ pub fn read_event<R: BufRead>(reader: &mut R) -> Result<BrokerEvent, CodecError>
 
 pub fn write_all<W: Write>(writer: &mut W, frame: &[u8]) -> io::Result<()> {
     writer.write_all(frame)
-}
-
-/// One-shot echo suppression for host writes.  A matching value is consumed
-/// exactly once; a later legitimate copy of the same text is not discarded.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct EchoSuppressor {
-    pending: Option<Option<String>>,
-}
-
-impl EchoSuppressor {
-    pub fn mark_host_update(&mut self, value: Option<&str>) {
-        self.pending = Some(value.map(str::to_owned));
-    }
-
-    pub fn should_forward_guest_observation(&mut self, value: Option<&str>) -> bool {
-        let observed = value.map(str::to_owned);
-        if self.pending.as_ref() == Some(&observed) {
-            self.pending = None;
-            false
-        } else {
-            true
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.pending = None;
-    }
 }
 
 /// Last-value state for the broker.  Empty text is never represented as a

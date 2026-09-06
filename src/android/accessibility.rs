@@ -15,6 +15,10 @@ use winit::{event::ElementState, event_loop::EventLoopProxy};
 pub enum AppUserEvent {
     AccessibilityInputReady,
     WaylandTraffic,
+    /// An Android clipboard observation was queued. The worker never touches
+    /// the render thread; this event only wakes the event loop so the queued
+    /// update is applied and flushed before later input.
+    AndroidClipboardChanged,
 }
 
 #[derive(Clone, Copy, Debug)]

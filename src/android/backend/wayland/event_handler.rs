@@ -19,6 +19,7 @@ use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{self, CursorImageStatus, CursorImageSurfaceData};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_pointer::ButtonState as WlButtonState;
+use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{IsAlive, Point, Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::wayland::{
@@ -40,13 +41,13 @@ const BTN_LEFT: u32 = 0x110;
 /// Linux input event code for the right mouse button (`BTN_RIGHT`).
 const BTN_RIGHT: u32 = 0x111;
 
-/// The nested session compositor presents one full-screen toplevel to Android.
+/// The nested session compositor presents the identified KWin toplevel to Android.
 fn get_surface(state: &State) -> Option<ToplevelSurface> {
     state
         .xdg_shell_state
         .toplevel_surfaces()
         .iter()
-        .next()
+        .find(|surface| state.is_known_kwin_surface(surface.wl_surface()))
         .cloned()
 }
 
@@ -236,9 +237,33 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             }
         }
         CentralizedEvent::Input(event) => {
+            // KeyboardHandle::input forwards only to its current focus. Keep
+            // that focus authoritative before draining clipboard work or
+            // forwarding any queued Android input.
+            backend.compositor.sync_kwin_seat_focus();
+            // External Android clipboard changes wake the loop with a dedicated
+            // event, but input can already be queued behind it. Drain and flush
+            // any completed clipboard update first (non-blocking, no Binder)
+            // so Ctrl+V reaches KWin with the fresh selection.
+            backend.compositor.process_android_clipboard();
             match event {
             InputEvent::Keyboard { event } => {
                 let compositor = &mut backend.compositor;
+                // Diagnostic: prove key arrival on the guest path (H2).
+                log::info!(
+                    "clipdiag key scancode={} state={:?} keyboard_focus={:?} kwin_surface={:?}",
+                    event.key,
+                    event.state,
+                    compositor
+                        .keyboard
+                        .current_focus()
+                        .map(|surface| surface.id()),
+                    compositor
+                    .state
+                    .kwin_surface
+                    .as_ref()
+                    .map(|surface| surface.id()),
+                );
                 let state = &mut compositor.state;
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = compositor.start_time.elapsed().as_millis() as u32;
@@ -620,6 +645,13 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
         CentralizedEvent::Focus(focused) => {
             if !focused {
                 backend.suspend_input_and_presentation();
+            } else {
+                // Android may deny clipboard reads while backgrounded. Resync
+                // explicitly on focus regain (non-blocking, no Binder here);
+                // the worker reads promptly and wakes with the dedicated event.
+                log::info!("clipdiag resync reason=focus-gain");
+                backend.compositor.sync_kwin_seat_focus();
+                backend.compositor.request_android_clipboard_resync();
             }
         }
         _ => (),
@@ -907,15 +939,18 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) -> Result<bool, String> {
         Err(error) => return Err(format!("Failed to dispatch clients: {error}")),
     }
 
+    // KWin's title identifies the only valid nested output client. Synchronize
+    // both seat channels before flushing so a pending compositor selection is
+    // offered to KWin in the same dispatch turn.
+    backend.compositor.observe_kwin_surfaces();
+    backend.compositor.sync_kwin_seat_focus();
+
     // 3. Flush pending outgoing protocol messages immediately to minimize latency.
     backend
         .compositor
         .display
         .flush_clients()
         .map_err(|error| format!("Failed to flush clients: {error}"))?;
-
-    backend.compositor.observe_kwin_surfaces();
-    backend.compositor.sync_data_device_focus();
 
     // 4. Low-frequency cached Plasma scale sampler.
     maybe_poll_plasma_scale(backend);

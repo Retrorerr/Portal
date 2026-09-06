@@ -3,6 +3,7 @@ pub mod core {
     pub mod android_integration;
     pub mod clipboard_broker;
     pub mod clipboard_policy;
+    pub mod clipboard_sync;
     pub mod config;
     pub mod coordinate_transform;
     pub mod ime_policy;
@@ -20,6 +21,7 @@ pub mod core {
 pub mod android {
     pub mod accessibility;
     pub mod clipboard;
+    pub mod clipboard_broker;
     pub mod diagnostics;
     pub mod ime;
     pub mod tablet_mode_manager;

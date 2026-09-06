@@ -69,7 +69,7 @@ done
 for name in HOME USER LOGNAME WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
     XDG_CURRENT_DESKTOP DESKTOP_SESSION KDE_FULL_SESSION KDE_SESSION_VERSION \
     KDE_USE_SYSTEMD PLASMA_USE_SYSTEMD QT_NO_XDG_DESKTOP_PORTAL \
-    WAYLAND_DEBUG; do
+    WAYLAND_DEBUG LOCALDESKTOP_CLIPBOARD_HOST LOCALDESKTOP_CLIPBOARD_PORT; do
     eval "value=\${$name-}"
     printf 'env %s=%q\n' "$name" "$value" >> "$session_log"
 done
@@ -108,6 +108,35 @@ reap_session() {
         signal_tree "$session_pid" KILL
     fi
     wait "$session_pid" 2>/dev/null || true
+}
+
+start_clipboard_bridge() {
+    [ -x /usr/local/bin/localdesktop-clipboard-sync ] || return 0
+    if [ -z "${LOCALDESKTOP_CLIPBOARD_PORT:-}" ] || [ -z "${LOCALDESKTOP_CLIPBOARD_TOKEN:-}" ]; then
+        printf 'stage=clipboard-bridge status=disabled reason=broker-environment-missing\n' >> "$session_log"
+        return 0
+    fi
+
+    # KWin is the outer client's compositor and exposes the Plasma clipboard
+    # on its own inner socket. Start the existing helper only after that
+    # socket exists; it reconnects across KWin restarts while this session is
+    # alive. The helper's process is a child of this launcher and is reaped by
+    # the same bounded session cleanup path.
+    (
+        inner_socket="$XDG_RUNTIME_DIR/wayland-1"
+        while kill -0 "$session_pid" 2>/dev/null; do
+            if [ -S "$inner_socket" ]; then
+                WAYLAND_DISPLAY=wayland-1 \
+                    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+                    /usr/local/bin/localdesktop-clipboard-sync
+                break
+            fi
+            sleep 1
+        done
+    ) >> "$session_log" 2>&1 &
+    clipboard_bridge_pid=$!
+    printf 'stage=clipboard-bridge status=starting pid=%s socket=%s\n' \
+        "$clipboard_bridge_pid" "$XDG_RUNTIME_DIR/wayland-1" >> "$session_log"
 }
 
 # Enforce systemdBoot=false in startkderc so Plasma 6 never hangs waiting for systemd user manager
@@ -293,6 +322,8 @@ fi
 dbus-run-session -- /usr/bin/startplasma-wayland >> "$session_log" 2>&1 &
 session_pid=$!
 printf 'stage=session-start pid=%s timestamp=%s\n' "$session_pid" "$(date +%s)" >> "$session_log"
+clipboard_bridge_pid=''
+start_clipboard_bridge
 
 ready=0
 for _ in $(seq 1 120); do

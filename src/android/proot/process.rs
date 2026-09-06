@@ -33,10 +33,26 @@ impl ArchProcess {
 
     /// Run a guest process that can be cancelled by its lifecycle owner.
     pub fn run_with_cancel(self, cancel: Arc<AtomicBool>) -> Output {
+        self.run_with_cancel_and_env(cancel, std::iter::empty::<(String, String)>())
+    }
+
+    /// Run a guest process with lifecycle cancellation and explicit environment
+    /// variables supplied by the Android host.
+    pub fn run_with_cancel_and_env<I>(
+        self,
+        cancel: Arc<AtomicBool>,
+        environment: I,
+    ) -> Output
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
         let runtime = PRootRuntime::active();
         let mut spec = ProcessSpec::new(self.command);
         if let Some(user) = self.user {
             spec = spec.with_user(user);
+        }
+        for (key, value) in environment {
+            spec = spec.with_env(key, value);
         }
         runtime.execute(spec, self.log, Some(cancel))
     }

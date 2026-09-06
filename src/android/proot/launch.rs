@@ -199,12 +199,13 @@ pub fn launch() {
         let username = local_config.user.username;
 
         let started = Instant::now();
+        let broker_environment = crate::android::clipboard::ClipboardBridge::broker_environment();
         let output = ArchProcess {
             command: local_config.command.launch,
             user: Some(username),
             log: Some(Arc::new(|it| log::info!("guest-session: {}", it))),
         }
-        .run_with_cancel(thread_cancel.clone());
+        .run_with_cancel_and_env(thread_cancel.clone(), broker_environment);
         let status = output.status.code();
         diagnostics::desktop_exit(status, started.elapsed().as_millis());
         log::warn!(
