@@ -7,7 +7,8 @@
 //! helper which talks to KWin's inner data-control protocol.
 
 use crate::core::clipboard_broker::{
-    self as protocol, AuthToken, BrokerEvent, BrokerState, ClientRequest, CodecError, RequestKind,
+    self as protocol, AuthToken, BrokerEvent, BrokerState, ClientRequest, CodecError,
+    HostEchoSuppressor, RequestKind,
 };
 use std::io::{BufReader, ErrorKind, Write};
 use std::net::{TcpListener, TcpStream};
@@ -34,6 +35,7 @@ type Subscribers = Arc<Mutex<Vec<(usize, Sender<BrokerEvent>)>>>;
 pub struct BrokerHandle {
     environment: BrokerEnvironment,
     state: Arc<Mutex<BrokerState>>,
+    host_echo: Arc<Mutex<HostEchoSuppressor>>,
     subscribers: Subscribers,
 }
 
@@ -99,12 +101,14 @@ pub fn start(
     }
 
     let state = Arc::new(Mutex::new(BrokerState::default()));
+    let host_echo = Arc::new(Mutex::new(HostEchoSuppressor::default()));
     let subscribers = Arc::new(Mutex::new(Vec::new()));
     let next_subscriber = Arc::new(AtomicUsize::new(1));
     log::info!("clipdiag broker listening port={port}");
 
     let expected_token = token;
     let state_for_listener = Arc::clone(&state);
+    let echo_for_listener = Arc::clone(&host_echo);
     let subscribers_for_listener = Arc::clone(&subscribers);
     let next_subscriber_for_listener = Arc::clone(&next_subscriber);
     thread::spawn(move || {
@@ -113,6 +117,7 @@ pub fn start(
             stop,
             expected_token,
             state_for_listener,
+            echo_for_listener,
             subscribers_for_listener,
             next_subscriber_for_listener,
             on_guest_change,
@@ -122,6 +127,7 @@ pub fn start(
     Some(BrokerHandle {
         environment,
         state,
+        host_echo,
         subscribers,
     })
 }
@@ -163,6 +169,9 @@ impl BrokerHandle {
         if !changed {
             return Ok(false);
         }
+        if let Ok(mut suppressor) = self.host_echo.lock() {
+            suppressor.mark_host_update(value);
+        }
 
         // Lock state before subscribers, matching the subscription snapshot
         // path so an update cannot overtake a newly subscribed client's first
@@ -193,6 +202,7 @@ fn accept_loop(
     stop: Arc<AtomicBool>,
     expected_token: AuthToken,
     state: Arc<Mutex<BrokerState>>,
+    host_echo: Arc<Mutex<HostEchoSuppressor>>,
     subscribers: Subscribers,
     next_subscriber: Arc<AtomicUsize>,
     on_guest_change: GuestClipboardCallback,
@@ -202,6 +212,7 @@ fn accept_loop(
             Ok((stream, _address)) => {
                 let _ = stream.set_nodelay(true);
                 let state = Arc::clone(&state);
+                let host_echo = Arc::clone(&host_echo);
                 let subscribers = Arc::clone(&subscribers);
                 let next_subscriber = Arc::clone(&next_subscriber);
                 let on_guest_change = Arc::clone(&on_guest_change);
@@ -211,6 +222,7 @@ fn accept_loop(
                         stream,
                         expected_token,
                         state,
+                        host_echo,
                         subscribers,
                         next_subscriber,
                         on_guest_change,
@@ -232,6 +244,7 @@ fn handle_client(
     stream: TcpStream,
     expected_token: AuthToken,
     state: Arc<Mutex<BrokerState>>,
+    host_echo: Arc<Mutex<HostEchoSuppressor>>,
     subscribers: Subscribers,
     next_subscriber: Arc<AtomicUsize>,
     on_guest_change: GuestClipboardCallback,
@@ -264,7 +277,7 @@ fn handle_client(
         Ok(request @ (ClientRequest::Push(_) | ClientRequest::Clear)) => {
             // wl-paste invokes a one-shot publisher: HELLO then PUSH/CLEAR.
             // It must not subscribe (and receive the host snapshot) to write.
-            if let Some(kind) = apply_guest_request(request, &state, &on_guest_change) {
+            if let Some(kind) = apply_guest_request(request, &state, &host_echo, &on_guest_change) {
                 let _ = send_event(&mut writer, BrokerEvent::Ack(kind));
             }
             return;
@@ -309,7 +322,7 @@ fn handle_client(
             Ok(request) => request,
             Err(_) => break,
         };
-        let Some(kind) = apply_guest_request(request, &state, &on_guest_change) else {
+        let Some(kind) = apply_guest_request(request, &state, &host_echo, &on_guest_change) else {
             break;
         };
         if out_tx.send(BrokerEvent::Ack(kind)).is_err() {
@@ -325,6 +338,7 @@ fn handle_client(
 fn apply_guest_request(
     request: ClientRequest,
     state: &Mutex<BrokerState>,
+    host_echo: &Mutex<HostEchoSuppressor>,
     on_guest_change: &GuestClipboardCallback,
 ) -> Option<RequestKind> {
     let (value, kind) = match request {
@@ -332,6 +346,13 @@ fn apply_guest_request(
         ClientRequest::Clear => (None, RequestKind::Clear),
         _ => return None,
     };
+    if !host_echo
+        .lock()
+        .ok()?
+        .should_forward_guest_observation(value.as_deref())
+    {
+        return Some(kind);
+    }
     let changed = state.lock().ok()?.apply(value.as_deref()).ok()?;
     if changed {
         on_guest_change(value);

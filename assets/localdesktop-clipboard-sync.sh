@@ -115,6 +115,11 @@ while :; do
                 continue
                 ;;
             CLEAR)
+                # A broker subscription always starts with its current state.
+                # Avoid manufacturing a clear when KWin is already clear.
+                if ! wl-paste --type 'text/plain;charset=utf-8' --no-newline >/dev/null 2>&1; then
+                    continue
+                fi
                 stop_injected_owner
                 wl-copy --clear >/dev/null 2>&1 || true
                 ;;
@@ -137,6 +142,13 @@ while :; do
                     rm -f -- "$decoded_file"
                     break
                 fi
+                current_file="$tmp_root/current.$$"
+                if wl-paste --type 'text/plain;charset=utf-8' --no-newline > "$current_file" 2>/dev/null \
+                    && cmp -s "$decoded_file" "$current_file"; then
+                    rm -f -- "$current_file" "$decoded_file"
+                    continue
+                fi
+                rm -f -- "$current_file"
                 stop_injected_owner
                 # Keep this source alive after the command returns so Plasma
                 # clients can paste even while no app owns the selection.
