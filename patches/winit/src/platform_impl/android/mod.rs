@@ -28,6 +28,9 @@ use crate::window::{
 };
 
 mod keycodes;
+mod touchpad;
+
+use touchpad::{GestureAction as TouchpadGestureAction, TouchpadGestureStateMachine};
 
 pub(crate) use crate::cursor::{
     NoCustomCursor as PlatformCustomCursor, NoCustomCursor as PlatformCustomCursorSource,
@@ -35,6 +38,25 @@ pub(crate) use crate::cursor::{
 pub(crate) use crate::icon::NoIcon as PlatformIcon;
 
 static HAS_FOCUS: AtomicBool = AtomicBool::new(true);
+
+fn send_mouse_button<T: 'static, F>(
+    callback: &mut F,
+    target: &RootAEL,
+    window_id: window::WindowId,
+    device_id: event::DeviceId,
+    state: event::ElementState,
+    button: MouseButton,
+) where
+    F: FnMut(Event<T>, &RootAEL),
+{
+    callback(
+        Event::WindowEvent {
+            window_id,
+            event: WindowEvent::MouseInput { device_id, state, button },
+        },
+        target,
+    );
+}
 
 /// Returns the minimum `Option<Duration>`, taking into account that `None`
 /// equates to an infinite timeout, not a zero timeout (so can't just use
@@ -148,7 +170,8 @@ pub struct EventLoop<T: 'static> {
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
     pressed_mouse_buttons: std::collections::HashSet<MouseButton>,
-    touchpad_scrolling: bool,
+    touchpad_gestures: TouchpadGestureStateMachine,
+    touchpad_clock: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -199,7 +222,8 @@ impl<T: 'static> EventLoop<T> {
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
             pressed_mouse_buttons: std::collections::HashSet::new(),
-            touchpad_scrolling: false,
+            touchpad_gestures: TouchpadGestureStateMachine::default(),
+            touchpad_clock: Instant::now(),
         })
     }
 
@@ -407,9 +431,20 @@ impl<T: 'static> EventLoop<T> {
                     let gesture_dy = pointer.axis_value(input::Axis::from(51)) as f64;
                     let has_gesture_scroll = gesture_dx != 0.0 || gesture_dy != 0.0;
 
+                    let gesture_time = self.touchpad_clock.elapsed();
+
                     // 1. Continuous Touchpad Scrolling
                     if is_touchpad && has_gesture_scroll {
-                        self.touchpad_scrolling = true;
+                        if self.touchpad_gestures.scroll() == Some(TouchpadGestureAction::DragEnd) {
+                            send_mouse_button(
+                                callback,
+                                self.window_target(),
+                                window_id,
+                                device_id,
+                                event::ElementState::Released,
+                                MouseButton::Left,
+                            );
+                        }
                         callback(
                             Event::WindowEvent {
                                 window_id,
@@ -429,7 +464,18 @@ impl<T: 'static> EventLoop<T> {
                             let h = pointer.axis_value(input::Axis::Hscroll) as f64 * 20.0;
                             let v = pointer.axis_value(input::Axis::Vscroll) as f64 * 20.0;
                             if h != 0.0 || v != 0.0 {
-                                self.touchpad_scrolling = true;
+                                if self.touchpad_gestures.scroll()
+                                    == Some(TouchpadGestureAction::DragEnd)
+                                {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        MouseButton::Left,
+                                    );
+                                }
                                 callback(
                                     Event::WindowEvent {
                                         window_id,
@@ -469,8 +515,7 @@ impl<T: 'static> EventLoop<T> {
                     if (action == MotionAction::HoverMove || action == MotionAction::Move)
                         && !has_gesture_scroll
                     {
-                        if self.touchpad_scrolling {
-                            self.touchpad_scrolling = false;
+                        if is_touchpad && self.touchpad_gestures.end_scroll() {
                             callback(
                                 Event::WindowEvent {
                                     window_id,
@@ -487,6 +532,19 @@ impl<T: 'static> EventLoop<T> {
                         }
                         let location =
                             PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
+                        if is_touchpad
+                            && self.touchpad_gestures.movement(location.x, location.y)
+                                == Some(TouchpadGestureAction::DragStart)
+                        {
+                            send_mouse_button(
+                                callback,
+                                self.window_target(),
+                                window_id,
+                                device_id,
+                                event::ElementState::Pressed,
+                                MouseButton::Left,
+                            );
+                        }
                         callback(
                             Event::WindowEvent {
                                 window_id,
@@ -502,7 +560,8 @@ impl<T: 'static> EventLoop<T> {
                         );
                     }
 
-                    // 3. Mouse / Touchpad Buttons (Tap-to-click, physical clicks, click-drag)
+                    // 3. Mouse / Touchpad Buttons. Real ButtonPress/ButtonRelease actions are
+                    // forwarded directly. A bare touchpad Down only arms tap recognition.
                     let button = motion_event.button_state();
                     let mapped_button = match button {
                         _ if button.secondary() => MouseButton::Right,
@@ -513,134 +572,211 @@ impl<T: 'static> EventLoop<T> {
                         _ => MouseButton::Left,
                     };
 
-                    match action {
-                        MotionAction::ButtonPress => {
-                            if self.pressed_mouse_buttons.insert(mapped_button) {
-                                callback(
-                                    Event::WindowEvent {
+                    if is_touchpad {
+                        match action {
+                            MotionAction::ButtonPress => {
+                                if self.touchpad_gestures.cancel()
+                                    == Some(TouchpadGestureAction::DragEnd)
+                                {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
                                         window_id,
-                                        event: WindowEvent::MouseInput {
-                                            device_id,
-                                            state: event::ElementState::Pressed,
-                                            button: mapped_button,
-                                        },
-                                    },
-                                    self.window_target(),
-                                );
-                            }
-                        },
-                        MotionAction::ButtonRelease => {
-                            if self.pressed_mouse_buttons.remove(&mapped_button) {
-                                callback(
-                                    Event::WindowEvent {
+                                        device_id,
+                                        event::ElementState::Released,
+                                        MouseButton::Left,
+                                    );
+                                }
+                                if self.pressed_mouse_buttons.insert(mapped_button) {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
                                         window_id,
-                                        event: WindowEvent::MouseInput {
-                                            device_id,
-                                            state: event::ElementState::Released,
-                                            button: mapped_button,
-                                        },
-                                    },
-                                    self.window_target(),
-                                );
-                            }
-                        },
-                        MotionAction::Down => {
-                            if self.pressed_mouse_buttons.is_empty() {
-                                self.pressed_mouse_buttons.insert(mapped_button);
-                                callback(
-                                    Event::WindowEvent {
+                                        device_id,
+                                        event::ElementState::Pressed,
+                                        mapped_button,
+                                    );
+                                }
+                            },
+                            MotionAction::ButtonRelease => {
+                                if self.pressed_mouse_buttons.remove(&mapped_button) {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
                                         window_id,
-                                        event: WindowEvent::MouseInput {
-                                            device_id,
-                                            state: event::ElementState::Pressed,
-                                            button: mapped_button,
-                                        },
-                                    },
-                                    self.window_target(),
-                                );
-                            }
-                        },
-                        MotionAction::Up => {
-                            if self.touchpad_scrolling {
-                                self.touchpad_scrolling = false;
-                                callback(
-                                    Event::WindowEvent {
-                                        window_id,
-                                        event: WindowEvent::MouseWheel {
-                                            device_id,
-                                            delta: event::MouseScrollDelta::PixelDelta(
-                                                PhysicalPosition { x: 0.0, y: 0.0 },
-                                            ),
-                                            phase: event::TouchPhase::Ended,
-                                        },
-                                    },
-                                    self.window_target(),
-                                );
-                            }
-                            let released: Vec<MouseButton> =
-                                self.pressed_mouse_buttons.drain().collect();
-                            if released.is_empty() {
-                                callback(
-                                    Event::WindowEvent {
-                                        window_id,
-                                        event: WindowEvent::MouseInput {
-                                            device_id,
-                                            state: event::ElementState::Released,
-                                            button: mapped_button,
-                                        },
-                                    },
-                                    self.window_target(),
-                                );
-                            } else {
-                                for btn in released {
+                                        device_id,
+                                        event::ElementState::Released,
+                                        mapped_button,
+                                    );
+                                }
+                            },
+                            MotionAction::Down => {
+                                let location = PhysicalPosition {
+                                    x: pointer.x() as f64,
+                                    y: pointer.y() as f64,
+                                };
+                                if self.pressed_mouse_buttons.is_empty() {
+                                    self.touchpad_gestures.down(
+                                        gesture_time,
+                                        location.x,
+                                        location.y,
+                                    );
+                                } else {
+                                    self.touchpad_gestures.cancel();
+                                }
+                            },
+                            MotionAction::Up => {
+                                if self.touchpad_gestures.end_scroll() {
                                     callback(
                                         Event::WindowEvent {
                                             window_id,
-                                            event: WindowEvent::MouseInput {
+                                            event: WindowEvent::MouseWheel {
                                                 device_id,
-                                                state: event::ElementState::Released,
-                                                button: btn,
+                                                delta: event::MouseScrollDelta::PixelDelta(
+                                                    PhysicalPosition { x: 0.0, y: 0.0 },
+                                                ),
+                                                phase: event::TouchPhase::Ended,
                                             },
                                         },
                                         self.window_target(),
                                     );
                                 }
-                            }
-                        },
-                        MotionAction::Cancel => {
-                            if self.touchpad_scrolling {
-                                self.touchpad_scrolling = false;
-                                callback(
-                                    Event::WindowEvent {
-                                        window_id,
-                                        event: WindowEvent::MouseWheel {
+                                let location = PhysicalPosition {
+                                    x: pointer.x() as f64,
+                                    y: pointer.y() as f64,
+                                };
+                                match self.touchpad_gestures.up(
+                                    gesture_time,
+                                    location.x,
+                                    location.y,
+                                ) {
+                                    Some(TouchpadGestureAction::Click) => {
+                                        send_mouse_button(
+                                            callback,
+                                            self.window_target(),
+                                            window_id,
                                             device_id,
-                                            delta: event::MouseScrollDelta::PixelDelta(
-                                                PhysicalPosition { x: 0.0, y: 0.0 },
-                                            ),
-                                            phase: event::TouchPhase::Ended,
-                                        },
-                                    },
-                                    self.window_target(),
-                                );
-                            }
-                            let cancelled: Vec<MouseButton> =
-                                self.pressed_mouse_buttons.drain().collect();
-                            for btn in cancelled {
-                                callback(
-                                    Event::WindowEvent {
-                                        window_id,
-                                        event: WindowEvent::MouseInput {
+                                            event::ElementState::Pressed,
+                                            MouseButton::Left,
+                                        );
+                                        send_mouse_button(
+                                            callback,
+                                            self.window_target(),
+                                            window_id,
                                             device_id,
-                                            state: event::ElementState::Released,
-                                            button: btn,
-                                        },
+                                            event::ElementState::Released,
+                                            MouseButton::Left,
+                                        );
                                     },
-                                    self.window_target(),
-                                );
-                            }
-                        },
-                        _ => {},
+                                    Some(TouchpadGestureAction::DragEnd) => send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        MouseButton::Left,
+                                    ),
+                                    Some(TouchpadGestureAction::DragStart) | None => {},
+                                }
+                            },
+                            MotionAction::PointerDown
+                            | MotionAction::PointerUp
+                            | MotionAction::Cancel => {
+                                if self.touchpad_gestures.cancel()
+                                    == Some(TouchpadGestureAction::DragEnd)
+                                {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        MouseButton::Left,
+                                    );
+                                }
+                            },
+                            _ => {},
+                        }
+                    } else if is_mouse {
+                        match action {
+                            MotionAction::ButtonPress => {
+                                if self.pressed_mouse_buttons.insert(mapped_button) {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Pressed,
+                                        mapped_button,
+                                    );
+                                }
+                            },
+                            MotionAction::ButtonRelease => {
+                                if self.pressed_mouse_buttons.remove(&mapped_button) {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        mapped_button,
+                                    );
+                                }
+                            },
+                            MotionAction::Down => {
+                                if self.pressed_mouse_buttons.is_empty() {
+                                    self.pressed_mouse_buttons.insert(mapped_button);
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Pressed,
+                                        mapped_button,
+                                    );
+                                }
+                            },
+                            MotionAction::Up => {
+                                let released: Vec<MouseButton> =
+                                    self.pressed_mouse_buttons.drain().collect();
+                                if released.is_empty() {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        mapped_button,
+                                    );
+                                } else {
+                                    for btn in released {
+                                        send_mouse_button(
+                                            callback,
+                                            self.window_target(),
+                                            window_id,
+                                            device_id,
+                                            event::ElementState::Released,
+                                            btn,
+                                        );
+                                    }
+                                }
+                            },
+                            MotionAction::Cancel => {
+                                let cancelled: Vec<MouseButton> =
+                                    self.pressed_mouse_buttons.drain().collect();
+                                for btn in cancelled {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        btn,
+                                    );
+                                }
+                            },
+                            _ => {},
+                        }
                     }
                 } else {
                     // Treat them as touch events
