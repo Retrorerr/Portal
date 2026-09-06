@@ -230,15 +230,15 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
     if let Some(icon_path) = env.icon.as_ref() {
         let mut scaler = xcommon::Scaler::open(icon_path)?;
         scaler.optimize();
-        let companion = |variant: &str| {
+        let companion = |variant: &str, extension: &str| {
             let stem = icon_path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or("icon");
-            icon_path.with_file_name(format!("{stem}-{variant}.png"))
+            icon_path.with_file_name(format!("{stem}-{variant}.{extension}"))
         };
-        let foreground_path = companion("foreground");
-        let monochrome_path = companion("monochrome");
+        let foreground_path = companion("foreground", "png");
+        let monochrome_path = companion("monochrome", "png");
         let mut foreground_scaler = foreground_path
             .is_file()
             .then(|| xcommon::Scaler::open(&foreground_path))
@@ -256,6 +256,18 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
         let anydpi = res.join("mipmap-anydpi-v26");
         std::fs::create_dir_all(&anydpi)?;
         std::fs::write(anydpi.join("ic_launcher.xml"), IC_LAUNCHER)?;
+        // Prefer resolution-independent adaptive layers when the icon supplies
+        // Android VectorDrawable companions. Density PNGs remain available for
+        // legacy launchers and projects without vector companions.
+        for variant in ["foreground", "monochrome"] {
+            let vector_path = companion(variant, "xml");
+            if vector_path.is_file() {
+                std::fs::copy(
+                    vector_path,
+                    anydpi.join(format!("ic_launcher_{variant}.xml")),
+                )?;
+            }
+        }
         let dpis = [
             ("m", 48),
             ("h", 72),
@@ -275,7 +287,8 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
             }
             // Adaptive layers occupy 108dp, versus 48dp for legacy launcher assets.
             let adaptive_size = size * 108 / 48;
-            let adaptive_opts = xcommon::ScalerOptsBuilder::new(adaptive_size, adaptive_size).build();
+            let adaptive_opts =
+                xcommon::ScalerOptsBuilder::new(adaptive_size, adaptive_size).build();
             for variant in ["foreground", "monochrome"] {
                 let mut icon =
                     std::fs::File::create(dir.join(format!("ic_launcher_{}.png", variant)))?;

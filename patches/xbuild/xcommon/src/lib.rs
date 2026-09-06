@@ -62,7 +62,10 @@ impl Scaler {
     pub fn write<W: Write + Seek>(&self, w: &mut W, opts: ScalerOpts) -> Result<()> {
         let resized = self
             .img
-            .resize(opts.scaled_size, opts.scaled_size, FilterType::Nearest);
+            // Icons are commonly reduced from a large master to density-specific
+            // assets. Lanczos preserves smooth vector-rendered edges instead of
+            // turning diagonals into nearest-neighbour stair steps.
+            .resize(opts.scaled_size, opts.scaled_size, FilterType::Lanczos3);
         if opts.scaled_size == opts.target_width && opts.scaled_size == opts.target_height {
             resized.write_to(w, ImageOutputFormat::Png)?;
         } else {
