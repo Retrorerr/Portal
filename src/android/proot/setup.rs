@@ -8,15 +8,9 @@ use crate::{
         },
         diagnostics,
         utils::application_context::get_application_context,
-        utils::ndk::{
-            active_refresh_millihz, long_press_timeout_ms, scale_factor, touch_slop_px,
-        },
+        utils::ndk::{active_refresh_millihz, long_press_timeout_ms, scale_factor, touch_slop_px},
     },
-    core::{
-        config::{
-            PRODUCTION_FS_ROOT, DOCS_HOME_URL,
-        },
-    },
+    core::config::{DOCS_HOME_URL, PRODUCTION_FS_ROOT},
 };
 use pathdiff::diff_paths;
 use smithay::utils::Clock;
@@ -35,7 +29,6 @@ use std::{
 };
 
 use winit::platform::android::activity::AndroidApp;
-
 
 #[derive(Debug)]
 pub enum SetupMessage {
@@ -60,7 +53,8 @@ const RECOVERY_LAUNCHER: &str = include_str!("../../../assets/localdesktop-recov
 const RETRY_PLASMA: &str = include_str!("../../../assets/localdesktop-retry-plasma.sh");
 const KONSOLE_CONFIG: &str = include_str!("../../../assets/konsole/konsolerc");
 const KONSOLE_PROFILE: &str = include_str!("../../../assets/konsole/LocalDesktop.profile");
-const CRASH_HANDLER_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/localdesktop-crash-handler.so");
+const CRASH_HANDLER_BINARY: &[u8] =
+    include_bytes!("../../../assets/guest-arm64/localdesktop-crash-handler.so");
 const CRASH_HANDLER_SOURCE: &str = include_str!("../../../assets/localdesktop-crash-handler.c");
 const PORTAL_IME_BRIDGE: &str = include_str!("../../../assets/portal-ime-bridge.py");
 const PORTAL_IME_DESKTOP: &str = include_str!("../../../assets/portal-ime.desktop");
@@ -82,14 +76,18 @@ type StageOutput = Option<JoinHandle<()>>;
 
 fn setup_debian_runtime(options: &SetupOptions) -> StageOutput {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
-    if artifact.is_ready(Path::new(PRODUCTION_FS_ROOT)) { return None; }
+    if artifact.is_ready(Path::new(PRODUCTION_FS_ROOT)) {
+        return None;
+    }
     let sender = options.mpsc_sender.clone();
     let base = get_application_context().data_dir.clone();
     Some(thread::spawn(move || {
-        artifact.provision(&base, |message| {
-            diagnostics::host_event("runtime-provisioning", &message);
-            let _ = sender.send(SetupMessage::Progress(message));
-        }).unwrap_or_else(|error| panic!("Debian provisioning failed: {error:#}"));
+        artifact
+            .provision(&base, |message| {
+                diagnostics::host_event("runtime-provisioning", &message);
+                let _ = sender.send(SetupMessage::Progress(message));
+            })
+            .unwrap_or_else(|error| panic!("Debian provisioning failed: {error:#}"));
     }))
 }
 
@@ -125,14 +123,9 @@ fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
 
             // Create fake proc files
             let proc_files = [
-                    ("proc/.loadavg", "0.12 0.07 0.02 2/165 765\n"),
-                    ("proc/.stat", "cpu  1957 0 2877 93280 262 342 254 87 0 0\ncpu0 31 0 226 12027 82 10 4 9 0 0\n"),
-                    ("proc/.uptime", "124.08 932.80\n"),
-                    ("proc/.version", "Linux version 6.2.1 (proot@termux) (gcc (GCC) 12.2.1 20230201, GNU ld (GNU Binutils) 2.40) #1 SMP PREEMPT_DYNAMIC Wed, 01 Mar 2023 00:00:00 +0000\n"),
-                    ("proc/.vmstat", "nr_free_pages 1743136\nnr_zone_inactive_anon 179281\nnr_zone_active_anon 7183\n"),
-                    ("proc/.sysctl_entry_cap_last_cap", "40\n"),
-                    ("proc/.sysctl_inotify_max_user_watches", "4096\n"),
-                ];
+                ("proc/.sysctl_entry_cap_last_cap", "40\n"),
+                ("proc/.sysctl_inotify_max_user_watches", "4096\n"),
+            ];
 
             for (path, content) in proc_files {
                 let _ = fs::write(fs_root.join(path), content)
@@ -213,16 +206,7 @@ defaultPref("media.cubeb.sandbox", false);
 defaultPref("security.sandbox.content.level", 0);
 defaultPref("media.allow-audio-non-utility", true);
 defaultPref("media.rdd-process.enabled", false);
-// Firefox's client-side titlebar cannot obtain KDE's button layout in the
-// stripped PRoot session. Use KWin's proven Breeze server decoration so close,
-// maximize and minimize are always visible and scaled consistently.
-defaultPref("browser.tabs.inTitlebar", 0);
 
-try {
-  var { SandboxUtils } = ChromeUtils.importESModule("resource://gre/modules/SandboxUtils.sys.mjs");
-  SandboxUtils.maybeWarnAboutDisabledContentSandbox = () => {};
-  SandboxUtils.observeContentSandboxPref = () => {};
-} catch (_) {}
 "#;
 
     for dir in candidates {
@@ -665,7 +649,25 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     }
 
     sync_android_timezone(fs_root);
+    // Small, verified Debian tools needed for triggers skipped by image extraction.
+    // Embedded in the APK so the published base image also works after uninstall.
+    tar::Archive::new(std::io::Cursor::new(include_bytes!(
+        "../../../assets/daily-use-tools.tar"
+    )))
+    .unpack(fs_root)
+    .expect("Failed to install desktop cache tools");
     sync_firefox_config(fs_root);
+    // Repair Portal's own launcher to use Debian's installed browser/icon name.
+    let docs_entry = home_dir.join("Desktop/localdesktop-online-docs.desktop");
+    if fs_root.join("usr/bin/firefox-esr").exists() {
+        if let Ok(text) = fs::read_to_string(&docs_entry) {
+            let text = text
+                .replace("Exec=firefox ", "Exec=firefox-esr ")
+                .replace("Icon=firefox\n", "Icon=firefox-esr\n");
+            let _ = fs::write(&docs_entry, text);
+            let _ = fs::set_permissions(&docs_entry, fs::Permissions::from_mode(0o755));
+        }
+    }
     sync_konsole_profile(fs_root, &home_dir);
     sync_debian_package_management(fs_root);
 
@@ -1012,11 +1014,15 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
 
     let handler = fs_root.join("usr/local/lib/localdesktop-crash-handler.so");
     let temporary = handler.with_extension("so.tmp");
-    fs::write(&temporary, CRASH_HANDLER_BINARY).expect("Failed to stage required guest support library");
+    fs::write(&temporary, CRASH_HANDLER_BINARY)
+        .expect("Failed to stage required guest support library");
     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
         .expect("Failed to set guest support library permissions");
     fs::rename(&temporary, &handler).expect("Failed to install required guest support library");
-    diagnostics::guest_event("guest-support", "installed bundled ARM64 glibc socket-stat shim");
+    diagnostics::guest_event(
+        "guest-support",
+        "installed bundled ARM64 glibc socket-stat shim",
+    );
 
     // Recovery creates its labwc autostart at runtime, after writing the
     // actionable kdialog message. Do not pre-seed an autostart that launches
@@ -1269,9 +1275,7 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         // reading. The live physical rate is tracked separately in
         // `physical_refresh_millihz` for diagnostics/pacing and never
         // rewrites `wl_output`.
-        refresh_rate_millihz: crate::android::utils::ndk::preferred_high_refresh_millihz(
-            &android_app,
-        ),
+        refresh_rate_millihz: crate::android::utils::ndk::refresh_rate_millihz(&android_app),
         physical_refresh_millihz: active_refresh_millihz(&android_app),
         pressed_keys: std::collections::HashSet::new(),
         button_tracker: crate::core::pointer_buttons::PointerButtonTracker::new(),

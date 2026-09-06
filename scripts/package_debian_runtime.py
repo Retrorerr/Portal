@@ -17,7 +17,7 @@ from build_debian_rootfs import build_rootfs, fetch_package_index, resolve_depen
 
 REPO = Path(__file__).resolve().parent.parent
 LOCK = REPO / "assets/debian-runtime-packages.json"
-VERSION = "debian13-arm64-2026.09.05.2"
+VERSION = "debian13-arm64-2026.09.05.3"
 
 
 def add_bytes(archive, name, data, mode=0o644):

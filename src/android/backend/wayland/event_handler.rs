@@ -547,13 +547,15 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             // whether the preferred rate is available.
             {
                 let observed =
-                    crate::android::utils::ndk::active_refresh_millihz(&backend.android_app);
+                    crate::android::utils::ndk::refresh_rate_millihz(&backend.android_app);
                 if crate::core::android_integration::refresh_changed(
                     backend.physical_refresh_millihz,
                     observed,
                 ) {
                     let previous = backend.physical_refresh_millihz;
                     backend.physical_refresh_millihz = observed;
+                    backend.refresh_rate_millihz = observed;
+                    backend.compositor.state.authoritative_display_state.refresh_rate_millihz = observed;
                     backend
                         .compositor
                         .state
@@ -811,14 +813,8 @@ fn maybe_poll_plasma_scale(backend: &mut WaylandBackend) {
     }
 }
 
-/// Throttled host physical-refresh sampler (diagnostics only, never `wl_output`).
-///
-/// OxygenOS VRR moves the OnePlus Pad 3 between 50/60/90/120/144 Hz at runtime. This
-/// polls the active `Display.Mode` at most once per second and tracks the
-/// instantaneous physical rate separately. The `wl_output` mode stays at the
-/// stable nominal rate: physical changes are logged but never rewrite the
-/// Wayland output, so idle VRR (e.g. 50 Hz) leaves Plasma's configured
-/// preferred mode untouched and no feedback loop can form.
+/// Sample the effective Android app rate once a second and publish changed modes.
+/// The native-window request remains independent, so reporting never changes policy.
 fn maybe_poll_refresh_rate(backend: &mut WaylandBackend) {
     const POLL_INTERVAL_MS: u64 = 1000;
     let now_ms = backend.clock.now().as_millis() as u64;
@@ -829,20 +825,30 @@ fn maybe_poll_refresh_rate(backend: &mut WaylandBackend) {
     }
     backend.last_refresh_poll_ms = Some(now_ms);
 
-    let observed = crate::android::utils::ndk::active_refresh_millihz(&backend.android_app);
+    let observed = crate::android::utils::ndk::refresh_rate_millihz(&backend.android_app);
     if !crate::core::android_integration::is_valid_refresh_millihz(observed) {
         return;
     }
     if !crate::core::android_integration::refresh_changed(
-        backend.physical_refresh_millihz,
+        backend.refresh_rate_millihz,
         observed,
     ) {
         return;
     }
     let previous = backend.physical_refresh_millihz;
     backend.physical_refresh_millihz = observed;
-    // Keep the authoritative copy in sync for diagnostics; nominal output
-    // mode and geometry are untouched.
+    backend.refresh_rate_millihz = observed;
+    backend.compositor.state.authoritative_display_state.refresh_rate_millihz = observed;
+    if let Some(output) = &backend.compositor.output {
+        if let Some(old) = output.current_mode() {
+            let mode = Mode { size: old.size, refresh: observed };
+            output.set_preferred(mode);
+            output.change_current_state(Some(mode), None, None, None);
+            output.delete_mode(old);
+        }
+    }
+
+    // Keep timing state synchronized without changing output geometry.
     backend
         .compositor
         .state

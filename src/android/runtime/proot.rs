@@ -338,20 +338,23 @@ impl LinuxRuntime for PRootRuntime {
             .arg("--bind=/proc/self/fd/0:/dev/stdin")
             .arg("--bind=/proc/self/fd/1:/dev/stdout")
             .arg("--bind=/proc/self/fd/2:/dev/stderr")
-            .arg(format!("--bind={}/proc/.loadavg:/proc/loadavg", rootfs_str))
-            .arg(format!("--bind={}/proc/.stat:/proc/stat", rootfs_str))
-            .arg(format!("--bind={}/proc/.uptime:/proc/uptime", rootfs_str))
-            .arg(format!("--bind={}/proc/.version:/proc/version", rootfs_str))
-            .arg(format!("--bind={}/proc/.vmstat:/proc/vmstat", rootfs_str))
             .arg(format!("--bind={}/proc/.sysctl_entry_cap_last_cap:/proc/sys/kernel/cap_last_cap", rootfs_str))
             .arg(format!("--bind={}/proc/.sysctl_inotify_max_user_watches:/proc/sys/fs/inotify/max_user_watches", rootfs_str))
             .arg(format!("--bind={}/sys/.empty:/sys/fs/selinux", rootfs_str));
 
         for bind in &spec.extra_binds {
             let bind_arg = if bind.readonly {
-                format!("--bind={}:{}:ro", bind.host_path.display(), bind.guest_path.display())
+                format!(
+                    "--bind={}:{}:ro",
+                    bind.host_path.display(),
+                    bind.guest_path.display()
+                )
             } else {
-                format!("--bind={}:{}", bind.host_path.display(), bind.guest_path.display())
+                format!(
+                    "--bind={}:{}",
+                    bind.host_path.display(),
+                    bind.guest_path.display()
+                )
             };
             process.arg(bind_arg);
         }
@@ -440,7 +443,14 @@ impl LinuxRuntime for PRootRuntime {
         let stderr_user = user.clone();
         let stderr_stop = reader_stop.clone();
         let stderr_thread = thread::spawn(move || {
-            drain_stream(stderr, stderr_command, stderr_user, "stderr", None, stderr_stop)
+            drain_stream(
+                stderr,
+                stderr_command,
+                stderr_user,
+                "stderr",
+                None,
+                stderr_stop,
+            )
         });
 
         let mut terminate_deadline = None;
@@ -474,8 +484,7 @@ impl LinuxRuntime for PRootRuntime {
                 Ok(Some(status)) => {
                     if terminate_deadline.is_some() {
                         #[cfg(target_os = "android")]
-                        let signalled_group =
-                            signal_process_group(process_group, libc::SIGKILL);
+                        let signalled_group = signal_process_group(process_group, libc::SIGKILL);
                         #[cfg(not(target_os = "android"))]
                         let signalled_group = false;
                         if !signalled_group {
@@ -497,8 +506,7 @@ impl LinuxRuntime for PRootRuntime {
                 Ok(None) => {
                     if terminate_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                         #[cfg(target_os = "android")]
-                        let signalled_group =
-                            signal_process_group(process_group, libc::SIGKILL);
+                        let signalled_group = signal_process_group(process_group, libc::SIGKILL);
                         #[cfg(not(target_os = "android"))]
                         let signalled_group = false;
                         if !signalled_group {

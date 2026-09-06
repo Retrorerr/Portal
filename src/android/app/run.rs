@@ -59,53 +59,15 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     // default on the first launch and only becomes accurate after a configuration change.
     let guest_scale_factor = ndk::scale_factor(&backend.android_app);
     backend.guest_scale_factor = guest_scale_factor;
-    // Nominal vs physical separation (VRR bootstrap fix):
-    // - `wl_output` advertises the stable preferred target resolved from
-    //   `Display.getSupportedModes()` (144 Hz on the OnePlus Pad 3, otherwise
-    //   the device maximum) so KWin sees it on cold-start fullscreen without
-    //   a popup transition.
-    // - The instantaneous Android physical/VRR rate (50/60/90/120/144 Hz) is
-    //   tracked separately for diagnostics/pacing and never rewrites the
-    //   output mode.
-    // - Actual presentation timing is communicated through frame/presentation
-    //   feedback, not mode rewrites.
-    let observed_physical = ndk::active_refresh_millihz(&backend.android_app);
-    if crate::core::android_integration::is_valid_refresh_millihz(observed_physical) {
-        backend.physical_refresh_millihz = observed_physical;
-        backend
-            .compositor
-            .state
-            .authoritative_display_state
-            .note_physical_refresh_millihz(observed_physical);
+    // Report Android's effective app refresh, independently of the requested maximum.
+    let observed = ndk::refresh_rate_millihz(&backend.android_app);
+    if crate::core::android_integration::is_valid_refresh_millihz(observed) {
+        backend.physical_refresh_millihz = observed;
+        backend.refresh_rate_millihz = observed;
+        let state = &mut backend.compositor.state.authoritative_display_state;
+        state.note_physical_refresh_millihz(observed);
+        state.refresh_rate_millihz = observed;
     }
-    let supported = ndk::supported_refresh_rates_millihz(&backend.android_app);
-    if supported
-        .iter()
-        .any(|rate| crate::core::android_integration::is_valid_refresh_millihz(*rate))
-    {
-        let preferred =
-            crate::core::android_integration::select_preferred_refresh_millihz(&supported);
-        backend.refresh_rate_millihz = preferred;
-        backend
-            .compositor
-            .state
-            .authoritative_display_state
-            .refresh_rate_millihz = preferred;
-    } else if !crate::core::android_integration::is_valid_refresh_millihz(
-        backend.refresh_rate_millihz,
-    ) {
-        // No cache yet and no enumeration: use the resolved fallback once
-        // (supported -> active -> default chain).
-        let preferred = ndk::preferred_high_refresh_millihz(&backend.android_app);
-        backend.refresh_rate_millihz = preferred;
-        backend
-            .compositor
-            .state
-            .authoritative_display_state
-            .refresh_rate_millihz = preferred;
-    }
-    // Otherwise: preserve the cached nominal (enumeration unavailable this
-    // resume; a transient failure must never downgrade it to the VRR rate).
     backend.compositor.state.size = size.into();
 
     // Mutate the existing authoritative state in place so resize generations,
@@ -250,7 +212,7 @@ fn resume_wayland(
     // resolved in `configure_output` so KWin, the output mode, and Android
     // all agree.
     if !backend.frame_rate_requested {
-        let rate_hz = backend.refresh_rate_millihz as f32 / 1000.0;
+        let rate_hz = ndk::preferred_high_refresh_millihz(&backend.android_app) as f32 / 1000.0;
         crate::android::utils::frame_rate::ensure_high_refresh_rate_hz(
             &backend.android_app,
             rate_hz,
@@ -436,7 +398,9 @@ impl PolarBearApp {
         self.backend = backend;
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             let _ = resume_wayland(backend, event_loop, &self.frontend.android_app);
-            crate::android::tablet_mode_manager::apply_kwin_tablet_mode(ime::is_desktop_input_present());
+            crate::android::tablet_mode_manager::apply_kwin_tablet_mode(
+                ime::is_desktop_input_present(),
+            );
         }
         true
     }
@@ -465,7 +429,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             let failed = !resume_wayland(backend, event_loop, &self.frontend.android_app);
             if !failed {
                 ime::refresh_visibility();
-                crate::android::tablet_mode_manager::apply_kwin_tablet_mode(ime::is_desktop_input_present());
+                crate::android::tablet_mode_manager::apply_kwin_tablet_mode(
+                    ime::is_desktop_input_present(),
+                );
             }
             failed
         } else {

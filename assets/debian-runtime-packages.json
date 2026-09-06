@@ -221,6 +221,12 @@
     "SHA256": "3d78d8418c90dfd1b07ef7941f032e398dacfd3766bbf7d99a79589610b4c5ab",
     "Size": "90076"
   },
+  "dictionaries-common": {
+    "Version": "1.30.10",
+    "Filename": "pool/main/d/dictionaries-common/dictionaries-common_1.30.10_all.deb",
+    "SHA256": "8640d705119a9458dc7fdcaef77b5ec7e72b0378caa6fb238383f3f6103c8692",
+    "Size": "174176"
+  },
   "diffutils": {
     "Version": "1:3.10-4",
     "Filename": "pool/main/d/diffutils/diffutils_3.10-4_arm64.deb",
@@ -238,6 +244,18 @@
     "Filename": "pool/main/l/lvm2/dmsetup_1.02.205-2_arm64.deb",
     "SHA256": "f802c1ec2d6f45a6544f09c5da72f9688e06208d12bb76ac9b25f2cfa8033306",
     "Size": "76072"
+  },
+  "docbook-xml": {
+    "Version": "4.5-13",
+    "Filename": "pool/main/d/docbook-xml/docbook-xml_4.5-13_all.deb",
+    "SHA256": "dc9b086ebfa92552d6fe97c33be520b2d48474d99bfc55c1e08ec753e031f354",
+    "Size": "77396"
+  },
+  "docbook-xsl": {
+    "Version": "1.79.2+dfsg-7",
+    "Filename": "pool/main/d/docbook-xsl/docbook-xsl_1.79.2+dfsg-7_all.deb",
+    "SHA256": "b0f710af8f8095ab4749327047ee139dd1dce245eeed2325f148a8fdd1169ab2",
+    "Size": "1220564"
   },
   "dolphin": {
     "Version": "4:25.04.3-1+deb13u1",
@@ -263,11 +281,29 @@
     "SHA256": "2f8004e6b0ec482bc093e6773b0018ac3eb41420c2ee3e468587ea4613eb91f3",
     "Size": "610748"
   },
+  "emacsen-common": {
+    "Version": "3.0.8",
+    "Filename": "pool/main/e/emacsen-common/emacsen-common_3.0.8_all.deb",
+    "SHA256": "8b164951c11937eae26b0528f65d75d5dda64985ec8ccf0cb48605842b4d5495",
+    "Size": "13636"
+  },
   "ffmpegthumbnailer": {
     "Version": "2.2.3-2",
     "Filename": "pool/main/f/ffmpegthumbnailer/ffmpegthumbnailer_2.2.3-2_arm64.deb",
     "SHA256": "c0917acb3ac0cc35631baeebaaec5306e6fe3a8eb837ae2b66289a3ec442491b",
     "Size": "15608"
+  },
+  "ffmpegthumbs": {
+    "Version": "4:25.04.0-2",
+    "Filename": "pool/main/f/ffmpegthumbs/ffmpegthumbs_25.04.0-2_arm64.deb",
+    "SHA256": "231d30cb229e16c3a372bc1dd41763ce755e909f12cabdd7259294e1afc7077f",
+    "Size": "31324"
+  },
+  "filelight": {
+    "Version": "4:25.04.2-1",
+    "Filename": "pool/main/f/filelight/filelight_25.04.2-1_arm64.deb",
+    "SHA256": "cb4d836d0fdc4a7cc38528333cdcba23e14ea1c5a56a38b359d9c1eaaf6cb7a5",
+    "Size": "765856"
   },
   "findutils": {
     "Version": "4.10.0-3",
@@ -304,6 +340,18 @@
     "Filename": "pool/main/f/fonts-dejavu/fonts-dejavu-mono_2.37-8_all.deb",
     "SHA256": "3003e98a5debfdeadc7040a7f715fe9fe6fb67f68deacf6049b54e30f07fc014",
     "Size": "488808"
+  },
+  "fonts-hack": {
+    "Version": "3.003-3",
+    "Filename": "pool/main/f/fonts-hack/fonts-hack_3.003-3_all.deb",
+    "SHA256": "ee85559100f4657f7214f23462cf43100d233858f468e3efa0c0a8500f2b7382",
+    "Size": "1629896"
+  },
+  "fonts-noto-color-emoji": {
+    "Version": "2.051-0+deb13u1",
+    "Filename": "pool/main/f/fonts-noto-color-emoji/fonts-noto-color-emoji_2.051-0+deb13u1_all.deb",
+    "SHA256": "03141cd51c0e9ff8ad858fcf2d8234f8a00ae4d7a0872df43a71519359c54e8c",
+    "Size": "10110428"
   },
   "fonts-noto-core": {
     "Version": "20201225-2",
@@ -395,6 +443,12 @@
     "SHA256": "6f7257fbec0197bd54b2347861ff01e2c4e8411790b0df20242483615324fe66",
     "Size": "426128"
   },
+  "gsettings-desktop-schemas": {
+    "Version": "48.0-1",
+    "Filename": "pool/main/g/gsettings-desktop-schemas/gsettings-desktop-schemas_48.0-1_all.deb",
+    "SHA256": "151133be02bff0bff4c860260a3418378821fad8c5d11133f588d4de760797a5",
+    "Size": "699668"
+  },
   "gtk-update-icon-cache": {
     "Version": "4.18.6+ds-2",
     "Filename": "pool/main/g/gtk4/gtk-update-icon-cache_4.18.6+ds-2_arm64.deb",
@@ -430,6 +484,12 @@
     "Filename": "pool/main/h/hostname/hostname_3.25_arm64.deb",
     "SHA256": "04d1ff24cb605788b59ed30d0052c1039c8bce2fb44c01c3c4b0c6edd4ea7ccc",
     "Size": "10808"
+  },
+  "hunspell-en-gb": {
+    "Version": "1:25.2.3-1",
+    "Filename": "pool/main/libr/libreoffice-dictionaries/hunspell-en-gb_25.2.3-1_all.deb",
+    "SHA256": "8f92b18ac39cf606e899bb526971091b870c95f0155eee328fb92b08f7169baa",
+    "Size": "1059580"
   },
   "init-system-helpers": {
     "Version": "1.69~deb13u1",
@@ -467,6 +527,12 @@
     "SHA256": "53979042725ed80a1bad2db7cb78ff4931a83aa8bbd4fb573cf25d75b13d54ff",
     "Size": "685340"
   },
+  "kcharselect": {
+    "Version": "4:25.04.0-1",
+    "Filename": "pool/main/k/kcharselect/kcharselect_25.04.0-1_arm64.deb",
+    "SHA256": "cb2037d357a8b08c19bb3de833d153dcad891c4e2c1262130c30ee8a4c426bd7",
+    "Size": "446396"
+  },
   "kde-cli-tools": {
     "Version": "4:6.3.4-1",
     "Filename": "pool/main/k/kde-cli-tools/kde-cli-tools_6.3.4-1_arm64.deb",
@@ -479,6 +545,18 @@
     "SHA256": "8f4f89fa13721ae6ab20b7efd27c97a21a527d0e3852d740a9d8e9d6a97afefa",
     "Size": "669876"
   },
+  "kde-config-gtk-style": {
+    "Version": "4:6.3.4-1",
+    "Filename": "pool/main/k/kde-gtk-config/kde-config-gtk-style_6.3.4-1_arm64.deb",
+    "SHA256": "853df580d9cb51f2480d212a60fb0306c377c0167e7360e58d029359319f065a",
+    "Size": "80656"
+  },
+  "kde-spectacle": {
+    "Version": "4:6.3.5-2",
+    "Filename": "pool/main/k/kde-spectacle/kde-spectacle_6.3.5-2_arm64.deb",
+    "SHA256": "9fa972112a66cc48e3388bdc19d8681c4ee03b9bdcc16317da6a5c1c27452deb",
+    "Size": "2046756"
+  },
   "kde-style-breeze": {
     "Version": "4:6.3.5-1",
     "Filename": "pool/main/b/breeze/kde-style-breeze_6.3.5-1_arm64.deb",
@@ -490,6 +568,12 @@
     "Filename": "pool/main/b/breeze/kde-style-breeze-data_6.3.5-1_all.deb",
     "SHA256": "7905ad1a91134838430fa6bd050a5db27924b0d9eadd0ddb71bd8f2b0f70ef1e",
     "Size": "43392"
+  },
+  "kded5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kded/kded5_5.116.0-1_arm64.deb",
+    "SHA256": "52e9cd9598d37f6f30834aad7aaf0d062dfea22c4e2f10ce403c8c02cd134cb1",
+    "Size": "59352"
   },
   "kded6": {
     "Version": "6.13.0-1",
@@ -515,6 +599,12 @@
     "SHA256": "c6ecfe9f2ebe90b79be70ec39146921e956496f196b5ca076a86466e90dead8e",
     "Size": "144820"
   },
+  "kdoctools6": {
+    "Version": "6.13.0-1",
+    "Filename": "pool/main/k/kf6-kdoctools/kdoctools6_6.13.0-1_arm64.deb",
+    "SHA256": "98de06f77c6dc26f87d572955b8b7879f1f51a498740f223da7301735f64efda",
+    "Size": "430568"
+  },
   "kf6-breeze-icon-theme": {
     "Version": "6.13.0-3",
     "Filename": "pool/main/k/kf6-breeze-icons/kf6-breeze-icon-theme_6.13.0-3_all.deb",
@@ -527,11 +617,29 @@
     "SHA256": "6e1d44549a1ec84438c21ad2f9fbf84a0821eadf16fff213ec711a279c52a286",
     "Size": "9196"
   },
+  "khelpcenter": {
+    "Version": "4:25.04.0-1",
+    "Filename": "pool/main/k/khelpcenter/khelpcenter_25.04.0-1_arm64.deb",
+    "SHA256": "1d00840db44b54aa80f1ef163b960b141ae154a1ccfd3bab597f587d5227f65c",
+    "Size": "197676"
+  },
+  "khelpcenter-data": {
+    "Version": "4:25.04.0-1",
+    "Filename": "pool/main/k/khelpcenter/khelpcenter-data_25.04.0-1_all.deb",
+    "SHA256": "880419987511cb6222dc3c532b8eb92d893f4f327c40b11b68af89fd4679c277",
+    "Size": "4291396"
+  },
   "kimageformat6-plugins": {
     "Version": "6.13.0-2",
     "Filename": "pool/main/k/kf6-kimageformats/kimageformat6-plugins_6.13.0-2_arm64.deb",
     "SHA256": "4600938777e83671a92ca96129bd9fde6be384a5746bffe5b02d40ff23a19784",
     "Size": "357196"
+  },
+  "kio": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kio/kio_5.116.0-1_arm64.deb",
+    "SHA256": "c17fdbbde07c2330eb669e45ae0b504f8091de67c2a4b4a2564aa548e29a08bf",
+    "Size": "3110928"
   },
   "kio-extras": {
     "Version": "4:25.04.3-1",
@@ -557,6 +665,12 @@
     "SHA256": "2e3d40c4a128f3bb90d27981d8069cf788264c1dd6cc12f54c95c1b01f7422fb",
     "Size": "323508"
   },
+  "kmenuedit": {
+    "Version": "4:6.3.4-2",
+    "Filename": "pool/main/k/kmenuedit/kmenuedit_6.3.4-2_arm64.deb",
+    "SHA256": "fc90a9e3b2d0bbc1d7c9a2bb1250e5b25a35d3039e6eb743bec69945198c90d3",
+    "Size": "1031136"
+  },
   "konsole": {
     "Version": "4:25.04.2-1",
     "Filename": "pool/main/k/konsole/konsole_25.04.2-1_arm64.deb",
@@ -581,17 +695,47 @@
     "SHA256": "bec9ad0c37a10bbc6fa9ecc2cd26d22d917fb693d2e87f955115d2b805c416ef",
     "Size": "315560"
   },
+  "ksshaskpass": {
+    "Version": "4:6.3.4-1",
+    "Filename": "pool/main/k/ksshaskpass/ksshaskpass_6.3.4-1_arm64.deb",
+    "SHA256": "9b1ae1cb71af41dc5360710e725fe79decc097c8c7c1e205873c78d0f98fab2a",
+    "Size": "31876"
+  },
+  "ksystemstats": {
+    "Version": "6.3.4-1",
+    "Filename": "pool/main/k/ksystemstats/ksystemstats_6.3.4-1_arm64.deb",
+    "SHA256": "a66041ea5be2adcb2bd0a14a9a01ea88f1433f9b609822106920646c9f7c1efd",
+    "Size": "237272"
+  },
   "kwallet6": {
     "Version": "6.13.0-1",
     "Filename": "pool/main/k/kf6-kwallet/kwallet6_6.13.0-1_arm64.deb",
     "SHA256": "1e4a4a54cb2d7213bb5655e7433f3160b4854234224bd9504b2de99a6ba3f7f5",
     "Size": "179272"
   },
+  "kwalletmanager": {
+    "Version": "4:25.04.2-1",
+    "Filename": "pool/main/k/kwalletmanager/kwalletmanager_25.04.2-1_arm64.deb",
+    "SHA256": "ad1138c8dd33c1112d4839e2a72023febff80ca9029a419f5db11ddc2e2d2f73",
+    "Size": "1217484"
+  },
+  "kwayland5-data": {
+    "Version": "4:5.116.0-1",
+    "Filename": "pool/main/k/kwayland-kf5/kwayland5-data_5.116.0-1_all.deb",
+    "SHA256": "58a4b657c47c6d56db21490d69dc0f4990ec19b01e76bc431253d13b1d79bfb8",
+    "Size": "7496"
+  },
   "kwayland6-data": {
     "Version": "4:6.3.4-1",
     "Filename": "pool/main/k/kwayland/kwayland6-data_6.3.4-1_all.deb",
     "SHA256": "d05196d18dd2fa0ca49527732281311a98265818424abd87c6f5a93080e57453",
     "Size": "7084"
+  },
+  "kwin-addons": {
+    "Version": "4:6.3.5-1",
+    "Filename": "pool/main/k/kdeplasma-addons/kwin-addons_6.3.5-1_arm64.deb",
+    "SHA256": "7d31717ff390b0f039c61f156a8e60af0dd22c7da9b710ac4c36f6ca9cd694b6",
+    "Size": "43356"
   },
   "kwin-common": {
     "Version": "4:6.3.6-1",
@@ -718,6 +862,12 @@
     "Filename": "pool/main/a/alsa-lib/libasound2t64_1.2.14-1_arm64.deb",
     "SHA256": "b89f299d77281df9984795701c915c92e736ca3840fb552604a305d1e9813a4a",
     "Size": "341544"
+  },
+  "libaspell15": {
+    "Version": "0.60.8.1-4",
+    "Filename": "pool/main/a/aspell/libaspell15_0.60.8.1-4_arm64.deb",
+    "SHA256": "dccd1dcf99068fdd80759fb9e83598bbd830bf7f9757f290dd9e389ed5b89742",
+    "Size": "307988"
   },
   "libass9": {
     "Version": "1:0.17.3-1+deb13u1",
@@ -1031,6 +1181,12 @@
     "SHA256": "0717912b3dc3bb1fd0011d662da9d95c1ec08ac23cea951d3c7cb3ed1437d6b0",
     "Size": "35536"
   },
+  "libcbor0.10": {
+    "Version": "0.10.2-2",
+    "Filename": "pool/main/libc/libcbor/libcbor0.10_0.10.2-2_arm64.deb",
+    "SHA256": "5e129095192ff766884e5ed13260644e510d20ed6b4facc47809bf2cb630117d",
+    "Size": "27372"
+  },
   "libcddb2": {
     "Version": "1.3.2-7.1",
     "Filename": "pool/main/libc/libcddb/libcddb2_1.3.2-7.1_arm64.deb",
@@ -1138,6 +1294,12 @@
     "Filename": "pool/main/d/dbus/libdbus-1-3_1.16.2-2_arm64.deb",
     "SHA256": "ca6bb5f2047ad58d274cb7d14216035a07d8e5aae6f6a0122c4f6293c9c39515",
     "Size": "169068"
+  },
+  "libdbusmenu-qt5-2": {
+    "Version": "0.9.3+16.04.20160218-3+b1",
+    "Filename": "pool/main/libd/libdbusmenu-qt/libdbusmenu-qt5-2_0.9.3+16.04.20160218-3+b1_arm64.deb",
+    "SHA256": "e6e2a3abc9169e366ffb8bf8db5f8765e3f737ca6f1f754db32785ea1f29e46d",
+    "Size": "66572"
   },
   "libdc1394-25": {
     "Version": "2.2.6-5",
@@ -1402,6 +1564,12 @@
     "Filename": "pool/main/f/fftw3/libfftw3-single3_3.3.10-2+b1_arm64.deb",
     "SHA256": "874b10ccab6219bcae210cc9ff9298389e266ad7308be086956c859ae1aa8ba5",
     "Size": "516600"
+  },
+  "libfido2-1": {
+    "Version": "1.15.0-1+b1",
+    "Filename": "pool/main/libf/libfido2/libfido2-1_1.15.0-1+b1_arm64.deb",
+    "SHA256": "510f81957f2905c57d3d8681c3ed9bf68a17bfb254d721a578c88edd8158477c",
+    "Size": "74348"
   },
   "libflac14": {
     "Version": "1.5.0+ds-2",
@@ -1691,6 +1859,12 @@
     "SHA256": "10d07cd4d2c374bfe9e1f9d197027cb6783d72efcfc5f1b159538b815f7552dd",
     "Size": "442280"
   },
+  "libhfstospell11": {
+    "Version": "0.5.4-1+b3",
+    "Filename": "pool/main/h/hfst-ospell/libhfstospell11_0.5.4-1+b3_arm64.deb",
+    "SHA256": "e41e8c8c2785bd4dbf6fb4b48f174bfe6c3928bae49685c8957c5b3a6dbf8e28",
+    "Size": "76684"
+  },
   "libhogweed6t64": {
     "Version": "3.10.1-1",
     "Filename": "pool/main/n/nettle/libhogweed6t64_3.10.1-1_arm64.deb",
@@ -1702,6 +1876,12 @@
     "Filename": "pool/main/h/hunspell/libhunspell-1.7-0_1.7.2+really1.7.2-10+b4_arm64.deb",
     "SHA256": "0396f603650d0caddf7505b252719068baa7995cc572f02c0f27424e8e1279e0",
     "Size": "204112"
+  },
+  "libhwloc15": {
+    "Version": "2.12.0-4",
+    "Filename": "pool/main/h/hwloc/libhwloc15_2.12.0-4_arm64.deb",
+    "SHA256": "e34c74eee1a87dd2c823922ada975c7429ec4a47ece13196a4070297b3a5e332",
+    "Size": "141600"
   },
   "libhwy1t64": {
     "Version": "1.2.0-2+b2",
@@ -1912,6 +2092,378 @@
     "Filename": "pool/main/k/keyutils/libkeyutils1_1.6.3-6_arm64.deb",
     "SHA256": "5e680f317a6613161986417fb3ed63007c9228343f5ac2348551b103cc7fd7b4",
     "Size": "9716"
+  },
+  "libkf5archive-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/karchive/libkf5archive-data_5.116.0-1_all.deb",
+    "SHA256": "66a2f2d84337f5efbdb47376d2164fd6b2db388c3b307e4c47c4e2c584492295",
+    "Size": "50332"
+  },
+  "libkf5archive5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/karchive/libkf5archive5_5.116.0-1_arm64.deb",
+    "SHA256": "41b3bd9f1c7b9ec8c9cbdacf56a2315713be8de1bf9059ed861c7c9f7ecbe53f",
+    "Size": "87440"
+  },
+  "libkf5auth-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kauth/libkf5auth-data_5.116.0-1_all.deb",
+    "SHA256": "7936f6697b1a3724a1716cc97bec8d5e5452b7f60b051f5e3ef505da3dc83d00",
+    "Size": "26832"
+  },
+  "libkf5authcore5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kauth/libkf5authcore5_5.116.0-1_arm64.deb",
+    "SHA256": "c46a9c6e0cb530ee8d4115340071e0fdfbc0ea1fbf40c34f312a822636634d91",
+    "Size": "51308"
+  },
+  "libkf5bookmarks-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kbookmarks/libkf5bookmarks-data_5.116.0-1_all.deb",
+    "SHA256": "03364daa4d00a6542a8f1c2ef25fdc249040b6ec7a1a6b320bfd7ebb44cf5bcf",
+    "Size": "53088"
+  },
+  "libkf5bookmarks5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kbookmarks/libkf5bookmarks5_5.116.0-1_arm64.deb",
+    "SHA256": "4a24bfeeea84cc6de019841a2aed4d04898e9f9c07f99112b5ca33d199b5bc10",
+    "Size": "81756"
+  },
+  "libkf5codecs-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kcodecs/libkf5codecs-data_5.116.0-1_all.deb",
+    "SHA256": "5fefab8376e8c5f549e7b14d4595b942ac1dc59eea5a3baa9c71e047c66ced99",
+    "Size": "51748"
+  },
+  "libkf5codecs5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kcodecs/libkf5codecs5_5.116.0-1_arm64.deb",
+    "SHA256": "0366627e9d856264b1b66da005af1208a844b7bcc3b3d3ab1fcf55478de578cf",
+    "Size": "92832"
+  },
+  "libkf5completion-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kcompletion/libkf5completion-data_5.116.0-1_all.deb",
+    "SHA256": "2504356e1fa662d4f1fa1a546da99bf6d15c719779fe91015162ed26473acbfc",
+    "Size": "17156"
+  },
+  "libkf5completion5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kcompletion/libkf5completion5_5.116.0-1_arm64.deb",
+    "SHA256": "fc0785cef11de1601fa4a7d9f373279c8517d07869d755c8fe16406aa4957878",
+    "Size": "84380"
+  },
+  "libkf5config-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kconfig/libkf5config-data_5.116.0-1_all.deb",
+    "SHA256": "7dc8d4944547bdf8a53704c910fce41d6df9e0bb82eb22ed5ba96e9811ebc903",
+    "Size": "96288"
+  },
+  "libkf5configcore5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kconfig/libkf5configcore5_5.116.0-1_arm64.deb",
+    "SHA256": "0eb4532e003be8610779a523557d82d6ec49fe43c9d301ee265c0333d09acb87",
+    "Size": "119212"
+  },
+  "libkf5configgui5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kconfig/libkf5configgui5_5.116.0-1_arm64.deb",
+    "SHA256": "e69be30f388bbcab18fcfaab79e7f270de66c4caf910686a5a8afc9804d858c1",
+    "Size": "50736"
+  },
+  "libkf5configwidgets-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kconfigwidgets/libkf5configwidgets-data_5.116.0-1_all.deb",
+    "SHA256": "08c4ed3312633ae26e88ee6032bb10c190c72202f66524800a9cf64525122dad",
+    "Size": "217656"
+  },
+  "libkf5configwidgets5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kconfigwidgets/libkf5configwidgets5_5.116.0-1_arm64.deb",
+    "SHA256": "de1b831a6ebf983010cb75c988e95c2a06fa9c9a0507b913c7a2346c06d78b75",
+    "Size": "138848"
+  },
+  "libkf5coreaddons-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kcoreaddons/libkf5coreaddons-data_5.116.0-1_all.deb",
+    "SHA256": "c8d12118945e03b86283318bebe474a41aabb06cfb70393694d7f094a61ce27d",
+    "Size": "137276"
+  },
+  "libkf5coreaddons5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kcoreaddons/libkf5coreaddons5_5.116.0-1_arm64.deb",
+    "SHA256": "3f043d7dd323ed02b66a7141fae9470a8a2785694b5a2687e30a080e58c8d57f",
+    "Size": "236184"
+  },
+  "libkf5crash5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kcrash/libkf5crash5_5.116.0-1_arm64.deb",
+    "SHA256": "b35fc1912e8139806efd7f290f3759a798fbb0e62ff6fe8ad23c465a9898c9d3",
+    "Size": "18392"
+  },
+  "libkf5dbusaddons-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kdbusaddons/libkf5dbusaddons-data_5.116.0-1_all.deb",
+    "SHA256": "dd19f07e2d34809415941e65f9516434222a854ad22ac8781130995e0f30b5dd",
+    "Size": "17788"
+  },
+  "libkf5dbusaddons5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kdbusaddons/libkf5dbusaddons5_5.116.0-1_arm64.deb",
+    "SHA256": "46f142910a2630fb3e45e2131812440d1199bfbb14a9228ff2a471ce35329b0d",
+    "Size": "36276"
+  },
+  "libkf5doctools5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kdoctools/libkf5doctools5_5.116.0-1_arm64.deb",
+    "SHA256": "2af446bf5505641f00cbf8a4e42a3719a1560925b1ff2093c5fbb0f37a8f7d4c",
+    "Size": "16520"
+  },
+  "libkf5globalaccel-bin": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kglobalaccel/libkf5globalaccel-bin_5.116.0-1_all.deb",
+    "SHA256": "450abd58118597a3c2e2a6798b8c4ef486890e1a052eea73b2b8bb30e7f7bbe9",
+    "Size": "5764"
+  },
+  "libkf5globalaccel-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kglobalaccel/libkf5globalaccel-data_5.116.0-1_all.deb",
+    "SHA256": "07427edd1ec5bb2646d7df7ce8814f625e7d744bfdb0dbc058d707ebe0bcfdb0",
+    "Size": "23484"
+  },
+  "libkf5globalaccel5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kglobalaccel/libkf5globalaccel5_5.116.0-1_arm64.deb",
+    "SHA256": "804ac32be3bc0e4b9be090b5508a44e19bc7632c93ec51b2c8218a43b0c0e350",
+    "Size": "45296"
+  },
+  "libkf5guiaddons-data": {
+    "Version": "5.116.0-2",
+    "Filename": "pool/main/k/kguiaddons/libkf5guiaddons-data_5.116.0-2_all.deb",
+    "SHA256": "e28581e210a4c6b3b26e9e5a530d027654faa51a693f68c564e9de3b9910cb8f",
+    "Size": "6652"
+  },
+  "libkf5guiaddons5": {
+    "Version": "5.116.0-2",
+    "Filename": "pool/main/k/kguiaddons/libkf5guiaddons5_5.116.0-2_arm64.deb",
+    "SHA256": "06190aa5911fce5fadae59a4b879be54eb8257f5dee83a0b0a024eab88137a95",
+    "Size": "81316"
+  },
+  "libkf5i18n-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/ki18n/libkf5i18n-data_5.116.0-1_all.deb",
+    "SHA256": "8d788ce3795da8e87472890243031f7b8d0494cc634d4f7e1433b340e91c25d1",
+    "Size": "1046144"
+  },
+  "libkf5i18n5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/ki18n/libkf5i18n5_5.116.0-1_arm64.deb",
+    "SHA256": "98196a34be8cd39131e6210ebfb20bd8548864037ffd424dd85ad8d98d207cd7",
+    "Size": "118168"
+  },
+  "libkf5iconthemes-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kiconthemes/libkf5iconthemes-data_5.116.0-1_all.deb",
+    "SHA256": "93094ab3cc64f17b167fe45bd0805468312cd253d27331295c82f9d699ddf3d2",
+    "Size": "28616"
+  },
+  "libkf5iconthemes5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kiconthemes/libkf5iconthemes5_5.116.0-1_arm64.deb",
+    "SHA256": "fdc93c135d77dadfcb934530dff38b974bb39b8e91c9c24454d18530e3df0e61",
+    "Size": "91392"
+  },
+  "libkf5itemviews-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kitemviews/libkf5itemviews-data_5.116.0-1_all.deb",
+    "SHA256": "97028f64aea26703da6c9f92276a1ebfe189131303b99cfc80df770299af581c",
+    "Size": "12380"
+  },
+  "libkf5itemviews5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kitemviews/libkf5itemviews5_5.116.0-1_arm64.deb",
+    "SHA256": "40e2e8cccd7c75110626543d703b1b755a8ec5e2d32c84b32c62bf7738cffe8c",
+    "Size": "74036"
+  },
+  "libkf5jobwidgets-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kjobwidgets/libkf5jobwidgets-data_5.116.0-1_all.deb",
+    "SHA256": "7929223b19842d935042d5d44b790bf245db2f1617d2af7714523c9f8f00989e",
+    "Size": "35692"
+  },
+  "libkf5jobwidgets5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kjobwidgets/libkf5jobwidgets5_5.116.0-1_arm64.deb",
+    "SHA256": "5c6b0fb7112d5107f217db2844cc79607e110544d06deadcf7a962dacef78ac4",
+    "Size": "62840"
+  },
+  "libkf5kiocore5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kio/libkf5kiocore5_5.116.0-1_arm64.deb",
+    "SHA256": "236d7ba97fae5c237071be8c8ff295074626d4c71f6aad241da06f30fd1eb0c6",
+    "Size": "440276"
+  },
+  "libkf5kiofilewidgets5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kio/libkf5kiofilewidgets5_5.116.0-1_arm64.deb",
+    "SHA256": "97f659cafdbd1e73974e035aa1d05e0801e234152c3959cf8c845fad2e39077a",
+    "Size": "282964"
+  },
+  "libkf5kiogui5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kio/libkf5kiogui5_5.116.0-1_arm64.deb",
+    "SHA256": "9a3a78c3831dd1ece97218142e7641015229a8914a6950ef76a52bb8c7868977",
+    "Size": "90416"
+  },
+  "libkf5kiontlm5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kio/libkf5kiontlm5_5.116.0-1_arm64.deb",
+    "SHA256": "aa6ead47a8ff8fce80013ebff0b252cd243ced1340f83eb0762c2086ffeeac04",
+    "Size": "23612"
+  },
+  "libkf5kiowidgets5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kio/libkf5kiowidgets5_5.116.0-1_arm64.deb",
+    "SHA256": "e65bdde246605398e31477deb6db967bc8ec91772d1c082b4e4129afab66733a",
+    "Size": "375980"
+  },
+  "libkf5kirigami2-5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kirigami2/libkf5kirigami2-5_5.116.0-1_arm64.deb",
+    "SHA256": "902f8316fd9513a0c0c455ebff17361dcda64c839f5a4c69f49774295cf10cff",
+    "Size": "59944"
+  },
+  "libkf5notifications-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/knotifications/libkf5notifications-data_5.116.0-1_all.deb",
+    "SHA256": "76d53dac4634ec25b54bc41e3705c1526c304750c7b68f6ecca6de9a686e22d7",
+    "Size": "18072"
+  },
+  "libkf5notifications5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/knotifications/libkf5notifications5_5.116.0-1_arm64.deb",
+    "SHA256": "adf41392509843681be4586e77d60f1a3b6c5dd073523aa9af38cb52f3ee13d8",
+    "Size": "109656"
+  },
+  "libkf5service-bin": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kservice/libkf5service-bin_5.116.0-1_arm64.deb",
+    "SHA256": "e7bac3b8b256fe588cb8f01647589043d616620a858df971182d0d06b9c1a14f",
+    "Size": "53640"
+  },
+  "libkf5service-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kservice/libkf5service-data_5.116.0-1_all.deb",
+    "SHA256": "5944546600296944283320851bd2cd1f338cb1115f4fef4ef407872275e31187",
+    "Size": "68400"
+  },
+  "libkf5service5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kservice/libkf5service5_5.116.0-1_arm64.deb",
+    "SHA256": "74aae9f208fc483e6a2cb5614c5136ed88af0638a30231df5987868312ed502b",
+    "Size": "203356"
+  },
+  "libkf5solid5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/s/solid/libkf5solid5_5.116.0-1_arm64.deb",
+    "SHA256": "3b9ea1d54ab45b01e4a93cf9807c55c1298606b3092e9b6f4b14a98d210008d2",
+    "Size": "230240"
+  },
+  "libkf5solid5-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/s/solid/libkf5solid5-data_5.116.0-1_all.deb",
+    "SHA256": "e3ae87b3fce3a321c84ac02e9ce7c9ce98b9e27077bad4b951350f43098a0751",
+    "Size": "106180"
+  },
+  "libkf5sonnet5-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/s/sonnet/libkf5sonnet5-data_5.116.0-1_all.deb",
+    "SHA256": "c481c421034d10bdf93b56776a8ce50b1ff370c632b20df2a1a4060afd0def9f",
+    "Size": "99696"
+  },
+  "libkf5sonnetcore5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/s/sonnet/libkf5sonnetcore5_5.116.0-1_arm64.deb",
+    "SHA256": "bf3e1d366b12e9f46a020e413a7c44c0f6d4fa42c1b157a3fac78c26392981a5",
+    "Size": "123356"
+  },
+  "libkf5sonnetui5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/s/sonnet/libkf5sonnetui5_5.116.0-1_arm64.deb",
+    "SHA256": "0a69649dd229e6330f7c2d8ddbb5dc35f50e0febf634832957752babd9e8d8ab",
+    "Size": "50312"
+  },
+  "libkf5textwidgets-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/ktextwidgets/libkf5textwidgets-data_5.116.0-1_all.deb",
+    "SHA256": "4ec653b03f8237a2d850a7dfee8c5f97897730d67734943e2485cc4746468dac",
+    "Size": "179220"
+  },
+  "libkf5textwidgets5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/ktextwidgets/libkf5textwidgets5_5.116.0-1_arm64.deb",
+    "SHA256": "811f6317795d268e4233ce2a5d089d3108eaf83088dbc5880cf0bc46cd5793ea",
+    "Size": "77828"
+  },
+  "libkf5wallet-bin": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kwallet-kf5/libkf5wallet-bin_5.116.0-1_all.deb",
+    "SHA256": "4cb66505adf604ac81a4ae13d815eba7bf7cc128c6efc9d588da64fb8afce5a1",
+    "Size": "5556"
+  },
+  "libkf5wallet-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kwallet-kf5/libkf5wallet-data_5.116.0-1_all.deb",
+    "SHA256": "a19ad0dc0b3071388003b9a8dcf8cd75fac4876e35256c0add77a6a518684b0e",
+    "Size": "199684"
+  },
+  "libkf5wallet5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kwallet-kf5/libkf5wallet5_5.116.0-1_arm64.deb",
+    "SHA256": "af2a9edc8c99c130da31439eb06aefc09f79cc192b20feaf9922508517986e3e",
+    "Size": "38976"
+  },
+  "libkf5waylandclient5": {
+    "Version": "4:5.116.0-1",
+    "Filename": "pool/main/k/kwayland-kf5/libkf5waylandclient5_5.116.0-1_arm64.deb",
+    "SHA256": "fabbc699bb7cfcd162c8b1ca10945a1a2da6f668bab75e4d926b719e2f3edf20",
+    "Size": "198244"
+  },
+  "libkf5widgetsaddons-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kwidgetsaddons/libkf5widgetsaddons-data_5.116.0-1_all.deb",
+    "SHA256": "7707d7b8ffb327013a03fb1a1999c1d5dedcde0eb9cb1ad01674772aa3d58678",
+    "Size": "1062376"
+  },
+  "libkf5widgetsaddons5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kwidgetsaddons/libkf5widgetsaddons5_5.116.0-1_arm64.deb",
+    "SHA256": "6f95b150b225fa35725c9456e0df2c5866b8679ddee08fd9117d8f9f4ca6982e",
+    "Size": "377412"
+  },
+  "libkf5windowsystem-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kwindowsystem/libkf5windowsystem-data_5.116.0-1_all.deb",
+    "SHA256": "fa1cd0cdc2968fe5697fb7e6432678b4a22dae20ee27545e734fae14f4165b35",
+    "Size": "12416"
+  },
+  "libkf5windowsystem5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kwindowsystem/libkf5windowsystem5_5.116.0-1_arm64.deb",
+    "SHA256": "6b5ab1626e878695815fb1ae174f0cdb2870772350f53d258b568f308d1b9cb3",
+    "Size": "133896"
+  },
+  "libkf5xmlgui-data": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kxmlgui/libkf5xmlgui-data_5.116.0-1_all.deb",
+    "SHA256": "088897952a6b57a7570555976ca7c843efa4840b9b8bce6a5d5483a7346abbeb",
+    "Size": "386296"
+  },
+  "libkf5xmlgui5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kxmlgui/libkf5xmlgui5_5.116.0-1_arm64.deb",
+    "SHA256": "3611482585cdf69217223eaa81f4e27b3b98357f0dcb8dcbac0ed8f4cf5dfc9b",
+    "Size": "266768"
   },
   "libkf6archive-data": {
     "Version": "6.13.0-2",
@@ -2597,6 +3149,12 @@
     "SHA256": "1ad66b752d24a33ae61777b967db32a00d8a1ba0bffb16470eeb280daeac3209",
     "Size": "1223768"
   },
+  "libkf6texttemplate6": {
+    "Version": "6.13.0-1",
+    "Filename": "pool/main/k/kf6-ktexttemplate/libkf6texttemplate6_6.13.0-1_arm64.deb",
+    "SHA256": "7683adf145a92e4dea3859041fdb6f6d752a78603c587f7a2a31c0da95a3e448",
+    "Size": "270892"
+  },
   "libkf6textwidgets-data": {
     "Version": "6.13.0-1",
     "Filename": "pool/main/k/kf6-ktextwidgets/libkf6textwidgets-data_6.13.0-1_all.deb",
@@ -2855,6 +3413,12 @@
     "SHA256": "3c894da9b418db8e01eec788485e9d43feb6827927b43d7450e660e4406ac1e3",
     "Size": "149168"
   },
+  "libksysguard-bin": {
+    "Version": "4:6.3.5-1",
+    "Filename": "pool/main/libk/libksysguard/libksysguard-bin_6.3.5-1_arm64.deb",
+    "SHA256": "2a779e61c61964ea8377581936e7a61dc2a18f3e250398bdd0abff31a4e810dc",
+    "Size": "68716"
+  },
   "libksysguard-data": {
     "Version": "4:6.3.5-1",
     "Filename": "pool/main/libk/libksysguard/libksysguard-data_6.3.5-1_all.deb",
@@ -3041,6 +3605,12 @@
     "SHA256": "46f361d1deb90caa1760f230c9c119fa4ce255636b12e6d817a0f65d6de87aad",
     "Size": "52592"
   },
+  "libmng1": {
+    "Version": "1.0.10+dfsg-3.1+b6",
+    "Filename": "pool/main/libm/libmng/libmng1_1.0.10+dfsg-3.1+b6_arm64.deb",
+    "SHA256": "3cc6d2d679477db96bff0eb0341ec0b0f9a68a6767512edd636308cf160c8f3b",
+    "Size": "200404"
+  },
   "libmount1": {
     "Version": "2.41-5",
     "Filename": "pool/main/u/util-linux/libmount1_2.41-5_arm64.deb",
@@ -3149,6 +3719,18 @@
     "SHA256": "4a220245385ec7222f4a20e444532808b90139b70ea9c7eeab179c927a27b37f",
     "Size": "28404"
   },
+  "libnl-3-200": {
+    "Version": "3.7.0-2",
+    "Filename": "pool/main/libn/libnl3/libnl-3-200_3.7.0-2_arm64.deb",
+    "SHA256": "0489548a052d64b1acf7f61b0f08fd2da954b6fd6b9c729a4e740d7d39652d00",
+    "Size": "57068"
+  },
+  "libnl-route-3-200": {
+    "Version": "3.7.0-2",
+    "Filename": "pool/main/libn/libnl3/libnl-route-3-200_3.7.0-2_arm64.deb",
+    "SHA256": "86cd5b58c83cd70a834625f112a6c30da249bb842c4ac4daa44fd4c08298b7be",
+    "Size": "167324"
+  },
   "libnorm1t64": {
     "Version": "1.5.9+dfsg-3.1+b2",
     "Filename": "pool/main/n/norm/libnorm1t64_1.5.9+dfsg-3.1+b2_arm64.deb",
@@ -3202,6 +3784,18 @@
     "Filename": "pool/main/o/okular/libokular6core3_25.04.2-1+deb13u1_arm64.deb",
     "SHA256": "8e9bb476f5066e7690e56026b1c7f06be1af2c6596372dc888cbb8510af4ede5",
     "Size": "396752"
+  },
+  "libopencv-core410": {
+    "Version": "4.10.0+dfsg-5",
+    "Filename": "pool/main/o/opencv/libopencv-core410_4.10.0+dfsg-5_arm64.deb",
+    "SHA256": "3fc19b9331f3f41254b3df7c80e5ea8551960841272938fb4d1fc4852906d88f",
+    "Size": "915168"
+  },
+  "libopencv-imgproc410": {
+    "Version": "4.10.0+dfsg-5",
+    "Filename": "pool/main/o/opencv/libopencv-imgproc410_4.10.0+dfsg-5_arm64.deb",
+    "SHA256": "9442d3f3893e867c7e61ac419c85da1eb887ae4de62cc44a12f390c2e0a615bc",
+    "Size": "992524"
   },
   "libopenexr-3-1-30": {
     "Version": "3.1.13-2",
@@ -3316,6 +3910,12 @@
     "Filename": "pool/main/p/parted/libparted2t64_3.6-5_arm64.deb",
     "SHA256": "cc441a27a61a0d7320cc991f147049b12444c6e290277f1a0a5a3fc5942ded63",
     "Size": "293388"
+  },
+  "libpcap0.8t64": {
+    "Version": "1.10.5-2",
+    "Filename": "pool/main/libp/libpcap/libpcap0.8t64_1.10.5-2_arm64.deb",
+    "SHA256": "9db27b0ebf0333ea8524feac225d39db283235bb408eee90cb59d426d5a422a5",
+    "Size": "159584"
   },
   "libpcre2-16-0": {
     "Version": "10.46-1~deb13u1",
@@ -3449,6 +4049,12 @@
     "SHA256": "e8c2e996ad45fef730c40a3b0de34ec878307d4347e63e19cd15e59bd9ac3dcc",
     "Size": "46328"
   },
+  "libpolkit-qt5-1-1": {
+    "Version": "0.200.0-4+b1",
+    "Filename": "pool/main/p/polkit-qt-1/libpolkit-qt5-1-1_0.200.0-4+b1_arm64.deb",
+    "SHA256": "90dbc73b11a1129faaaba7918e1ccd4493fce639f4151bef5a358fc822a06c70",
+    "Size": "52432"
+  },
   "libpolkit-qt6-1-1": {
     "Version": "0.200.0-4+b1",
     "Filename": "pool/main/p/polkit-qt-1/libpolkit-qt6-1-1_0.200.0-4+b1_arm64.deb",
@@ -3581,6 +4187,108 @@
     "SHA256": "8a52834e626c6f9c662005e4db5ee45043e1ed50f6a7833ff7e18c2f3a8b4edb",
     "Size": "38736"
   },
+  "libqt5core5t64": {
+    "Version": "5.15.15+dfsg-6+deb13u1",
+    "Filename": "pool/main/q/qtbase-opensource-src/libqt5core5t64_5.15.15+dfsg-6+deb13u1_arm64.deb",
+    "SHA256": "a8a8f5f447a7ebe93f604f7d3b1a9b7bdf662e5e7430993b881b94e251bec313",
+    "Size": "1738944"
+  },
+  "libqt5dbus5t64": {
+    "Version": "5.15.15+dfsg-6+deb13u1",
+    "Filename": "pool/main/q/qtbase-opensource-src/libqt5dbus5t64_5.15.15+dfsg-6+deb13u1_arm64.deb",
+    "SHA256": "1582eb7aae3f09506a8811a7491c3edcbee2fbe39aee98a68c331c4e47f171be",
+    "Size": "205580"
+  },
+  "libqt5gui5t64": {
+    "Version": "5.15.15+dfsg-6+deb13u1",
+    "Filename": "pool/main/q/qtbase-opensource-src/libqt5gui5t64_5.15.15+dfsg-6+deb13u1_arm64.deb",
+    "SHA256": "523866c11c5cf10df6f3b5af51bb2a5d5f84f906daa9dd3d443bd74edd693969",
+    "Size": "3198636"
+  },
+  "libqt5network5t64": {
+    "Version": "5.15.15+dfsg-6+deb13u1",
+    "Filename": "pool/main/q/qtbase-opensource-src/libqt5network5t64_5.15.15+dfsg-6+deb13u1_arm64.deb",
+    "SHA256": "de1ef2f59cc274efec4aabbe9e9caa8a81c5f1d1e23f7f21d72877e593d4df48",
+    "Size": "652112"
+  },
+  "libqt5printsupport5t64": {
+    "Version": "5.15.15+dfsg-6+deb13u1",
+    "Filename": "pool/main/q/qtbase-opensource-src/libqt5printsupport5t64_5.15.15+dfsg-6+deb13u1_arm64.deb",
+    "SHA256": "2d1dea478aedc11c0462aca3a33245ee78bf53860adc83ab397e506301d964e6",
+    "Size": "198744"
+  },
+  "libqt5qml5": {
+    "Version": "5.15.15+dfsg-3",
+    "Filename": "pool/main/q/qtdeclarative-opensource-src/libqt5qml5_5.15.15+dfsg-3_arm64.deb",
+    "SHA256": "b302f6912ab3e29b585c3097a6335c7d1d959c620af08abd7aad875cb07e6438",
+    "Size": "1289484"
+  },
+  "libqt5qmlmodels5": {
+    "Version": "5.15.15+dfsg-3",
+    "Filename": "pool/main/q/qtdeclarative-opensource-src/libqt5qmlmodels5_5.15.15+dfsg-3_arm64.deb",
+    "SHA256": "860f9723e3454a81b9f8b65ea98e106ddef2fbbd111f4cadba33656334854a2e",
+    "Size": "184836"
+  },
+  "libqt5qmlworkerscript5": {
+    "Version": "5.15.15+dfsg-3",
+    "Filename": "pool/main/q/qtdeclarative-opensource-src/libqt5qmlworkerscript5_5.15.15+dfsg-3_arm64.deb",
+    "SHA256": "77c9caf41f001777a0895f649f4cc3f0b8a66df4fd5eadeb1276bfeadb0128de",
+    "Size": "34816"
+  },
+  "libqt5quick5": {
+    "Version": "5.15.15+dfsg-3",
+    "Filename": "pool/main/q/qtdeclarative-opensource-src/libqt5quick5_5.15.15+dfsg-3_arm64.deb",
+    "SHA256": "5d88c8f01f0cee8012e046c8921ab85301b8ea93cdfc4dd0f7332b6182afa6c8",
+    "Size": "1521844"
+  },
+  "libqt5quickcontrols2-5": {
+    "Version": "5.15.15+dfsg-2",
+    "Filename": "pool/main/q/qtquickcontrols2-opensource-src/libqt5quickcontrols2-5_5.15.15+dfsg-2_arm64.deb",
+    "SHA256": "695b800b101f47a45f184de39693845640a5312c3e1e8dc936c1fa57e2c09315",
+    "Size": "61696"
+  },
+  "libqt5quicktemplates2-5": {
+    "Version": "5.15.15+dfsg-2",
+    "Filename": "pool/main/q/qtquickcontrols2-opensource-src/libqt5quicktemplates2-5_5.15.15+dfsg-2_arm64.deb",
+    "SHA256": "adb218392e3f38e354d41c5dce655a604480ec73409261f3e9d8b518d6d8bf99",
+    "Size": "382260"
+  },
+  "libqt5svg5": {
+    "Version": "5.15.15-2",
+    "Filename": "pool/main/q/qtsvg-opensource-src/libqt5svg5_5.15.15-2_arm64.deb",
+    "SHA256": "1608a3d0dd0435269794eae57fd608a17fdc6dc282330e5248ba60ce64153441",
+    "Size": "128460"
+  },
+  "libqt5texttospeech5": {
+    "Version": "5.15.15-2",
+    "Filename": "pool/main/q/qtspeech-opensource-src/libqt5texttospeech5_5.15.15-2_arm64.deb",
+    "SHA256": "76cb17bd3bf4d4e8a1b7dc0adc24fd1c8ebc1362ecb1d3bd473b4dea655bc83d",
+    "Size": "19896"
+  },
+  "libqt5waylandclient5": {
+    "Version": "5.15.15-3",
+    "Filename": "pool/main/q/qtwayland-opensource-src/libqt5waylandclient5_5.15.15-3_arm64.deb",
+    "SHA256": "85b83deb7e7d9b3acc03bd269174e19d55fbb3a02df724e0636b8016cd0d1b96",
+    "Size": "363292"
+  },
+  "libqt5widgets5t64": {
+    "Version": "5.15.15+dfsg-6+deb13u1",
+    "Filename": "pool/main/q/qtbase-opensource-src/libqt5widgets5t64_5.15.15+dfsg-6+deb13u1_arm64.deb",
+    "SHA256": "c777a0fa641fc5d56ad9a0cfb918e40d1525bb752d82de9ee9f7d98438d31c95",
+    "Size": "2283968"
+  },
+  "libqt5x11extras5": {
+    "Version": "5.15.15-2",
+    "Filename": "pool/main/q/qtx11extras-opensource-src/libqt5x11extras5_5.15.15-2_arm64.deb",
+    "SHA256": "3e402d826a6abd9d0b49b68c6eed9dba321224913e96c74e220fad2e6af9634a",
+    "Size": "10688"
+  },
+  "libqt5xml5t64": {
+    "Version": "5.15.15+dfsg-6+deb13u1",
+    "Filename": "pool/main/q/qtbase-opensource-src/libqt5xml5t64_5.15.15+dfsg-6+deb13u1_arm64.deb",
+    "SHA256": "58b0ebb744fbed6b85533a98d8b1d00b5347d9134a5c52cb9d5e5acd4d86953c",
+    "Size": "121732"
+  },
   "libqt6concurrent6": {
     "Version": "6.8.2+dfsg-9+deb13u2",
     "Filename": "pool/main/q/qt6-base/libqt6concurrent6_6.8.2+dfsg-9+deb13u2_arm64.deb",
@@ -3694,6 +4402,24 @@
     "Filename": "pool/main/q/qt6-declarative/libqt6qmlworkerscript6_6.8.2+dfsg-7_arm64.deb",
     "SHA256": "cdba1936fe5a9d516fdbe060e6968876f941feb4d562e601cb87477d35d8b97d",
     "Size": "35432"
+  },
+  "libqt6quick3d6": {
+    "Version": "6.8.2-5",
+    "Filename": "pool/main/q/qt6-quick3d/libqt6quick3d6_6.8.2-5_arm64.deb",
+    "SHA256": "e94f61edb79f57d29455f469875709a5d79a472569b4be63944714a618987694",
+    "Size": "393196"
+  },
+  "libqt6quick3druntimerender6": {
+    "Version": "6.8.2-5",
+    "Filename": "pool/main/q/qt6-quick3d/libqt6quick3druntimerender6_6.8.2-5_arm64.deb",
+    "SHA256": "67aa9932bb13866254da9b3bdc95403a61ab5e2f557dddc26bbc59ab6f01ba9b",
+    "Size": "1365524"
+  },
+  "libqt6quick3dutils6": {
+    "Version": "6.8.2-5",
+    "Filename": "pool/main/q/qt6-quick3d/libqt6quick3dutils6_6.8.2-5_arm64.deb",
+    "SHA256": "ecf01d09af4ba085703edf977df3a19e7f0ce3c6d20b240bebc12bb31d30e739",
+    "Size": "161572"
   },
   "libqt6quick6": {
     "Version": "6.8.2+dfsg-7",
@@ -3832,6 +4558,12 @@
     "Filename": "pool/main/q/qt6-webengine/libqt6webenginequick6_6.8.2+dfsg-4_arm64.deb",
     "SHA256": "abd98b584b0d4db407db7544065a73c905cea002cb2a99d20c6094f357e37ab3",
     "Size": "193424"
+  },
+  "libqt6webenginewidgets6": {
+    "Version": "6.8.2+dfsg-4",
+    "Filename": "pool/main/q/qt6-webengine/libqt6webenginewidgets6_6.8.2+dfsg-4_arm64.deb",
+    "SHA256": "f7f0007b53f797632e0481a988a6103b294684ee391679bc4b601110ed7e1d21",
+    "Size": "79832"
   },
   "libqt6widgets6": {
     "Version": "6.8.2+dfsg-9+deb13u2",
@@ -4265,6 +4997,24 @@
     "SHA256": "e421da949cd26245f24c594265d6a01900b5e060e80793f68b977f7bfaa009ef",
     "Size": "47304"
   },
+  "libtbb12": {
+    "Version": "2022.1.0-1+deb13u1",
+    "Filename": "pool/main/o/onetbb/libtbb12_2022.1.0-1+deb13u1_arm64.deb",
+    "SHA256": "6c91139b5bb02cb8a9e6857dcf46301e9d7f02885ae8f5d120cefdf870b3d373",
+    "Size": "67552"
+  },
+  "libtbbbind-2-5": {
+    "Version": "2022.1.0-1+deb13u1",
+    "Filename": "pool/main/o/onetbb/libtbbbind-2-5_2022.1.0-1+deb13u1_arm64.deb",
+    "SHA256": "dc742ce5db64156e8f36e006decd08517e4dba423b3409b85063c7aebf2f1d02",
+    "Size": "13760"
+  },
+  "libtbbmalloc2": {
+    "Version": "2022.1.0-1+deb13u1",
+    "Filename": "pool/main/o/onetbb/libtbbmalloc2_2022.1.0-1+deb13u1_arm64.deb",
+    "SHA256": "fa1721ac56903a7a4e23e313516c205d740d20d6496a1e5102e8655f08212e9c",
+    "Size": "35844"
+  },
   "libtdb1": {
     "Version": "2:1.4.13+samba4.22.10+dfsg-0+deb13u1",
     "Filename": "pool/main/s/samba/libtdb1_1.4.13+samba4.22.10+dfsg-0+deb13u1_arm64.deb",
@@ -4282,6 +5032,12 @@
     "Filename": "pool/main/libt/libtext-charwidth-perl/libtext-charwidth-perl_0.04-11+b4_arm64.deb",
     "SHA256": "72a9c2131b8dc3a124b778d1e7a606201388bf20203f12b571f4ea58ee362880",
     "Size": "9652"
+  },
+  "libtext-iconv-perl": {
+    "Version": "1.7-8+b4",
+    "Filename": "pool/main/libt/libtext-iconv-perl/libtext-iconv-perl_1.7-8+b4_arm64.deb",
+    "SHA256": "81cbbf9ecc1b80f185d95bcb90adec4dddadea13a819896eba47099edcaa2cd4",
+    "Size": "14248"
   },
   "libtext-wrapi18n-perl": {
     "Version": "0.06-10",
@@ -4463,6 +5219,12 @@
     "SHA256": "2f7eaa2d70030a97e26563868d7595a4bc9ba49aab244bdac08c4b170b91dfbf",
     "Size": "487868"
   },
+  "libvoikko1": {
+    "Version": "4.3.2-1+b2",
+    "Filename": "pool/main/libv/libvoikko/libvoikko1_4.3.2-1+b2_arm64.deb",
+    "SHA256": "8f2785a727988e6f1a572820752bf1c5dbea4ff0a2980610b252f74af6c53394",
+    "Size": "110040"
+  },
   "libvolume-key1": {
     "Version": "0.3.12-9",
     "Filename": "pool/main/v/volume-key/libvolume-key1_0.3.12-9_arm64.deb",
@@ -4607,6 +5369,12 @@
     "SHA256": "c786ffe37393781b39fa99100aaa93891436dc0d8e0a4a5209cc1102679ebe22",
     "Size": "1856972"
   },
+  "libxapian30": {
+    "Version": "1.4.29-3",
+    "Filename": "pool/main/x/xapian-core/libxapian30_1.4.29-3_arm64.deb",
+    "SHA256": "1652525c1c605b2169b3b27beecd01cbaa0e5abd7ec4d2029cbae2084dbde012",
+    "Size": "1055832"
+  },
   "libxau6": {
     "Version": "1:1.0.11-1",
     "Filename": "pool/main/libx/libxau/libxau6_1.0.11-1_arm64.deb",
@@ -4738,6 +5506,12 @@
     "Filename": "pool/main/libx/libxcb/libxcb-xfixes0_1.17.0-2+b1_arm64.deb",
     "SHA256": "19cdb8502827bc010993e69eaba09c670024976f7edd35b2b504bd646b141b0a",
     "Size": "109644"
+  },
+  "libxcb-xinerama0": {
+    "Version": "1.17.0-2+b1",
+    "Filename": "pool/main/libx/libxcb/libxcb-xinerama0_1.17.0-2+b1_arm64.deb",
+    "SHA256": "a55fa7be97bdbd1ee544ddc3fcd990929e181a5221e28a8db93b837419b50050",
+    "Size": "105180"
   },
   "libxcb-xinput0": {
     "Version": "1.17.0-2+b1",
@@ -4876,6 +5650,12 @@
     "Filename": "pool/main/libx/libxml2/libxml2_2.12.7+dfsg+really2.9.14-2.1+deb13u3_arm64.deb",
     "SHA256": "a66b9c960acef8ed9653223cbd00b155a92ebb758ea13a788c41609246c23bc7",
     "Size": "631428"
+  },
+  "libxml2-utils": {
+    "Version": "2.12.7+dfsg+really2.9.14-2.1+deb13u3",
+    "Filename": "pool/main/libx/libxml2/libxml2-utils_2.12.7+dfsg+really2.9.14-2.1+deb13u3_arm64.deb",
+    "SHA256": "8fe018b0270315582f1fbb40cea2df2972ff77bc8faac516d71b92280622c97f",
+    "Size": "99508"
   },
   "libxmlb2": {
     "Version": "0.3.22-1",
@@ -5123,6 +5903,12 @@
     "SHA256": "553173542c5388f14c375f97b60d61158fb241d8472ef72f5120b13612d4cb0c",
     "Size": "1049464"
   },
+  "openssh-client": {
+    "Version": "1:10.0p1-7+deb13u4",
+    "Filename": "pool/main/o/openssh/openssh-client_10.0p1-7+deb13u4_arm64.deb",
+    "SHA256": "e900c13c9a5267714fc2c2c1f369fe4a667c7dd4031266b1480250320f0bfcfb",
+    "Size": "926832"
+  },
   "openssl": {
     "Version": "3.5.6-1~deb13u2",
     "Filename": "pool/main/o/openssl/openssl_3.5.6-1~deb13u2_arm64.deb",
@@ -5219,6 +6005,18 @@
     "SHA256": "b38032ad711e43dc7d4b00b67d93fb660bc548faac866c3deb68c0112ce62653",
     "Size": "24696"
   },
+  "plasma-browser-integration": {
+    "Version": "6.3.4-2",
+    "Filename": "pool/main/p/plasma-browser-integration/plasma-browser-integration_6.3.4-2_arm64.deb",
+    "SHA256": "f8f756a5b1697055ba84418f221aa770b30893573028e30ddc1323fa5d0da66a",
+    "Size": "163880"
+  },
+  "plasma-calendar-addons": {
+    "Version": "4:6.3.5-1",
+    "Filename": "pool/main/k/kdeplasma-addons/plasma-calendar-addons_6.3.5-1_arm64.deb",
+    "SHA256": "883348643d9514fd3c4c777b0ff02631275ff6b73d03636bc7d81e385d8c6601",
+    "Size": "121572"
+  },
   "plasma-dataengines-addons": {
     "Version": "4:6.3.5-1",
     "Filename": "pool/main/k/kdeplasma-addons/plasma-dataengines-addons_6.3.5-1_arm64.deb",
@@ -5236,6 +6034,12 @@
     "Filename": "pool/main/p/plasma-desktop/plasma-desktop-data_6.3.6-1_all.deb",
     "SHA256": "02d20e56a9215422d3d3c1d53b19ed8f858b45d0401d2d05da7ddde06b580d63",
     "Size": "10764996"
+  },
+  "plasma-desktop-doc": {
+    "Version": "4:6.3.6-1",
+    "Filename": "pool/main/p/plasma-desktop/plasma-desktop-doc_6.3.6-1_all.deb",
+    "SHA256": "ca522a77113ec35d08489057020169a3889f2ada5a53857832a54d15b0a76f11",
+    "Size": "4801784"
   },
   "plasma-desktoptheme": {
     "Version": "6.3.5-1",
@@ -5261,6 +6065,12 @@
     "SHA256": "084a2f10cced070d35af7575f1b6a5cdd9bb9aa91d5f0c22ba144e19bd7aa388",
     "Size": "117516"
   },
+  "plasma-wallpapers-addons": {
+    "Version": "4:6.3.5-1",
+    "Filename": "pool/main/k/kdeplasma-addons/plasma-wallpapers-addons_6.3.5-1_arm64.deb",
+    "SHA256": "85800ffbc51d0424fc5fafe82f7c7cdd67849f8d7be10818f7ffada8f7031beb",
+    "Size": "70928"
+  },
   "plasma-widgets-addons": {
     "Version": "4:6.3.5-1",
     "Filename": "pool/main/k/kdeplasma-addons/plasma-widgets-addons_6.3.5-1_arm64.deb",
@@ -5284,6 +6094,12 @@
     "Filename": "pool/main/p/plasma-workspace-wallpapers/plasma-workspace-wallpapers_6.3.4-1_all.deb",
     "SHA256": "b521d36486817f7a44c26faf247b9528138cc1ea1e8b154442a757c7e31faa2c",
     "Size": "131063876"
+  },
+  "plasma5-integration": {
+    "Version": "6.3.6-1",
+    "Filename": "pool/main/p/plasma-integration/plasma5-integration_6.3.6-1_arm64.deb",
+    "SHA256": "dee5f5902c3717150291bf296e11d42bfae3de1cb6c47b9c70a8c18aed7ee5e9",
+    "Size": "152600"
   },
   "pnp.ids": {
     "Version": "0.394-1",
@@ -5350,6 +6166,66 @@
     "Filename": "pool/main/q/qt6-tools/qdbus-qt6_6.8.2-5_arm64.deb",
     "SHA256": "ebc146e71a3460a421a0fe24d68ba8e645128ccf0e7e45ec421f989f107bd8ef",
     "Size": "29724"
+  },
+  "qml-module-org-kde-kirigami2": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/k/kirigami2/qml-module-org-kde-kirigami2_5.116.0-1_arm64.deb",
+    "SHA256": "a38487c0444ca1dc41d0e2363f9410376681a782746e8c0c1407d94ec5e9f7b4",
+    "Size": "324024"
+  },
+  "qml-module-org-kde-qqc2desktopstyle": {
+    "Version": "5.116.1-1",
+    "Filename": "pool/main/q/qqc2-desktop-style/qml-module-org-kde-qqc2desktopstyle_5.116.1-1_arm64.deb",
+    "SHA256": "7e2fc47fe49ef8dca66064cb2e0374947322b092b3d9ee564a4196708d95b26a",
+    "Size": "82048"
+  },
+  "qml-module-org-kde-sonnet": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/s/sonnet/qml-module-org-kde-sonnet_5.116.0-1_arm64.deb",
+    "SHA256": "be2f403a78ffbbfcf2a6308f4448ce3c54c976594aaae1b480d841afb074b021",
+    "Size": "23988"
+  },
+  "qml-module-qtgraphicaleffects": {
+    "Version": "5.15.15-2",
+    "Filename": "pool/main/q/qtgraphicaleffects-opensource-src/qml-module-qtgraphicaleffects_5.15.15-2_arm64.deb",
+    "SHA256": "44c19d19f8bbd90df561227390ae2b29330c016ef7af969451417b277cb1d473",
+    "Size": "68936"
+  },
+  "qml-module-qtqml-models2": {
+    "Version": "5.15.15+dfsg-3",
+    "Filename": "pool/main/q/qtdeclarative-opensource-src/qml-module-qtqml-models2_5.15.15+dfsg-3_arm64.deb",
+    "SHA256": "0167c9e64f000f40506df704b26ec6dbf5f793b91639a90aaa66280dc3eadf2e",
+    "Size": "21832"
+  },
+  "qml-module-qtquick-controls2": {
+    "Version": "5.15.15+dfsg-2",
+    "Filename": "pool/main/q/qtquickcontrols2-opensource-src/qml-module-qtquick-controls2_5.15.15+dfsg-2_arm64.deb",
+    "SHA256": "f4b48360ddd5b833ff8080eb5b9dd2fe7c7792cabbeb4478a4144f211688449a",
+    "Size": "901096"
+  },
+  "qml-module-qtquick-layouts": {
+    "Version": "5.15.15+dfsg-3",
+    "Filename": "pool/main/q/qtdeclarative-opensource-src/qml-module-qtquick-layouts_5.15.15+dfsg-3_arm64.deb",
+    "SHA256": "c1d2e26c9a218d4c7a537b5a216bccaa0d9848a79197b6a494ec5dd83f897a2b",
+    "Size": "53768"
+  },
+  "qml-module-qtquick-templates2": {
+    "Version": "5.15.15+dfsg-2",
+    "Filename": "pool/main/q/qtquickcontrols2-opensource-src/qml-module-qtquick-templates2_5.15.15+dfsg-2_arm64.deb",
+    "SHA256": "0dda781c8cf32d33d14a4b284fe97d6ff052e9fb3faae75d168ad29ab2d962c0",
+    "Size": "72188"
+  },
+  "qml-module-qtquick-window2": {
+    "Version": "5.15.15+dfsg-3",
+    "Filename": "pool/main/q/qtdeclarative-opensource-src/qml-module-qtquick-window2_5.15.15+dfsg-3_arm64.deb",
+    "SHA256": "847c903e520fe9dd4f7530d718d4de5a31ca64649803bee1491ebf24b6f4446f",
+    "Size": "28716"
+  },
+  "qml-module-qtquick2": {
+    "Version": "5.15.15+dfsg-3",
+    "Filename": "pool/main/q/qtdeclarative-opensource-src/qml-module-qtquick2_5.15.15+dfsg-3_arm64.deb",
+    "SHA256": "f224ccee132d5378715c395e4ca0a79db5fa80ee26e0c31579de9738a216d6ec",
+    "Size": "37344"
   },
   "qml6-module-org-kde-activities": {
     "Version": "6.3.4-1",
@@ -5669,6 +6545,12 @@
     "SHA256": "ecd1cc14d727f78137823f84016448ff92e606b4ecb5209cad26e211281f904c",
     "Size": "16988"
   },
+  "qml6-module-qtquick3d": {
+    "Version": "6.8.2-5",
+    "Filename": "pool/main/q/qt6-quick3d/qml6-module-qtquick3d_6.8.2-5_arm64.deb",
+    "SHA256": "df63266d525c00a0425d1bf7f1d16d01a4ada6d372086d609e9774df54648d9b",
+    "Size": "99080"
+  },
   "qml6-module-qtwebchannel": {
     "Version": "6.8.2-2",
     "Filename": "pool/main/q/qt6-webchannel/qml6-module-qtwebchannel_6.8.2-2_arm64.deb",
@@ -5686,6 +6568,12 @@
     "Filename": "pool/main/a/accounts-qml-module/qml6-module-sso-onlineaccounts_0.7+git20231028.05e79eb-6_arm64.deb",
     "SHA256": "637c5ee6aaa16cd87d302e818c5c05f9dad6360eb0cb3257e2726193a0f33ba3",
     "Size": "64428"
+  },
+  "qt6-image-formats-plugins": {
+    "Version": "6.8.2-4",
+    "Filename": "pool/main/q/qt6-imageformats/qt6-image-formats-plugins_6.8.2-4_arm64.deb",
+    "SHA256": "211c542a1b2612f9dd311c2e35b2cfd05635bbb644c60f8ebf2446520f350692",
+    "Size": "47804"
   },
   "qt6-svg-plugins": {
     "Version": "6.8.2-3",
@@ -5729,11 +6617,23 @@
     "SHA256": "a355b832d9f0f4dc9eca1a661080db5dc118e6c435f107a5c4dd201d7af59ba8",
     "Size": "10868"
   },
+  "sgml-data": {
+    "Version": "2.0.11+nmu1",
+    "Filename": "pool/main/s/sgml-data/sgml-data_2.0.11+nmu1_all.deb",
+    "SHA256": "2f1c3b3d2387054757b8e64e92fc10f4e1f7f31fdf461ae15cc5f8145e1f3876",
+    "Size": "178976"
+  },
   "shared-mime-info": {
     "Version": "2.4-5+b2",
     "Filename": "pool/main/s/shared-mime-info/shared-mime-info_2.4-5+b2_arm64.deb",
     "SHA256": "a68086d0fdffc32fa05b1768f67b83d06344b026a855e29daa7ff02d64deec59",
     "Size": "756268"
+  },
+  "sonnet6-plugins": {
+    "Version": "6.13.0-1",
+    "Filename": "pool/main/k/kf6-sonnet/sonnet6-plugins_6.13.0-1_arm64.deb",
+    "SHA256": "993ae613f3d7d62c098c1b03567e24020052e03d2f0c32846117b318b0894714",
+    "Size": "61344"
   },
   "sound-theme-freedesktop": {
     "Version": "0.8-6~deb13u1",
@@ -5752,6 +6652,12 @@
     "Filename": "pool/main/s/sudo/sudo_1.9.16p2-3+deb13u2_arm64.deb",
     "SHA256": "907d333f72f3369b2ceda64dbcfccf0dc515543b76ac68d5c901e309f118709b",
     "Size": "1991796"
+  },
+  "sweeper": {
+    "Version": "4:25.04.0-1",
+    "Filename": "pool/main/s/sweeper/sweeper_25.04.0-1_arm64.deb",
+    "SHA256": "05f2771d6f59ca2e5cebc1ad03f4cf416c5d64f8f5bdd1ff2bf3236f5b07471e",
+    "Size": "403536"
   },
   "systemd-sysv": {
     "Version": "257.13-1~deb13u1",
@@ -5825,6 +6731,12 @@
     "SHA256": "6c772ad57116e10674ed7d2206bcbf6030b1965f1bdd115fcf47a7a9b693123f",
     "Size": "222816"
   },
+  "webext-plasma-browser-integration": {
+    "Version": "6.3.4-2",
+    "Filename": "pool/main/p/plasma-browser-integration/webext-plasma-browser-integration_6.3.4-2_all.deb",
+    "SHA256": "7355860224b72ff7eb013b4913c06490042e94880b1136a186e55e5a0f045cde",
+    "Size": "153944"
+  },
   "wireplumber": {
     "Version": "0.5.8-2",
     "Filename": "pool/main/w/wireplumber/wireplumber_0.5.8-2_arm64.deb",
@@ -5885,6 +6797,12 @@
     "SHA256": "dc1d37303c103b23c40cd1ea694c5c6561e0e8dc1734a73c7a0ae0ef080e7fcc",
     "Size": "2410088"
   },
+  "xsettings-kde": {
+    "Version": "0.12.3-1",
+    "Filename": "pool/main/x/xsettings-kde/xsettings-kde_0.12.3-1_arm64.deb",
+    "SHA256": "37a2160d4a5d19ac779391692538a4e0a0126e516daad4d6eae67f1c8cd01a3c",
+    "Size": "12740"
+  },
   "xwayland": {
     "Version": "2:24.1.6-1",
     "Filename": "pool/main/x/xwayland/xwayland_24.1.6-1_arm64.deb",
@@ -5914,5 +6832,17 @@
     "Filename": "pool/main/libz/libzstd/zstd_1.5.7+dfsg-1_arm64.deb",
     "SHA256": "715696637b45bf1c30230f1c97f9ffdc9af18ead053564d9349f92accccbe988",
     "Size": "635036"
+  },
+  "libgtk-3-bin": {
+    "Version": "3.24.49-3",
+    "Filename": "pool/main/g/gtk+3.0/libgtk-3-bin_3.24.49-3_arm64.deb",
+    "SHA256": "c8faafd970307d5edd59a14376c67ea6280f71822815dde8f3c7b245405c0374",
+    "Size": "84724"
+  },
+  "libglib2.0-bin": {
+    "Version": "2.84.4-3~deb13u3",
+    "Filename": "pool/main/g/glib2.0/libglib2.0-bin_2.84.4-3~deb13u3_arm64.deb",
+    "SHA256": "8bb0a5f9315828a10dc2f69778f7e9d0ab854dd1b826ed13bfc9b34acadd240b",
+    "Size": "127100"
   }
 }
