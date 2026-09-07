@@ -8,6 +8,9 @@ on warm charcoal. Its open form should remain legible without lettering.
 - `portal-icon-monochrome.svg`: the same silhouette for themed icons.
 - `portal-icon-foreground.xml`: resolution-independent Android foreground.
 - `portal-icon-monochrome.xml`: resolution-independent Android themed icon.
+- `portal-debug-icon.svg`: legacy debug icon with a blue code badge.
+- `portal-debug-icon-foreground.svg`: badged adaptive foreground.
+- `portal-debug-icon-monochrome.svg`: badged themed-icon silhouette.
 
 Regenerate PNGs with Node.js and `sharp` available:
 
@@ -15,7 +18,8 @@ Regenerate PNGs with Node.js and `sharp` available:
 node scripts/render-icon.cjs target/portal-icon-preview.png
 ```
 
-The renderer checks the foreground against Android's 66dp safe circle inside
+The renderer generates and checks both normal and debug artwork against
+Android's 66dp safe circle inside
 the 108dp layer. The preview models the central 72dp crop and its 1.5x scale;
 masking the whole source image would understate launcher clipping. Keep the
 transparent margins. Adaptive resources are exported at 108dp per density;
