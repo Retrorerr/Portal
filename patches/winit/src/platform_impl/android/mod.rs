@@ -196,6 +196,7 @@ impl<T: 'static> EventLoop<T> {
             "An `AndroidApp` as passed to android_main() is required to create an `EventLoop` on \
              Android",
         );
+        let density = android_app.config().density().map(|dpi| dpi as f64 / 160.0).unwrap_or(1.0);
         let redraw_flag = SharedFlag::new();
 
         Ok(Self {
@@ -222,7 +223,7 @@ impl<T: 'static> EventLoop<T> {
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
             pressed_mouse_buttons: std::collections::HashSet::new(),
-            touchpad_gestures: TouchpadGestureStateMachine::default(),
+            touchpad_gestures: TouchpadGestureStateMachine::with_density(density),
             touchpad_clock: Instant::now(),
         })
     }
@@ -575,19 +576,25 @@ impl<T: 'static> EventLoop<T> {
                     if is_touchpad {
                         match action {
                             MotionAction::ButtonPress => {
-                                if self.touchpad_gestures.cancel()
-                                    == Some(TouchpadGestureAction::DragEnd)
+                                let forward_press = if mapped_button == MouseButton::Left {
+                                    self.touchpad_gestures.physical_button_press()
+                                } else {
+                                    if self.touchpad_gestures.cancel()
+                                        == Some(TouchpadGestureAction::DragEnd)
+                                    {
+                                        send_mouse_button(
+                                            callback,
+                                            self.window_target(),
+                                            window_id,
+                                            device_id,
+                                            event::ElementState::Released,
+                                            MouseButton::Left,
+                                        );
+                                    }
+                                    true
+                                };
+                                if self.pressed_mouse_buttons.insert(mapped_button) && forward_press
                                 {
-                                    send_mouse_button(
-                                        callback,
-                                        self.window_target(),
-                                        window_id,
-                                        device_id,
-                                        event::ElementState::Released,
-                                        MouseButton::Left,
-                                    );
-                                }
-                                if self.pressed_mouse_buttons.insert(mapped_button) {
                                     send_mouse_button(
                                         callback,
                                         self.window_target(),
@@ -599,6 +606,9 @@ impl<T: 'static> EventLoop<T> {
                                 }
                             },
                             MotionAction::ButtonRelease => {
+                                if mapped_button == MouseButton::Left {
+                                    self.touchpad_gestures.physical_button_release();
+                                }
                                 if self.pressed_mouse_buttons.remove(&mapped_button) {
                                     send_mouse_button(
                                         callback,
@@ -615,11 +625,16 @@ impl<T: 'static> EventLoop<T> {
                                     x: pointer.x() as f64,
                                     y: pointer.y() as f64,
                                 };
-                                if self.pressed_mouse_buttons.is_empty() {
-                                    self.touchpad_gestures.down(
+                                let has_non_primary_button = self
+                                    .pressed_mouse_buttons
+                                    .iter()
+                                    .any(|button| *button != MouseButton::Left);
+                                if !has_non_primary_button {
+                                    self.touchpad_gestures.down_with_physical_button(
                                         gesture_time,
                                         location.x,
                                         location.y,
+                                        self.pressed_mouse_buttons.contains(&MouseButton::Left),
                                     );
                                 } else {
                                     self.touchpad_gestures.cancel();
@@ -677,6 +692,22 @@ impl<T: 'static> EventLoop<T> {
                                         MouseButton::Left,
                                     ),
                                     Some(TouchpadGestureAction::DragStart) | None => {},
+                                }
+
+                                // Some Android touchpad stacks end a primary click with Up
+                                // instead of a separate ButtonRelease. Treat Up as a release
+                                // fallback so physical or adopted synthetic grabs cannot stick.
+                                let released: Vec<MouseButton> =
+                                    self.pressed_mouse_buttons.drain().collect();
+                                for button in released {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        button,
+                                    );
                                 }
                             },
                             MotionAction::PointerDown

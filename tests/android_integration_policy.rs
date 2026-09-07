@@ -277,7 +277,8 @@ fn nested_android_owned_settings_are_truthful() {
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_touchscreen.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_tablet.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_mouse.so"));
-    assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_touchpad.so"));
+    assert!(ANDROID_SETUP_SOURCE.contains("Failed to restore Portal touchpad settings module"));
+    assert!(ANDROID_SETUP_SOURCE.contains("kwin-debian-arm64/libkwin.so.6.3.6"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings_qwidgets/kcm_clock.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("with_extension(\"so.portal-disabled\")"));
     assert!(ANDROID_SETUP_SOURCE.contains("org.kde.dolphin.desktop"));
