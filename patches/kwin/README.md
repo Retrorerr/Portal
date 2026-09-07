@@ -196,3 +196,12 @@ nested Wayland connection, configure/ack, buffer import, Android EGL
 submission, or physical presentation.  Those remain separate ARM64 release
 gates and must retain attempt-correlated logs and a native backtrace for any
 new failure.
+
+## Debian 6.3.6 nested touchpad patch
+
+`debian-6.3.6/0001-wayland-portal-touchpad-scroll-settings.patch` targets
+Debian's KWin 6.3.6 source. It preserves the parent Wayland axis source,
+publishes one truthful Portal touchpad through KWin's existing D-Bus device
+contract, persists the supported settings in `kcminputrc`, and applies only
+`NaturalScroll` and `ScrollFactor` to finger-axis events. It is independent of
+the Arch 6.7.4 patches above and must not be applied to that source tree.

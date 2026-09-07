@@ -62,6 +62,8 @@ const CLIPBOARD_SYNC: &str = include_str!("../../../assets/localdesktop-clipboar
 const CLIPBOARD_PUSH: &str = include_str!("../../../assets/localdesktop-clipboard-push.sh");
 const WL_COPY_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-copy");
 const WL_PASTE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-paste");
+const KWIN_LIBRARY: &[u8] =
+    include_bytes!("../../../assets/kwin-debian-arm64/libkwin.so.6.3.6");
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -127,6 +129,7 @@ fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
 
             // Create fake proc files
             let proc_files = [
+                ("proc/.version", "Linux version 6.1.0-portal\n"),
                 ("proc/.sysctl_entry_cap_last_cap", "40\n"),
                 ("proc/.sysctl_inotify_max_user_watches", "4096\n"),
             ];
@@ -705,14 +708,12 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     );
 
     // These KCMs configure Linux-owned hardware/services that do not exist in
-    // a nested Android PRoot session. Keep the KWin touchscreen-gestures KCM:
-    // it legitimately acts on the wl_touch seat. Hide only the libinput device,
-    // drawing-tablet and privileged timedated pages.
+    // a nested Android PRoot session. Keep the KWin touchscreen-gestures KCM
+    // and Portal's narrowly supported touchpad KCM visible.
     for desktop_file in [
         "kcm_clock.desktop",
         "kcm_tablet.desktop",
         "kcm_mouse.desktop",
-        "kcm_touchpad.desktop",
     ] {
         let path = fs_root.join("usr/share/applications").join(desktop_file);
         if path.is_file() {
@@ -730,7 +731,6 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_touchscreen.so",
         "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_tablet.so",
         "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_mouse.so",
-        "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_touchpad.so",
         "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings_qwidgets/kcm_clock.so",
     ] {
         let source = fs_root.join(plugin);
@@ -739,6 +739,23 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
             fs::rename(&source, &disabled)
                 .expect("Failed to disable an unsupported Plasma settings module");
         }
+    }
+
+    let touchpad_desktop = fs_root.join("usr/share/applications/kcm_touchpad.desktop");
+    if touchpad_desktop.is_file() {
+        upsert_kv_file(
+            &touchpad_desktop,
+            '=',
+            &[("Hidden", "false".to_string()), ("NoDisplay", "false".to_string())],
+        );
+    }
+    let touchpad_plugin = fs_root.join(
+        "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_touchpad.so",
+    );
+    let disabled_touchpad_plugin = touchpad_plugin.with_extension("so.portal-disabled");
+    if !touchpad_plugin.exists() && disabled_touchpad_plugin.is_file() {
+        fs::rename(&disabled_touchpad_plugin, &touchpad_plugin)
+            .expect("Failed to restore Portal touchpad settings module");
     }
 
     // Plasma's stock panel pins Discover even when this deliberately minimal
@@ -1022,8 +1039,26 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     let ui_scale = 1;
     sync_session_runtime_files(fs_root, ui_scale);
 
-    // Debian supplies its matching KWin library; the former Arch 6.7 library
-    // is ABI-incompatible with the Debian 6.3 executable and is not installed.
+    // Install Portal's ABI-matched Debian KWin library atomically on every
+    // provisioning pass. /usr/local/lib is already first in the wrapper's
+    // loader path, so the package-owned library remains an untouched fallback.
+    let kwin_dir = fs_root.join("usr/local/lib");
+    fs::create_dir_all(&kwin_dir).expect("Failed to create KWin library directory");
+    let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
+    let kwin_temporary = kwin_library.with_extension("6.3.6.tmp");
+    fs::write(&kwin_temporary, KWIN_LIBRARY).expect("Failed to stage Portal KWin library");
+    fs::set_permissions(&kwin_temporary, fs::Permissions::from_mode(0o755))
+        .expect("Failed to set Portal KWin library permissions");
+    fs::rename(&kwin_temporary, &kwin_library).expect("Failed to install Portal KWin library");
+    for (link, target) in [
+        ("libkwin.so.6", "libkwin.so.6.3.6"),
+        ("libkwin.so", "libkwin.so.6"),
+    ] {
+        let path = kwin_dir.join(link);
+        let _ = fs::remove_file(&path);
+        symlink(target, path).expect("Failed to link Portal KWin library");
+    }
+
     // All builds need the socket fstat fix in this existing library. A
     // nested gdb frequently dies before it can attach under Android's PRoot;
     // this preload still records the fault PC/LR/SP, loader maps and a best-

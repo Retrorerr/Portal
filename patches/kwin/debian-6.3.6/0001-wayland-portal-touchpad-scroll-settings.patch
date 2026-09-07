@@ -1,0 +1,354 @@
+diff --git a/src/backends/wayland/wayland_backend.cpp b/src/backends/wayland/wayland_backend.cpp
+index d326d93..a22cb38 100644
+--- a/src/backends/wayland/wayland_backend.cpp
++++ b/src/backends/wayland/wayland_backend.cpp
+@@ -24,7 +24,10 @@
+ #include <KWayland/Client/surface.h>
+ #include <KWayland/Client/touch.h>
+ 
++#include <KSharedConfig>
++
+ #include <QAbstractEventDispatcher>
++#include <QDBusConnection>
+ 
+ #include <drm_fourcc.h>
+ #include <fcntl.h>
+@@ -82,6 +85,18 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Pointer *pointer, Wayla
+     : m_seat(seat)
+     , m_pointer(pointer)
+ {
++    const auto config = KSharedConfig::openConfig(QStringLiteral("kcminputrc"));
++    m_config = config->group(QStringLiteral("Libinput"))
++                   .group(QStringLiteral("0"))
++                   .group(QStringLiteral("0"))
++                   .group(name());
++    m_naturalScroll = m_config.readEntry("NaturalScroll", false);
++    m_scrollFactor = m_config.readEntry("ScrollFactor", 1.0);
++
++    QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice/") + sysName(),
++                                                 QStringLiteral("org.kde.KWin.InputDevice"),
++                                                 this,
++                                                 QDBusConnection::ExportAllProperties);
+     connect(pointer, &Pointer::entered, this, [this](quint32 serial, const QPointF &relativeToSurface) {
+         WaylandOutput *output = m_seat->backend()->findOutput(m_pointer->enteredSurface());
+         Q_ASSERT(output);
+@@ -117,7 +132,22 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Pointer *pointer, Wayla
+         }
+         Q_EMIT pointerButtonChanged(button, state, std::chrono::milliseconds(time), this);
+     });
+-    // TODO: Send discreteDelta and source as well.
++    connect(pointer, &Pointer::axisSourceChanged, this, [this](Pointer::AxisSource source) {
++        switch (source) {
++        case Pointer::AxisSource::Wheel:
++            m_axisSource = PointerAxisSource::Wheel;
++            break;
++        case Pointer::AxisSource::Finger:
++            m_axisSource = PointerAxisSource::Finger;
++            break;
++        case Pointer::AxisSource::Continuous:
++            m_axisSource = PointerAxisSource::Continuous;
++            break;
++        case Pointer::AxisSource::WheelTilt:
++            m_axisSource = PointerAxisSource::WheelTilt;
++            break;
++        }
++    });
+     connect(pointer, &Pointer::axisChanged, this, [this](quint32 time, Pointer::Axis nativeAxis, qreal delta) {
+         PointerAxis axis;
+         switch (nativeAxis) {
+@@ -130,11 +160,19 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Pointer *pointer, Wayla
+         default:
+             Q_UNREACHABLE();
+         }
+-        Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Unknown, false, std::chrono::milliseconds(time), this);
++        const bool configuredFingerScroll = m_axisSource == PointerAxisSource::Finger;
++        if (configuredFingerScroll) {
++            delta *= m_scrollFactor;
++            if (m_naturalScroll) {
++                delta = -delta;
++            }
++        }
++        Q_EMIT pointerAxisChanged(axis, delta, 0, m_axisSource, configuredFingerScroll && m_naturalScroll, std::chrono::milliseconds(time), this);
+     });
+ 
+     connect(pointer, &Pointer::frame, this, [this]() {
+         Q_EMIT pointerFrame(this);
++        m_axisSource = PointerAxisSource::Unknown;
+     });
+ 
+     KWayland::Client::PointerGestures *pointerGestures = m_seat->backend()->display()->pointerGestures();
+@@ -213,11 +251,19 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Touch *touch, WaylandSe
+ 
+ WaylandInputDevice::~WaylandInputDevice()
+ {
++    if (m_pointer) {
++        QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/org/kde/KWin/InputDevice/") + sysName());
++    }
+ }
+ 
+ QString WaylandInputDevice::name() const
+ {
+-    return QString();
++    return m_pointer ? QStringLiteral("Portal Touchpad") : QString();
++}
++
++QString WaylandInputDevice::sysName() const
++{
++    return m_pointer ? QStringLiteral("portal_touchpad") : QString();
+ }
+ 
+ bool WaylandInputDevice::isEnabled() const
+@@ -241,7 +287,7 @@ bool WaylandInputDevice::isPointer() const
+ 
+ bool WaylandInputDevice::isTouchpad() const
+ {
+-    return false;
++    return m_pointer != nullptr;
+ }
+ 
+ bool WaylandInputDevice::isTouch() const
+@@ -274,12 +320,74 @@ KWayland::Client::Pointer *WaylandInputDevice::nativePointer() const
+     return m_pointer.get();
+ }
+ 
++bool WaylandInputDevice::falseValue() const
++{
++    return false;
++}
++
++bool WaylandInputDevice::trueValue() const
++{
++    return true;
++}
++
++int WaylandInputDevice::zeroValue() const
++{
++    return 0;
++}
++
++quint32 WaylandInputDevice::zeroUnsignedValue() const
++{
++    return 0;
++}
++
++qreal WaylandInputDevice::zeroRealValue() const
++{
++    return 0;
++}
++
++bool WaylandInputDevice::isNaturalScroll() const
++{
++    return m_naturalScroll;
++}
++
++void WaylandInputDevice::setNaturalScroll(bool enabled)
++{
++    if (m_naturalScroll == enabled) {
++        return;
++    }
++    m_naturalScroll = enabled;
++    m_config.writeEntry("NaturalScroll", enabled);
++    m_config.sync();
++    Q_EMIT naturalScrollChanged();
++}
++
++qreal WaylandInputDevice::scrollFactor() const
++{
++    return m_scrollFactor;
++}
++
++void WaylandInputDevice::setScrollFactor(qreal factor)
++{
++    if (m_scrollFactor == factor) {
++        return;
++    }
++    m_scrollFactor = factor;
++    m_config.writeEntry("ScrollFactor", factor);
++    m_config.sync();
++    Q_EMIT scrollFactorChanged();
++}
++
+ WaylandInputBackend::WaylandInputBackend(WaylandBackend *backend, QObject *parent)
+     : InputBackend(parent)
+     , m_backend(backend)
+ {
+ }
+ 
++WaylandInputBackend::~WaylandInputBackend()
++{
++    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/org/kde/KWin/InputDevice"));
++}
++
+ void WaylandInputBackend::initialize()
+ {
+     WaylandSeat *seat = m_backend->seat();
+@@ -296,10 +404,32 @@ void WaylandInputBackend::initialize()
+         Q_EMIT deviceAdded(seat->touchDevice());
+     }
+ 
++    QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice"),
++                                                 QStringLiteral("org.kde.KWin.InputDeviceManager"),
++                                                 this,
++                                                 QDBusConnection::ExportAllProperties | QDBusConnection::ExportAllSignals);
++
++    connect(seat, &WaylandSeat::deviceAdded, this, [this](WaylandInputDevice *device) {
++        if (device->isTouchpad()) {
++            Q_EMIT deviceAdded(device->sysName());
++        }
++    });
++    connect(seat, &WaylandSeat::deviceRemoved, this, [this](WaylandInputDevice *device) {
++        if (device->isTouchpad()) {
++            Q_EMIT deviceRemoved(device->sysName());
++        }
++    });
++
+     connect(seat, &WaylandSeat::deviceAdded, this, &InputBackend::deviceAdded);
+     connect(seat, &WaylandSeat::deviceRemoved, this, &InputBackend::deviceRemoved);
+ }
+ 
++QStringList WaylandInputBackend::devicesSysNames() const
++{
++    WaylandInputDevice *device = m_backend->seat()->pointerDevice();
++    return device ? QStringList{device->sysName()} : QStringList{};
++}
++
+ WaylandSeat::WaylandSeat(KWayland::Client::Seat *nativeSeat, WaylandBackend *backend)
+     : QObject(nullptr)
+     , m_seat(nativeSeat)
+diff --git a/src/backends/wayland/wayland_backend.h b/src/backends/wayland/wayland_backend.h
+index d7039e3..9536992 100644
+--- a/src/backends/wayland/wayland_backend.h
++++ b/src/backends/wayland/wayland_backend.h
+@@ -17,6 +17,7 @@
+ #include "core/outputbackend.h"
+ #include "effect/globals.h"
+ #include "utils/filedescriptor.h"
++#include <KConfigGroup>
+ // Qt
+ #include <QHash>
+ #include <QImage>
+@@ -59,6 +60,64 @@ class WaylandDisplay;
+ class WaylandInputDevice : public InputDevice
+ {
+     Q_OBJECT
++    Q_CLASSINFO("D-Bus Interface", "org.kde.KWin.InputDevice")
++    Q_PROPERTY(bool touchpad READ isTouchpad CONSTANT)
++    Q_PROPERTY(QString name READ name CONSTANT)
++    Q_PROPERTY(QString sysName READ sysName CONSTANT)
++    Q_PROPERTY(bool supportsDisableEvents READ falseValue CONSTANT)
++    Q_PROPERTY(bool enabled READ trueValue CONSTANT)
++    Q_PROPERTY(int supportedButtons READ zeroValue CONSTANT)
++    Q_PROPERTY(bool supportsLeftHanded READ falseValue CONSTANT)
++    Q_PROPERTY(bool leftHandedEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool leftHanded READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsPointerAcceleration READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsPointerAccelerationProfileFlat READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsPointerAccelerationProfileAdaptive READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsDisableWhileTyping READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsDisableEventsOnExternalMouse READ falseValue CONSTANT)
++    Q_PROPERTY(qreal defaultPointerAcceleration READ zeroRealValue CONSTANT)
++    Q_PROPERTY(bool defaultPointerAccelerationProfileFlat READ falseValue CONSTANT)
++    Q_PROPERTY(bool defaultPointerAccelerationProfileAdaptive READ falseValue CONSTANT)
++    Q_PROPERTY(bool disableEventsOnExternalMouseEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool disableWhileTypingEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(qreal pointerAcceleration READ zeroRealValue CONSTANT)
++    Q_PROPERTY(bool pointerAccelerationProfileFlat READ falseValue CONSTANT)
++    Q_PROPERTY(bool pointerAccelerationProfileAdaptive READ falseValue CONSTANT)
++    Q_PROPERTY(bool disableEventsOnExternalMouse READ falseValue CONSTANT)
++    Q_PROPERTY(bool disableWhileTyping READ falseValue CONSTANT)
++    Q_PROPERTY(int tapFingerCount READ zeroValue CONSTANT)
++    Q_PROPERTY(bool supportsMiddleEmulation READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapToClickEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapAndDragEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapDragLockEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool middleEmulationEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapToClick READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapAndDrag READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapDragLock READ falseValue CONSTANT)
++    Q_PROPERTY(bool middleEmulation READ falseValue CONSTANT)
++    Q_PROPERTY(bool lmrTapButtonMapEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool lmrTapButtonMap READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsNaturalScroll READ isTouchpad CONSTANT)
++    Q_PROPERTY(bool naturalScrollEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool naturalScroll READ isNaturalScroll WRITE setNaturalScroll NOTIFY naturalScrollChanged)
++    Q_PROPERTY(bool supportsScrollTwoFinger READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsScrollEdge READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsScrollOnButtonDown READ falseValue CONSTANT)
++    Q_PROPERTY(bool scrollTwoFingerEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool scrollEdgeEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool scrollOnButtonDownEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(quint32 defaultScrollButton READ zeroUnsignedValue CONSTANT)
++    Q_PROPERTY(bool scrollTwoFinger READ falseValue CONSTANT)
++    Q_PROPERTY(bool scrollEdge READ falseValue CONSTANT)
++    Q_PROPERTY(bool scrollOnButtonDown READ falseValue CONSTANT)
++    Q_PROPERTY(quint32 scrollButton READ zeroUnsignedValue CONSTANT)
++    Q_PROPERTY(qreal scrollFactor READ scrollFactor WRITE setScrollFactor NOTIFY scrollFactorChanged)
++    Q_PROPERTY(bool supportsClickMethodAreas READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsClickMethodClickfinger READ falseValue CONSTANT)
++    Q_PROPERTY(bool defaultClickMethodAreas READ falseValue CONSTANT)
++    Q_PROPERTY(bool defaultClickMethodClickfinger READ falseValue CONSTANT)
++    Q_PROPERTY(bool clickMethodAreas READ falseValue CONSTANT)
++    Q_PROPERTY(bool clickMethodClickfinger READ falseValue CONSTANT)
+ 
+ public:
+     WaylandInputDevice(KWayland::Client::Touch *touch, WaylandSeat *seat);
+@@ -68,6 +127,7 @@ public:
+     ~WaylandInputDevice() override;
+ 
+     QString name() const override;
++    QString sysName() const;
+ 
+     bool isEnabled() const override;
+     void setEnabled(bool enabled) override;
+@@ -83,6 +143,20 @@ public:
+ 
+     KWayland::Client::Pointer *nativePointer() const;
+ 
++    bool falseValue() const;
++    bool trueValue() const;
++    int zeroValue() const;
++    quint32 zeroUnsignedValue() const;
++    qreal zeroRealValue() const;
++    bool isNaturalScroll() const;
++    void setNaturalScroll(bool enabled);
++    qreal scrollFactor() const;
++    void setScrollFactor(qreal factor);
++
++Q_SIGNALS:
++    void naturalScrollChanged();
++    void scrollFactorChanged();
++
+ private:
+     WaylandSeat *const m_seat;
+ 
+@@ -94,16 +168,30 @@ private:
+     std::unique_ptr<KWayland::Client::PointerSwipeGesture> m_swipeGesture;
+ 
+     QSet<quint32> m_pressedKeys;
++    KConfigGroup m_config;
++    PointerAxisSource m_axisSource = PointerAxisSource::Unknown;
++    bool m_naturalScroll = false;
++    qreal m_scrollFactor = 1.0;
+ };
+ 
+ class WaylandInputBackend : public InputBackend
+ {
+     Q_OBJECT
++    Q_CLASSINFO("D-Bus Interface", "org.kde.KWin.InputDeviceManager")
++    Q_PROPERTY(QStringList devicesSysNames READ devicesSysNames CONSTANT)
+ 
+ public:
+     explicit WaylandInputBackend(WaylandBackend *backend, QObject *parent = nullptr);
++    ~WaylandInputBackend() override;
++    using InputBackend::deviceAdded;
++    using InputBackend::deviceRemoved;
+ 
+     void initialize() override;
++    QStringList devicesSysNames() const;
++
++Q_SIGNALS:
++    void deviceAdded(const QString &sysName);
++    void deviceRemoved(const QString &sysName);
+ 
+ private:
+     WaylandBackend *m_backend;
