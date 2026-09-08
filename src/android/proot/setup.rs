@@ -1861,6 +1861,9 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         output_damage_signature: None,
         frame_pacer: crate::android::accessibility::event_loop_proxy()
             .and_then(crate::android::utils::frame_pacing::AndroidFramePacer::new),
+        frame_timeline: None,
+        frame_timeline_stats: Default::default(),
+        surface_control_cursor: None,
         frame_in_flight: false,
         android_app,
     })

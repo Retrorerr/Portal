@@ -66,6 +66,8 @@ type EglGetFrameTimestamps = unsafe extern "system" fn(
 ) -> RawEglBoolean;
 type EglGetFrameTimestampSupported =
     unsafe extern "system" fn(RawEglDisplay, RawEglSurface, i32) -> RawEglBoolean;
+type EglPresentationTime =
+    unsafe extern "system" fn(RawEglDisplay, RawEglSurface, i64) -> RawEglBoolean;
 
 /// Whether Android's physical display-present timestamp can be queried for
 /// the active EGL window surface.
@@ -555,6 +557,11 @@ pub fn bind(event_loop: &ActiveEventLoop) -> Result<WinitGraphicsBackend<GlesRen
         bind_size: None,
         renderer,
         frame_timestamps: AndroidFrameTimestampProbe::default(),
+        presentation_time: {
+            let address =
+                unsafe { smithay::backend::egl::get_proc_address("eglPresentationTimeANDROID") };
+            (!address.is_null()).then(|| unsafe { std::mem::transmute(address) })
+        },
     })
 }
 
@@ -583,6 +590,7 @@ pub struct WinitGraphicsBackend<R> {
     _display: EGLDisplay,
     egl_surface: EGLSurface,
     frame_timestamps: AndroidFrameTimestampProbe,
+    presentation_time: Option<EglPresentationTime>,
     window: Arc<WinitWindow>,
     damage_tracking: bool,
     bind_size: Option<Size<i32, Physical>>,
@@ -607,6 +615,19 @@ where
     /// Reference to the underlying window
     pub fn window(&self) -> &WinitWindow {
         &self.window
+    }
+
+    /// Borrow the active lifecycle generation's ANativeWindow pointer. Callers
+    /// must not retain it after the matching Android suspend callback.
+    pub fn native_window_ptr(&self) -> *mut c_void {
+        self.window
+            .window_handle()
+            .ok()
+            .and_then(|handle| match handle.as_raw() {
+                RawWindowHandle::AndroidNdk(handle) => Some(handle.a_native_window.as_ptr()),
+                _ => None,
+            })
+            .unwrap_or(std::ptr::null_mut())
     }
 
     /// Access the underlying renderer
@@ -688,6 +709,7 @@ where
     pub fn submit(
         &mut self,
         damage: Option<&[Rectangle<i32, Physical>]>,
+        expected_present_ns: Option<i64>,
     ) -> Result<Option<u64>, SwapBuffersError> {
         let mut damage = match damage {
             Some(damage) if self.damage_tracking && !damage.is_empty() => {
@@ -714,6 +736,25 @@ where
         let frame_id = self
             .frame_timestamps
             .before_swap(&self._display, &self.egl_surface);
+
+        // API-33+ Choreographer tells us the platform's preferred physical
+        // presentation time. EGL_ANDROID_presentation_time carries that same
+        // monotonic target into the existing BufferQueue without changing its
+        // damage/buffer-age semantics. Failure is harmless: swap remains the
+        // fully compatible fallback clock.
+        if let (Some(set_time), Some(expected_present_ns)) = (
+            self.presentation_time,
+            expected_present_ns
+                .filter(|time| *time > crate::android::utils::frame_pacing::monotonic_time_ns()),
+        ) {
+            let _ = unsafe {
+                set_time(
+                    AndroidFrameTimestampProbe::raw_display(&self._display),
+                    surface_before,
+                    expected_present_ns,
+                )
+            };
+        }
 
         // Request frame callback.
         self.window.pre_present_notify();

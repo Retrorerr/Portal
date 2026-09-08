@@ -19,10 +19,14 @@ pub enum AppUserEvent {
     /// the render thread; this event only wakes the event loop so the queued
     /// update is applied and flushed before later input.
     AndroidClipboardChanged,
-    /// Android's next display frame began. The payload is the Choreographer
-    /// frame time and is diagnostic evidence only; scheduling is callback-led.
+    /// Android's next display frame began. API 33+ supplies the preferred
+    /// frame-timeline deadline, expected presentation time and vsync id; older
+    /// devices leave those fields at zero/-1 and retain callback-only pacing.
     ChoreographerFrame {
         frame_time_ns: i64,
+        deadline_ns: i64,
+        expected_present_ns: i64,
+        vsync_id: i64,
     },
 }
 
