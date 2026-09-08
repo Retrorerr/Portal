@@ -62,8 +62,7 @@ const CLIPBOARD_SYNC: &str = include_str!("../../../assets/localdesktop-clipboar
 const CLIPBOARD_PUSH: &str = include_str!("../../../assets/localdesktop-clipboard-push.sh");
 const WL_COPY_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-copy");
 const WL_PASTE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-paste");
-const KWIN_LIBRARY: &[u8] =
-    include_bytes!("../../../assets/kwin-debian-arm64/libkwin.so.6.3.6");
+const KWIN_LIBRARY: &[u8] = include_bytes!("../../../assets/kwin-debian-arm64/libkwin.so.6.3.6");
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -1113,6 +1112,33 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     }
     sync_debian_package_management(fs_root);
 
+    // Configure the stock defaults before the first panel exists. Editing only
+    // desktop-appletsrc cannot repair a clean install's initial default value.
+    for (relative, old, new) in [
+        (
+            "usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml",
+            "applications:org.kde.discover.desktop,",
+            "",
+        ),
+        (
+            "usr/share/plasma/plasmoids/org.kde.plasma.kickoff/contents/config/main.xml",
+            "org.kde.kontact.desktop,",
+            "",
+        ),
+        (
+            "usr/share/plasma/plasmoids/org.kde.plasma.kickoff/contents/config/main.xml",
+            ",org.kde.discover.desktop",
+            "",
+        ),
+    ] {
+        let path = fs_root.join(relative);
+        if let Ok(text) = fs::read_to_string(&path) {
+            if text.contains(old) {
+                let _ = fs::write(path, text.replace(old, new));
+            }
+        }
+    }
+
     let xresources_path = home_dir.join(".Xresources");
     let _ = fs::create_dir_all(
         xresources_path
@@ -1170,12 +1196,14 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         upsert_kv_file(
             &touchpad_desktop,
             '=',
-            &[("Hidden", "false".to_string()), ("NoDisplay", "false".to_string())],
+            &[
+                ("Hidden", "false".to_string()),
+                ("NoDisplay", "false".to_string()),
+            ],
         );
     }
-    let touchpad_plugin = fs_root.join(
-        "usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_touchpad.so",
-    );
+    let touchpad_plugin = fs_root
+        .join("usr/lib/aarch64-linux-gnu/qt6/plugins/plasma/kcms/systemsettings/kcm_touchpad.so");
     let disabled_touchpad_plugin = touchpad_plugin.with_extension("so.portal-disabled");
     if !touchpad_plugin.exists() && disabled_touchpad_plugin.is_file() {
         fs::rename(&disabled_touchpad_plugin, &touchpad_plugin)
@@ -1185,8 +1213,12 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     // Plasma's stock panel pins Discover even when this deliberately minimal
     // image has no package-management backend. Migrate that one dead launcher
     // to Dolphin once, then leave subsequent user panel customisation alone.
-    let panel_marker = home_dir.join(".local/state/portal/panel-launchers-v1");
-    if !panel_marker.exists() {
+    let panel_marker = home_dir.join(".local/state/portal/panel-launchers-v2");
+    if !panel_marker.exists()
+        && config_dir
+            .join("plasma-org.kde.plasma.desktop-appletsrc")
+            .is_file()
+    {
         let appletsrc = config_dir.join("plasma-org.kde.plasma.desktop-appletsrc");
         if let Ok(content) = fs::read_to_string(&appletsrc) {
             let discover_available = fs_root.join("usr/bin/plasma-discover").is_file();
@@ -1241,10 +1273,10 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     // The guest scripts are versioned assets so the classic startup contract,
     // KWin crash capture and graphical recovery UI cannot drift apart. The
     // launcher substitutes only the device-specific scale factor.
-    // Debug APKs opt into the wrapper's debugger path so a device run can
-    // collect a real KWin trace when gdb is provisioned. The environment still
-    // wins, and release APKs retain the zero-overhead default.
-    let gdb_backtrace = if cfg!(debug_assertions) { "1" } else { "0" };
+    // Debugger capture stays off in all builds: running every KWin instance
+    // under gdb changes startup timing and ptrace is commonly denied by
+    // Android's sandbox. It remains opt-in via the environment override.
+    let gdb_backtrace = "0";
     let launcher = PLASMA_LAUNCHER
         .replace("@UI_SCALE@", &ui_scale.to_string())
         .replace("@GDB_BACKTRACE@", gdb_backtrace);
@@ -1276,14 +1308,22 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     // across existing and newly provisioned runtime slots.
     write_guest_binary(&fs_root.join("usr/local/bin/wl-copy"), WL_COPY_BINARY);
     write_guest_binary(&fs_root.join("usr/local/bin/wl-paste"), WL_PASTE_BINARY);
-    write_executable(
-        &fs_root.join("usr/local/bin/ksplashqml"),
-        "#!/bin/sh\nexit 0\n",
+    // ABI-matched optional backend, reproduced by build_canberra_backend.py.
+    // libcanberra discovers modules here; no package manager runs at startup.
+    write_guest_binary(
+        &fs_root.join("usr/lib/aarch64-linux-gnu/libcanberra-0.30/libcanberra-pulse.so"),
+        include_bytes!("../../../assets/guest-arm64/libcanberra-pulse.so"),
     );
-    write_executable(
-        &fs_root.join("usr/local/bin/plasma_waitforname"),
-        "#!/bin/sh\nif [ \"$1\" = \"org.kde.KSplash\" ]; then\n    exit 0\nfi\nexec /usr/bin/plasma_waitforname \"$@\"\n",
-    );
+    let canberra_notice = fs_root.join("usr/share/doc/portal-canberra-backend");
+    fs::create_dir_all(&canberra_notice).expect("Failed to create backend license directory");
+    fs::write(
+        canberra_notice.join("copyright"),
+        include_bytes!("../../../assets/guest-arm64/libcanberra-copyright"),
+    )
+    .expect("Failed to install backend license");
+    // Migrate older APKs that shadowed the distribution's splash executables.
+    let _ = fs::remove_file(fs_root.join("usr/local/bin/ksplashqml"));
+    let _ = fs::remove_file(fs_root.join("usr/local/bin/plasma_waitforname"));
     write_executable(
         &fs_root.join("usr/local/bin/portal-ime-bridge"),
         PORTAL_IME_BRIDGE,
@@ -1782,6 +1822,7 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         guest_scale_factor,
         touch_points: std::collections::HashMap::new(),
         scroll_centroid: None,
+        touch_scroll_started: false,
         touch_mode: TouchMode::Undecided,
         touch_down_position: None,
         touch_down_time: None,
@@ -1789,6 +1830,8 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         touch_slop_px: touch_slop_px(&android_app),
         long_press_timeout_ms: long_press_timeout_ms(&android_app),
         pointer_pressed: false,
+        finger_scroll_axes: Default::default(),
+        continuous_scroll_axes: Default::default(),
         presentation_sequence: 0,
         pending_kwin_presentation: None,
         // Nominal output mode is the stable preferred target resolved from
@@ -1797,7 +1840,9 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         // reading. The live physical rate is tracked separately in
         // `physical_refresh_millihz` for diagnostics/pacing and never
         // rewrites `wl_output`.
-        refresh_rate_millihz: crate::android::utils::ndk::refresh_rate_millihz(&android_app),
+        refresh_rate_millihz: crate::android::utils::ndk::preferred_high_refresh_millihz(
+            &android_app,
+        ),
         physical_refresh_millihz: active_refresh_millihz(&android_app),
         pressed_keys: std::collections::HashSet::new(),
         button_tracker: crate::core::pointer_buttons::PointerButtonTracker::new(),
@@ -1805,9 +1850,17 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         last_plasma_poll_ms: None,
         last_refresh_poll_ms: None,
         frame_rate_requested: false,
+        content_cadence: Default::default(),
+        supported_refresh_millihz: crate::android::utils::ndk::supported_refresh_rates_millihz(
+            &android_app,
+        ),
         kwin_commit_gate: crate::core::presentation::KwinCommitGate::new(),
         socket_watcher: None,
         output_dirty: true,
+        output_damage_tracker: None,
+        output_damage_signature: None,
+        frame_pacer: crate::android::accessibility::event_loop_proxy()
+            .and_then(crate::android::utils::frame_pacing::AndroidFramePacer::new),
         frame_in_flight: false,
         android_app,
     })

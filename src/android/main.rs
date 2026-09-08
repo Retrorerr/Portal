@@ -19,7 +19,10 @@ use winit::{
 
 #[no_mangle]
 fn android_main(android_app: AndroidApp) {
-    std::env::set_var("RUST_BACKTRACE", "full");
+    std::env::set_var(
+        "RUST_BACKTRACE",
+        if cfg!(debug_assertions) { "1" } else { "0" },
+    );
     // The host libxkbcommon runs outside PRoot. Its historical compiled-in
     // directory points at Arch, so bind its data search to the production
     // runtime before any keyboard context (or background worker) is created.
@@ -41,7 +44,11 @@ fn android_main(android_app: AndroidApp) {
     // Keep Android logcat and the user-exported host log bounded in debug builds too. The
     // per-frame Smithay/EGL records are DEBUG-level; they remain available only when a future
     // explicitly bounded diagnostic mode opts into them.
-    let log_level = log::LevelFilter::Info;
+    let log_level = if cfg!(debug_assertions) {
+        log::LevelFilter::Info
+    } else {
+        log::LevelFilter::Warn
+    };
     let logger = android_logger::AndroidLogger::default();
     // Keep a copy in diagnostics/host.log even when Android logcat is
     // unavailable (or a release build is running with logcat filtering).

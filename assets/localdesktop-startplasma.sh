@@ -25,7 +25,10 @@ export GTK_USE_PORTAL=0
 export QT_NO_XDG_DESKTOP_PORTAL=1
 export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
 export ELECTRON_DISABLE_SANDBOX=1
-export LOCALDESKTOP_DIAGNOSTICS=1
+export LOCALDESKTOP_DIAGNOSTICS=${LOCALDESKTOP_DIAGNOSTICS:-0}
+if [ "$LOCALDESKTOP_DIAGNOSTICS" != 1 ]; then
+    export QT_LOGGING_RULES="*.debug=false;*.info=false${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
+fi
 export SHELL=/bin/bash
 # Debugger capture is opt-in.  Running every KWin instance under gdb changes
 # startup timing and ptrace is commonly denied by Android's sandbox.
@@ -81,7 +84,13 @@ trim_log() {
     local size
     size=$(wc -c < "$path" 2>/dev/null || echo 0)
     if [ "$size" -gt "$max_bytes" ]; then
-        tail -c "$max_bytes" "$path" > "$path.trim" 2>/dev/null && mv -f "$path.trim" "$path"
+        # Keep the inode: running children retain append descriptors to it.
+        # Renaming here would leave them writing an unlinked, unbounded file.
+        if tail -c 4194304 "$path" > "$path.trim" 2>/dev/null; then
+            : > "$path"
+            cat "$path.trim" >> "$path"
+            rm -f "$path.trim"
+        fi
     fi
 }
 
@@ -186,33 +195,50 @@ export LC_ALL=en_GB.UTF-8
 
 # Package extraction also skips gawk's update-alternatives registration.
 if ! command -v awk >/dev/null 2>&1 && [ -x /usr/bin/gawk ]; then
-    update-alternatives --install /usr/bin/awk awk /usr/bin/gawk 10 >> "$session_log" 2>&1 || exit 1
+    update-alternatives --install /usr/bin/awk awk /usr/bin/gawk 10 >> "$session_log" 2>&1 || \
+        printf 'stage=startup-maintenance status=degraded step=awk-alternatives\n' >> "$session_log"
 fi
 
 # Debian maintainer triggers are not run when extracting the rootfs. GLib's
 # absent schemas leave GTK's DPI unset (-1), yielding negative Firefox UI fonts.
 # GTK's missing module cache also prevents Wayland text-input from loading.
-glib-compile-schemas /usr/share/glib-2.0/schemas >> "$session_log" 2>&1 || exit 1
-/usr/lib/aarch64-linux-gnu/libgtk-3-0/gtk-query-immodules-3.0 --update-cache >> "$session_log" 2>&1 || exit 1
+# These steps are best-effort: a missing/locked database must degrade the
+# session, never abort a clean first install into the recovery loop.
+if command -v glib-compile-schemas >/dev/null 2>&1; then
+    glib-compile-schemas /usr/share/glib-2.0/schemas >> "$session_log" 2>&1 || \
+        printf 'stage=startup-maintenance status=degraded step=glib-schemas\n' >> "$session_log"
+fi
+if [ -x /usr/lib/aarch64-linux-gnu/libgtk-3-0/gtk-query-immodules-3.0 ]; then
+    /usr/lib/aarch64-linux-gnu/libgtk-3-0/gtk-query-immodules-3.0 --update-cache >> "$session_log" 2>&1 || \
+        printf 'stage=startup-maintenance status=degraded step=gtk-immodules\n' >> "$session_log"
+fi
 
 # Android denies host CPU counters and hides other apps' processes. Stock
 # System Monitor must not present fabricated host-wide statistics.
 if [ -x /usr/bin/plasma-systemmonitor ]; then
-    dpkg --remove plasma-systemmonitor >> "$session_log" 2>&1 || exit 1
+    dpkg --remove plasma-systemmonitor >> "$session_log" 2>&1 || \
+        printf 'stage=startup-maintenance status=degraded step=remove-systemmonitor\n' >> "$session_log"
 fi
 
 cache_marker="$state_dir/desktop-caches-v3"
 if [ ! -e "$cache_marker" ]; then
+    cache_failed=0
     if command -v update-mime-database >/dev/null 2>&1; then
-        update-mime-database /usr/share/mime >> "$session_log" 2>&1 || true
+        update-mime-database /usr/share/mime >> "$session_log" 2>&1 || cache_failed=1
     fi
     if command -v update-desktop-database >/dev/null 2>&1; then
-        update-desktop-database /usr/share/applications >> "$session_log" 2>&1 || true
+        update-desktop-database /usr/share/applications >> "$session_log" 2>&1 || cache_failed=1
     fi
     if command -v kbuildsycoca6 >/dev/null 2>&1; then
-        kbuildsycoca6 --noincremental >> "$session_log" 2>&1 || true
+        kbuildsycoca6 --noincremental >> "$session_log" 2>&1 || cache_failed=1
     fi
-    : > "$cache_marker"
+    # Only mark complete when the available tools succeeded: a partial image
+    # must retry caches on the next launch instead of skipping them forever.
+    if [ "$cache_failed" -eq 0 ]; then
+        : > "$cache_marker"
+    else
+        printf 'stage=startup-maintenance status=degraded step=desktop-caches\n' >> "$session_log"
+    fi
 fi
 
 # Configure TabletMode default in kwinrc only if not already set; dynamic host bridge manages it
@@ -241,18 +267,25 @@ fi
 # extra persistent command-execution service through session autostart.
 rm -f "$config_dir/autostart/portal-session-cmd.desktop" /usr/local/bin/portal-session-cmd
 
-# Disable ksplash to avoid hanging on splash animation under PRoot
-ksplashrc="$config_dir/ksplashrc"
-if command -v kwriteconfig6 >/dev/null 2>&1; then
-    kwriteconfig6 --file "$ksplashrc" --group KSplash --key Theme None
-else
-    if [ ! -f "$ksplashrc" ]; then
-        printf '[KSplash]\nTheme=None\n' > "$ksplashrc"
-    elif ! grep -q '^Theme=' "$ksplashrc"; then
-        printf '\n[KSplash]\nTheme=None\n' >> "$ksplashrc"
-    else
-        sed -i 's/^Theme=.*/Theme=None/' "$ksplashrc"
+# Restore the stock splash once, preserving later user customization.
+# If the config tool is unavailable (partial image), leave the marker absent
+# so a later launch with a complete image still repairs the splash.
+if [ ! -f "$state_dir/splash-restored-v1" ]; then
+    if command -v kwriteconfig6 >/dev/null 2>&1; then
+        kwriteconfig6 --file "$config_dir/ksplashrc" --group KSplash --key Theme org.kde.breeze && \
+        kwriteconfig6 --file "$config_dir/ksplashrc" --group KSplash --key Engine KSplashQML && \
+        touch "$state_dir/splash-restored-v1"
     fi
+fi
+
+# The Android audio owner starts asynchronously before this launcher. Wait
+# for its Pulse endpoint before Plasma's startup notification is dispatched.
+for _ in $(seq 1 150); do
+    [ -S /tmp/pulse/native ] && break
+    sleep 0.1
+done
+if [ ! -S /tmp/pulse/native ]; then
+    printf 'stage=audio-unavailable action=retry-portal\n' >> "$session_log"
 fi
 
 # Disable screen locking completely: Android/OxygenOS owns device security
@@ -283,6 +316,16 @@ session_pid=$!
 printf 'stage=session-start pid=%s timestamp=%s\n' "$session_pid" "$(date +%s)" >> "$session_log"
 clipboard_bridge_pid=''
 start_clipboard_bridge
+(
+    while kill -0 "$session_pid" 2>/dev/null; do
+        sleep 30
+        trim_log "$session_log"
+        trim_log "$state_dir/kwin.log"
+        trim_log "$state_dir/kwin-backtrace.log"
+    done
+) &
+log_monitor_pid=$!
+trap 'kill "$log_monitor_pid" 2>/dev/null || true' EXIT
 
 ready=0
 for _ in $(seq 1 120); do
@@ -304,6 +347,7 @@ for _ in $(seq 1 120); do
 done
 
 if [ "$ready" -ne 1 ]; then
+    kill "$log_monitor_pid" 2>/dev/null || true
     runtime=$(( $(date +%s) - started ))
     reason=startup-timeout-or-exit
     if [ -s "$crash_marker" ] && grep -Fq "attempt=$attempt_id" "$crash_marker"; then
@@ -319,6 +363,7 @@ fi
 
 wait "$session_pid"
 status=$?
+kill "$log_monitor_pid" 2>/dev/null || true
 runtime=$(( $(date +%s) - started ))
 printf 'stage=exit status=%s runtime=%s timestamp=%s\n' "$status" "$runtime" "$(date +%s)" >> "$session_log"
 trim_log "$session_log"

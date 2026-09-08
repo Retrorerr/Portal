@@ -229,13 +229,19 @@ mod tests {
             144_000
         );
         // Portable fallback: 120/90/60 Hz devices keep their own maximum.
-        assert_eq!(select_preferred_refresh_millihz(&[60_000, 120_000]), 120_000);
+        assert_eq!(
+            select_preferred_refresh_millihz(&[60_000, 120_000]),
+            120_000
+        );
         assert_eq!(select_preferred_refresh_millihz(&[60_000, 90_000]), 90_000);
         assert_eq!(select_preferred_refresh_millihz(&[60_000]), 60_000);
         assert_eq!(select_preferred_refresh_millihz(&[59_940, 60_000]), 60_000);
         // Invalid entries are ignored, never selected.
         assert_eq!(select_preferred_refresh_millihz(&[0, -1, 144_000]), 144_000);
-        assert_eq!(select_preferred_refresh_millihz(&[0, -1, 2_000_000]), 120_000);
+        assert_eq!(
+            select_preferred_refresh_millihz(&[0, -1, 2_000_000]),
+            120_000
+        );
         // Empty/unusable lists fall back to the sane default.
         assert_eq!(select_preferred_refresh_millihz(&[]), 120_000);
         assert_eq!(select_preferred_refresh_millihz(&[0]), 120_000);

@@ -4,13 +4,13 @@ mod wayland_protocol;
 use wayland_protocol::{FrameEvent, FrameTrace, ProtocolViolation};
 
 #[test]
-fn frame_done_and_presentation_follow_the_submitted_frame() {
+fn next_frame_is_scheduled_before_blocking_submit() {
     let mut trace = FrameTrace::new();
     for event in [
         FrameEvent::Dispatch,
         FrameEvent::Render,
-        FrameEvent::Submit,
         FrameEvent::FrameDone,
+        FrameEvent::Submit,
         FrameEvent::Presented,
     ] {
         trace
@@ -24,8 +24,8 @@ fn frame_done_and_presentation_follow_the_submitted_frame() {
         &[
             FrameEvent::Dispatch,
             FrameEvent::Render,
-            FrameEvent::Submit,
             FrameEvent::FrameDone,
+            FrameEvent::Submit,
             FrameEvent::Presented,
         ]
     );
@@ -46,18 +46,12 @@ fn old_render_dispatch_order_is_rejected() {
 }
 
 #[test]
-fn callbacks_and_feedback_cannot_precede_submit() {
+fn callbacks_can_precede_submit_but_presented_feedback_cannot() {
     let mut trace = FrameTrace::new();
     trace.record(FrameEvent::Dispatch).unwrap();
     trace.record(FrameEvent::Render).unwrap();
 
-    assert_eq!(
-        trace.record(FrameEvent::FrameDone),
-        Err(ProtocolViolation::MissingPrerequisite {
-            event: FrameEvent::FrameDone,
-            prerequisite: FrameEvent::Submit,
-        })
-    );
+    trace.record(FrameEvent::FrameDone).unwrap();
     assert_eq!(
         trace.record(FrameEvent::Presented),
         Err(ProtocolViolation::MissingPrerequisite {
@@ -65,6 +59,20 @@ fn callbacks_and_feedback_cannot_precede_submit() {
             prerequisite: FrameEvent::Submit,
         })
     );
+}
+
+#[test]
+fn undrawn_frame_can_advance_callback_and_discard_feedback() {
+    let mut trace = FrameTrace::new();
+    for event in [
+        FrameEvent::Dispatch,
+        FrameEvent::Render,
+        FrameEvent::FrameDone,
+        FrameEvent::Discarded,
+    ] {
+        trace.record(event).unwrap();
+    }
+    assert!(trace.completed());
 }
 
 #[test]
@@ -87,8 +95,8 @@ fn duplicate_frame_done_is_rejected() {
     for event in [
         FrameEvent::Dispatch,
         FrameEvent::Render,
-        FrameEvent::Submit,
         FrameEvent::FrameDone,
+        FrameEvent::Submit,
     ] {
         trace.record(event).unwrap();
     }

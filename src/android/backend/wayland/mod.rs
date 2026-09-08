@@ -23,7 +23,7 @@ pub use winit_backend::{
 };
 
 use smithay::{
-    backend::renderer::gles::GlesRenderer,
+    backend::renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
     utils::{Clock, Monotonic},
 };
 use std::collections::{HashMap, HashSet};
@@ -54,6 +54,8 @@ pub struct WaylandBackend {
     pub touch_points: HashMap<u64, PhysicalPosition<f64>>,
     /// Centroid of the active touch points at the last scroll update.
     pub scroll_centroid: Option<PhysicalPosition<f64>>,
+    /// Whether the current touchscreen gesture has emitted its first scroll frame.
+    pub touch_scroll_started: bool,
     /// What the current gesture has been resolved to.
     pub touch_mode: TouchMode,
     /// Location where the gesture's first finger landed.
@@ -70,6 +72,9 @@ pub struct WaylandBackend {
     pub long_press_timeout_ms: u64,
     /// Whether a synthesized button press is currently held (an in-progress drag).
     pub pointer_pressed: bool,
+    /// Active high-resolution Wayland axes, tracked separately by semantic source.
+    pub finger_scroll_axes: ScrollAxisState,
+    pub continuous_scroll_axes: ScrollAxisState,
     /// Monotonic sequence sent with wp_presentation feedback.
     pub presentation_sequence: u64,
     /// An EGL frame that contained the identified KWin surface and its
@@ -96,6 +101,8 @@ pub struct WaylandBackend {
     /// Whether the preferred `ANativeWindow` hint has been issued for the current
     /// native window. Reset on suspend (window destroyed); re-issued on resume.
     pub frame_rate_requested: bool,
+    pub content_cadence: crate::core::content_cadence::ContentCadence,
+    pub supported_refresh_millihz: Vec<i32>,
     /// Currently pressed evdev physical scancodes.
     pub pressed_keys: HashSet<u32>,
     /// Guest-side mouse button policy: presses in letterbox borders are
@@ -119,6 +126,16 @@ pub struct WaylandBackend {
     pub socket_watcher: Option<WaylandSocketWatcher>,
     /// Whether the output needs a redraw (commits received, input motion, resize, etc.).
     pub output_dirty: bool,
+    /// Tracks final Android-target damage across KWin/cursor/overlay render
+    /// elements. The SHM importer independently tracks texture upload damage;
+    /// this tracker carries the resulting scene damage through GLES and EGL.
+    pub output_damage_tracker: Option<OutputDamageTracker>,
+    /// `(width, height, scale_bits)` used to create `output_damage_tracker`.
+    /// A host resize or presentation-scale change invalidates buffer history
+    /// and forces a fresh full frame before partial redraws resume.
+    pub output_damage_signature: Option<(i32, i32, u64)>,
+    /// Coalesces event-driven host redraws onto Android display callbacks.
+    pub frame_pacer: Option<crate::android::utils::frame_pacing::AndroidFramePacer>,
     /// Whether a frame is currently in flight to the Android compositor.
     pub frame_in_flight: bool,
 }
@@ -129,22 +146,89 @@ pub struct PendingKwinPresentation {
     pub egl_frame_id: u64,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollAxisState {
+    pub horizontal: bool,
+    pub vertical: bool,
+}
+
 impl WaylandBackend {
+    /// Schedule an already-dirty frame at Android's next display callback.
+    /// Devices without the NDK Choreographer API keep the immediate path.
+    pub fn schedule_redraw(&self) {
+        let Some(winit) = self.graphic_renderer.as_ref() else {
+            return;
+        };
+        if self
+            .frame_pacer
+            .as_ref()
+            .is_some_and(|pacer| pacer.request_redraw())
+        {
+            return;
+        }
+        winit.window().request_redraw();
+    }
+
+    /// Stop only axes that actually received high-resolution values for this
+    /// semantic source. Wayland axis_stop has no value payload; lifecycle is
+    /// therefore tracked explicitly instead of inferred from zero deltas.
+    pub fn stop_scroll_source(
+        &mut self,
+        source: smithay::backend::input::AxisSource,
+        time: u32,
+    ) -> bool {
+        use smithay::backend::input::{Axis, AxisSource};
+        let active = match source {
+            AxisSource::Finger => std::mem::take(&mut self.finger_scroll_axes),
+            AxisSource::Continuous => std::mem::take(&mut self.continuous_scroll_axes),
+            _ => return false,
+        };
+        if !active.horizontal && !active.vertical {
+            return false;
+        }
+        let mut frame = smithay::input::pointer::AxisFrame::new(time).source(source);
+        if active.horizontal {
+            frame = frame.stop(Axis::Horizontal);
+        }
+        if active.vertical {
+            frame = frame.stop(Axis::Vertical);
+        }
+        let pointer = self.compositor.pointer.clone();
+        pointer.axis(&mut self.compositor.state, frame);
+        pointer.frame(&mut self.compositor.state);
+        true
+    }
+
+    pub fn stop_all_scrolls(&mut self, time: u32) {
+        use smithay::backend::input::AxisSource;
+        self.stop_scroll_source(AxisSource::Finger, time);
+        self.stop_scroll_source(AxisSource::Continuous, time);
+    }
+
     /// Forget the in-flight gesture. Callers holding a pressed button must release it first.
+    /// Note: `suppressed_touch_ids` is deliberately preserved — `touch_points`
+    /// only tracks non-suppressed fingers, so clearing the suppressed set here
+    /// would un-suppress a border-started finger that is still down when the
+    /// last in-guest finger lifts. Suppressed ids are removed individually on
+    /// their own lift/cancel (or all at once on suspend).
     pub fn reset_touch_state(&mut self) {
         self.touch_points.clear();
         self.scroll_centroid = None;
+        self.touch_scroll_started = false;
         self.touch_mode = TouchMode::Undecided;
         self.touch_down_position = None;
         self.touch_down_time = None;
         self.touch_down_generation = None;
-        self.suppressed_touch_ids.clear();
     }
 
     /// Release any synthesized pointer grab and clear pending presentation state on suspend.
     pub fn suspend_input_and_presentation(&mut self) {
         self.reset_touch_state();
+        // All fingers are gone on suspend: drop any border-suppressed ids too
+        // (reset_touch_state preserves them for the partial-lift case above).
+        self.suppressed_touch_ids.clear();
         let time = self.clock.now().as_millis() as u32;
+        self.stop_all_scrolls(time);
         if self.pointer_pressed {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.compositor.pointer.button(

@@ -121,12 +121,20 @@ fn centralize_keyboard(
 ) -> CentralizedEvent {
     match state {
         ElementState::Pressed => {
-            backend.key_counter += 1;
-            backend.pressed_keys.insert(scancode);
+            // `pressed_keys` is a set: only count genuinely new presses so a
+            // duplicate press (accessibility repeat, IME synthesis) cannot
+            // desynchronize `key_counter` from the actual held set.
+            if backend.pressed_keys.insert(scancode) {
+                backend.key_counter += 1;
+            }
         }
         ElementState::Released => {
-            backend.key_counter = backend.key_counter.saturating_sub(1);
-            backend.pressed_keys.remove(&scancode);
+            // Only count releases for keys we believe are held. This also
+            // makes the modifier-reconcile + release double-path safe: the
+            // second release of the same scancode becomes a no-op.
+            if backend.pressed_keys.remove(&scancode) {
+                backend.key_counter = backend.key_counter.saturating_sub(1);
+            }
         }
     };
 
@@ -181,13 +189,17 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             is_synthetic,
             ..
         } if !is_synthetic && !event.repeat => {
+            // Reconcile stale modifiers before the mapping check: if Alt was
+            // physically released (meta_state=0) but the next event is an
+            // unmapped OEM key, the stale Alt must still be released now
+            // rather than lingering until the next mapped key.
+            reconcile_modifiers(event.android_meta_state(), time as u32, backend);
             let Some(scancode) = physicalkey_to_scancode(event.physical_key) else {
                 // Never forward the sentinel evdev code 0. It is interpreted as an unknown
                 // key by libinput/KWin and can leave modifiers or key counters inconsistent.
                 log::debug!("Dropping keyboard event without a physical evdev mapping: {event:?}");
                 return CentralizedEvent::Unsupported;
             };
-            reconcile_modifiers(event.android_meta_state(), time as u32, backend);
             centralize_keyboard(scancode, event.state, time, backend)
         }
         WindowEvent::CursorMoved { position, .. } => {
@@ -244,9 +256,23 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
                 },
             })
         }
-        WindowEvent::MouseWheel { delta, .. } => {
+        WindowEvent::MouseWheel {
+            mut delta, phase, ..
+        } => {
+            if let MouseScrollDelta::PixelDelta(physical) = delta {
+                let snapshot = backend
+                    .compositor
+                    .state
+                    .authoritative_display_state
+                    .presentation_snapshot();
+                let Some((x, y)) = snapshot.physical_vector_to_logical(physical.x, physical.y)
+                else {
+                    return CentralizedEvent::Unsupported;
+                };
+                delta = MouseScrollDelta::PixelDelta(PhysicalPosition { x, y });
+            }
             let event = InputEvent::PointerAxis {
-                event: WinitMouseWheelEvent { time, delta },
+                event: WinitMouseWheelEvent::from_pointer(time, delta, phase),
             };
             CentralizedEvent::Input(event)
         }
@@ -326,6 +352,24 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
                 return CentralizedEvent::Unsupported;
             }
             backend.touch_points.insert(id, location);
+            // A host resize between down and move invalidates the slop anchor:
+            // the old physical no longer maps through the new viewport, so a
+            // cross-generation delta would be a false scroll (or miss a real
+            // one). Re-anchor here; the long-press path is guarded the same way.
+            let current_generation = backend
+                .compositor
+                .state
+                .authoritative_display_state
+                .resize_generation;
+            if backend
+                .touch_down_generation
+                .is_some_and(|g| g != current_generation)
+            {
+                backend.touch_down_position = Some(location);
+                backend.touch_down_generation = Some(current_generation);
+                backend.scroll_centroid = Some(centroid(&backend.touch_points));
+                return CentralizedEvent::Unsupported;
+            }
 
             if backend.touch_mode == TouchMode::Undecided && travelled_past_slop(backend, location)
             {
@@ -353,16 +397,36 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
                     let Some(last) = last else {
                         return CentralizedEvent::Unsupported;
                     };
-                    let dx = new_centroid.x - last.x;
-                    let dy = new_centroid.y - last.y;
+                    // Convert displacement with the same authoritative
+                    // physical -> guest-logical snapshot used for pointer
+                    // coordinates. This naturally follows host size, rendered
+                    // guest size, letterboxing, and Plasma scale changes.
+                    let snapshot = backend
+                        .compositor
+                        .state
+                        .authoritative_display_state
+                        .presentation_snapshot();
+                    let Some((dx, dy)) = snapshot.physical_delta_to_logical(
+                        (last.x, last.y),
+                        (new_centroid.x, new_centroid.y),
+                    ) else {
+                        return CentralizedEvent::Unsupported;
+                    };
                     if dx == 0.0 && dy == 0.0 {
                         return CentralizedEvent::Unsupported;
                     }
+                    let phase = if backend.touch_scroll_started {
+                        TouchPhase::Moved
+                    } else {
+                        backend.touch_scroll_started = true;
+                        TouchPhase::Started
+                    };
                     CentralizedEvent::Input(InputEvent::PointerAxis {
-                        event: WinitMouseWheelEvent {
+                        event: WinitMouseWheelEvent::from_touchscreen(
                             time,
-                            delta: MouseScrollDelta::PixelDelta(PhysicalPosition { x: dx, y: dy }),
-                        },
+                            MouseScrollDelta::PixelDelta(PhysicalPosition { x: dx, y: dy }),
+                            phase,
+                        ),
                     })
                 }
                 TouchMode::Drag => {

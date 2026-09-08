@@ -11,11 +11,11 @@ use jni::{
     objects::{GlobalRef, JObject},
     JNIEnv,
 };
-use std::sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock};
-use winit::{
-    event_loop::EventLoopProxy,
-    platform::android::activity::AndroidApp,
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
 };
+use winit::{event_loop::EventLoopProxy, platform::android::activity::AndroidApp};
 
 #[derive(Default)]
 struct PopupControl {

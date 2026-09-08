@@ -152,6 +152,48 @@ impl AbsolutePositionEvent<WinitInput> for WinitMouseMovedEvent {
 pub struct WinitMouseWheelEvent {
     pub(crate) time: u64,
     pub(crate) delta: MouseScrollDelta,
+    axis_source: AxisSource,
+    phase: winit::event::TouchPhase,
+}
+
+impl WinitMouseWheelEvent {
+    /// Preserve the Android pointer backend's explicit encoding: physical
+    /// touchpads emit pixel deltas, while real mouse wheels emit line deltas.
+    pub(crate) fn from_pointer(
+        time: u64,
+        delta: MouseScrollDelta,
+        phase: winit::event::TouchPhase,
+    ) -> Self {
+        let axis_source = match delta {
+            MouseScrollDelta::LineDelta(_, _) => AxisSource::Wheel,
+            MouseScrollDelta::PixelDelta(_) => AxisSource::Finger,
+        };
+        Self {
+            time,
+            delta,
+            axis_source,
+            phase,
+        }
+    }
+
+    /// Touchscreen gestures are synthesized into pointer scrolling by Portal,
+    /// but must not inherit the physical touchpad's configuration.
+    pub(crate) fn from_touchscreen(
+        time: u64,
+        delta: MouseScrollDelta,
+        phase: winit::event::TouchPhase,
+    ) -> Self {
+        Self {
+            time,
+            delta,
+            axis_source: AxisSource::Continuous,
+            phase,
+        }
+    }
+
+    pub(crate) fn phase(&self) -> winit::event::TouchPhase {
+        self.phase
+    }
 }
 
 impl Event<WinitInput> for WinitMouseWheelEvent {
@@ -166,10 +208,7 @@ impl Event<WinitInput> for WinitMouseWheelEvent {
 
 impl PointerAxisEvent<WinitInput> for WinitMouseWheelEvent {
     fn source(&self) -> AxisSource {
-        match self.delta {
-            MouseScrollDelta::LineDelta(_, _) => AxisSource::Wheel,
-            MouseScrollDelta::PixelDelta(_) => AxisSource::Finger,
-        }
+        self.axis_source
     }
 
     fn amount(&self, axis: Axis) -> Option<f64> {

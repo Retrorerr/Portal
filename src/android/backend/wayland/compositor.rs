@@ -726,6 +726,7 @@ impl Compositor {
         crate::android::backend::wayland::output_state::sync_kwin_output_scale(
             &mut auth_display_state,
         );
+        auth_display_state.update_render_scale(crate::core::config::DESKTOP_RENDER_LINEAR_SCALE);
         let coordinate_transform = auth_display_state.coordinate_transform();
         // Single uniform aspect-preserving scale (never anisotropic, allows
         // <1 for transitional downscaling). Both axes identical by construction.

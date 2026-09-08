@@ -218,7 +218,8 @@ mod tests {
 
     #[test]
     fn internal_touchscreen_alone_triggers_tablet_mode() {
-        let touchpanel = InputDeviceDescriptor::new(false, false, SOURCE_TOUCHSCREEN, KEYBOARD_TYPE_NONE);
+        let touchpanel =
+            InputDeviceDescriptor::new(false, false, SOURCE_TOUCHSCREEN, KEYBOARD_TYPE_NONE);
         assert!(!is_physical_alphabetic_keyboard(&touchpanel));
         assert!(!is_desktop_pointer(&touchpanel));
 
@@ -231,8 +232,10 @@ mod tests {
 
     #[test]
     fn internal_power_and_volume_keys_do_not_block_tablet_mode() {
-        let gpio_keys = InputDeviceDescriptor::new(false, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_NON_ALPHABETIC);
-        let pmic_keys = InputDeviceDescriptor::new(false, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_NON_ALPHABETIC);
+        let gpio_keys =
+            InputDeviceDescriptor::new(false, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_NON_ALPHABETIC);
+        let pmic_keys =
+            InputDeviceDescriptor::new(false, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_NON_ALPHABETIC);
         assert!(!is_physical_alphabetic_keyboard(&gpio_keys));
         assert!(!is_desktop_pointer(&gpio_keys));
 
@@ -246,7 +249,8 @@ mod tests {
     fn combined_oneplus_pad_keyboard_and_touchpad_case() {
         let kb = InputDeviceDescriptor::new(true, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_ALPHABETIC);
         let tp = InputDeviceDescriptor::new(true, false, SOURCE_TOUCHPAD, KEYBOARD_TYPE_NONE);
-        let touch = InputDeviceDescriptor::new(false, false, SOURCE_TOUCHSCREEN, KEYBOARD_TYPE_NONE);
+        let touch =
+            InputDeviceDescriptor::new(false, false, SOURCE_TOUCHSCREEN, KEYBOARD_TYPE_NONE);
 
         let attached_state = SystemInputState::evaluate([&kb, &tp, &touch]);
         assert!(attached_state.physical_keyboard_present);
@@ -274,7 +278,8 @@ mod tests {
 
     #[test]
     fn update_kwinrc_adds_tablet_mode_to_existing_group() {
-        let original = "[Desktops]\nNumber=1\n\n[Input]\nCursorTheme=Breeze\n\n[Xwayland]\nScale=2\n";
+        let original =
+            "[Desktops]\nNumber=1\n\n[Input]\nCursorTheme=Breeze\n\n[Xwayland]\nScale=2\n";
         let updated = update_kwinrc_tablet_mode(original, "on");
         assert!(updated.contains("[Input]\nTabletMode=on\nCursorTheme=Breeze"));
     }

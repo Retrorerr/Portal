@@ -56,7 +56,7 @@ index d326d93..a22cb38 100644
      connect(pointer, &Pointer::axisChanged, this, [this](quint32 time, Pointer::Axis nativeAxis, qreal delta) {
          PointerAxis axis;
          switch (nativeAxis) {
-@@ -130,11 +160,19 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Pointer *pointer, Wayla
+@@ -130,11 +160,38 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Pointer *pointer, Wayla
          default:
              Q_UNREACHABLE();
          }
@@ -70,6 +70,25 @@ index d326d93..a22cb38 100644
 +        }
 +        Q_EMIT pointerAxisChanged(axis, delta, 0, m_axisSource, configuredFingerScroll && m_naturalScroll, std::chrono::milliseconds(time), this);
      });
++
++    connect(pointer, &Pointer::axisStopped, this, [this](quint32 time, Pointer::Axis nativeAxis) {
++        PointerAxis axis;
++        switch (nativeAxis) {
++        case Pointer::Axis::Horizontal:
++            axis = PointerAxis::Horizontal;
++            break;
++        case Pointer::Axis::Vertical:
++            axis = PointerAxis::Vertical;
++            break;
++        default:
++            Q_UNREACHABLE();
++        }
++        // KWin's input API represents termination as a zero-delta axis event;
++        // SeatInterface converts that event back into wl_pointer.axis_stop for
++        // the focused client. Preserve the parent source so finger scrolling
++        // cannot remain active across tabs, surfaces, or focus changes.
++        Q_EMIT pointerAxisChanged(axis, 0, 0, m_axisSource, false, std::chrono::milliseconds(time), this);
++    });
  
      connect(pointer, &Pointer::frame, this, [this]() {
          Q_EMIT pointerFrame(this);
@@ -77,7 +96,7 @@ index d326d93..a22cb38 100644
      });
  
      KWayland::Client::PointerGestures *pointerGestures = m_seat->backend()->display()->pointerGestures();
-@@ -213,11 +251,19 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Touch *touch, WaylandSe
+@@ -213,11 +270,19 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Touch *touch, WaylandSe
  
  WaylandInputDevice::~WaylandInputDevice()
  {
@@ -98,7 +117,7 @@ index d326d93..a22cb38 100644
  }
  
  bool WaylandInputDevice::isEnabled() const
-@@ -241,7 +287,7 @@ bool WaylandInputDevice::isPointer() const
+@@ -241,7 +306,7 @@ bool WaylandInputDevice::isPointer() const
  
  bool WaylandInputDevice::isTouchpad() const
  {
@@ -107,7 +126,7 @@ index d326d93..a22cb38 100644
  }
  
  bool WaylandInputDevice::isTouch() const
-@@ -274,12 +320,74 @@ KWayland::Client::Pointer *WaylandInputDevice::nativePointer() const
+@@ -274,12 +339,74 @@ KWayland::Client::Pointer *WaylandInputDevice::nativePointer() const
      return m_pointer.get();
  }
  
@@ -182,7 +201,7 @@ index d326d93..a22cb38 100644
  void WaylandInputBackend::initialize()
  {
      WaylandSeat *seat = m_backend->seat();
-@@ -296,10 +404,32 @@ void WaylandInputBackend::initialize()
+@@ -296,10 +423,32 @@ void WaylandInputBackend::initialize()
          Q_EMIT deviceAdded(seat->touchDevice());
      }
  

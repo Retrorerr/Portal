@@ -49,7 +49,7 @@ fn oneplus_pad_like_metrics_keep_fractional_scale_and_refresh_period() {
 }
 
 #[test]
-fn effective_output_refresh_tracks_android_independently_of_requested_maximum() {
+fn nominal_output_refresh_is_independent_of_physical_vrr() {
     // Fallback constants stay sane when mode enumeration is unavailable.
     assert_eq!(NOMINAL_OUTPUT_REFRESH_MILLIHZ, 120_000);
     assert_eq!(DESIRED_REFRESH_MILLIHZ, 120_000);
@@ -106,7 +106,7 @@ fn effective_output_refresh_tracks_android_independently_of_requested_maximum() 
     assert!(RUN.contains("ndk::refresh_rate_millihz"));
     assert!(RUN.contains("preferred_high_refresh_millihz"));
     assert!(RUN.contains("ensure_high_refresh_rate_hz"));
-    assert!(SETUP.contains("ndk::refresh_rate_millihz"));
+    assert!(SETUP.contains("ndk::preferred_high_refresh_millihz"));
     assert!(FRAME_RATE.contains("preferred_frame_rate_hz"));
     assert!(FRAME_RATE.contains("ensure_high_refresh_rate_hz"));
     // No device-name checks, OEM APIs, or global-setting writes: selection is
@@ -119,7 +119,7 @@ fn effective_output_refresh_tracks_android_independently_of_requested_maximum() 
         assert!(!src.contains("Settings.Global"));
         assert!(!src.contains("Settings.System"));
     }
-    // The periodic poll must propagate effective changes to the nested compositor.
+    // The periodic poll must never publish physical VRR as a nominal mode.
     let poll_start = EVENT_HANDLER
         .find("fn maybe_poll_refresh_rate")
         .expect("physical sampler is present");
@@ -129,8 +129,11 @@ fn effective_output_refresh_tracks_android_independently_of_requested_maximum() 
         .expect("dispatch follows sampler");
     let poll_body = &EVENT_HANDLER[poll_start..dispatch_start];
     assert!(poll_body.contains("physical_refresh_millihz"));
-    assert!(poll_body.contains("set_preferred"));
-    assert!(poll_body.contains("change_current_state"));
+    assert!(!poll_body.contains("set_preferred"));
+    assert!(!poll_body.contains("change_current_state"));
+    for source in [RUN, EVENT_HANDLER] {
+        assert!(!source.contains("refresh_rate_millihz = observed"));
+    }
 }
 
 #[test]

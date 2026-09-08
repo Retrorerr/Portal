@@ -539,6 +539,11 @@ pub fn bind(event_loop: &ActiveEventLoop) -> Result<WinitGraphicsBackend<GlesRen
     let renderer = unsafe { GlesRenderer::new(context) }
         .map_err(|error| format!("Failed to create GLES Renderer: {error}"))?;
     let damage_tracking = display.supports_damage();
+    if !damage_tracking {
+        log::warn!(
+            "EGL buffer age plus swap-damage extensions are unavailable; using correctness-first full output redraws"
+        );
+    }
 
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
 

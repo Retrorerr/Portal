@@ -58,7 +58,11 @@ impl PointerButtonTracker {
         if !self.inside {
             return false;
         }
-        self.pressed.insert(button);
+        // Duplicate presses must not forward twice: press,press,release would
+        // otherwise leave the guest believing the button is still held.
+        if !self.pressed.insert(button) {
+            return false;
+        }
         true
     }
 

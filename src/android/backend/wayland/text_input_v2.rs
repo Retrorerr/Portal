@@ -54,7 +54,10 @@ impl Dispatch<ZwpTextInputManagerV2, ()> for State {
     ) {
         match request {
             zwp_text_input_manager_v2::Request::GetTextInput { id, seat } => {
-                log::info!("Portal text-input-v2: GetTextInput requested seat={:?}", seat);
+                log::info!(
+                    "Portal text-input-v2: GetTextInput requested seat={:?}",
+                    seat
+                );
                 let input = data_init.init(id, TextInputData { seat });
                 state.text_inputs.push(input.clone());
                 if let Some(surface) = state.keyboard_focus_surface.clone() {
@@ -91,13 +94,19 @@ impl Dispatch<ZwpTextInputV2, TextInputData> for State {
     ) {
         match request {
             zwp_text_input_v2::Request::Enable { surface } => {
-                log::info!("Portal text-input-v2: Enable requested for surface {:?}", surface);
+                log::info!(
+                    "Portal text-input-v2: Enable requested for surface {:?}",
+                    surface
+                );
                 state.active_text_input = Some(input.clone());
                 state.keyboard_focus_surface = Some(surface);
                 crate::android::ime::set_wayland_text_input_active(true);
             }
             zwp_text_input_v2::Request::Disable { surface } => {
-                log::info!("Portal text-input-v2: Disable requested for surface {:?}", surface);
+                log::info!(
+                    "Portal text-input-v2: Disable requested for surface {:?}",
+                    surface
+                );
                 if state.active_text_input.as_ref() == Some(input) {
                     state.active_text_input = None;
                     crate::android::ime::set_wayland_text_input_active(false);

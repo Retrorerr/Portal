@@ -63,11 +63,14 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     let observed = ndk::refresh_rate_millihz(&backend.android_app);
     if crate::core::android_integration::is_valid_refresh_millihz(observed) {
         backend.physical_refresh_millihz = observed;
-        backend.refresh_rate_millihz = observed;
         let state = &mut backend.compositor.state.authoritative_display_state;
         state.note_physical_refresh_millihz(observed);
-        state.refresh_rate_millihz = observed;
     }
+    backend
+        .compositor
+        .state
+        .authoritative_display_state
+        .refresh_rate_millihz = backend.refresh_rate_millihz;
     backend.compositor.state.size = size.into();
 
     // Mutate the existing authoritative state in place so resize generations,
@@ -174,7 +177,11 @@ fn resume_wayland(
 ) -> bool {
     if backend.graphic_renderer.is_none() {
         match bind(event_loop) {
-            Ok(winit) => backend.graphic_renderer = Some(winit),
+            Ok(winit) => {
+                backend.graphic_renderer = Some(winit);
+                backend.output_damage_tracker = None;
+                backend.output_damage_signature = None;
+            }
             Err(error) => {
                 log::error!("Failed to initialize Wayland renderer on resume: {error}");
                 accessibility::set_runtime_active(false);
@@ -212,6 +219,7 @@ fn resume_wayland(
     // resolved in `configure_output` so KWin, the output mode, and Android
     // all agree.
     if !backend.frame_rate_requested {
+        backend.content_cadence = Default::default();
         let rate_hz = ndk::preferred_high_refresh_millihz(&backend.android_app) as f32 / 1000.0;
         crate::android::utils::frame_rate::ensure_high_refresh_rate_hz(
             &backend.android_app,
@@ -234,9 +242,12 @@ fn resume_wayland(
         log::error!("Initial Wayland frame failed; guest session will not be launched");
         return false;
     }
-    launch();
-    // Start the standalone-client PipeWire/AAudio backend.
     pipewire_standalone_aaudio::spawn_after_ready(android_app.clone());
+    launch();
+    // Spawn guest/audio workers first so they retain normal priority. Only
+    // the NativeActivity event/render thread receives Android display
+    // priority; no affinity, root capability or guest-wide nice change.
+    crate::android::utils::frame_pacing::prioritize_current_render_thread();
     true
 }
 
@@ -508,6 +519,15 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             handle(event, backend, event_loop);
         }
 
+        if let AppUserEvent::ChoreographerFrame { frame_time_ns } = _event {
+            log::debug!("android.frame_callback time_ns={frame_time_ns}");
+            if backend.output_dirty {
+                if let Some(winit) = backend.graphic_renderer.as_ref() {
+                    winit.window().request_redraw();
+                }
+            }
+        }
+
         if _event == AppUserEvent::AndroidClipboardChanged {
             // Dedicated wake for external clipboard changes. Apply the queued
             // update and flush Wayland immediately so a later Ctrl+V observes
@@ -522,9 +542,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         if _event == AppUserEvent::WaylandTraffic {
             if let Ok(dirty) = crate::android::backend::wayland::dispatch_wayland(backend) {
                 if dirty || backend.output_dirty {
-                    if let Some(winit) = backend.graphic_renderer.as_ref() {
-                        winit.window().request_redraw();
-                    }
+                    backend.schedule_redraw();
                 }
             }
         }
@@ -597,6 +615,8 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             }
             backend.socket_watcher = None;
             backend.graphic_renderer = None;
+            backend.output_damage_tracker = None;
+            backend.output_damage_signature = None;
             backend.suspend_input_and_presentation();
             // The ANativeWindow is destroyed on suspend; the preferred-rate hint
             // must be re-issued on the next resume's fresh window.
@@ -611,9 +631,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             if let Ok(dirty) = crate::android::backend::wayland::dispatch_wayland(backend) {
                 if dirty || backend.output_dirty {
-                    if let Some(winit) = backend.graphic_renderer.as_ref() {
-                        winit.window().request_redraw();
-                    }
+                    backend.schedule_redraw();
                 }
             }
 
@@ -658,8 +676,13 @@ fn inject_committed_text(
     }
 
     for (scancode, shift_required) in events {
+        // The IME-generated Shift shares `pressed_keys`/`key_counter` with the
+        // physical keyboard. If the user already holds Shift, emitting another
+        // press/release would remove their physical modifier on release. Only
+        // emit the Shift edge when it is not already held.
+        let shift_edge = shift_required && !backend.pressed_keys.contains(&42);
         let time = backend.clock.now().as_millis() as u64;
-        if shift_required {
+        if shift_edge {
             handle(
                 centralize_injected_keyboard(42, ElementState::Pressed, time, backend),
                 backend,
@@ -678,7 +701,7 @@ fn inject_committed_text(
             backend,
             event_loop,
         );
-        if shift_required {
+        if shift_edge {
             let time = backend.clock.now().as_millis() as u64;
             handle(
                 centralize_injected_keyboard(42, ElementState::Released, time, backend),

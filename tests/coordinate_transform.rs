@@ -158,6 +158,44 @@ fn authoritative_display_state_configure_size_invariant_under_observed_size() {
 }
 
 #[test]
+fn reduced_internal_resolution_upscales_to_the_native_viewport() {
+    use localdesktop::core::coordinate_transform::{
+        kwin_logical_to_physical_pixels, AuthoritativeDisplayState,
+    };
+
+    let mut state = AuthoritativeDisplayState::new(3392, 2400, 320, 144000);
+    state.update_kwin_scale(2.0);
+    assert!(state.update_render_scale(0.8));
+    assert_eq!(state.configure_size(), (1357, 960));
+    assert_eq!(
+        kwin_logical_to_physical_pixels(state.configure_size(), 2.0),
+        (2714, 1920)
+    );
+
+    assert!(state.note_kwin_commit(Some((1357.0, 960.0)), None, Some(2)));
+    let snapshot = state.presentation_snapshot();
+    assert!(snapshot.converged);
+    assert_eq!(snapshot.guest_logical, (1357.0, 960.0));
+    assert_near(snapshot.uniform_scale, 3392.0 / 1357.0);
+    assert_near(snapshot.viewport_origin.0, 0.0);
+    assert!(snapshot.viewport_origin.1 < 0.25);
+    assert_near(snapshot.viewport_size.0, 3392.0);
+    assert!((snapshot.viewport_size.1 - 2400.0).abs() < 0.5);
+
+    let (logical_x, logical_y) = snapshot.physical_to_logical(1696.0, 1200.0).unwrap();
+    assert!((logical_x - 678.5).abs() < 0.01);
+    assert!((logical_y - 480.0).abs() < 0.01);
+    let (scroll_x, scroll_y) = snapshot
+        .physical_delta_to_logical((1000.0, 1000.0), (1100.0, 1100.0))
+        .unwrap();
+    assert!((scroll_x - 40.0059).abs() < 0.01);
+    assert!((scroll_y - 40.0).abs() < 0.01);
+    let (wheel_x, wheel_y) = snapshot.physical_vector_to_logical(100.0, 100.0).unwrap();
+    assert!((wheel_x - 40.0059).abs() < 0.01);
+    assert!((wheel_y - 40.0).abs() < 0.01);
+}
+
+#[test]
 fn logical_configure_rounding_policy_invariants() {
     use localdesktop::core::coordinate_transform::{
         kwin_logical_to_physical_pixels, physical_to_kwin_logical_configure,

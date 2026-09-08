@@ -51,7 +51,12 @@ impl WaylandSocketWatcher {
                     pending_clone,
                 );
             })
-            .map_err(|err| format!("Failed to spawn wayland-socket-watcher thread: {err}"))?;
+            .map_err(|err| {
+                // The eventfd is owned by this function until the worker takes
+                // over; close it on spawn failure instead of leaking the fd.
+                unsafe { libc::close(stop_eventfd) };
+                format!("Failed to spawn wayland-socket-watcher thread: {err}")
+            })?;
 
         Ok(Self {
             stop_eventfd,
@@ -127,16 +132,21 @@ impl WaylandSocketWatcher {
                 break;
             }
 
-            let has_listener_event = (fds[1].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP)) != 0;
-            let has_display_event = (fds[2].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP)) != 0;
+            let has_listener_event =
+                (fds[1].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP)) != 0;
+            let has_display_event =
+                (fds[2].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP)) != 0;
 
             if has_listener_event || has_display_event {
-                let _ = proxy.send_event(AppUserEvent::WaylandTraffic);
-
-                // Wait for the main thread to complete dispatching before polling level-triggered FDs again
+                // Arm before publishing the wake. The main thread may dispatch
+                // immediately; setting pending afterwards loses its acknowledgement
+                // and can park this worker until unrelated input wakes the app.
                 let (lock, cvar) = &*pending_lock;
                 if let Ok(mut pending) = lock.lock() {
                     *pending = true;
+                    if proxy.send_event(AppUserEvent::WaylandTraffic).is_err() {
+                        break;
+                    }
                     while *pending && !shutdown.load(Ordering::SeqCst) {
                         match cvar.wait(pending) {
                             Ok(guard) => pending = guard,

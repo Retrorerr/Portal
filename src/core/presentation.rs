@@ -157,6 +157,38 @@ impl PresentationSnapshot {
         Some((u * self.guest_logical.0, v * self.guest_logical.1))
     }
 
+    /// Convert a physical touchscreen displacement into the logical units
+    /// consumed by Wayland clients, using one immutable presentation snapshot.
+    pub fn physical_delta_to_logical(
+        &self,
+        from: (f64, f64),
+        to: (f64, f64),
+    ) -> Option<(f64, f64)> {
+        let (from_x, from_y) = self.physical_to_logical(from.0, from.1)?;
+        let (to_x, to_y) = self.physical_to_logical(to.0, to.1)?;
+        Some((to_x - from_x, to_y - from_y))
+    }
+
+    /// Convert an origin-free Android display-pixel vector (for example the
+    /// API 34 touchpad scroll-distance axes) into KWin logical units. Unlike
+    /// touch displacement this must not perform viewport hit testing because
+    /// the vector has no screen position.
+    pub fn physical_vector_to_logical(&self, dx: f64, dy: f64) -> Option<(f64, f64)> {
+        if !dx.is_finite()
+            || !dy.is_finite()
+            || self.viewport_size.0 <= 0.0
+            || self.viewport_size.1 <= 0.0
+            || self.guest_logical.0 <= 0.0
+            || self.guest_logical.1 <= 0.0
+        {
+            return None;
+        }
+        Some((
+            dx * self.guest_logical.0 / self.viewport_size.0,
+            dy * self.guest_logical.1 / self.viewport_size.1,
+        ))
+    }
+
     /// KWin logical → Android physical (for cursor placement). Clamps to keep
     /// the cursor visible; inner points map exactly (round-trip <1px with
     /// `physical_to_logical`).

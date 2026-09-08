@@ -61,6 +61,19 @@ x build --release --platform android --arch arm64 --format apk
 
 The APK is written to `target/x/release/android/localdesktop.apk`.
 
+To build both installable variants on Windows, use:
+
+```powershell
+./scripts/build_android_variants.ps1
+```
+
+This produces `target/Portal-stable-unsigned.apk` for release signing and the
+locally installable `target/Portal-Debug.apk` for development. Once the stable
+artifact is signed as `target/Portal.apk`, Portal is fully optimized and quiet
+by default. Portal Debug retains development diagnostics and uses a badged
+launcher icon. The two packages have separate app-private data and Debian
+runtimes.
+
 An on-device Termux build is also supported:
 
 ```bash
@@ -87,16 +100,19 @@ Useful engineering references:
 - [Diagnostics integration](docs/diagnostics-integration.md)
 - [Startup investigation notes](docs/startup-investigation.md)
 
-## Stable compatibility identifiers
+## Compatibility identifiers
 
-The product name is Portal, but several internal identifiers deliberately retain their original values:
+The two Android variants deliberately have different package identities:
 
-- Android package: `app.polarbear`
+- Portal: `app.polarbear.portal`
+- Portal Debug: `app.polarbear`
 - Rust crate and native library: `localdesktop`
 - guest configuration root: `/etc/localdesktop`
 - build artifact basename: `localdesktop.apk`
 
-Changing them would break Android upgrades or existing guest installations. They are compatibility boundaries, not unfinished branding.
+Portal Debug keeps the historical package and upgrade lineage. Stable Portal
+uses its own package and data directory so installing it cannot reuse or damage
+development state.
 
 ## Contributing and security
 

@@ -23,12 +23,12 @@ portal-debug = []
 
 [profile.release]
 strip = true      # Automatically strip symbols from the binary.
-opt-level = "z"   # Optimize for size.
+opt-level = 3     # Daily-driver build: optimize the render/input hot paths.
 lto = true
 codegen-units = 1
 
 [target.'cfg(target_os = "android")'.dependencies] # Portal's Android host dependencies
-tracing = "0.1.41"
+tracing = { version = "0.1.41", features = ["release_max_level_warn"] }
 jni = "0.21.1"
 mockall = "0.13.1"
 android_logger = { version = "0.14", default-features = false }
@@ -80,7 +80,7 @@ image = { version = "0.24.5", default-features = false, features = [
     "png",
     "webp",
 ] }
-log = "0.4"
+log = { version = "0.4", features = ["release_max_level_warn"] }
 pem = "1.1.0"
 quick-xml = { version = "0.26.0", features = ["serialize"] }
 rasn = "0.6.1"

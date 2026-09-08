@@ -5,11 +5,14 @@
 //! while the panel supports up to 144 Hz. Portal previously made no frame-rate
 //! request at all.
 //!
-//! This module issues exactly one supported hint:
+//! This module issues a supported per-window preference:
 //! `ANativeWindow_setFrameRate[WithChangeStrategy](<preferred> Hz, DEFAULT,
 //! ONLY_IF_SEAMLESS)`, where `<preferred>` is resolved from
 //! `Display.getSupportedModes()` (144 Hz on the OnePlus Pad 3, otherwise the
-//! device's own maximum). Semantics per the NDK:
+//! device's own maximum). Sustained compositor demand may temporarily select
+//! a supported 60 Hz multiple through the host-tested cadence policy. Neither
+//! request nor physical observations change the nominal Wayland mode.
+//! Semantics per the NDK:
 //! - `frameRate` is a hint; the system may stay on a lower refresh when idle
 //!   or when no better match exists. Unsupported modes are never forced.
 //! - `COMPATIBILITY_DEFAULT (0)` lets the system use VRR/power-saving and
