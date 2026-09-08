@@ -282,7 +282,8 @@ fn nested_android_owned_settings_are_truthful() {
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings_qwidgets/kcm_clock.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("with_extension(\"so.portal-disabled\")"));
     assert!(ANDROID_SETUP_SOURCE.contains("org.kde.dolphin.desktop"));
-    assert!(ANDROID_SETUP_SOURCE.contains("Profile 1.profile"));
+    assert!(ANDROID_SETUP_SOURCE.contains("LocalDesktop.profile"));
+    assert!(ANDROID_SETUP_SOURCE.contains("konsole-profile-v2"));
     assert!(ANDROID_SETUP_SOURCE.contains("sync_debian_package_management"));
     assert!(ANDROID_SETUP_SOURCE.contains("APT::Sandbox::User \\\"root\\\""));
     assert!(ANDROID_SETUP_SOURCE.contains("policy-rc.d"));
@@ -438,8 +439,8 @@ fn android_clipboard_path_applies_byte_limit_before_wayland_selection() {
         .split_once("pub fn process_android_clipboard")
         .map(|(_, body)| body)
         .expect("Android clipboard compositor path is present");
-    assert!(process_path.contains("is_valid_clip_text(&text)"));
-    assert!(process_path.contains("set_data_device_selection"));
+    assert!(process_path.contains("publish_android_clipboard(value.as_deref())"));
+    assert!(!process_path.contains("set_data_device_selection"));
 }
 
 #[test]

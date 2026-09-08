@@ -1,2 +1,5 @@
 build/static-aarch64/
 build/root-aarch64/
+build/talloc-*/bin/
+**/__pycache__/
+.DS_Store

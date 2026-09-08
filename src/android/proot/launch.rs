@@ -151,9 +151,15 @@ pub fn launch() {
 
     let runtime = crate::android::runtime::proot::PRootRuntime::active();
     let rootfs = runtime.rootfs_path();
-    if !crate::core::provisioning::RuntimeArtifact::production().is_ready(rootfs) {
-        log::error!("Refusing to launch an incomplete or mismatched Debian runtime");
+    if !crate::core::provisioning::RuntimeArtifact::production().is_bootable(rootfs) {
+        log::error!("Refusing to launch an incomplete or incompatible Debian runtime");
         LAUNCH_RUNNING.store(false, Ordering::Release);
+        // Surface the failure instead of sitting on a blank UI: an
+        // interrupted download leaves no error page otherwise, and
+        // `sync_session_runtime_files` never runs to attempt repair.
+        report_failure(
+            "Debian runtime is incomplete or incompatible. Portal preserved it instead of replacing user data; export diagnostics before repairing the guest.",
+        );
         return;
     }
     log::info!("launch: active runtime rootfs is {}", rootfs.display());

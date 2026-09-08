@@ -6,8 +6,17 @@ use std::{
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "portal-debug"))]
+pub const APP_FILES_ROOT: &str = "/data/data/app.polarbear/files";
+#[cfg(all(not(test), not(feature = "portal-debug")))]
+pub const APP_FILES_ROOT: &str = "/data/data/app.polarbear.portal/files";
+#[cfg(test)]
+pub const APP_FILES_ROOT: &str = "/data/local/tmp";
+
+#[cfg(all(not(test), feature = "portal-debug"))]
 pub const PRODUCTION_FS_ROOT: &str = "/data/data/app.polarbear/files/runtime-B";
+#[cfg(all(not(test), not(feature = "portal-debug")))]
+pub const PRODUCTION_FS_ROOT: &str = "/data/data/app.polarbear.portal/files/runtime-B";
 #[cfg(test)]
 pub const PRODUCTION_FS_ROOT: &str = "/data/local/tmp/runtime-B";
 
