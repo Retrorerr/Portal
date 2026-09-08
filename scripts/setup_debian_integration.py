@@ -180,15 +180,13 @@ exit "$status"
     p.write_text(kwin_wrapper, encoding="utf-8", newline="\n")
     p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    # 3. ksplashqml stub
-    p = bin_dir / "ksplashqml"
-    p.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
-    p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-    # 4. plasma_waitforname stub
-    p = bin_dir / "plasma_waitforname"
-    p.write_text('#!/bin/sh\nif [ "$1" = "org.kde.KSplash" ]; then\n    exit 0\nfi\nexec /usr/bin/plasma_waitforname "$@"\n', encoding="utf-8", newline="\n")
-    p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # APK session assets own splash and startup policy.
+    for name in ("ksplashqml", "plasma_waitforname"):
+        (bin_dir / name).unlink(missing_ok=True)
+    (bin_dir / "startplasma-localdesktop").write_text(
+        (Path(__file__).resolve().parent.parent / "assets/localdesktop-startplasma.sh").read_text()
+        .replace("@GDB_BACKTRACE@", "0").replace("@UI_SCALE@", "1"),
+        encoding="utf-8", newline="\n")
 
     print("Debian integration scripts successfully installed into /usr/local/bin!")
 

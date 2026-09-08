@@ -14,11 +14,11 @@ use std::{
     fs::File,
     io::Read,
     net::TcpStream,
-        sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering},
-            Arc, Condvar, Mutex, OnceLock,
-        },
-        thread,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Condvar, Mutex, OnceLock,
+    },
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use websocket::{
@@ -301,11 +301,7 @@ fn handle_message(state: &WebviewState, generation: u64, text: &str) {
             );
         }
         Ok(ParsedAction::ExportDiagnostics) => {
-            let app = state
-                .android_app
-                .lock()
-                .ok()
-                .and_then(|app| app.clone());
+            let app = state.android_app.lock().ok().and_then(|app| app.clone());
             let result = app
                 .ok_or_else(|| "Android activity is not ready for diagnostics export".to_string())
                 .and_then(|app| {
@@ -410,7 +406,11 @@ fn start_socket(
                     continue;
                 }
             };
-            if !request.protocols().iter().any(|protocol| protocol == "rust-websocket") {
+            if !request
+                .protocols()
+                .iter()
+                .any(|protocol| protocol == "rust-websocket")
+            {
                 if let Err(error) = request.reject() {
                     log::warn!("Failed to reject setup progress client: {error:?}");
                 }
@@ -626,11 +626,7 @@ mod tests {
     fn parser_accepts_only_supported_actions_and_tokens() {
         let token = "0123456789abcdef";
         assert_eq!(
-            parse_action(
-                r#"{"action":"hello","token":"0123456789abcdef"}"#,
-                token
-            )
-            .unwrap(),
+            parse_action(r#"{"action":"hello","token":"0123456789abcdef"}"#, token).unwrap(),
             ParsedAction::Hello
         );
         assert_eq!(

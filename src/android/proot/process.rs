@@ -38,11 +38,7 @@ impl ArchProcess {
 
     /// Run a guest process with lifecycle cancellation and explicit environment
     /// variables supplied by the Android host.
-    pub fn run_with_cancel_and_env<I>(
-        self,
-        cancel: Arc<AtomicBool>,
-        environment: I,
-    ) -> Output
+    pub fn run_with_cancel_and_env<I>(self, cancel: Arc<AtomicBool>, environment: I) -> Output
     where
         I: IntoIterator<Item = (String, String)>,
     {

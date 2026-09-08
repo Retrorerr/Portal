@@ -65,7 +65,11 @@ extern "C" {
 }
 
 static AAUDIO_CHILDREN: Mutex<Option<PipewireAaudioChildren>> = Mutex::new(None);
-static AAUDIO_START_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+// Serialize whole startup/teardown operations, not just publication of children.
+// Otherwise suspend can remove sockets while startup is still creating them,
+// and that startup can publish children after shutdown has already returned.
+static AAUDIO_OPERATION: Mutex<()> = Mutex::new(());
+static AAUDIO_WANTED: AtomicBool = AtomicBool::new(false);
 
 struct PipewireAaudioChildren {
     pipewire: Child,
@@ -86,24 +90,24 @@ struct PipewireAaudioEnv {
     ld_library_path: String,
 }
 
-/// Start the experimental PipeWire/AAudio bridge after the compositor is ready.
+/// Schedule the single PipeWire/AAudio owner before launching Plasma.
 pub fn spawn_after_ready(android_app: AndroidApp) {
-    if AAUDIO_START_IN_PROGRESS
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        pw_debug!("server", "PipeWire/AAudio start already in progress");
-        return;
-    }
+    AAUDIO_WANTED.store(true, Ordering::SeqCst);
 
     pw_info!(
         "server",
         "scheduling standalone-client PipeWire/AAudio backend"
     );
     thread::spawn(move || {
+        let _operation = AAUDIO_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+        if !AAUDIO_WANTED.load(Ordering::SeqCst) {
+            return;
+        }
         let started = phase_begin("ensure_pipewire_aaudio");
         let result = ensure_running(&android_app);
-        AAUDIO_START_IN_PROGRESS.store(false, Ordering::SeqCst);
+        if !AAUDIO_WANTED.load(Ordering::SeqCst) {
+            stop_running();
+        }
         match &result {
             Ok(()) => pw_info!(
                 "server",
@@ -122,8 +126,19 @@ fn pipewire_runtime_dir() -> PathBuf {
         .join("tmp")
 }
 
-/// Stop the proof-of-concept processes, if they were started.
+/// Request teardown without blocking Android's lifecycle thread on startup.
 pub fn shutdown() {
+    AAUDIO_WANTED.store(false, Ordering::SeqCst);
+    thread::spawn(|| {
+        let _operation = AAUDIO_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+        // A newer resume may have superseded this queued suspend.
+        if !AAUDIO_WANTED.load(Ordering::SeqCst) {
+            stop_running();
+        }
+    });
+}
+
+fn stop_running() {
     let children = if let Ok(mut slot) = AAUDIO_CHILDREN.lock() {
         slot.take()
     } else {

@@ -144,6 +144,10 @@ pub struct WleglHandleInner {
 
 impl WleglHandleData {
     pub fn new(expected_fds: i32, ints: Vec<i32>) -> Self {
+        // `expected_fds` comes from the guest client. Clamp defensively:
+        // negative values previously flowed into `Vec::with_capacity(usize::MAX)`
+        // and panicked the event-loop thread.
+        let expected_fds = expected_fds.clamp(0, 64);
         Self {
             inner: Mutex::new(WleglHandleInner {
                 expected_fds,
@@ -170,6 +174,10 @@ pub fn handle_wlegl_request<D>(
 {
     match request {
         android_wlegl::Request::CreateHandle { id, num_fds, ints } => {
+            if num_fds < 0 || num_fds > 64 {
+                resource.post_error(android_wlegl::Error::BadValue, "num_fds out of range");
+                return;
+            }
             if ints.len() % 4 != 0 {
                 resource.post_error(
                     android_wlegl::Error::BadValue,
@@ -205,7 +213,7 @@ pub fn handle_wlegl_request<D>(
             };
 
             let mut inner = handle_data.inner.lock().unwrap();
-            if inner.fds.len() as i32 != inner.expected_fds {
+            if inner.expected_fds < 0 || inner.fds.len() as i32 != inner.expected_fds {
                 resource.post_error(
                     android_wlegl::Error::BadHandle,
                     format!(
@@ -213,6 +221,24 @@ pub fn handle_wlegl_request<D>(
                         inner.expected_fds,
                         inner.fds.len()
                     ),
+                );
+                return;
+            }
+
+            // Dimensions arrive as Wayland `int`. Reject non-positive values
+            // before the `as u32` cast: negative values would wrap to ~4 GiB
+            // and flow unchecked into the AHB import FFI.
+            if width <= 0 || height <= 0 || stride <= 0 || format <= 0 {
+                resource.post_error(
+                    android_wlegl::Error::BadValue,
+                    "buffer dimensions must be positive",
+                );
+                return;
+            }
+            if width > 8192 || height > 8192 {
+                resource.post_error(
+                    android_wlegl::Error::BadValue,
+                    "buffer dimensions exceed sane bounds",
                 );
                 return;
             }
@@ -289,7 +315,7 @@ pub fn handle_handle_request(
     match request {
         android_wlegl_handle::Request::AddFd { fd } => {
             let mut inner = data.inner.lock().unwrap();
-            if inner.fds.len() as i32 >= inner.expected_fds {
+            if inner.expected_fds <= 0 || inner.fds.len() as i32 >= inner.expected_fds {
                 resource.post_error(android_wlegl_handle::Error::TooManyFds, "too many fds");
                 return;
             }

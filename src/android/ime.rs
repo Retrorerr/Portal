@@ -145,7 +145,7 @@ pub fn dispatch_committed_text(text: String) -> bool {
                 log::info!("Dispatched {count} backspace(s) via input-method context protocol");
                 return true;
             }
-        } else if text == "\n" || text == "\r\n" {
+        } else if text == "\n" || text == "\r\n" || text == "\r" {
             if send_ime_command("ENTER\n") {
                 log::info!("Dispatched enter key via input-method context protocol");
                 return true;
@@ -153,7 +153,10 @@ pub fn dispatch_committed_text(text: String) -> bool {
         } else {
             if let Ok(b64) = crate::core::clipboard_broker::encode_base64(text.as_bytes()) {
                 if send_ime_command(&format!("COMMIT:{b64}\n")) {
-                    log::info!("Dispatched commit_string via input-method context protocol: {text:?}");
+                    log::info!(
+                        "Dispatched commit_string via input-method context protocol ({} bytes)",
+                        text.len()
+                    );
                     return true;
                 }
             }
@@ -420,7 +423,9 @@ pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnInputDevice
 
     let prev_keyboard = HARDWARE_KEYBOARD_PRESENT.swap(has_physical_keyboard, Ordering::AcqRel);
     if prev_keyboard != has_physical_keyboard {
-        request_visibility(!has_physical_keyboard && WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire));
+        request_visibility(
+            !has_physical_keyboard && WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire),
+        );
     }
 
     let prev_desktop = DESKTOP_INPUT_PRESENT.swap(has_desktop_input, Ordering::AcqRel);
@@ -436,5 +441,7 @@ pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnHardwareKey
     bridge: JObject,
     present: jni::sys::jboolean,
 ) {
-    Java_app_polarbear_SoftKeyboardBridge_nativeOnInputDevicesChanged(env, bridge, present, present);
+    Java_app_polarbear_SoftKeyboardBridge_nativeOnInputDevicesChanged(
+        env, bridge, present, present,
+    );
 }

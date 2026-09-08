@@ -6,7 +6,7 @@ Portal runs a local Linux desktop across two security and runtime domains: an An
 
 ```text
 Android
-└─ app.polarbear / NativeActivity
+└─ Portal package / NativeActivity
    ├─ winit event loop
    ├─ Smithay Wayland compositor
    ├─ setup and diagnostics WebView
@@ -45,7 +45,13 @@ The compositor translates between Android's surface lifecycle and Wayland's pers
 - Android provides the native window, physical dimensions, rotation, density, and refresh rate.
 - Smithay owns Wayland globals, surfaces, configure sequencing, frame callbacks, and presentation feedback.
 - EGL/GLES renders into the Android surface.
-- Android `AHardwareBuffer` and `android_wlegl` support compatible guest buffers without a readback path.
+- Portal exposes `android_wlegl` and can import a compatible Android
+  `AHardwareBuffer` directly as an EGL image. The current KWin 6.3 Wayland
+  QPainter backend does not produce those buffers: it allocates `wl_shm`
+  buffers, which Portal uploads to GLES. Reaching the zero-copy path therefore
+  requires an Android-buffer allocator/export path in the guest compositor;
+  the server-side import support alone does not make the current desktop
+  zero-copy.
 - Surface loss suspends the renderer; resume recreates it without launching a second guest session.
 
 Readiness is stricter than process liveness. Portal requires the expected KWin identity, an acknowledged configure, a committed guest buffer, and a host-presented frame from the same startup generation before declaring the desktop ready.
@@ -80,9 +86,16 @@ Every recovery path should preserve evidence and user data.
 
 ## Compatibility boundaries
 
-The visible product name is Portal. The following identifiers remain stable because existing Android installs and Debian guests depend on them:
+The visible daily-use product is Portal. Release builds use package
+`app.polarbear.portal` and app-private storage below that package. Portal Debug
+retains the historical `app.polarbear` identifier and its existing data so both
+variants can be installed, launched and updated independently. Each variant
+therefore provisions its own Debian runtime and cannot accidentally launch the
+other variant's half-installed state.
 
-- package `app.polarbear`;
+The following guest and native identifiers remain stable because Debian setup
+and native loading depend on them:
+
 - crate and native-library name `localdesktop`;
 - guest paths under `/etc/localdesktop`;
 - selected asset and artifact basenames.

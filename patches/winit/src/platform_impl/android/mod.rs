@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use android_activity::input::{
-    self, InputEvent, KeyAction, Keycode, MotionAction, Source, ToolType,
+    self, Button, InputEvent, KeyAction, Keycode, MotionAction, Source, ToolType,
 };
 use android_activity::{
     AndroidApp, AndroidAppWaker, ConfigurationRef, InputStatus, MainEvent, Rect,
@@ -56,6 +56,72 @@ fn send_mouse_button<T: 'static, F>(
         },
         target,
     );
+}
+
+fn send_mouse_wheel<T: 'static, F>(
+    callback: &mut F,
+    target: &RootAEL,
+    window_id: window::WindowId,
+    device_id: event::DeviceId,
+    x: f64,
+    y: f64,
+    phase: event::TouchPhase,
+) where
+    F: FnMut(Event<T>, &RootAEL),
+{
+    callback(
+        Event::WindowEvent {
+            window_id,
+            event: WindowEvent::MouseWheel {
+                device_id,
+                delta: event::MouseScrollDelta::PixelDelta(PhysicalPosition { x, y }),
+                phase,
+            },
+        },
+        target,
+    );
+}
+
+/// Android-activity 0.6 intentionally hides history for API parity with its
+/// GameActivity backend, while the pinned `ndk` API exposes the same native
+/// event history. NativeActivity's MotionEvent is `repr(transparent)` over
+/// `ndk::event::MotionEvent`, so this view preserves the original lifetime and
+/// does not take ownership of the AInputEvent.
+#[cfg(feature = "android-native-activity")]
+fn touchpad_gesture_samples(
+    motion_event: &android_activity::input::MotionEvent<'_>,
+    pointer_index: usize,
+) -> Vec<(f64, f64)> {
+    let ndk_event = unsafe {
+        &*(motion_event as *const android_activity::input::MotionEvent<'_>
+            as *const ndk::event::MotionEvent)
+    };
+    let x_axis = ndk::event::Axis::from(50);
+    let y_axis = ndk::event::Axis::from(51);
+    let mut samples = Vec::with_capacity(ndk_event.history_size() + 1);
+    for historical in ndk_event.history() {
+        if let Some(pointer) = historical.pointers().nth(pointer_index) {
+            samples.push((pointer.axis_value(x_axis) as f64, pointer.axis_value(y_axis) as f64));
+        }
+    }
+    let pointer = motion_event.pointer_at_index(pointer_index);
+    samples.push((
+        pointer.axis_value(input::Axis::from(50)) as f64,
+        pointer.axis_value(input::Axis::from(51)) as f64,
+    ));
+    samples
+}
+
+#[cfg(not(feature = "android-native-activity"))]
+fn touchpad_gesture_samples(
+    motion_event: &android_activity::input::MotionEvent<'_>,
+    pointer_index: usize,
+) -> Vec<(f64, f64)> {
+    let pointer = motion_event.pointer_at_index(pointer_index);
+    vec![(
+        pointer.axis_value(input::Axis::from(50)) as f64,
+        pointer.axis_value(input::Axis::from(51)) as f64,
+    )]
 }
 
 /// Returns the minimum `Option<Duration>`, taking into account that `None`
@@ -172,6 +238,7 @@ pub struct EventLoop<T: 'static> {
     pressed_mouse_buttons: std::collections::HashSet<MouseButton>,
     touchpad_gestures: TouchpadGestureStateMachine,
     touchpad_clock: Instant,
+    last_touchpad_device_id: Option<event::DeviceId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -225,7 +292,52 @@ impl<T: 'static> EventLoop<T> {
             pressed_mouse_buttons: std::collections::HashSet::new(),
             touchpad_gestures: TouchpadGestureStateMachine::with_density(density),
             touchpad_clock: Instant::now(),
+            last_touchpad_device_id: None,
         })
+    }
+
+    fn cancel_touchpad_input<F>(&mut self, callback: &mut F)
+    where
+        F: FnMut(Event<T>, &RootAEL),
+    {
+        let Some(device_id) = self.last_touchpad_device_id else {
+            self.touchpad_gestures.cancel();
+            self.pressed_mouse_buttons.clear();
+            return;
+        };
+        let window_id = window::WindowId(WindowId);
+        if self.touchpad_gestures.end_scroll() {
+            send_mouse_wheel(
+                callback,
+                self.window_target(),
+                window_id,
+                device_id,
+                0.0,
+                0.0,
+                event::TouchPhase::Cancelled,
+            );
+        }
+        if self.touchpad_gestures.cancel() == Some(TouchpadGestureAction::DragEnd) {
+            send_mouse_button(
+                callback,
+                self.window_target(),
+                window_id,
+                device_id,
+                event::ElementState::Released,
+                MouseButton::Left,
+            );
+        }
+        let released: Vec<MouseButton> = self.pressed_mouse_buttons.drain().collect();
+        for button in released {
+            send_mouse_button(
+                callback,
+                self.window_target(),
+                window_id,
+                device_id,
+                event::ElementState::Released,
+                button,
+            );
+        }
     }
 
     fn single_iteration<F>(&mut self, main_event: Option<MainEvent<'_>>, callback: &mut F)
@@ -248,6 +360,7 @@ impl<T: 'static> EventLoop<T> {
                     callback(Event::Resumed, self.window_target());
                 },
                 MainEvent::TerminateWindow { .. } => {
+                    self.cancel_touchpad_input(callback);
                     callback(Event::Suspended, self.window_target());
                 },
                 MainEvent::WindowResized { .. } => resized = true,
@@ -266,6 +379,7 @@ impl<T: 'static> EventLoop<T> {
                     );
                 },
                 MainEvent::LostFocus => {
+                    self.cancel_touchpad_input(callback);
                     HAS_FOCUS.store(false, Ordering::Relaxed);
                     callback(
                         Event::WindowEvent {
@@ -312,6 +426,7 @@ impl<T: 'static> EventLoop<T> {
                     warn!("TODO: forward saveState notification to application");
                 },
                 MainEvent::Pause => {
+                    self.cancel_touchpad_input(callback);
                     debug!("App Paused - stopped running");
                     self.running = false;
                 },
@@ -426,16 +541,27 @@ impl<T: 'static> EventLoop<T> {
                     let is_touchpad = source == Source::Touchpad
                         || (source == Source::Mouse && tool_type == ToolType::Finger);
                     let is_mouse = source == Source::Mouse && tool_type != ToolType::Finger;
+                    if is_touchpad {
+                        self.last_touchpad_device_id = Some(device_id);
+                    }
 
-                    // Query continuous gesture scroll distance (axes 50/51 on Android 14+ / 16)
-                    let gesture_dx = pointer.axis_value(input::Axis::from(50)) as f64;
-                    let gesture_dy = pointer.axis_value(input::Axis::from(51)) as f64;
-                    let has_gesture_scroll = gesture_dx != 0.0 || gesture_dy != 0.0;
+                    // Android 14+ gesture axes 50/51 are per-sample relative
+                    // deltas. Preserve every batched historical sample, oldest
+                    // first, then the current sample.
+                    let gesture_samples = is_touchpad
+                        .then(|| {
+                            touchpad_gesture_samples(motion_event, motion_event.pointer_index())
+                        })
+                        .unwrap_or_default();
+                    let has_gesture_scroll =
+                        gesture_samples.iter().any(|(x, y)| *x != 0.0 || *y != 0.0);
 
                     let gesture_time = self.touchpad_clock.elapsed();
+                    let button_state = motion_event.button_state();
 
                     // 1. Continuous Touchpad Scrolling
                     if is_touchpad && has_gesture_scroll {
+                        let was_scrolling = self.touchpad_gestures.is_scrolling();
                         if self.touchpad_gestures.scroll() == Some(TouchpadGestureAction::DragEnd) {
                             send_mouse_button(
                                 callback,
@@ -446,25 +572,32 @@ impl<T: 'static> EventLoop<T> {
                                 MouseButton::Left,
                             );
                         }
-                        callback(
-                            Event::WindowEvent {
+                        let mut first = !was_scrolling;
+                        for (gesture_dx, gesture_dy) in gesture_samples {
+                            if gesture_dx == 0.0 && gesture_dy == 0.0 {
+                                continue;
+                            }
+                            send_mouse_wheel(
+                                callback,
+                                self.window_target(),
                                 window_id,
-                                event: WindowEvent::MouseWheel {
-                                    device_id,
-                                    delta: event::MouseScrollDelta::PixelDelta(PhysicalPosition {
-                                        x: gesture_dx,
-                                        y: gesture_dy,
-                                    }),
-                                    phase: event::TouchPhase::Moved,
+                                device_id,
+                                gesture_dx,
+                                gesture_dy,
+                                if first {
+                                    event::TouchPhase::Started
+                                } else {
+                                    event::TouchPhase::Moved
                                 },
-                            },
-                            self.window_target(),
-                        );
+                            );
+                            first = false;
+                        }
                     } else if action == MotionAction::Scroll {
                         if is_touchpad {
                             let h = pointer.axis_value(input::Axis::Hscroll) as f64 * 20.0;
                             let v = pointer.axis_value(input::Axis::Vscroll) as f64 * 20.0;
                             if h != 0.0 || v != 0.0 {
+                                let was_scrolling = self.touchpad_gestures.is_scrolling();
                                 if self.touchpad_gestures.scroll()
                                     == Some(TouchpadGestureAction::DragEnd)
                                 {
@@ -477,18 +610,18 @@ impl<T: 'static> EventLoop<T> {
                                         MouseButton::Left,
                                     );
                                 }
-                                callback(
-                                    Event::WindowEvent {
-                                        window_id,
-                                        event: WindowEvent::MouseWheel {
-                                            device_id,
-                                            delta: event::MouseScrollDelta::PixelDelta(
-                                                PhysicalPosition { x: h, y: v },
-                                            ),
-                                            phase: event::TouchPhase::Moved,
-                                        },
-                                    },
+                                send_mouse_wheel(
+                                    callback,
                                     self.window_target(),
+                                    window_id,
+                                    device_id,
+                                    h,
+                                    v,
+                                    if was_scrolling {
+                                        event::TouchPhase::Moved
+                                    } else {
+                                        event::TouchPhase::Started
+                                    },
                                 );
                             }
                         } else if is_mouse {
@@ -517,25 +650,25 @@ impl<T: 'static> EventLoop<T> {
                         && !has_gesture_scroll
                     {
                         if is_touchpad && self.touchpad_gestures.end_scroll() {
-                            callback(
-                                Event::WindowEvent {
-                                    window_id,
-                                    event: WindowEvent::MouseWheel {
-                                        device_id,
-                                        delta: event::MouseScrollDelta::PixelDelta(
-                                            PhysicalPosition { x: 0.0, y: 0.0 },
-                                        ),
-                                        phase: event::TouchPhase::Ended,
-                                    },
-                                },
+                            send_mouse_wheel(
+                                callback,
                                 self.window_target(),
+                                window_id,
+                                device_id,
+                                0.0,
+                                0.0,
+                                event::TouchPhase::Ended,
                             );
                         }
                         let location =
                             PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
                         if is_touchpad
-                            && self.touchpad_gestures.movement(location.x, location.y)
-                                == Some(TouchpadGestureAction::DragStart)
+                            && self.touchpad_gestures.movement(
+                                gesture_time,
+                                location.x,
+                                location.y,
+                                button_state.primary(),
+                            ) == Some(TouchpadGestureAction::DragStart)
                         {
                             send_mouse_button(
                                 callback,
@@ -563,13 +696,21 @@ impl<T: 'static> EventLoop<T> {
 
                     // 3. Mouse / Touchpad Buttons. Real ButtonPress/ButtonRelease actions are
                     // forwarded directly. A bare touchpad Down only arms tap recognition.
-                    let button = motion_event.button_state();
-                    let mapped_button = match button {
-                        _ if button.secondary() => MouseButton::Right,
-                        _ if button.teriary() => MouseButton::Middle,
-                        _ if button.back() => MouseButton::Back,
-                        _ if button.forward() => MouseButton::Forward,
-                        _ if button.stylus_secondary() => MouseButton::Right,
+                    let mapped_button = match action {
+                        MotionAction::ButtonPress | MotionAction::ButtonRelease => {
+                            match motion_event.action_button() {
+                                Button::Secondary | Button::StylusSecondary => MouseButton::Right,
+                                Button::Tertiary => MouseButton::Middle,
+                                Button::Back => MouseButton::Back,
+                                Button::Forward => MouseButton::Forward,
+                                _ => MouseButton::Left,
+                            }
+                        },
+                        _ if button_state.secondary() => MouseButton::Right,
+                        _ if button_state.teriary() => MouseButton::Middle,
+                        _ if button_state.back() => MouseButton::Back,
+                        _ if button_state.forward() => MouseButton::Forward,
+                        _ if button_state.stylus_secondary() => MouseButton::Right,
                         _ => MouseButton::Left,
                     };
 
@@ -593,7 +734,7 @@ impl<T: 'static> EventLoop<T> {
                                     }
                                     true
                                 };
-                                if self.pressed_mouse_buttons.insert(mapped_button) && forward_press
+                                if forward_press && self.pressed_mouse_buttons.insert(mapped_button)
                                 {
                                     send_mouse_button(
                                         callback,
@@ -606,10 +747,11 @@ impl<T: 'static> EventLoop<T> {
                                 }
                             },
                             MotionAction::ButtonRelease => {
-                                if mapped_button == MouseButton::Left {
-                                    self.touchpad_gestures.physical_button_release();
-                                }
-                                if self.pressed_mouse_buttons.remove(&mapped_button) {
+                                let forward_release = mapped_button != MouseButton::Left
+                                    || self.touchpad_gestures.physical_button_release();
+                                if forward_release
+                                    && self.pressed_mouse_buttons.remove(&mapped_button)
+                                {
                                     send_mouse_button(
                                         callback,
                                         self.window_target(),
@@ -630,11 +772,10 @@ impl<T: 'static> EventLoop<T> {
                                     .iter()
                                     .any(|button| *button != MouseButton::Left);
                                 if !has_non_primary_button {
-                                    self.touchpad_gestures.down_with_physical_button(
+                                    self.touchpad_gestures.down(
                                         gesture_time,
                                         location.x,
                                         location.y,
-                                        self.pressed_mouse_buttons.contains(&MouseButton::Left),
                                     );
                                 } else {
                                     self.touchpad_gestures.cancel();
@@ -642,18 +783,14 @@ impl<T: 'static> EventLoop<T> {
                             },
                             MotionAction::Up => {
                                 if self.touchpad_gestures.end_scroll() {
-                                    callback(
-                                        Event::WindowEvent {
-                                            window_id,
-                                            event: WindowEvent::MouseWheel {
-                                                device_id,
-                                                delta: event::MouseScrollDelta::PixelDelta(
-                                                    PhysicalPosition { x: 0.0, y: 0.0 },
-                                                ),
-                                                phase: event::TouchPhase::Ended,
-                                            },
-                                        },
+                                    send_mouse_wheel(
+                                        callback,
                                         self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        0.0,
+                                        0.0,
+                                        event::TouchPhase::Ended,
                                     );
                                 }
                                 let location = PhysicalPosition {
@@ -713,6 +850,21 @@ impl<T: 'static> EventLoop<T> {
                             MotionAction::PointerDown
                             | MotionAction::PointerUp
                             | MotionAction::Cancel => {
+                                if self.touchpad_gestures.end_scroll() {
+                                    send_mouse_wheel(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        0.0,
+                                        0.0,
+                                        if action == MotionAction::Cancel {
+                                            event::TouchPhase::Cancelled
+                                        } else {
+                                            event::TouchPhase::Ended
+                                        },
+                                    );
+                                }
                                 if self.touchpad_gestures.cancel()
                                     == Some(TouchpadGestureAction::DragEnd)
                                 {

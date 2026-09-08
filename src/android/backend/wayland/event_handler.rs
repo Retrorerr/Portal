@@ -8,19 +8,19 @@ use crate::android::{
 };
 use crate::core::wayland_protocol::{FrameEvent, FrameTrace};
 use smithay::backend::input::ButtonState;
+use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::utils::draw_render_elements;
-use smithay::backend::renderer::{Color32F, Frame, Renderer};
+use smithay::backend::renderer::Color32F;
 use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{self, CursorImageStatus, CursorImageSurfaceData};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_pointer::ButtonState as WlButtonState;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{IsAlive, Point, Rectangle, Transform, SERIAL_COUNTER};
+use smithay::utils::{IsAlive, Point, Transform, SERIAL_COUNTER};
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::wayland::{
     compositor::{with_states, with_surface_tree_downward, TraversalAction},
@@ -28,12 +28,13 @@ use smithay::wayland::{
 };
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, Event, InputEvent, KeyboardKeyEvent, PointerAxisEvent,
-        PointerButtonEvent,
+        AbsolutePositionEvent, Axis, AxisSource, Event, InputEvent, KeyboardKeyEvent,
+        PointerAxisEvent, PointerButtonEvent,
     },
     output::{Mode, Scale},
 };
 use std::sync::Arc;
+use winit::event::TouchPhase;
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 
 /// Linux input event code for the left mouse button (`BTN_LEFT`).
@@ -231,6 +232,13 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             if let Err(error) = redraw(backend) {
                 log::error!("Redraw failed; dropping renderer until next resume: {error}");
                 backend.graphic_renderer = None;
+                backend.output_damage_tracker = None;
+                backend.output_damage_signature = None;
+                // The pending presentation waited on an EGL frame id from the
+                // dropped surface. Frame ids restart on the next surface, so a
+                // stale pending entry would either spin or drop the first real
+                // frame after recovery. Clear it with the renderer.
+                backend.pending_kwin_presentation = None;
                 accessibility::set_runtime_active(false);
                 event_loop.set_control_flow(ControlFlow::Wait);
                 return;
@@ -247,251 +255,298 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             // so Ctrl+V reaches KWin with the fresh selection.
             backend.compositor.process_android_clipboard();
             match event {
-            InputEvent::Keyboard { event } => {
-                let compositor = &mut backend.compositor;
-                // Diagnostic: prove key arrival on the guest path (H2).
-                log::info!(
-                    "clipdiag key scancode={} state={:?} keyboard_focus={:?} kwin_surface={:?}",
-                    event.key,
-                    event.state,
-                    compositor
-                        .keyboard
-                        .current_focus()
-                        .map(|surface| surface.id()),
-                    compositor
-                    .state
-                    .kwin_surface
-                    .as_ref()
-                    .map(|surface| surface.id()),
-                );
-                let state = &mut compositor.state;
-                let serial = SERIAL_COUNTER.next_serial();
-                let time = compositor.start_time.elapsed().as_millis() as u32;
-                compositor.keyboard.input::<(), _>(
-                    state,
-                    event.key_code(),
-                    event.state(),
-                    serial,
-                    time,
-                    |_, _, _| {
-                        //
-                        FilterResult::Forward
-                    },
-                );
-            }
-            InputEvent::TouchDown { event } => {
-                // Just move the cursor. Which button (if any) this gesture sends is only known
-                // once the finger moves, lifts, or sits still long enough to be a long press.
-                emit_pointer_motion(
-                    &mut backend.compositor,
-                    event.x(),
-                    event.y(),
-                    event.time_msec(),
-                );
-            }
-            InputEvent::TouchMotion { event } => {
-                let time = event.time_msec();
-
-                // The centralizer only emits motion in Drag mode, and flips into it on the
-                // first move after a long press — that transition is where the grab starts.
-                if !backend.pointer_pressed {
-                    emit_pointer_press(&mut backend.compositor, BTN_LEFT, time);
-                    backend.pointer_pressed = true;
+                InputEvent::Keyboard { event } => {
+                    let compositor = &mut backend.compositor;
+                    // Diagnostic: prove key arrival on the guest path (H2).
+                    log::info!(
+                        "clipdiag key scancode={} state={:?} keyboard_focus={:?} kwin_surface={:?}",
+                        event.key,
+                        event.state,
+                        compositor
+                            .keyboard
+                            .current_focus()
+                            .map(|surface| surface.id()),
+                        compositor
+                            .state
+                            .kwin_surface
+                            .as_ref()
+                            .map(|surface| surface.id()),
+                    );
+                    let state = &mut compositor.state;
+                    let serial = SERIAL_COUNTER.next_serial();
+                    let time = compositor.start_time.elapsed().as_millis() as u32;
+                    compositor.keyboard.input::<(), _>(
+                        state,
+                        event.key_code(),
+                        event.state(),
+                        serial,
+                        time,
+                        |_, _, _| {
+                            //
+                            FilterResult::Forward
+                        },
+                    );
                 }
+                InputEvent::TouchDown { event } => {
+                    // Just move the cursor. Which button (if any) this gesture sends is only known
+                    // once the finger moves, lifts, or sits still long enough to be a long press.
+                    emit_pointer_motion(
+                        &mut backend.compositor,
+                        event.x(),
+                        event.y(),
+                        event.time_msec(),
+                    );
+                }
+                InputEvent::TouchMotion { event } => {
+                    let time = event.time_msec();
 
-                emit_pointer_motion(&mut backend.compositor, event.x(), event.y(), time);
-            }
-            InputEvent::TouchUp { event } => {
-                use crate::core::pointer_buttons::{
-                    resolve_touch_lift, GuestTouchEnd, TouchLiftAction,
-                };
-                let time = event.time_msec();
-                let end = match event.mode {
-                    TouchMode::Undecided => GuestTouchEnd::Tap,
-                    TouchMode::LongPress => GuestTouchEnd::LongPress,
-                    TouchMode::Scroll => GuestTouchEnd::Scroll,
-                    TouchMode::Drag => GuestTouchEnd::Drag,
-                };
-                match resolve_touch_lift(backend.pointer_pressed, end, event.in_guest) {
-                    TouchLiftAction::ReleaseAtCurrent => {
-                        // End of a drag at the current guest pointer location.
-                        // The lift coordinates are deliberately unused: a
-                        // border/outside release must never synthesize edge
-                        // movement or snap the drag to a fake Plasma edge.
-                        let current = backend.compositor.pointer.current_location();
-                        emit_pointer_motion(&mut backend.compositor, current.x, current.y, time);
-                        emit_pointer_release(&mut backend.compositor, BTN_LEFT, time);
+                    // The centralizer only emits motion in Drag mode, and flips into it on the
+                    // first move after a long press — that transition is where the grab starts.
+                    if !backend.pointer_pressed {
+                        emit_pointer_press(&mut backend.compositor, BTN_LEFT, time);
+                        backend.pointer_pressed = true;
+                    }
+
+                    emit_pointer_motion(&mut backend.compositor, event.x(), event.y(), time);
+                }
+                InputEvent::TouchUp { event } => {
+                    use crate::core::pointer_buttons::{
+                        resolve_touch_lift, GuestTouchEnd, TouchLiftAction,
+                    };
+                    let time = event.time_msec();
+                    if event.mode == TouchMode::Scroll {
+                        backend.stop_scroll_source(AxisSource::Continuous, time);
+                    }
+                    let end = match event.mode {
+                        TouchMode::Undecided => GuestTouchEnd::Tap,
+                        TouchMode::LongPress => GuestTouchEnd::LongPress,
+                        TouchMode::Scroll => GuestTouchEnd::Scroll,
+                        TouchMode::Drag => GuestTouchEnd::Drag,
+                    };
+                    match resolve_touch_lift(backend.pointer_pressed, end, event.in_guest) {
+                        TouchLiftAction::ReleaseAtCurrent => {
+                            // End of a drag at the current guest pointer location.
+                            // The lift coordinates are deliberately unused: a
+                            // border/outside release must never synthesize edge
+                            // movement or snap the drag to a fake Plasma edge.
+                            let current = backend.compositor.pointer.current_location();
+                            emit_pointer_motion(
+                                &mut backend.compositor,
+                                current.x,
+                                current.y,
+                                time,
+                            );
+                            emit_pointer_release(&mut backend.compositor, BTN_LEFT, time);
+                            backend.pointer_pressed = false;
+                        }
+                        // A tap: left click where the finger lifted (always
+                        // in-guest here; border lifts are dropped at ingestion).
+                        TouchLiftAction::ClickLeft => emit_pointer_click(
+                            &mut backend.compositor,
+                            BTN_LEFT,
+                            event.x,
+                            event.y,
+                            time,
+                        ),
+                        // Held still, then lifted without moving: a context menu.
+                        TouchLiftAction::ClickRight => emit_pointer_click(
+                            &mut backend.compositor,
+                            BTN_RIGHT,
+                            event.x,
+                            event.y,
+                            time,
+                        ),
+                        // A scroll consumed the gesture, or a border lift with
+                        // nothing held: nothing to click or release.
+                        TouchLiftAction::Ignore => {}
+                    }
+                }
+                InputEvent::TouchCancel { event } => {
+                    backend.stop_scroll_source(AxisSource::Continuous, event.time_msec());
+                    if backend.pointer_pressed {
+                        emit_pointer_release(
+                            &mut backend.compositor,
+                            BTN_LEFT,
+                            event.time() as u32,
+                        );
                         backend.pointer_pressed = false;
                     }
-                    // A tap: left click where the finger lifted (always
-                    // in-guest here; border lifts are dropped at ingestion).
-                    TouchLiftAction::ClickLeft => emit_pointer_click(
-                        &mut backend.compositor,
-                        BTN_LEFT,
-                        event.x,
-                        event.y,
-                        time,
-                    ),
-                    // Held still, then lifted without moving: a context menu.
-                    TouchLiftAction::ClickRight => emit_pointer_click(
-                        &mut backend.compositor,
-                        BTN_RIGHT,
-                        event.x,
-                        event.y,
-                        time,
-                    ),
-                    // A scroll consumed the gesture, or a border lift with
-                    // nothing held: nothing to click or release.
-                    TouchLiftAction::Ignore => {}
                 }
-            }
-            InputEvent::TouchCancel { event } => {
-                if backend.pointer_pressed {
-                    emit_pointer_release(&mut backend.compositor, BTN_LEFT, event.time() as u32);
-                    backend.pointer_pressed = false;
-                }
-            }
-            InputEvent::PointerMotionAbsolute { event, .. } => {
-                let compositor = &mut backend.compositor;
-                let pointer = compositor.pointer.clone();
-                let serial = SERIAL_COUNTER.next_serial();
-                let (clamped_x, clamped_y) =
-                    clamp_coordinates(&compositor.state, event.x(), event.y());
+                InputEvent::PointerMotionAbsolute { event, .. } => {
+                    let compositor = &mut backend.compositor;
+                    let pointer = compositor.pointer.clone();
+                    let serial = SERIAL_COUNTER.next_serial();
+                    let (clamped_x, clamped_y) =
+                        clamp_coordinates(&compositor.state, event.x(), event.y());
 
-                let round_trip = compositor.state.coordinate_transform.logical_to_physical(
-                    crate::core::coordinate_transform::LogicalPoint {
-                        x: clamped_x,
-                        y: clamped_y,
-                    },
-                );
-                let error_px = ((round_trip.x - event.physical_x()).powi(2)
-                    + (round_trip.y - event.physical_y()).powi(2))
-                .sqrt();
-                let kwin_scale = compositor
-                    .state
-                    .authoritative_display_state
-                    .effective_kwin_scale();
-                if let (Some(dev), Some(src), Some(tool)) = (
-                    event.android_device_id(),
-                    event.android_source(),
-                    event.android_tool_type(),
-                ) {
-                    log::info!(
+                    let round_trip = compositor.state.coordinate_transform.logical_to_physical(
+                        crate::core::coordinate_transform::LogicalPoint {
+                            x: clamped_x,
+                            y: clamped_y,
+                        },
+                    );
+                    let error_px = ((round_trip.x - event.physical_x()).powi(2)
+                        + (round_trip.y - event.physical_y()).powi(2))
+                    .sqrt();
+                    let kwin_scale = compositor
+                        .state
+                        .authoritative_display_state
+                        .effective_kwin_scale();
+                    if let (Some(dev), Some(src), Some(tool)) = (
+                        event.android_device_id(),
+                        event.android_source(),
+                        event.android_tool_type(),
+                    ) {
+                        log::info!(
                         "input.alignment device={dev} source={src:#x} tool={tool} physical=({:.1},{:.1}) logical=({clamped_x:.1},{clamped_y:.1}) round_trip=({:.1},{:.1}) error_px={error_px:.3} scale={kwin_scale:.3}",
                         event.physical_x(),
                         event.physical_y(),
                         round_trip.x,
                         round_trip.y
                     );
-                } else {
-                    log::info!(
+                    } else {
+                        log::info!(
                         "input.alignment physical=({:.1},{:.1}) logical=({clamped_x:.1},{clamped_y:.1}) round_trip=({:.1},{:.1}) error_px={error_px:.3} scale={kwin_scale:.3}",
                         event.physical_x(),
                         event.physical_y(),
                         round_trip.x,
                         round_trip.y
                     );
-                }
+                    }
 
-                if let Some(surface) = get_surface(&compositor.state) {
-                    pointer.motion(
+                    if let Some(surface) = get_surface(&compositor.state) {
+                        pointer.motion(
+                            &mut compositor.state,
+                            Some((surface.wl_surface().clone(), (0f64, 0f64).into())),
+                            &pointer::MotionEvent {
+                                location: (clamped_x, clamped_y).into(),
+                                serial,
+                                time: event.time_msec(),
+                            },
+                        );
+                    }
+                    pointer.frame(&mut compositor.state);
+                }
+                InputEvent::PointerButton { event, .. } => {
+                    let serial = SERIAL_COUNTER.next_serial();
+                    let button = event.button_code();
+
+                    let state = WlButtonState::from(event.state());
+
+                    let compositor = &mut backend.compositor;
+                    let pointer = compositor.pointer.clone();
+
+                    if let Some(surface) = get_surface(&compositor.state) {
+                        compositor.keyboard.set_focus(
+                            &mut compositor.state,
+                            Some(surface.wl_surface().clone()),
+                            0.into(),
+                        );
+                    }
+                    pointer.button(
                         &mut compositor.state,
-                        Some((surface.wl_surface().clone(), (0f64, 0f64).into())),
-                        &pointer::MotionEvent {
-                            location: (clamped_x, clamped_y).into(),
+                        &pointer::ButtonEvent {
+                            button,
+                            state: state.try_into().unwrap(),
                             serial,
                             time: event.time_msec(),
                         },
                     );
-                }
-                pointer.frame(&mut compositor.state);
-            }
-            InputEvent::PointerButton { event, .. } => {
-                let serial = SERIAL_COUNTER.next_serial();
-                let button = event.button_code();
-
-                let state = WlButtonState::from(event.state());
-
-                let compositor = &mut backend.compositor;
-                let pointer = compositor.pointer.clone();
-
-                if let Some(surface) = get_surface(&compositor.state) {
-                    compositor.keyboard.set_focus(
-                        &mut compositor.state,
-                        Some(surface.wl_surface().clone()),
-                        0.into(),
-                    );
-                }
-                pointer.button(
-                    &mut compositor.state,
-                    &pointer::ButtonEvent {
-                        button,
-                        state: state.try_into().unwrap(),
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
-                pointer.frame(&mut compositor.state);
-            }
-            InputEvent::PointerAxis { event } => {
-                // A second finger can turn an in-progress drag into a scroll; drop the button
-                // the drag was holding rather than scrolling with it down.
-                if backend.pointer_pressed {
-                    emit_pointer_release(&mut backend.compositor, BTN_LEFT, event.time_msec());
-                    backend.pointer_pressed = false;
-                }
-                let horizontal_amount = event
-                    .amount(Axis::Horizontal)
-                    .unwrap_or_else(|| event.amount_v120(Axis::Horizontal).unwrap_or(0.0) / 120.);
-                let vertical_amount = event
-                    .amount(Axis::Vertical)
-                    .unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) / 120.);
-                let horizontal_amount_discrete = event.amount_v120(Axis::Horizontal);
-                let vertical_amount_discrete = event.amount_v120(Axis::Vertical);
-
-                {
-                    let mut frame =
-                        pointer::AxisFrame::new(event.time_msec()).source(event.source());
-                    if horizontal_amount != 0.0 {
-                        frame = frame.relative_direction(
-                            Axis::Horizontal,
-                            event.relative_direction(Axis::Horizontal),
-                        );
-                        frame = frame.value(Axis::Horizontal, horizontal_amount);
-                        if let Some(discrete) = horizontal_amount_discrete {
-                            frame = frame.v120(Axis::Horizontal, discrete as i32);
-                        }
-                    }
-                    if vertical_amount != 0.0 {
-                        frame = frame.relative_direction(
-                            Axis::Vertical,
-                            event.relative_direction(Axis::Vertical),
-                        );
-                        frame = frame.value(Axis::Vertical, vertical_amount);
-                        if let Some(discrete) = vertical_amount_discrete {
-                            frame = frame.v120(Axis::Vertical, discrete as i32);
-                        }
-                    }
-                    if event.amount(Axis::Horizontal) == Some(0.0) {
-                        frame = frame.stop(Axis::Horizontal);
-                    }
-                    if event.amount(Axis::Vertical) == Some(0.0) {
-                        frame = frame.stop(Axis::Vertical);
-                    }
-                    let compositor = &mut backend.compositor;
-                    let pointer = compositor.pointer.clone();
-                    pointer.axis(&mut compositor.state, frame);
                     pointer.frame(&mut compositor.state);
                 }
+                InputEvent::PointerAxis { event } => {
+                    let phase = event.phase();
+                    if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        backend.stop_scroll_source(event.source(), event.time_msec());
+                    } else {
+                        let horizontal_amount =
+                            event.amount(Axis::Horizontal).unwrap_or_else(|| {
+                                event.amount_v120(Axis::Horizontal).unwrap_or(0.0) / 120.
+                            });
+                        let vertical_amount = event.amount(Axis::Vertical).unwrap_or_else(|| {
+                            event.amount_v120(Axis::Vertical).unwrap_or(0.0) / 120.
+                        });
+                        let horizontal_amount_discrete = event.amount_v120(Axis::Horizontal);
+                        let vertical_amount_discrete = event.amount_v120(Axis::Vertical);
+
+                        if horizontal_amount != 0.0 || vertical_amount != 0.0 {
+                            match event.source() {
+                                AxisSource::Finger => {
+                                    backend.stop_scroll_source(
+                                        AxisSource::Continuous,
+                                        event.time_msec(),
+                                    );
+                                }
+                                AxisSource::Continuous => {
+                                    backend
+                                        .stop_scroll_source(AxisSource::Finger, event.time_msec());
+                                }
+                                _ => {}
+                            }
+                            // A second finger can turn an in-progress drag into a scroll; drop the
+                            // button the drag was holding before sending the first axis value.
+                            if backend.pointer_pressed {
+                                emit_pointer_release(
+                                    &mut backend.compositor,
+                                    BTN_LEFT,
+                                    event.time_msec(),
+                                );
+                                backend.pointer_pressed = false;
+                            }
+
+                            let mut frame =
+                                pointer::AxisFrame::new(event.time_msec()).source(event.source());
+                            if horizontal_amount != 0.0 {
+                                frame = frame.relative_direction(
+                                    Axis::Horizontal,
+                                    event.relative_direction(Axis::Horizontal),
+                                );
+                                frame = frame.value(Axis::Horizontal, horizontal_amount);
+                                if let Some(discrete) = horizontal_amount_discrete {
+                                    frame = frame.v120(Axis::Horizontal, discrete as i32);
+                                }
+                                match event.source() {
+                                    AxisSource::Finger => {
+                                        backend.finger_scroll_axes.horizontal = true
+                                    }
+                                    AxisSource::Continuous => {
+                                        backend.continuous_scroll_axes.horizontal = true
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if vertical_amount != 0.0 {
+                                frame = frame.relative_direction(
+                                    Axis::Vertical,
+                                    event.relative_direction(Axis::Vertical),
+                                );
+                                frame = frame.value(Axis::Vertical, vertical_amount);
+                                if let Some(discrete) = vertical_amount_discrete {
+                                    frame = frame.v120(Axis::Vertical, discrete as i32);
+                                }
+                                match event.source() {
+                                    AxisSource::Finger => {
+                                        backend.finger_scroll_axes.vertical = true
+                                    }
+                                    AxisSource::Continuous => {
+                                        backend.continuous_scroll_axes.vertical = true
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let compositor = &mut backend.compositor;
+                            let pointer = compositor.pointer.clone();
+                            pointer.axis(&mut compositor.state, frame);
+                            pointer.frame(&mut compositor.state);
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
+            let _ = backend.compositor.display.flush_clients();
+            backend.output_dirty = true;
+            backend.schedule_redraw();
         }
-        let _ = backend.compositor.display.flush_clients();
-        backend.output_dirty = true;
-        if let Some(winit) = backend.graphic_renderer.as_ref() {
-            winit.window().request_redraw();
-        }
-    }
         CentralizedEvent::Resized {
             size,
             guest_scale_factor,
@@ -579,8 +634,6 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 ) {
                     let previous = backend.physical_refresh_millihz;
                     backend.physical_refresh_millihz = observed;
-                    backend.refresh_rate_millihz = observed;
-                    backend.compositor.state.authoritative_display_state.refresh_rate_millihz = observed;
                     backend
                         .compositor
                         .state
@@ -638,9 +691,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 }
             }
             backend.output_dirty = true;
-            if let Some(winit) = backend.graphic_renderer.as_ref() {
-                winit.window().request_redraw();
-            }
+            backend.schedule_redraw();
         }
         CentralizedEvent::Focus(focused) => {
             if !focused {
@@ -762,6 +813,9 @@ fn complete_kwin_presentation_without_android_timestamp(
 /// never per frame. Filter device logs with `adb logcat | grep
 /// presentation.state` while stress-testing popup/fullscreen resizing.
 pub fn log_presentation_state(reason: &str, state: &State) {
+    if !log::log_enabled!(log::Level::Info) {
+        return;
+    }
     let display = &state.authoritative_display_state;
     let snap = display.presentation_snapshot();
     let fmt_size = |size: Option<(f64, f64)>| match size {
@@ -830,8 +884,7 @@ fn maybe_poll_plasma_scale(backend: &mut WaylandBackend) {
             .authoritative_display_state
             .configure_size();
         for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
-            let serial =
-                configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+            let serial = configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
             if let Some(serial) = serial {
                 backend
                     .compositor
@@ -845,8 +898,7 @@ fn maybe_poll_plasma_scale(backend: &mut WaylandBackend) {
     }
 }
 
-/// Sample the effective Android app rate once a second and publish changed modes.
-/// The native-window request remains independent, so reporting never changes policy.
+/// Sample physical VRR once a second, without changing the nominal Wayland mode.
 fn maybe_poll_refresh_rate(backend: &mut WaylandBackend) {
     const POLL_INTERVAL_MS: u64 = 1000;
     let now_ms = backend.clock.now().as_millis() as u64;
@@ -856,29 +908,29 @@ fn maybe_poll_refresh_rate(backend: &mut WaylandBackend) {
         }
     }
     backend.last_refresh_poll_ms = Some(now_ms);
+    if let Some(rate) = backend.content_cadence.evaluate(
+        now_ms,
+        backend.refresh_rate_millihz,
+        &backend.supported_refresh_millihz,
+    ) {
+        crate::android::utils::frame_rate::ensure_high_refresh_rate_hz(
+            &backend.android_app,
+            rate as f32 / 1000.0,
+        );
+    }
 
     let observed = crate::android::utils::ndk::refresh_rate_millihz(&backend.android_app);
     if !crate::core::android_integration::is_valid_refresh_millihz(observed) {
         return;
     }
     if !crate::core::android_integration::refresh_changed(
-        backend.refresh_rate_millihz,
+        backend.physical_refresh_millihz,
         observed,
     ) {
         return;
     }
     let previous = backend.physical_refresh_millihz;
     backend.physical_refresh_millihz = observed;
-    backend.refresh_rate_millihz = observed;
-    backend.compositor.state.authoritative_display_state.refresh_rate_millihz = observed;
-    if let Some(output) = &backend.compositor.output {
-        if let Some(old) = output.current_mode() {
-            let mode = Mode { size: old.size, refresh: observed };
-            output.set_preferred(mode);
-            output.change_current_state(Some(mode), None, None, None);
-            output.delete_mode(old);
-        }
-    }
 
     // Keep timing state synchronized without changing output geometry.
     backend
@@ -936,7 +988,15 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) -> Result<bool, String> {
                 activity = true;
             }
         }
-        Err(error) => return Err(format!("Failed to dispatch clients: {error}")),
+        Err(error) => {
+            // The socket watcher parks in `pending=true` until the main thread
+            // calls `resume_polling`. Resume before returning so a transient
+            // dispatch error cannot stall all future `WaylandTraffic` wakes.
+            if let Some(watcher) = &backend.socket_watcher {
+                watcher.resume_polling();
+            }
+            return Err(format!("Failed to dispatch clients: {error}"));
+        }
     }
 
     // KWin's title identifies the only valid nested output client. Synchronize
@@ -946,16 +1006,17 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) -> Result<bool, String> {
     backend.compositor.sync_kwin_seat_focus();
 
     // 3. Flush pending outgoing protocol messages immediately to minimize latency.
-    backend
-        .compositor
-        .display
-        .flush_clients()
-        .map_err(|error| format!("Failed to flush clients: {error}"))?;
+    if let Err(error) = backend.compositor.display.flush_clients() {
+        if let Some(watcher) = &backend.socket_watcher {
+            watcher.resume_polling();
+        }
+        return Err(format!("Failed to flush clients: {error}"));
+    }
 
     // 4. Low-frequency cached Plasma scale sampler.
     maybe_poll_plasma_scale(backend);
 
-    // 4b. Low-frequency host refresh sampler (change-only wl_output update).
+    // 4b. Physical telemetry and demand policy; never changes wl_output.
     maybe_poll_refresh_rate(backend);
 
     // 5. Check if any client commit or visual state change marked the compositor dirty.
@@ -974,7 +1035,11 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) -> Result<bool, String> {
         .to_vec();
 
     for surface in &toplevels {
-        if backend.compositor.state.is_known_kwin_surface(surface.wl_surface()) {
+        if backend
+            .compositor
+            .state
+            .is_known_kwin_surface(surface.wl_surface())
+        {
             let observed = smithay::backend::renderer::utils::with_renderer_surface_state(
                 surface.wl_surface(),
                 |state| {
@@ -990,10 +1055,14 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) -> Result<bool, String> {
                 },
             );
             if let Some((surface_size, buffer_size, buffer_scale, commit)) = observed {
-                let is_new_frame = backend
-                    .kwin_commit_gate
-                    .check_and_record(backend.compositor.state.kwin_generation.unwrap_or(0), commit);
+                let is_new_frame = backend.kwin_commit_gate.check_and_record(
+                    backend.compositor.state.kwin_generation.unwrap_or(0),
+                    commit,
+                );
                 if is_new_frame {
+                    backend
+                        .content_cadence
+                        .committed(backend.clock.now().as_millis() as u64);
                     activity = true;
                     backend.output_dirty = true;
                     let was_converged = backend
@@ -1200,7 +1269,6 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             }
         }
     }
-    let damage = Rectangle::from_size(size);
     let mut presentation_feedbacks = Vec::new();
     let mut frame_trace = FrameTrace::new();
     record_protocol_event(&mut frame_trace, FrameEvent::Dispatch);
@@ -1210,13 +1278,35 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     // let KWin reuse a shm buffer while the Android renderer is still consuming its texture.
     let mut kwin_surface_rendered = false;
     let mut kwin_feedback_requested = false;
-    let rendered_elements = {
-        let (renderer, mut framebuffer) = winit
-            .bind()
-            .map_err(|error| {
-                backend.frame_in_flight = false;
-                format!("Failed to bind EGL surface: {error}")
-            })?;
+    let snapshot = backend
+        .compositor
+        .state
+        .authoritative_display_state
+        .presentation_snapshot();
+    let scale_to_use = snapshot.uniform_scale;
+    let damage_signature = (size.w, size.h, scale_to_use.to_bits());
+    let tracker_was_reset = backend.output_damage_signature != Some(damage_signature);
+    if tracker_was_reset {
+        backend.output_damage_tracker = Some(OutputDamageTracker::new(
+            size,
+            scale_to_use,
+            Transform::Flipped180,
+        ));
+        backend.output_damage_signature = Some(damage_signature);
+    }
+    // EGL buffer age tells the tracker which previous damage must be repainted
+    // into the current back buffer. A new geometry/scale has no valid history.
+    let buffer_age = if tracker_was_reset {
+        0
+    } else {
+        winit.buffer_age().unwrap_or(0)
+    };
+
+    let (rendered_elements, output_damage) = {
+        let (renderer, mut framebuffer) = winit.bind().map_err(|error| {
+            backend.frame_in_flight = false;
+            format!("Failed to bind EGL surface: {error}")
+        })?;
 
         let compositor = &mut backend.compositor;
 
@@ -1231,11 +1321,6 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         // aspect-preserving FIT, allows <1 (downscale old large frames into
         // smaller popups), centered with temporary letterboxing — never
         // anisotropic stretch, crop or drift.
-        let snapshot = compositor
-            .state
-            .authoritative_display_state
-            .presentation_snapshot();
-        let scale_to_use = snapshot.uniform_scale;
         let viewport_origin = snapshot.viewport_origin;
 
         let mut elements = Vec::new();
@@ -1324,20 +1409,28 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             ));
         }
 
-        let mut frame = renderer
-            .render(&mut framebuffer, size, Transform::Flipped180)
-            .map_err(|error| format!("Failed to render frame: {error:?}"))?;
-        // Black letterbox/pillarbox for transitional FIT frames (old KWin frame
-        // centered in the new host until the matching commit converges).
-        frame
-            .clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage])
-            .map_err(|error| format!("Failed to clear frame: {error:?}"))?;
-        draw_render_elements(&mut frame, scale_to_use, &elements, &[damage])
-            .map_err(|error| format!("Failed to draw render elements: {error:?}"))?;
-        // We rely on the nested compositor to do the sync for us.
-        let _ = frame
-            .finish()
-            .map_err(|error| format!("Failed to finish frame: {error:?}"))?;
+        let rendered = backend
+            .output_damage_tracker
+            .as_mut()
+            .expect("output damage tracker initialized above")
+            .render_output(
+                renderer,
+                &mut framebuffer,
+                buffer_age,
+                &elements,
+                Color32F::new(0.0, 0.0, 0.0, 1.0),
+            )
+            .map_err(|error| format!("Failed to render damaged output: {error:?}"))?;
+        let output_damage = rendered.damage.cloned().unwrap_or_default();
+        log::debug!(
+            "output.damage age={} rects={} pixels={}",
+            buffer_age,
+            output_damage.len(),
+            output_damage
+                .iter()
+                .map(|rect| rect.size.w as i64 * rect.size.h as i64)
+                .sum::<i64>(),
+        );
 
         for surface in &toplevels {
             let surface_feedbacks = take_presentation_feedbacks_surface_tree(surface.wl_surface());
@@ -1360,28 +1453,13 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
 
         record_protocol_event(&mut frame_trace, FrameEvent::Render);
 
-        elements
+        (elements, output_damage)
     };
 
-    // It is important that all events on the display have been dispatched and flushed to clients
-    // before swapping buffers because this operation may block.
-    let submitted_frame_id = match winit.submit(Some(&[damage])) {
-        Ok(id) => {
-            backend.frame_in_flight = false;
-            id
-        }
-        Err(error) => {
-            backend.frame_in_flight = false;
-            return Err(format!("Failed to submit frame: {error}"));
-        }
-    };
-    let timestamp_support = winit.android_frame_timestamp_support();
-    record_protocol_event(&mut frame_trace, FrameEvent::Submit);
-
-    // The host has now submitted the frame represented by rendered_elements.  Do not release
-    // client buffers until after submit() has returned (see the invariant above).
-    drop(rendered_elements);
-
+    // Schedule KWin's next CPU-rendered buffer before the vsynced Android swap
+    // can block. The current wl_buffers remain retained by `rendered_elements`
+    // until submit returns, and Smithay cannot dispatch the next commit while
+    // this thread is in EGL, so this adds at most one frame of safe overlap.
     let frame_time = backend.compositor.start_time.elapsed().as_millis() as u32;
     for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
         send_frames_surface_tree(surface.wl_surface(), frame_time);
@@ -1392,8 +1470,41 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         }
     }
     record_protocol_event(&mut frame_trace, FrameEvent::FrameDone);
+    backend
+        .compositor
+        .display
+        .flush_clients()
+        .map_err(|error| format!("Failed to flush frame callbacks before submit: {error}"))?;
 
-    if let Some(output) = &backend.compositor.output {
+    // It is important that all events on the display have been dispatched and flushed to clients
+    // before swapping buffers because this operation may block.
+    let (did_submit, submitted_frame_id) = if output_damage.is_empty() {
+        // Dirty input/protocol state need not mutate pixels. Frame callbacks
+        // below still let clients advance, but no EGL buffer is queued.
+        backend.frame_in_flight = false;
+        (false, None)
+    } else {
+        match winit.submit(Some(&output_damage)) {
+            Ok(id) => {
+                backend.frame_in_flight = false;
+                (true, id)
+            }
+            Err(error) => {
+                backend.frame_in_flight = false;
+                return Err(format!("Failed to submit frame: {error}"));
+            }
+        }
+    };
+    let timestamp_support = winit.android_frame_timestamp_support();
+    if did_submit {
+        record_protocol_event(&mut frame_trace, FrameEvent::Submit);
+    }
+
+    // The host has now submitted the frame represented by rendered_elements.  Do not release
+    // client buffers until after submit() has returned (see the invariant above).
+    drop(rendered_elements);
+
+    if let (true, Some(output)) = (did_submit, &backend.compositor.output) {
         // `presentation_time` is the real EGL submit time; `refresh` is the
         // stable nominal output period (never transient VRR). Hardware
         // scanout proof arrives separately via Android frame timestamps

@@ -14,7 +14,10 @@ pub enum FrameEvent {
     Render,
     /// The Android/EGL surface accepted the rendered frame.
     Submit,
-    /// `wl_surface.frame` callbacks were sent for the submitted frame.
+    /// `wl_surface.frame` callbacks scheduled the client's next frame. Portal
+    /// may send this after rendering and before a blocking EGL submit so KWin
+    /// can prepare its next buffer concurrently; it does not release the
+    /// buffer used by the current render.
     FrameDone,
     /// Presentation feedback was completed as presented.
     Presented,
@@ -95,9 +98,15 @@ impl FrameTrace {
             }
             FrameEvent::Render => self.require(FrameEvent::Dispatch, event)?,
             FrameEvent::Submit => self.require(FrameEvent::Render, event)?,
-            FrameEvent::FrameDone => self.require(FrameEvent::Submit, event)?,
-            FrameEvent::Presented | FrameEvent::Discarded => {
+            FrameEvent::FrameDone => self.require(FrameEvent::Render, event)?,
+            FrameEvent::Presented => {
                 self.require(FrameEvent::Submit, event)?;
+                if self.contains(FrameEvent::Presented) || self.contains(FrameEvent::Discarded) {
+                    return Err(ProtocolViolation::ConflictingPresentation);
+                }
+            }
+            FrameEvent::Discarded => {
+                self.require(FrameEvent::Render, event)?;
                 if self.contains(FrameEvent::Presented) || self.contains(FrameEvent::Discarded) {
                     return Err(ProtocolViolation::ConflictingPresentation);
                 }

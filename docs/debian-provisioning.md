@@ -9,11 +9,10 @@ it no longer denotes an optional developer slot. Existing `arch` data and old
 
 `assets/debian-runtime.json` pins the public Portal GitHub release URL, image
 version, compressed size and SHA-256. The current image is
-`debian13-arm64-2026.09.05.2`, published in
-[the runtime release](https://github.com/Retrorerr/Portal/releases/tag/runtime-debian13-arm64-2026.09.05.2).
-It contains 986 locked Debian packages. The compressed archive is 823,512,456
-bytes; its final regular-file payload is 2,575,636,513 bytes, before filesystem
-allocation overhead. Bundling that archive in each APK would be impractical.
+`debian13-arm64-2026.09.05.3`, published in
+[the runtime release](https://github.com/Retrorerr/Portal/releases/tag/runtime-debian13-arm64-2026.09.05.3).
+It contains 1,141 locked Debian packages. The compressed archive is 896,188,212
+bytes (855 MiB). Bundling that archive in each APK would be impractical.
 
 Build the image from the existing Debian builder, not a copied guest directory:
 
@@ -38,13 +37,21 @@ to produce the image or install the app.
 ## First launch and restart
 
 1. Select Debian deterministically and check its exact completion identity.
-2. Download the pinned archive with three bounded attempts and explicit errors.
+2. Preflight free space (five times the compressed size plus 512 MiB, less
+   reusable archive bytes). Download with three bounded attempts and explicit
+   errors, resuming partial bytes when the server accepts the matching range.
 3. Verify compressed size and SHA-256 before unpacking anything.
 4. Extract into `runtime-B.staging`, reporting actual extracted entry counts.
 5. Check Debian identity, image version and required programs. Write the
    completion identity only after successful extraction, then rename staging
    to `runtime-B`. A partial extraction is never booted. A relaunch retries it.
 6. Synchronize device/session settings and launch native nested KWin/Plasma.
+
+A complete verified staging tree also recovers an interrupted promotion without
+redownloading. Setup explains the required Android Developer Options setting,
+“Disable child process restrictions”, and continues into Plasma automatically.
+Download errors retain partial bytes for Retry. Extraction errors never make a
+partial runtime launchable.
 
 No package resolution, desktop installation, `apt upgrade`, or `pacman` command
 runs during provisioning. A valid completed image is reused on subsequent
@@ -60,6 +67,12 @@ uses setup-stage count as an extraction percentage.
 The APK remains authoritative for timezone, DNS, certificates, machine ID,
 Firefox defaults, Konsole settings, session configuration, Android audio/IME
 bridges and session directories. In particular:
+
+- The APK installs the pinned Debian ARM64 libcanberra PulseAudio backend and
+  its copyright notice. `scripts/build_canberra_backend.py` reproduces the
+  module from the SHA-256-verified Debian package; the base image is unchanged.
+- The session restores the Breeze splash once and waits for Portal's single
+  audio bridge before starting Plasma. It does not start another audio server.
 
 - The host `XKB_CONFIG_ROOT` and `XLOCALEDIR` point to Debian before keyboard
   initialization. The older bundled host library has an Arch build-time default.

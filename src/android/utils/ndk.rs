@@ -3,9 +3,7 @@ use jni::sys::{_jobject, JNIInvokeInterface_};
 use jni::{JNIEnv, JavaVM};
 use winit::platform::android::activity::AndroidApp;
 
-use crate::core::android_integration::{
-    density_scale_factor, select_preferred_refresh_millihz,
-};
+use crate::core::android_integration::{density_scale_factor, select_preferred_refresh_millihz};
 
 /// A higher-order function to run a provided JNI function within the JVM context.
 pub fn run_in_jvm<F, T>(jni_function: F, android_app: AndroidApp) -> T
@@ -235,8 +233,8 @@ pub fn supported_refresh_rates_millihz(android_app: &AndroidApp) -> Vec<i32> {
 ///
 /// Resolves [`select_preferred_refresh_millihz`] over
 /// `Display.getSupportedModes()` so a 144 Hz panel yields 144000 while
-/// 120/90/60 Hz devices yield their own maximum. Falls back to the active
-/// rate when enumeration is empty/unusable, and finally to the sane default.
+/// 120/90/60 Hz devices yield their own maximum. Uses a
+/// stable fallback when enumeration is empty/unusable, never the active VRR rate.
 /// Never panics; always returns a valid millihertz value.
 pub fn preferred_high_refresh_millihz(android_app: &AndroidApp) -> i32 {
     let supported = supported_refresh_rates_millihz(android_app);
@@ -245,10 +243,6 @@ pub fn preferred_high_refresh_millihz(android_app: &AndroidApp) -> i32 {
         .any(|rate| crate::core::android_integration::is_valid_refresh_millihz(*rate))
     {
         return select_preferred_refresh_millihz(&supported);
-    }
-    let active = active_refresh_millihz(android_app);
-    if crate::core::android_integration::is_valid_refresh_millihz(active) {
-        return active.max(60_000);
     }
     crate::core::android_integration::NOMINAL_OUTPUT_REFRESH_MILLIHZ
 }
@@ -349,9 +343,7 @@ pub fn log_display_modes(android_app: &AndroidApp) {
                         let _ = env.exception_clear();
                         let mut parts = Vec::new();
                         for i in 0..len {
-                            let Ok(mode_obj) =
-                                env.get_object_array_element(&modes_array, i)
-                            else {
+                            let Ok(mode_obj) = env.get_object_array_element(&modes_array, i) else {
                                 let _ = env.exception_clear();
                                 continue;
                             };

@@ -494,13 +494,15 @@ fn assert_intermediate_frame(
 ) {
     let snap = state.presentation_snapshot();
     let committed = simulated_buffer_commit(frame_host);
-    let req_logical =
-        localdesktop::core::coordinate_transform::physical_to_kwin_logical_configure(
-            target,
-            state.effective_kwin_scale(),
-        );
+    let req_logical = localdesktop::core::coordinate_transform::physical_to_kwin_logical_configure(
+        target,
+        state.effective_kwin_scale(),
+    );
     assert_eq!(snap.host, target, "{context}: host target moved");
-    assert_eq!(snap.requested, req_logical, "{context}: requested target moved");
+    assert_eq!(
+        snap.requested, req_logical,
+        "{context}: requested target moved"
+    );
     assert_eq!(
         snap.committed,
         Some(committed),
@@ -859,7 +861,10 @@ fn cold_startup_scale_race_repair_and_convergence() {
     state.note_configure_sent(2);
     state.record_configure_repair();
     assert!(state.has_unacknowledged_configure());
-    assert!(!state.needs_configure_repair(), "repair must not re-trigger while in flight");
+    assert!(
+        !state.needs_configure_repair(),
+        "repair must not re-trigger while in flight"
+    );
 
     // KWin acks serial 2 under scale 2.0, resizes output mode to 3392x2400, commits 1696x1200.
     state.note_configure_acked(2);
@@ -894,7 +899,10 @@ fn configure_repair_stops_after_three_attempts() {
 
     // 4th commit with mismatch: attempts capped at 3, must not trigger further repairs.
     state.note_kwin_commit(Some(rogue_commit), Some(rogue_commit), Some(2));
-    assert!(!state.needs_configure_repair(), "repair must be capped at 3 attempts");
+    assert!(
+        !state.needs_configure_repair(),
+        "repair must be capped at 3 attempts"
+    );
 }
 
 #[test]
@@ -902,7 +910,9 @@ fn resize_in_flight_does_not_trigger_premature_repair() {
     let mut state = fresh_converged_fullscreen();
     // User resizes to popup (1134x2016).
     let popup = (1134, 2016);
-    let gen_popup = state.try_update_physical_size(popup.0, popup.1).expect("new gen");
+    let gen_popup = state
+        .try_update_physical_size(popup.0, popup.1)
+        .expect("new gen");
     state.note_configure_sent(101);
     assert!(state.has_unacknowledged_configure());
 
@@ -910,7 +920,10 @@ fn resize_in_flight_does_not_trigger_premature_repair() {
     let old_frame = (1696.0, 1200.0);
     state.note_kwin_commit(Some(old_frame), Some(old_frame), Some(2));
     assert!(!state.presentation_snapshot().converged);
-    assert!(!state.needs_configure_repair(), "in-flight configure must suppress repair");
+    assert!(
+        !state.needs_configure_repair(),
+        "in-flight configure must suppress repair"
+    );
 
     // Popup configure acked and committed.
     state.note_configure_acked(101);
@@ -921,4 +934,3 @@ fn resize_in_flight_does_not_trigger_premature_repair() {
     assert_eq!(snap.rendered_generation, gen_popup);
     assert!(!state.needs_configure_repair());
 }
-

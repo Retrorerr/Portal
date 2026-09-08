@@ -1,7 +1,7 @@
 use crate::core::runtime::LinuxRuntime;
 use crate::{
     android::utils::ndk::run_in_jvm,
-    core::config::{parse_config, LocalConfig, PRODUCTION_FS_ROOT, CONFIG_FILE},
+    core::config::{parse_config, LocalConfig, CONFIG_FILE, PRODUCTION_FS_ROOT},
 };
 use jni::{
     objects::{JObject, JString},

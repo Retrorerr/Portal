@@ -203,10 +203,7 @@ mod tests {
         assert!(sync.observe_poll(Ok(Some("other".to_owned()))));
         sync.drain_pending();
         assert!(sync.observe_poll(Ok(Some("guest-text".to_owned()))));
-        assert_eq!(
-            sync.drain_pending(),
-            vec![Some("guest-text".to_owned())]
-        );
+        assert_eq!(sync.drain_pending(), vec![Some("guest-text".to_owned())]);
     }
 
     #[test]

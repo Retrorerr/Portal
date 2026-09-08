@@ -3,9 +3,9 @@
 //! Controls `[Input] TabletMode = on | off` in `kwinrc` to match the presence of external
 //! keyboard/pointer hardware on Android.
 
-use std::path::PathBuf;
 use crate::core::runtime::LinuxRuntime;
 use crate::core::tablet_mode::update_kwinrc_tablet_mode;
+use std::path::PathBuf;
 
 pub fn get_kwinrc_path() -> PathBuf {
     let runtime = crate::android::runtime::proot::PRootRuntime::active();
@@ -29,8 +29,15 @@ pub fn apply_kwin_tablet_mode(has_desktop_input: bool) {
         // preventing kwriteconfig6 from notifying KWin's KConfigWatcher.
         std::thread::spawn(move || {
             use std::io::Write;
-            log::info!("Dispatching TabletMode {mode} to session FIFO at {:?}", fifo_path);
-            match std::fs::OpenOptions::new().read(true).write(true).open(&fifo_path) {
+            log::info!(
+                "Dispatching TabletMode {mode} to session FIFO at {:?}",
+                fifo_path
+            );
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&fifo_path)
+            {
                 Ok(mut file) => {
                     let cmd = format!("kwriteconfig6 --file kwinrc --group Input --key TabletMode {mode} --notify\n");
                     if let Err(e) = file.write_all(cmd.as_bytes()) {

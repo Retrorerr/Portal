@@ -184,3 +184,15 @@ fn tracker_reevaluate_tracks_viewport_truth() {
     tracker.note_motion(true, (450.0, 800.0));
     assert!(tracker.is_inside());
 }
+
+#[test]
+fn duplicate_press_does_not_stick_the_button() {
+    let (_state, mut tracker) = converged_with_tracker();
+    assert!(tracker.press(BTN_LEFT));
+    // A duplicate press (event duplication) must not forward again: otherwise
+    // press,press,release leaves the guest believing the button is still held.
+    assert!(!tracker.press(BTN_LEFT));
+    assert!(tracker.release(BTN_LEFT));
+    assert!(!tracker.release(BTN_LEFT));
+    assert_eq!(tracker.pressed_count(), 0);
+}

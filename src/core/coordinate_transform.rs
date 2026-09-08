@@ -203,10 +203,7 @@ pub struct KwinLogicalConfigure {
 ///
 /// Clamped to minimum 1 to never produce zero dimensions.
 #[inline]
-pub fn physical_to_kwin_logical_configure(
-    host: (i32, i32),
-    kwin_scale: f64,
-) -> (i32, i32) {
+pub fn physical_to_kwin_logical_configure(host: (i32, i32), kwin_scale: f64) -> (i32, i32) {
     let scale = if kwin_scale.is_finite() && kwin_scale > 0.0 {
         kwin_scale.clamp(1.0, 8.0)
     } else {
@@ -219,10 +216,7 @@ pub fn physical_to_kwin_logical_configure(
 
 /// Expected KWin physical pixel output given a logical configure size and scale.
 #[inline]
-pub fn kwin_logical_to_physical_pixels(
-    logical: (i32, i32),
-    kwin_scale: f64,
-) -> (i32, i32) {
+pub fn kwin_logical_to_physical_pixels(logical: (i32, i32), kwin_scale: f64) -> (i32, i32) {
     let scale = if kwin_scale.is_finite() && kwin_scale > 0.0 {
         kwin_scale.clamp(1.0, 8.0)
     } else {
@@ -271,6 +265,9 @@ pub struct AuthoritativeDisplayState {
     /// Configured/observed KWin logical scale factor (e.g. 2.0, 2.25).
     /// Used STRICTLY for logical output geometry and input coordinate mapping.
     pub kwin_scale: Option<f64>,
+    /// Linear KWin render-resolution multiplier. Portal keeps the Android
+    /// target native-sized and upscales this smaller desktop in GLES.
+    pub render_scale: f64,
     /// Monotonically increasing host resize generation.
     pub resize_generation: u64,
     /// Last geometry actually requested from KWin (configure sent).
@@ -339,6 +336,7 @@ impl AuthoritativeDisplayState {
             transform: ViewportTransform::Normal,
             observed_surface_size: None,
             kwin_scale: None,
+            render_scale: 1.0,
             resize_generation: 1,
             requested_configure: initial_logical,
             requested_generation: 1,
@@ -499,7 +497,46 @@ impl AuthoritativeDisplayState {
     /// NEVER sends raw physical dimensions directly.
     #[inline]
     pub fn configure_size(&self) -> (i32, i32) {
-        physical_to_kwin_logical_configure(self.physical_size, self.effective_kwin_scale())
+        let native =
+            physical_to_kwin_logical_configure(self.physical_size, self.effective_kwin_scale());
+        (
+            (native.0 as f64 * self.render_scale).round().max(1.0) as i32,
+            (native.1 as f64 * self.render_scale).round().max(1.0) as i32,
+        )
+    }
+
+    /// Set the nested desktop's linear render-resolution multiplier. Changing
+    /// it follows the same configure-generation contract as a host resize or
+    /// Plasma scale change; the old committed frame remains valid until KWin
+    /// acknowledges and commits the new target.
+    pub fn update_render_scale(&mut self, scale: f64) -> bool {
+        if !scale.is_finite() || scale <= 0.0 {
+            return false;
+        }
+        let scale = scale.clamp(0.5, 1.0);
+        if (self.render_scale - scale).abs() <= 0.001 {
+            return false;
+        }
+        self.render_scale = scale;
+        self.configure_repair_count = 0;
+        let new_logical = self.configure_size();
+        if new_logical != self.requested_configure {
+            let generation = self.next_generation();
+            self.requested_configure = new_logical;
+            self.requested_generation = generation;
+            self.push_request(
+                generation,
+                self.physical_size,
+                new_logical,
+                self.effective_kwin_scale(),
+                0,
+            );
+            if self.observed_surface_size.is_none() {
+                self.guest_logical_size = (new_logical.0 as f64, new_logical.1 as f64);
+                self.rendered_generation = generation;
+            }
+        }
+        true
     }
 
     /// Explicit alias for [`Self::configure_size`].
@@ -565,13 +602,7 @@ impl AuthoritativeDisplayState {
                 let gen = self.next_generation();
                 self.requested_configure = new_logical;
                 self.requested_generation = gen;
-                self.push_request(
-                    gen,
-                    self.physical_size,
-                    new_logical,
-                    scale,
-                    0,
-                );
+                self.push_request(gen, self.physical_size, new_logical, scale, 0);
                 if self.observed_surface_size.is_none() {
                     self.guest_logical_size = (new_logical.0 as f64, new_logical.1 as f64);
                     self.rendered_generation = gen;
@@ -764,8 +795,8 @@ impl AuthoritativeDisplayState {
             }
             if let Some(scale) = buffer_scale {
                 if (1..=4).contains(&scale) {
-                    let bw = request.host.0 as f64 / scale as f64;
-                    let bh = request.host.1 as f64 / scale as f64;
+                    let bw = request.requested_logical.0 as f64 * request.scale / scale as f64;
+                    let bh = request.requested_logical.1 as f64 * request.scale / scale as f64;
                     if (s.0 - bw).abs() <= 2.5 && (s.1 - bh).abs() <= 2.5 {
                         return Some(((req_w, req_h), false));
                     }
@@ -775,8 +806,8 @@ impl AuthoritativeDisplayState {
         }
         if let (Some(b), Some(scale)) = (buffer, buffer_scale) {
             if (1..=4).contains(&scale) {
-                let exp_w = request.host.0 as f64 / scale as f64;
-                let exp_h = request.host.1 as f64 / scale as f64;
+                let exp_w = request.requested_logical.0 as f64 * request.scale / scale as f64;
+                let exp_h = request.requested_logical.1 as f64 * request.scale / scale as f64;
                 if (b.0 - exp_w).abs() <= 2.5 && (b.1 - exp_h).abs() <= 2.5 {
                     return Some(((req_w, req_h), false));
                 }

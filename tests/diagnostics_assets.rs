@@ -201,11 +201,13 @@ fn setup_and_error_pages_offer_one_tap_export() {
 }
 
 #[test]
-fn android_logging_is_local_and_info_by_default() {
+fn android_logging_is_local_and_warn_in_release() {
     assert!(!ANDROID_MAIN.contains("sentry::init"));
     assert!(!ANDROID_MAIN.contains("SentryLogger"));
     assert!(ANDROID_MAIN.contains("android_logger::AndroidLogger::default()"));
-    assert!(ANDROID_MAIN.contains("let log_level = log::LevelFilter::Info;"));
+    assert!(ANDROID_MAIN.contains("log::LevelFilter::Warn"));
+    assert!(ANDROID_MAIN.contains("log::LevelFilter::Info"));
+    assert!(ANDROID_MAIN.contains("cfg!(debug_assertions)"));
     assert!(!ANDROID_MAIN.contains("LevelFilter::Debug"));
     assert!(!ANDROID_MAIN.contains("LevelFilter::Trace"));
 }

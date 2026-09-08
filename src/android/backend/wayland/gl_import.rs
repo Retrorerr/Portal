@@ -27,6 +27,7 @@ type FnEglCreateImageKHR = unsafe extern "C" fn(
 type FnEglDestroyImageKHR = unsafe extern "C" fn(*const c_void, *const c_void) -> u32;
 type FnGlGenTextures = unsafe extern "C" fn(i32, *mut u32);
 type FnGlBindTexture = unsafe extern "C" fn(u32, u32);
+type FnGlDeleteTextures = unsafe extern "C" fn(i32, *const u32);
 type FnGlTexParameteri = unsafe extern "C" fn(u32, u32, i32);
 type FnGlEGLImageTargetTexture2DOES = unsafe extern "C" fn(u32, *const c_void);
 type FnGlGetError = unsafe extern "C" fn() -> u32;
@@ -38,6 +39,7 @@ pub struct AhbTextureImporter {
     egl_destroy_image: FnEglDestroyImageKHR,
     gl_gen_textures: FnGlGenTextures,
     gl_bind_texture: FnGlBindTexture,
+    gl_delete_textures: FnGlDeleteTextures,
     gl_tex_parameteri: FnGlTexParameteri,
     gl_egl_image_target_texture_2d_oes: FnGlEGLImageTargetTexture2DOES,
     gl_get_error: FnGlGetError,
@@ -90,6 +92,7 @@ impl AhbTextureImporter {
                 egl_destroy_image: std::mem::transmute(load_proc("eglDestroyImageKHR")?),
                 gl_gen_textures: std::mem::transmute(load_gl(b"glGenTextures\0")?),
                 gl_bind_texture: std::mem::transmute(load_gl(b"glBindTexture\0")?),
+                gl_delete_textures: std::mem::transmute(load_gl(b"glDeleteTextures\0")?),
                 gl_tex_parameteri: std::mem::transmute(load_gl(b"glTexParameteri\0")?),
                 gl_egl_image_target_texture_2d_oes: std::mem::transmute(load_proc(
                     "glEGLImageTargetTexture2DOES",
@@ -151,6 +154,10 @@ impl AhbTextureImporter {
             let gl_err = (self.gl_get_error)();
             if gl_err != 0 {
                 (self.egl_destroy_image)(raw_display, image);
+                // `tex` was generated but never attached: delete it instead
+                // of leaking the GL name on every failed import.
+                (self.gl_bind_texture)(target, 0);
+                (self.gl_delete_textures)(1, &tex);
                 return Err(format!(
                     "glEGLImageTargetTexture2DOES failed with GL error: 0x{:X}",
                     gl_err

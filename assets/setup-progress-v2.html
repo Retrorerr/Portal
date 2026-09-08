@@ -23,10 +23,12 @@
     <main>
       <h1>Opening Portal</h1>
       <p>Portal is preparing Debian 13 and Plasma. Keep Portal open. Download and extraction time depends on your connection and storage.</p>
+      <p>First installation downloads about 855 MiB and needs about 4.7 GiB free for setup. Interrupted downloads can continue when you retry.</p>
+      <p><strong>Required on OxygenOS:</strong> enable <strong>Disable child process restrictions</strong> in Android Settings → Developer options. Without this, Android can stop the desktop and its apps.</p>
       <progress id="progress"></progress>
       <div class="status" id="status" role="status">Connecting to the installer…</div>
       <div class="error" id="error" hidden></div>
-      <div class="logs" id="logs" aria-label="Setup log"></div>
+      <details><summary>Setup details</summary><div class="logs" id="logs" aria-label="Setup log"></div></details>
       <button id="export">Export diagnostics</button>
       <button class="secondary" id="retry" hidden>Retry setup</button>
       <div id="handoff" hidden>Setup complete. Waiting for the first presented Plasma frame…</div>

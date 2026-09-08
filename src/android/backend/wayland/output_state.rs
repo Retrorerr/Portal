@@ -13,6 +13,9 @@ pub fn write_guest_output_state(width: i32, height: i32, scale: i32) {
     let path = runtime.rootfs_path().join("tmp/localdesktop-output");
     let content =
         format!("LOCALDESKTOP_OUTPUT_MODE={width}x{height}\nLOCALDESKTOP_OUTPUT_SCALE={scale}\n");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Err(error) = std::fs::write(&path, content) {
         log::warn!(
             "Failed to write guest output state to {}: {error}",
@@ -29,12 +32,10 @@ pub fn read_kwin_output_scale_with_mtime() -> Option<(f64, u64)> {
         runtime
             .rootfs_path()
             .join("root/.config/kwinoutputconfig.json"),
-        std::path::PathBuf::from(
-            "/data/data/app.polarbear/files/runtime-B/root/.config/kwinoutputconfig.json",
-        ),
-        std::path::PathBuf::from(
-            "/data/data/app.polarbear/files/arch/root/.config/kwinoutputconfig.json",
-        ),
+        std::path::PathBuf::from(crate::core::config::PRODUCTION_FS_ROOT)
+            .join("root/.config/kwinoutputconfig.json"),
+        std::path::PathBuf::from(crate::core::config::APP_FILES_ROOT)
+            .join("arch/root/.config/kwinoutputconfig.json"),
     ];
 
     for path in &candidate_paths {
