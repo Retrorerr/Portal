@@ -61,6 +61,45 @@ fn pointer_focus(
     get_surface(state).map(|surface| (surface.wl_surface().clone(), (0f64, 0f64).into()))
 }
 
+fn sync_surface_control_cursor(
+    backend: &mut WaylandBackend,
+    timeline: Option<crate::android::utils::frame_pacing::AndroidFrameTimeline>,
+) -> bool {
+    let cursor_surface = match &backend.compositor.state.cursor_image {
+        CursorImageStatus::Surface(surface) if surface.alive() => Some(surface.clone()),
+        _ => None,
+    };
+    let Some(presenter) = backend.surface_control_cursor.as_mut() else {
+        return false;
+    };
+    let Some(surface) = cursor_surface else {
+        presenter.hide();
+        return false;
+    };
+    let hotspot = with_states(&surface, |states| {
+        states
+            .data_map
+            .get::<CursorImageSurfaceData>()
+            .and_then(|attributes| attributes.lock().ok().map(|attributes| attributes.hotspot))
+            .unwrap_or_default()
+    });
+    let pointer = backend.compositor.pointer.current_location();
+    let snapshot = backend
+        .compositor
+        .state
+        .authoritative_display_state
+        .presentation_snapshot();
+    let Some((physical_x, physical_y)) = snapshot.logical_to_physical(pointer.x, pointer.y) else {
+        presenter.hide();
+        return false;
+    };
+    let position = (
+        (physical_x - hotspot.x as f64 * snapshot.uniform_scale).round() as i32,
+        (physical_y - hotspot.y as f64 * snapshot.uniform_scale).round() as i32,
+    );
+    presenter.update(&surface, position, snapshot.uniform_scale as f32, timeline)
+}
+
 fn clamp_coordinates(state: &State, x: f64, y: f64) -> (f64, f64) {
     let logical = state.coordinate_transform.logical_source();
     (
@@ -232,6 +271,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             if let Err(error) = redraw(backend) {
                 log::error!("Redraw failed; dropping renderer until next resume: {error}");
                 backend.graphic_renderer = None;
+                backend.surface_control_cursor = None;
                 backend.output_damage_tracker = None;
                 backend.output_damage_signature = None;
                 // The pending presentation waited on an EGL frame id from the
@@ -239,12 +279,16 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 // stale pending entry would either spin or drop the first real
                 // frame after recovery. Clear it with the renderer.
                 backend.pending_kwin_presentation = None;
+                backend.frame_timeline = None;
                 accessibility::set_runtime_active(false);
                 event_loop.set_control_flow(ControlFlow::Wait);
                 return;
             }
         }
         CentralizedEvent::Input(event) => {
+            let input_started = std::time::Instant::now();
+            let pointer_before = backend.compositor.pointer.current_location();
+            let desktop_was_dirty = backend.output_dirty;
             // KeyboardHandle::input forwards only to its current focus. Keep
             // that focus authoritative before draining clipboard work or
             // forwarding any queued Android input.
@@ -544,8 +588,18 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 _ => {}
             }
             let _ = backend.compositor.display.flush_clients();
-            backend.output_dirty = true;
-            backend.schedule_redraw();
+            let pointer_after = backend.compositor.pointer.current_location();
+            let cursor_moved = pointer_before != pointer_after;
+            let cursor_is_separate = cursor_moved && sync_surface_control_cursor(backend, None);
+            if cursor_is_separate {
+                if let Some(cursor) = backend.surface_control_cursor.as_mut() {
+                    cursor.note_pointer_latency(input_started.elapsed());
+                }
+            }
+            if !cursor_is_separate || desktop_was_dirty {
+                backend.output_dirty = true;
+                backend.schedule_redraw();
+            }
         }
         CentralizedEvent::Resized {
             size,
@@ -1173,6 +1227,9 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     backend.output_dirty = false;
     backend.frame_in_flight = true;
 
+    let cursor_timeline = backend.frame_timeline;
+    let surface_control_cursor_active = sync_surface_control_cursor(backend, cursor_timeline);
+
     let Some(winit) = backend.graphic_renderer.as_mut() else {
         backend.frame_in_flight = false;
         return Ok(());
@@ -1377,36 +1434,38 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             CursorImageStatus::Surface(surface) if surface.alive() => Some(surface.clone()),
             _ => None,
         };
-        if let Some(surface) = &cursor_surface {
-            let hotspot = with_states(surface, |states| {
-                states
-                    .data_map
-                    .get::<CursorImageSurfaceData>()
-                    .and_then(|attributes| {
-                        attributes.lock().ok().map(|attributes| attributes.hotspot)
-                    })
-                    .unwrap_or_default()
-            });
-            let pointer_logical = compositor.pointer.current_location();
-            // Same snapshot as the desktop: logical→physical through the FIT
-            // viewport, hotspot scaled by the SAME uniform scale. Target <1px
-            // hotspot error (only integer sprite rounding remains).
-            let (pointer_phys_x, pointer_phys_y) =
-                match snapshot.logical_to_physical(pointer_logical.x, pointer_logical.y) {
-                    Some((px, py)) => (px, py),
-                    None => (viewport_origin.0, viewport_origin.1),
-                };
-            let elem_phys_x = pointer_phys_x - (hotspot.x as f64) * snapshot.uniform_scale;
-            let elem_phys_y = pointer_phys_y - (hotspot.y as f64) * snapshot.uniform_scale;
-            let location = (elem_phys_x.round() as i32, elem_phys_y.round() as i32);
-            elements.extend(render_elements_from_surface_tree(
-                renderer,
-                surface,
-                (location.0, location.1),
-                scale_to_use,
-                1.0,
-                Kind::Cursor,
-            ));
+        if !surface_control_cursor_active {
+            if let Some(surface) = &cursor_surface {
+                let hotspot = with_states(surface, |states| {
+                    states
+                        .data_map
+                        .get::<CursorImageSurfaceData>()
+                        .and_then(|attributes| {
+                            attributes.lock().ok().map(|attributes| attributes.hotspot)
+                        })
+                        .unwrap_or_default()
+                });
+                let pointer_logical = compositor.pointer.current_location();
+                // Same snapshot as the desktop: logical→physical through the FIT
+                // viewport, hotspot scaled by the SAME uniform scale. Target <1px
+                // hotspot error (only integer sprite rounding remains).
+                let (pointer_phys_x, pointer_phys_y) =
+                    match snapshot.logical_to_physical(pointer_logical.x, pointer_logical.y) {
+                        Some((px, py)) => (px, py),
+                        None => (viewport_origin.0, viewport_origin.1),
+                    };
+                let elem_phys_x = pointer_phys_x - (hotspot.x as f64) * snapshot.uniform_scale;
+                let elem_phys_y = pointer_phys_y - (hotspot.y as f64) * snapshot.uniform_scale;
+                let location = (elem_phys_x.round() as i32, elem_phys_y.round() as i32);
+                elements.extend(render_elements_from_surface_tree(
+                    renderer,
+                    surface,
+                    (location.0, location.1),
+                    scale_to_use,
+                    1.0,
+                    Kind::Cursor,
+                ));
+            }
         }
 
         let rendered = backend
@@ -1478,14 +1537,21 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
 
     // It is important that all events on the display have been dispatched and flushed to clients
     // before swapping buffers because this operation may block.
+    let timeline = backend.frame_timeline.take();
     let (did_submit, submitted_frame_id) = if output_damage.is_empty() {
         // Dirty input/protocol state need not mutate pixels. Frame callbacks
         // below still let clients advance, but no EGL buffer is queued.
         backend.frame_in_flight = false;
         (false, None)
     } else {
-        match winit.submit(Some(&output_damage)) {
+        match winit.submit(
+            Some(&output_damage),
+            timeline.map(|timeline| timeline.expected_present_ns),
+        ) {
             Ok(id) => {
+                if let Some(timeline) = timeline {
+                    backend.frame_timeline_stats.note_submit(timeline);
+                }
                 backend.frame_in_flight = false;
                 (true, id)
             }

@@ -8,6 +8,7 @@ mod keymap;
 pub mod output_state;
 pub mod protocol;
 pub mod socket_watcher;
+pub(crate) mod surface_control_cursor;
 mod text_input_v2;
 mod winit_backend;
 pub mod wlegl;
@@ -136,6 +137,14 @@ pub struct WaylandBackend {
     pub output_damage_signature: Option<(i32, i32, u64)>,
     /// Coalesces event-driven host redraws onto Android display callbacks.
     pub frame_pacer: Option<crate::android::utils::frame_pacing::AndroidFramePacer>,
+    /// Preferred API-33+ Choreographer timeline for the next submitted frame.
+    /// Consumed exactly once so a stale vsync target never leaks into a later
+    /// event-driven redraw.
+    pub frame_timeline: Option<crate::android::utils::frame_pacing::AndroidFrameTimeline>,
+    pub frame_timeline_stats: crate::android::utils::frame_pacing::FrameTimelineStats,
+    /// Android 16 cursor-only layer. The desktop remains on EGL; `None` is the
+    /// fully compatible GLES cursor fallback.
+    pub surface_control_cursor: Option<surface_control_cursor::SurfaceControlCursor>,
     /// Whether a frame is currently in flight to the Android compositor.
     pub frame_in_flight: bool,
 }

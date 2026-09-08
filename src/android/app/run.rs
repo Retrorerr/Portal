@@ -181,6 +181,8 @@ fn resume_wayland(
                 backend.graphic_renderer = Some(winit);
                 backend.output_damage_tracker = None;
                 backend.output_damage_signature = None;
+                backend.frame_timeline = None;
+                backend.frame_timeline_stats = Default::default();
             }
             Err(error) => {
                 log::error!("Failed to initialize Wayland renderer on resume: {error}");
@@ -203,6 +205,20 @@ fn resume_wayland(
             ) {
                 Ok(watcher) => backend.socket_watcher = Some(watcher),
                 Err(error) => log::error!("Failed to spawn WaylandSocketWatcher: {error}"),
+            }
+        }
+    }
+
+    if backend.surface_control_cursor.is_none() {
+        if let Some(winit) = backend.graphic_renderer.as_ref() {
+            match crate::android::backend::wayland::surface_control_cursor::SurfaceControlCursor::new(
+                winit.native_window_ptr(),
+            ) {
+                Ok(cursor) => {
+                    log::info!("presenter.cursor=surface-control release_fences=api36");
+                    backend.surface_control_cursor = Some(cursor);
+                }
+                Err(error) => log::info!("presenter.cursor=egl reason={error}"),
             }
         }
     }
@@ -519,9 +535,25 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             handle(event, backend, event_loop);
         }
 
-        if let AppUserEvent::ChoreographerFrame { frame_time_ns } = _event {
-            log::debug!("android.frame_callback time_ns={frame_time_ns}");
+        if let AppUserEvent::ChoreographerFrame {
+            frame_time_ns,
+            deadline_ns,
+            expected_present_ns,
+            vsync_id,
+        } = _event
+        {
+            log::debug!(
+                "android.frame_callback time_ns={frame_time_ns} deadline_ns={deadline_ns} expected_present_ns={expected_present_ns} vsync_id={vsync_id}"
+            );
             if backend.output_dirty {
+                backend.frame_timeline =
+                    Some(crate::android::utils::frame_pacing::AndroidFrameTimeline {
+                        frame_time_ns,
+                        deadline_ns,
+                        expected_present_ns,
+                        vsync_id,
+                    });
+                backend.frame_timeline_stats.note_callback();
                 if let Some(winit) = backend.graphic_renderer.as_ref() {
                     winit.window().request_redraw();
                 }
@@ -614,10 +646,15 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 log::debug!("Software keyboard bridge could not be hidden on suspend: {error}");
             }
             backend.socket_watcher = None;
+            // Drop child layers while this lifecycle generation's parent
+            // ANativeWindow is still valid.
+            backend.surface_control_cursor = None;
             backend.graphic_renderer = None;
             backend.output_damage_tracker = None;
             backend.output_damage_signature = None;
             backend.suspend_input_and_presentation();
+            backend.frame_timeline = None;
+            backend.frame_timeline_stats = Default::default();
             // The ANativeWindow is destroyed on suspend; the preferred-rate hint
             // must be re-issued on the next resume's fresh window.
             backend.frame_rate_requested = false;
