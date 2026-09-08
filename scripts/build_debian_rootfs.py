@@ -332,18 +332,34 @@ def extract_deb_package(deb_path: Path, dest_dir: Path, dpkg_info_dir: Path, pay
     arch = control_meta.get("Architecture", "arm64")
     multi_arch = control_meta.get("Multi-Arch", "")
 
-    # Debian dpkg on single-arch native systems uses <pkg_name>.<ext> in /var/lib/dpkg/info.
-    # Furthermore, colons in filenames create Alternate Data Streams on Windows NTFS.
-    pkg_id = pkg_name
+    # dpkg qualifies the infodb basename for Multi-Arch:same packages.  The
+    # package stanza remains `Package: libfoo` plus `Architecture: arm64`, but
+    # every file below /var/lib/dpkg/info is named `libfoo:arm64.*`.  Keep this
+    # distinction in the release tar: the archive is assembled directly from
+    # Debian members and therefore preserves the colon even when the builder
+    # itself is running on Windows (where a colon cannot be a normal filename).
+    pkg_id = f"{pkg_name}:{arch}" if multi_arch == "same" and arch not in ("", "all") else pkg_name
+
+    def write_info_member(fname: str, content: bytes, mode: int) -> None:
+        archive_name = f"var/lib/dpkg/info/{pkg_id}.{fname}"
+        if payload_tar is not None and ":" in pkg_id:
+            info = tarfile.TarInfo(archive_name)
+            info.mode = mode
+            info.size = len(content)
+            payload_tar.addfile(info, io.BytesIO(content))
+            if payload_names is not None:
+                payload_names.append(archive_name)
+            return
+        target_path = dpkg_info_dir / f"{pkg_id}.{fname}"
+        with open(target_path, "wb") as out_f:
+            out_f.write(content)
+        target_path.chmod(mode)
 
     # Write other control files (md5sums, conffiles, postinst, etc.) to dpkg_info_dir
     for fname, m in other_control_members:
         f = ctrl_tar.extractfile(m)
         if f:
-            target_path = dpkg_info_dir / f"{pkg_id}.{fname}"
-            with open(target_path, "wb") as out_f:
-                out_f.write(f.read())
-            target_path.chmod(m.mode)
+            write_info_member(fname, f.read(), m.mode)
 
     # Build status stanza: add Status: install ok installed after Package:
     status_lines = []
@@ -406,10 +422,14 @@ def extract_deb_package(deb_path: Path, dest_dir: Path, dpkg_info_dir: Path, pay
     else:
         data_tar.extractall(path=dest_dir, filter="tar")
 
-    # Write .list file
-    list_path = dpkg_info_dir / f"{pkg_id}.list"
-    with open(list_path, "w", newline="\n", encoding="utf-8") as f:
-        f.write("\n".join(list_lines) + "\n")
+    # Write .list file.  Multi-Arch:same metadata is written directly to the
+    # output tar when necessary so Windows never turns the colon into an NTFS
+    # alternate data stream.
+    write_info_member(
+        "list",
+        ("\n".join(list_lines) + "\n").encode("utf-8"),
+        0o644,
+    )
 
     return status_stanza
 
@@ -529,11 +549,6 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked
     apt_no_sandbox = output_dir / "etc" / "apt" / "apt.conf.d" / "01no-sandbox"
     with open(apt_no_sandbox, "w", newline="\n", encoding="utf-8") as f:
         f.write('APT::Sandbox::User "root";\n')
-
-    # Write /etc/apt/apt.conf.d/01portal-clean: non-interactive config prompts
-    apt_clean = output_dir / "etc" / "apt" / "apt.conf.d" / "01portal-clean"
-    with open(apt_clean, "w", newline="\n", encoding="utf-8") as f:
-        f.write('DPkg::Options { "--force-confdef"; "--force-confold"; };\n')
 
     # Write /usr/sbin/policy-rc.d: prevent maintainer scripts from failing on init/systemd
     policy_rc_d = output_dir / "usr" / "sbin" / "policy-rc.d"

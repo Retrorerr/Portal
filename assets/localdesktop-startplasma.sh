@@ -172,26 +172,6 @@ else
 fi
 rm -f "$config_dir/autostart/konsole.desktop" "$config_dir/autostart/org.kde.konsole.desktop"
 
-# Ensure default Konsole profile and konsolerc exist
-konsole_profile_dir="$home_dir/.local/share/konsole"
-mkdir -p "$konsole_profile_dir"
-if [ ! -f "$konsole_profile_dir/Profile 1.profile" ]; then
-    cat <<'EOF' > "$konsole_profile_dir/Profile 1.profile"
-[General]
-Command=/bin/bash
-Name=Profile 1
-Parent=FALLBACK/
-
-[Appearance]
-ColorScheme=Breeze
-EOF
-fi
-
-konsolerc="$config_dir/konsolerc"
-if command -v kwriteconfig6 >/dev/null 2>&1; then
-    kwriteconfig6 --file "$konsolerc" --group 'Desktop Entry' --key DefaultProfile 'Profile 1.profile'
-fi
-
 # The Debian image is assembled by extracting a deterministic package closure,
 # so maintainer scripts do not run during image creation. Generate only the
 # small runtime databases desktop applications actually consume. Each command
@@ -257,30 +237,9 @@ elif ! grep -q 'InputMethod=' "$kwinrc" 2>/dev/null; then
     printf '\n[Wayland]\nInputMethod=/usr/share/applications/portal-ime.desktop\nVirtualKeyboardMode=1\n' >> "$kwinrc"
 fi
 
-# Session command runner for in-session D-Bus queries and diagnostics
-mkdir -p "$config_dir/autostart"
-cat << 'RUNNER_EOF' > /usr/local/bin/portal-session-cmd
-#!/bin/bash
-fifo=/tmp/portal-session-cmd.fifo
-out=/tmp/portal-session-cmd.out
-rm -f "$fifo" "$out"
-mkfifo "$fifo" 2>/dev/null || true
-while true; do
-    while read -r cmd; do
-        eval "$cmd" > "$out" 2>&1
-        echo "---PORTAL_CMD_EOF---" >> "$out"
-    done < "$fifo"
-done
-RUNNER_EOF
-chmod +x /usr/local/bin/portal-session-cmd 2>/dev/null || true
-
-cat << 'AUTOS_EOF' > "$config_dir/autostart/portal-session-cmd.desktop"
-[Desktop Entry]
-Type=Application
-Name=Portal Session Runner
-Exec=/usr/local/bin/portal-session-cmd
-X-KDE-autostart-phase=1
-AUTOS_EOF
+# Remove the old development shell runner; guest apps must not acquire an
+# extra persistent command-execution service through session autostart.
+rm -f "$config_dir/autostart/portal-session-cmd.desktop" /usr/local/bin/portal-session-cmd
 
 # Disable ksplash to avoid hanging on splash animation under PRoot
 ksplashrc="$config_dir/ksplashrc"

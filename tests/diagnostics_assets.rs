@@ -3,6 +3,7 @@ const PLASMA_LAUNCHER: &str = include_str!("../assets/localdesktop-startplasma.s
 const RECOVERY: &str = include_str!("../assets/localdesktop-recovery.sh");
 const RETRY: &str = include_str!("../assets/localdesktop-retry-plasma.sh");
 const KONSOLE_PROFILE: &str = include_str!("../assets/konsole/LocalDesktop.profile");
+const PROOT_RUNTIME: &str = include_str!("../src/android/runtime/proot.rs");
 const CRASH_HANDLER: &str = include_str!("../assets/localdesktop-crash-handler.c");
 const SETUP: &str = include_str!("../src/android/proot/setup.rs");
 const DIAGNOSTICS: &str = include_str!("../src/android/diagnostics.rs");
@@ -64,12 +65,40 @@ fn plasma_launcher_waits_for_host_presented_marker() {
         PLASMA_LAUNCHER.contains("rm -f \"$ready_marker\" \"$failure_marker\" \"$crash_marker\"")
     );
     assert!(PLASMA_LAUNCHER.contains("attempt=$attempt_id"));
-    assert!(PLASMA_LAUNCHER.contains("WAYLAND_DEBUG=${WAYLAND_DEBUG:-1}"));
+    assert!(PLASMA_LAUNCHER.contains("WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}"));
     assert!(PLASMA_LAUNCHER.contains("stage=backend compositor=kwin_wayland"));
     assert!(PLASMA_LAUNCHER.contains("package in kwin-wayland plasma-workspace"));
     assert!(PLASMA_LAUNCHER.contains("signal_tree \"$session_pid\" KILL"));
     assert!(PLASMA_LAUNCHER
         .contains("LOCALDESKTOP_GDB_BACKTRACE=${LOCALDESKTOP_GDB_BACKTRACE:-@GDB_BACKTRACE@}"));
+}
+
+#[test]
+fn plasma_launcher_leaves_konsole_profile_selection_to_provisioning() {
+    assert!(!PLASMA_LAUNCHER.contains("Profile 1.profile"));
+    assert!(!PLASMA_LAUNCHER.contains("DefaultProfile"));
+}
+
+#[test]
+fn proot_starts_guest_processes_with_debian_shell_defaults() {
+    assert!(PROOT_RUNTIME.contains(".arg(\"-w\")"));
+    assert!(PROOT_RUNTIME.contains("let working_dir"));
+    assert!(PROOT_RUNTIME.contains("SHELL=/bin/bash"));
+    assert!(PROOT_RUNTIME.contains(
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games"
+    ));
+    assert!(!PROOT_RUNTIME.contains("/system/bin:/system/xbin"));
+}
+
+#[test]
+fn electron_desktop_entries_receive_proot_safe_startup_flags() {
+    assert!(SETUP.contains("resources/app.asar"));
+    assert!(SETUP.contains("--no-sandbox"));
+    assert!(SETUP.contains("--no-stdio-init"));
+    assert!(SETUP.contains("--ozone-platform=wayland"));
+    assert!(SETUP.contains("99portal-desktop-integration"));
+    assert!(SETUP.contains("desktop-integration.log"));
+    assert!(SETUP.contains("$dst.portal-tmp.$$"));
 }
 
 #[test]
@@ -121,8 +150,10 @@ fn setup_installs_versioned_classic_startup_assets_and_profile() {
     assert!(SETUP.contains("localdesktop-crash-handler.so"));
     assert!(SETUP.contains("handler.with_extension(\"so.tmp\")"));
     assert!(SETUP.contains("fs::rename(&temporary, &handler)"));
-    assert!(SETUP.contains(".config/konsolerc"));
+    assert!(SETUP.contains("join(\"konsolerc\")"));
     assert!(SETUP.contains(".local/share/konsole"));
+    assert!(SETUP.contains("migrate_konsole_profile"));
+    assert!(SETUP.contains("konsole-profile-v2"));
     assert!(KONSOLE_PROFILE.contains("Command=/bin/bash"));
     assert!(KONSOLE_PROFILE.contains("Directory=@HOME@"));
     assert!(SETUP.contains("fn normalize_guest_text"));

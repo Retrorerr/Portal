@@ -3,6 +3,9 @@ target
 /target-*/
 localdesktop.apk
 .DS_Store
+__pycache__/
+*.py[cod]
+*.log
 /build/
 /manuals/
 /dist/

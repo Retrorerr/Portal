@@ -46,11 +46,7 @@ impl PRootRuntime {
     }
 
     pub fn active() -> Self {
-        #[cfg(not(test))]
-        let base = "/data/data/app.polarbear/files";
-        #[cfg(test)]
-        let base = "/data/local/tmp";
-        let layout = crate::core::runtime::RuntimeLayout::new(base);
+        let layout = crate::core::runtime::RuntimeLayout::new(config::APP_FILES_ROOT);
         Self::new(layout.active_slot().rootfs_path)
     }
 
@@ -301,6 +297,12 @@ impl LinuxRuntime for PRootRuntime {
         let user = spec.user.as_deref().unwrap_or("root");
         let command = spec.command;
         let user = user.to_string();
+        let guest_home = if user == "root" {
+            PathBuf::from("/root")
+        } else {
+            PathBuf::from("/home").join(&user)
+        };
+        let working_dir = spec.working_dir.clone().unwrap_or(guest_home);
 
         let mut process = Command::new(context.native_library_dir.join("libproot.so"));
         process
@@ -315,6 +317,12 @@ impl LinuxRuntime for PRootRuntime {
         process
             .arg("-r")
             .arg(&self.rootfs)
+            // Start every guest process in its Debian home directory unless a
+            // caller supplied an explicit working directory.  Merely setting
+            // PWD below does not change the kernel cwd, so Konsole and other
+            // GUI-launched clients otherwise inherit `/` from startplasma.
+            .arg("-w")
+            .arg(&working_dir)
             .arg("-L")
             .arg("--link2symlink")
             .arg("--sysvipc")
@@ -371,8 +379,9 @@ impl LinuxRuntime for PRootRuntime {
 
         process
             .arg("LANG=C.UTF-8")
+            .arg("SHELL=/bin/bash")
             .arg("TERM=xterm-256color")
-            .arg("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games:/system/bin:/system/xbin")
+            .arg("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games")
             .arg("TMPDIR=/tmp")
             .arg(format!("USER={}", user))
             .arg(format!("LOGNAME={}", user));
@@ -381,9 +390,7 @@ impl LinuxRuntime for PRootRuntime {
             process.arg(format!("{}={}", k, v));
         }
 
-        if let Some(wd) = &spec.working_dir {
-            process.arg(format!("PWD={}", wd.display()));
-        }
+        process.arg(format!("PWD={}", working_dir.display()));
 
         if user == "root" {
             process.arg("sh");

@@ -82,7 +82,7 @@ type StageOutput = Option<JoinHandle<()>>;
 
 fn setup_debian_runtime(options: &SetupOptions) -> StageOutput {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
-    if artifact.is_ready(Path::new(PRODUCTION_FS_ROOT)) {
+    if artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)) {
         return None;
     }
     let sender = options.mpsc_sender.clone();
@@ -153,6 +153,9 @@ fn setup_machine_id(_: &SetupOptions) -> StageOutput {
             fs::create_dir_all(parent).expect("Failed to create /etc for machine-id");
         }
 
+        // The file is left read-only (0444) after a successful seed. chmod
+        // before rewriting so a repair after a crashed first install does not
+        // fail with EACCES and panic every subsequent setup.
         let _ = fs::set_permissions(&machine_id, fs::Permissions::from_mode(0o644));
         fs::write(&machine_id, format!("{}\n", generate_machine_id()))
             .expect("Failed to write machine-id");
@@ -164,7 +167,22 @@ fn setup_machine_id(_: &SetupOptions) -> StageOutput {
     fs::create_dir_all(&dbus_dir).expect("Failed to create /var/lib/dbus");
     let dbus_machine_id = dbus_dir.join("machine-id");
     match fs::symlink_metadata(&dbus_machine_id) {
-        Ok(_) => {}
+        // A regular file or dangling symlink from a crashed install would
+        // otherwise pin divergent IDs forever. Replace anything that is not a
+        // symlink to /etc/machine-id.
+        Ok(meta) => {
+            let needs_repair = if meta.file_type().is_symlink() {
+                fs::read_link(&dbus_machine_id).ok().as_deref()
+                    != Some(Path::new("/etc/machine-id"))
+            } else {
+                true
+            };
+            if needs_repair {
+                let _ = fs::remove_file(&dbus_machine_id);
+                symlink("/etc/machine-id", &dbus_machine_id)
+                    .expect("Failed to symlink /var/lib/dbus/machine-id");
+            }
+        }
         Err(err) if err.kind() == ErrorKind::NotFound => {
             symlink("/etc/machine-id", &dbus_machine_id)
                 .expect("Failed to symlink /var/lib/dbus/machine-id");
@@ -376,17 +394,17 @@ exec "$@"
 fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
 
-    // Chromium's sandbox needs CLONE_NEWUSER, which Android SELinux blocks, so every
-    // Chromium/Electron app has to be started with --no-sandbox. Electron apps pick that up
-    // from ELECTRON_DISABLE_SANDBOX (exported by the Plasma launcher), but Chromium itself
-    // only takes the flag, and its desktop entry hardcodes an absolute path that a
-    // /usr/local/bin wrapper cannot intercept. So shadow the affected application entries in
-    // the user's own XDG directory, re-running every session to catch newly installed apps.
+    // Chromium's sandbox needs CLONE_NEWUSER, which Android SELinux blocks.  Electron also
+    // initializes Node against inherited descriptors that PRoot cannot faithfully expose,
+    // and Xwayland authentication is not a reliable boundary for guest-launched clients.
+    // Shadow only positively identified Chromium/Electron desktop entries in the user's XDG
+    // directory.  The session autostart and apt post-invoke hook both run this helper, so
+    // newly installed applications work immediately and package upgrades cannot overwrite it.
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-no-sandbox-entries"),
         r#"#!/bin/sh
 target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-mkdir -p "$target_dir" || exit 0
+mkdir -p "$target_dir" || exit 1
 
 for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop; do
     [ -f "$src" ] || continue
@@ -400,10 +418,18 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
     bin=$(readlink -f "$bin" 2>/dev/null)
     [ -n "$bin" ] || continue
 
-    # Every Chromium/Electron build ships the setuid sandbox helper next to its binary,
-    # or one level up when the launcher lives in a bin/ subdirectory.
     dir=$(dirname "$bin")
-    [ -e "$dir/chrome-sandbox" ] || [ -e "$dir/../chrome-sandbox" ] || continue
+    electron=0
+    for root in "$dir" "$dir/.."; do
+        if [ -f "$root/resources/app.asar" ] || [ -d "$root/resources/app" ]; then
+            electron=1
+            break
+        fi
+    done
+    if [ "$electron" -ne 1 ] &&
+       [ ! -e "$dir/chrome-sandbox" ] && [ ! -e "$dir/../chrome-sandbox" ]; then
+        continue
+    fi
 
     dst="$target_dir/$(basename "$src")"
     # Leave alone anything the user wrote themselves.
@@ -411,11 +437,22 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
         continue
     fi
 
-    awk '
+    tmp="$dst.portal-tmp.$$"
+    if ! awk -v electron="$electron" '
         /^\[Desktop Entry\]/ && !seen { print; print "X-LocalDesktop-NoSandbox=true"; seen = 1; next }
-        /^Exec=/ && !/--no-sandbox/ { sub(/^Exec=[^ ]+/, "& --no-sandbox") }
+        /^Exec=/ {
+            if (index($0, "--no-sandbox") == 0)
+                sub(/^Exec=[^ ]+/, "& --no-sandbox")
+            if (electron == 1 && index($0, "--no-stdio-init") == 0)
+                sub(/^Exec=[^ ]+/, "& --no-stdio-init")
+            if (electron == 1 && index($0, "--ozone-platform=") == 0)
+                sub(/^Exec=[^ ]+/, "& --ozone-platform=wayland")
+        }
         { print }
-    ' "$src" > "$dst"
+    ' "$src" > "$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$dst"; then
+        rm -f "$tmp"
+        printf 'Failed to update Portal desktop integration for %s\n' "$src" >&2
+    fi
 done
 "#,
     );
@@ -595,59 +632,442 @@ fn android_ui_scale(density_dpi: i32) -> i32 {
     ((density_dpi as f32) / 160.0 * 1.1).max(1.0).round() as i32
 }
 
-/// Ensure guest package-management files are durable across slot switches and clean installs.
-fn sync_debian_package_management(fs_root: &Path) {
-    let apt_conf_d = fs_root.join("etc/apt/apt.conf.d");
-    if fs::create_dir_all(&apt_conf_d).is_ok() {
-        let no_sandbox_path = apt_conf_d.join("01no-sandbox");
-        if !no_sandbox_path.exists() {
-            let _ = fs::write(&no_sandbox_path, "APT::Sandbox::User \"root\";\n");
-        }
-        let clean_path = apt_conf_d.join("01portal-clean");
-        if !clean_path.exists() {
-            let _ = fs::write(
-                &clean_path,
-                "DPkg::Options { \"--force-confdef\"; \"--force-confold\"; };\n",
-            );
+/// Copy a Debian-owned startup file only when the guest has no user version.
+/// `symlink_metadata` treats dangling links as user-owned state as well.
+fn copy_guest_file_if_missing(source: &Path, destination: &Path) -> bool {
+    if fs::symlink_metadata(destination).is_ok() {
+        return true;
+    }
+    if !source.is_file() {
+        log::error!("Debian startup source is unavailable: {}", source.display());
+        return false;
+    }
+    let Some(parent) = destination.parent() else {
+        return false;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    let temporary = parent.join(format!(
+        ".{}.portal-default-{}",
+        destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file"),
+        process::id()
+    ));
+    if fs::copy(source, &temporary).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return false;
+    }
+    if fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return false;
+    }
+    if fs::symlink_metadata(destination).is_ok() {
+        let _ = fs::remove_file(&temporary);
+        return true;
+    }
+    if fs::rename(&temporary, destination).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return false;
+    }
+    true
+}
+
+/// base-files normally creates these files from its maintainer script.  The
+/// release image is assembled without executing ARM64 maintainer scripts, so
+/// seed only missing files from Debian's packaged defaults and never replace
+/// user shell configuration.
+fn sync_base_files_defaults(fs_root: &Path, home_dir: &Path) -> bool {
+    let mut complete = copy_guest_file_if_missing(
+        &fs_root.join("usr/share/base-files/profile"),
+        &fs_root.join("etc/profile"),
+    );
+    let skeleton = fs_root.join("etc/skel");
+    let base_files = fs_root.join("usr/share/base-files");
+    for home in [fs_root.join("root"), home_dir.to_path_buf()] {
+        for (name, fallback) in [(".profile", "dot.profile"), (".bashrc", "dot.bashrc")] {
+            let skeleton_source = skeleton.join(name);
+            let source = if skeleton_source.is_file() {
+                skeleton_source
+            } else {
+                base_files.join(fallback)
+            };
+            complete &= copy_guest_file_if_missing(&source, &home.join(name));
         }
     }
+    complete
+}
+
+/// base-files normally owns these compatibility links.  Package extraction
+/// skipped its maintainer script, so repair only an empty real directory. A
+/// non-empty directory or a different file/link is user/package state and is
+/// reported without deletion.
+fn repair_base_files_runtime_links(fs_root: &Path) -> bool {
+    if fs::create_dir_all(fs_root.join("run/lock")).is_err() {
+        return false;
+    }
+    let mut complete = true;
+    for (relative, target) in [("var/run", "/run"), ("var/lock", "/run/lock")] {
+        let path = fs_root.join(relative);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                if symlink(target, &path).is_err() {
+                    complete = false;
+                }
+                continue;
+            }
+            Err(_) => {
+                complete = false;
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            if fs::read_link(&path).ok().as_deref() != Some(Path::new(target)) {
+                log::error!(
+                    "Refusing to replace non-standard guest link {}",
+                    path.display()
+                );
+                complete = false;
+            }
+            continue;
+        }
+        if !metadata.is_dir() {
+            log::error!("Refusing to replace guest path {}", path.display());
+            complete = false;
+            continue;
+        }
+        let empty = fs::read_dir(&path)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if !empty {
+            log::error!(
+                "Refusing to replace non-empty guest directory {}",
+                path.display()
+            );
+            complete = false;
+            continue;
+        }
+        let backup = path.with_extension(format!("portal-old-{}", process::id()));
+        if fs::symlink_metadata(&backup).is_ok() || fs::rename(&path, &backup).is_err() {
+            complete = false;
+            continue;
+        }
+        if symlink(target, &path).is_err() {
+            let _ = fs::rename(&backup, &path);
+            complete = false;
+        } else if fs::remove_dir(&backup).is_err() {
+            complete = false;
+        }
+    }
+    complete
+}
+
+const DPKG_INFO_MIGRATION_MARKER: &str = "var/lib/localdesktop/dpkg-info-multiarch-v1";
+const LEGACY_PORTAL_CLEAN_APT: &str =
+    "DPkg::Options { \"--force-confdef\"; \"--force-confold\"; };\n";
+
+fn remove_legacy_portal_clean_apt(fs_root: &Path) {
+    let path = fs_root.join("etc/apt/apt.conf.d/01portal-clean");
+    if fs::read_to_string(&path).ok().as_deref() == Some(LEGACY_PORTAL_CLEAN_APT)
+        && fs::remove_file(&path).is_err()
+    {
+        panic!("Cannot remove the obsolete Portal apt override");
+    }
+}
+
+fn dpkg_multiarch_same_packages(status: &str) -> Vec<(String, String)> {
+    let mut packages = Vec::new();
+    for stanza in status.split("\n\n") {
+        let mut package = None;
+        let mut architecture = None;
+        let mut multi_arch_same = false;
+        for line in stanza.lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.trim();
+            match key {
+                "Package" => package = Some(value.to_string()),
+                "Architecture" => architecture = Some(value.to_string()),
+                "Multi-Arch" => multi_arch_same = value == "same",
+                _ => {}
+            }
+        }
+        let Some(package) = package else { continue };
+        let Some(architecture) = architecture else {
+            continue;
+        };
+        if multi_arch_same
+            && !package.is_empty()
+            && !package.contains('/')
+            && !package.contains(':')
+            && !architecture.is_empty()
+            && architecture != "all"
+            && !architecture.contains('/')
+            && !architecture.contains(':')
+        {
+            packages.push((package, architecture));
+        }
+    }
+    packages
+}
+
+/// Repair the package-info names emitted by old Portal images.  dpkg expects
+/// every sidecar of Multi-Arch:same packages to use `pkg:arch.*`; moving the
+/// unqualified files makes `dpkg --audit` and future maintainer scripts work.
+/// Each rename stays within the guest filesystem and is atomic.  A qualified
+/// destination is never overwritten: apt may already have upgraded that
+/// package and created authoritative `pkg:arch.*` metadata.  In that case the
+/// obsolete unqualified image metadata is retained in Portal-owned quarantine
+/// rather than being allowed to confuse dpkg or being destroyed.
+fn migrate_multiarch_dpkg_info(fs_root: &Path) -> bool {
+    let marker = fs_root.join(DPKG_INFO_MIGRATION_MARKER);
+    if fs::symlink_metadata(&marker).is_ok() {
+        return true;
+    }
+    let status_path = fs_root.join("var/lib/dpkg/status");
+    let info_dir = fs_root.join("var/lib/dpkg/info");
+    let Ok(status) = fs::read_to_string(&status_path) else {
+        log::error!(
+            "Cannot migrate dpkg info: {} is unreadable",
+            status_path.display()
+        );
+        return false;
+    };
+    if !info_dir.is_dir() {
+        log::error!(
+            "Cannot migrate dpkg info: {} is missing",
+            info_dir.display()
+        );
+        return false;
+    }
+    let quarantine_dir = fs_root.join("var/lib/localdesktop/dpkg-info-unqualified-v1");
+    if let Err(error) = fs::create_dir_all(&quarantine_dir) {
+        log::error!(
+            "Cannot create dpkg metadata quarantine {}: {}",
+            quarantine_dir.display(),
+            error
+        );
+        return false;
+    }
+
+    let mut complete = true;
+    for (package, architecture) in dpkg_multiarch_same_packages(&status) {
+        let unqualified_prefix = format!("{package}.");
+        let qualified_prefix = format!("{package}:{architecture}.");
+        let entries = match fs::read_dir(&info_dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                log::error!("Cannot read {}: {}", info_dir.display(), error);
+                return false;
+            }
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                complete = false;
+                continue;
+            };
+            let source = entry.path();
+            let Some(name) = source.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with(&unqualified_prefix) {
+                continue;
+            }
+            let suffix = &name[unqualified_prefix.len()..];
+            if suffix.is_empty() {
+                continue;
+            }
+            let destination = info_dir.join(format!("{qualified_prefix}{suffix}"));
+            if fs::symlink_metadata(&destination).is_ok() {
+                let quarantine = quarantine_dir.join(name);
+                if fs::symlink_metadata(&quarantine).is_ok() {
+                    let same = match (fs::read(&source), fs::read(&quarantine)) {
+                        (Ok(source_bytes), Ok(quarantine_bytes)) => {
+                            source_bytes == quarantine_bytes
+                        }
+                        _ => false,
+                    };
+                    if same {
+                        if let Err(error) = fs::remove_file(&source) {
+                            log::error!(
+                                "Cannot remove already-quarantined dpkg metadata {}: {}",
+                                source.display(),
+                                error
+                            );
+                            complete = false;
+                        }
+                    } else {
+                        log::error!(
+                            "Refusing conflicting dpkg metadata quarantine {} -> {}",
+                            source.display(),
+                            quarantine.display()
+                        );
+                        complete = false;
+                    }
+                } else if let Err(error) = fs::rename(&source, &quarantine) {
+                    log::error!(
+                        "Cannot quarantine obsolete dpkg metadata {} -> {}: {}",
+                        source.display(),
+                        quarantine.display(),
+                        error
+                    );
+                    complete = false;
+                }
+                continue;
+            }
+            // No apt/dpkg process is started during this setup pass, so the
+            // checked-absent destination cannot be a normal concurrent writer.
+            // Rename preserves metadata and is atomic on the same filesystem.
+            if let Err(error) = fs::rename(&source, &destination) {
+                log::error!(
+                    "Cannot migrate dpkg metadata {} -> {}: {}",
+                    source.display(),
+                    destination.display(),
+                    error
+                );
+                complete = false;
+            }
+        }
+    }
+    if !complete {
+        return false;
+    }
+    let Some(parent) = marker.parent() else {
+        return false;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    let temporary = parent.join(format!(".dpkg-info-multiarch-v1-{}", process::id()));
+    if fs::write(&temporary, b"completed\n").is_err() {
+        let _ = fs::remove_file(&temporary);
+        return false;
+    }
+    if let Err(error) = fs::rename(&temporary, &marker) {
+        log::error!("Cannot commit dpkg metadata migration marker: {}", error);
+        let _ = fs::remove_file(&temporary);
+        return false;
+    }
+    true
+}
+
+/// Run Debian's own PAM generator only when no common stack exists.  If a
+/// user has already supplied any common stack file, do not let the package
+/// helper rewrite it; an incomplete custom PAM setup is reported instead.
+fn sync_pam_defaults(fs_root: &Path) -> bool {
+    let common = [
+        "etc/pam.d/common-auth",
+        "etc/pam.d/common-account",
+        "etc/pam.d/common-session",
+        "etc/pam.d/common-session-noninteractive",
+        "etc/pam.d/common-password",
+    ];
+    let present = common
+        .iter()
+        .filter(|path| fs::symlink_metadata(fs_root.join(path)).is_ok())
+        .count();
+    if present == common.len() {
+        return true;
+    }
+    if present != 0 {
+        log::warn!(
+            "Guest PAM common stack is incomplete; preserving existing files and refusing to overwrite it"
+        );
+        return false;
+    }
+    if !fs_root.join("usr/sbin/pam-auth-update").is_file() {
+        log::warn!("Guest libpam-runtime is missing pam-auth-update; PAM defaults unavailable");
+        return false;
+    }
+    let output = ArchProcess {
+        command: "DEBIAN_FRONTEND=noninteractive /usr/sbin/pam-auth-update --package --force"
+            .into(),
+        user: None,
+        log: None,
+    }
+    .run();
+    let complete = output.status.success()
+        && common
+            .iter()
+            .all(|path| fs::symlink_metadata(fs_root.join(path)).is_ok());
+    if !complete {
+        log::error!(
+            "Debian PAM configuration failed (status {:?}); package authentication may be unavailable",
+            output.status.code()
+        );
+    }
+    complete
+}
+
+/// Ensure guest package-management files are durable across slot switches and clean installs.
+fn sync_debian_package_management(fs_root: &Path) {
+    remove_legacy_portal_clean_apt(fs_root);
+    if !repair_base_files_runtime_links(fs_root) {
+        panic!("Debian /var/run and /var/lock integration is unsafe; refusing package operations");
+    }
+    if !migrate_multiarch_dpkg_info(fs_root) {
+        panic!("Debian package metadata migration did not complete; refusing package operations");
+    }
+    if !sync_pam_defaults(fs_root) {
+        panic!("Debian PAM configuration did not complete; refusing package operations");
+    }
+    let apt_conf_d = fs_root.join("etc/apt/apt.conf.d");
+    fs::create_dir_all(&apt_conf_d).expect("Failed to create guest apt configuration directory");
+    let no_sandbox_path = apt_conf_d.join("01no-sandbox");
+    if !no_sandbox_path.exists() {
+        fs::write(&no_sandbox_path, "APT::Sandbox::User \"root\";\n")
+            .expect("Failed to install the PRoot apt sandbox policy");
+    }
+    // Refresh XDG shadows after apt/dpkg transactions as well as at session
+    // startup.  Failures are retained in a Portal-owned log but do not
+    // turn a successfully configured Debian package into an apt failure.
+    fs::write(
+        apt_conf_d.join("99portal-desktop-integration"),
+        r#"DPkg::Post-Invoke { "if [ -x /usr/local/bin/localdesktop-no-sandbox-entries ]; then HOME=/root XDG_DATA_HOME=/root/.local/share /usr/local/bin/localdesktop-no-sandbox-entries >>/var/lib/localdesktop/desktop-integration.log 2>&1 || printf '%s\n' 'Portal desktop integration refresh failed' >>/var/lib/localdesktop/desktop-integration.log; fi"; };
+"#,
+    )
+    .expect("Failed to install the Portal desktop integration apt hook");
 
     let sbin_dir = fs_root.join("usr/sbin");
-    if fs::create_dir_all(&sbin_dir).is_ok() {
-        let policy_rc_d = sbin_dir.join("policy-rc.d");
-        if !policy_rc_d.exists() {
-            let _ = fs::write(&policy_rc_d, "#!/bin/sh\nexit 101\n");
-            let _ = fs::set_permissions(&policy_rc_d, fs::Permissions::from_mode(0o755));
-        }
+    fs::create_dir_all(&sbin_dir).expect("Failed to create guest sbin directory");
+    let policy_rc_d = sbin_dir.join("policy-rc.d");
+    if !policy_rc_d.exists() {
+        fs::write(&policy_rc_d, "#!/bin/sh\nexit 101\n")
+            .expect("Failed to install the PRoot service-start policy");
+        fs::set_permissions(&policy_rc_d, fs::Permissions::from_mode(0o755))
+            .expect("Failed to mark the PRoot service-start policy executable");
     }
 
     let dpkg_dir = fs_root.join("var/lib/dpkg");
-    if fs::create_dir_all(&dpkg_dir).is_ok() {
-        let arch_path = dpkg_dir.join("arch");
-        if !arch_path.exists() {
-            let _ = fs::write(&arch_path, "arm64\n");
-        }
+    fs::create_dir_all(&dpkg_dir).expect("Failed to create guest dpkg directory");
+    let arch_path = dpkg_dir.join("arch");
+    if !arch_path.exists() {
+        fs::write(&arch_path, "arm64\n").expect("Failed to seed the guest dpkg architecture");
     }
 
     let dpkg_info_dir = fs_root.join("var/lib/dpkg/info");
-    if fs::create_dir_all(&dpkg_info_dir).is_ok() {
-        let format_path = dpkg_info_dir.join("format");
-        if !format_path.exists() {
-            let _ = fs::write(&format_path, "1\n");
-        }
+    fs::create_dir_all(&dpkg_info_dir).expect("Failed to create guest dpkg info directory");
+    let format_path = dpkg_info_dir.join("format");
+    if !format_path.exists() {
+        fs::write(&format_path, "1\n").expect("Failed to seed the guest dpkg info format");
     }
 
     let sources_list = fs_root.join("etc/apt/sources.list");
     if !sources_list.exists() {
         if let Some(parent) = sources_list.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent).expect("Failed to create guest apt directory");
         }
-        let _ = fs::write(
+        fs::write(
             &sources_list,
             "deb http://deb.debian.org/debian trixie main\n\
              deb http://deb.debian.org/debian trixie-updates main\n\
              deb http://security.debian.org/debian-security trixie-security main\n",
-        );
+        )
+        .expect("Failed to seed Debian package sources");
     }
 }
 
@@ -659,7 +1079,9 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     // Normally created by systemd-tmpfiles, which does not run in PRoot.
     // KWin refuses to start Xwayland without this socket directory, and
     // Debian's ksmserver still needs that X connection in a Wayland session.
-    for relative in ["tmp/.X11-unix", "tmp/.ICE-unix", "var/tmp"] {
+    // `tmp` itself must also be world-writable: the image ships it as 0755,
+    // which breaks the Pulse native socket and wayland-0 in the guest.
+    for relative in ["tmp", "tmp/.X11-unix", "tmp/.ICE-unix", "var/tmp"] {
         let directory = fs_root.join(relative);
         fs::create_dir_all(&directory).expect("Failed to create guest session directory");
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o1777))
@@ -686,7 +1108,9 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
             let _ = fs::set_permissions(&docs_entry, fs::Permissions::from_mode(0o755));
         }
     }
-    sync_konsole_profile(fs_root, &home_dir);
+    if !sync_base_files_defaults(fs_root, &home_dir) {
+        panic!("Debian shell startup defaults could not be repaired; refusing guest launch");
+    }
     sync_debian_package_management(fs_root);
 
     let xresources_path = home_dir.join(".Xresources");
@@ -873,18 +1297,60 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     sync_guest_network_config(fs_root);
 }
 
-fn sync_konsole_profile(fs_root: &Path, home_dir: &Path) {
-    let profile_content = "[General]\nCommand=/bin/bash\nName=Profile 1\nParent=FALLBACK/\n\n[Appearance]\nColorScheme=Breeze\n";
-    for dir in [
-        fs_root.join("usr/share/konsole"),
-        home_dir.join(".local/share/konsole"),
-    ] {
-        let _ = fs::create_dir_all(&dir);
-        let profile_path = dir.join("Profile 1.profile");
-        if !profile_path.exists() {
-            let _ = fs::write(&profile_path, profile_content);
+/// Select Portal's profile once for runtimes that previously defaulted to the
+/// extracted Debian `Profile 1.profile`.  After this migration the user's
+/// selected profile is authoritative; later launches never rewrite `konsolerc`
+/// or any profile launch keys.
+fn migrate_konsole_profile(home_dir: &Path, guest_home: &str) {
+    let config_dir = home_dir.join(".config");
+    let config_path = config_dir.join("konsolerc");
+    let profile_dir = home_dir.join(".local/share/konsole");
+    let profile_path = profile_dir.join("LocalDesktop.profile");
+    let marker = home_dir.join(".local/state/portal/konsole-profile-v2");
+
+    write_default_file(&config_path, KONSOLE_CONFIG);
+    write_default_file(
+        &profile_path,
+        &KONSOLE_PROFILE.replace("@HOME@", guest_home),
+    );
+
+    if marker.exists() {
+        return;
+    }
+
+    let content = fs::read_to_string(&config_path).expect("Failed to read Konsole configuration");
+    let mut changed = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let is_legacy_default = trimmed
+            .split_once('=')
+            .map(|(key, value)| {
+                key.trim().eq_ignore_ascii_case("DefaultProfile")
+                    && value.trim() == "Profile 1.profile"
+            })
+            .unwrap_or(false);
+        if is_legacy_default {
+            let prefix_len = line.len() - trimmed.len();
+            lines.push(format!(
+                "{}DefaultProfile=LocalDesktop.profile",
+                &line[..prefix_len]
+            ));
+            changed = true;
+        } else {
+            lines.push(line.to_string());
         }
     }
+    if changed {
+        let mut migrated = lines.join("\n");
+        migrated.push('\n');
+        fs::write(&config_path, migrated).expect("Failed to migrate Konsole default profile");
+    }
+
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent).expect("Failed to create Konsole migration state directory");
+    }
+    fs::write(marker, "version=2\n").expect("Failed to record Konsole profile migration");
 }
 
 fn sync_android_timezone(fs_root: &Path) {
@@ -1092,9 +1558,6 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     // actionable kdialog message. Do not pre-seed an autostart that launches
     // a terminal or bypasses that recovery flow.
 
-    let konsole_profile_dir = home_dir.join(".local/share/konsole");
-    write_default_file(&home_dir.join(".config/konsolerc"), KONSOLE_CONFIG);
-    let konsole_profile_path = konsole_profile_dir.join("LocalDesktop.profile");
     // Konsole reads this path after PRoot has switched into the guest.  Do
     // not leak the host-side `/data/.../archlinux-*` prefix into the profile;
     // that path is not meaningful inside the guest namespace.
@@ -1103,12 +1566,7 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     } else {
         format!("/home/{username}")
     };
-    let konsole_profile = KONSOLE_PROFILE.replace("@HOME@", &guest_home);
-    write_default_file(&konsole_profile_path, &konsole_profile);
-    // Existing upgrades may have received the old empty-command profile.
-    // Repair only the launch keys, preserving appearance and other user edits.
-    upsert_kconfig_value(&konsole_profile_path, "General", "Command", "/bin/bash");
-    upsert_kconfig_value(&konsole_profile_path, "General", "Directory", &guest_home);
+    migrate_konsole_profile(&home_dir, &guest_home);
 
     let config_dir = home_dir.join(".config");
     let autostart_dir = config_dir.join("autostart");
