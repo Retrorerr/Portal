@@ -1,0 +1,37 @@
+Project Anland load-time stub — build recipe (guest-native ARM64 glibc).
+
+The lfdevs kwin_wayland binary (Debian rev -95, Anland backend) references
+KWin::AnlandBackend's constructor. Debian hardens with BIND_NOW, so the
+symbol must resolve at load even for QPainter sessions, which run Portal's
+damage-patched overlay libkwin that has no Anland backend. This one-symbol
+stub satisfies the loader. It is preloaded ONLY when ANLAND_SOCKET is unset
+(see assets/localdesktop-kwin-wrapper-v2.sh); any actual call traps (SIGILL),
+proving a backend-selection bug instead of corruptingpixels.
+
+Reproduce in the Debian 13 guest (native ARM64, gcc):
+
+  cat > /tmp/anland-stub.c <<'EOF'
+  // Project Anland load-time stub (QPainter sessions only, temporary).
+  // The lfdevs kwin_wayland binary references KWin::AnlandBackend's constructor
+  // (Debian BIND_NOW resolves it at load), while QPainter sessions run Portal's
+  // damage-patched overlay libkwin which has no Anland backend. This stub
+  // satisfies the loader. It is preloaded ONLY when ANLAND_SOCKET is unset; any
+  // actual call means a bad backend selection and traps loudly.
+  void _ZN4KWin13AnlandBackendC1ERK7QStringP7QObject(void) {
+      __builtin_trap();
+  }
+  EOF
+  cc -shared -fPIC -O2 -o /tmp/libanland-stub.so /tmp/anland-stub.c
+
+Verify in-guest (QPainter overlay lib + stub must load the binary):
+
+  LD_LIBRARY_PATH=/usr/local/lib/portal LD_PRELOAD=/tmp/libanland-stub.so \
+      /usr/bin/kwin_wayland --help | grep -m1 anland
+
+Then stage the .so here as assets/guest-arm64/libanland-stub.so (it is
+embedded into the APK and synced to /usr/local/lib/portal/ on every launch).
+
+Retirement path: rebuild the overlay libkwin from a source tree that includes
+the Anland backend (SuperTurtleDev/anland producers/kde/anland_backend_debian13_v5
++ Debian13_v5/kwin.patch) plus Portal's 0001-touchpad/0002-damage patches;
+a single libkwin then serves both modes and this stub becomes unnecessary.

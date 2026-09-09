@@ -77,22 +77,48 @@ struct AnwWindow {
         Option<unsafe extern "C" fn(*mut AnwWindow, *mut ANativeWindowBuffer, c_int) -> c_int>,
 }
 
-#[link(name = "nativewindow")]
-extern "C" {
-    pub fn ANativeWindow_acquire(window: *mut c_void);
-    pub fn ANativeWindow_release(window: *mut c_void);
-    pub fn ANativeWindow_getWidth(window: *mut c_void) -> i32;
-    pub fn ANativeWindow_getHeight(window: *mut c_void) -> i32;
-    pub fn ANativeWindow_setBuffersGeometry(
-        window: *mut c_void,
-        width: i32,
-        height: i32,
-        format: i32,
-    ) -> i32;
+/// Public `ANativeWindow` entry points, resolved via dlsym like the hidden
+/// ones (avoids a build-time `libnativewindow.so` dependency the APK packager
+/// cannot satisfy; the library is always present on-device).
+type AcquireFn = unsafe extern "C" fn(*mut c_void);
+type ReleaseFn = unsafe extern "C" fn(*mut c_void);
+type GetWidthFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type GetHeightFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type SetGeometryFn = unsafe extern "C" fn(*mut c_void, i32, i32, i32) -> i32;
+
+pub unsafe fn acquire(window: *mut c_void, api: &AnwApi) {
+    (api.acquire)(window)
+}
+
+pub unsafe fn release(window: *mut c_void, api: &AnwApi) {
+    (api.release)(window)
+}
+
+pub unsafe fn get_width(window: *mut c_void, api: &AnwApi) -> i32 {
+    (api.get_width)(window)
+}
+
+pub unsafe fn get_height(window: *mut c_void, api: &AnwApi) -> i32 {
+    (api.get_height)(window)
+}
+
+pub unsafe fn set_buffers_geometry(
+    window: *mut c_void,
+    api: &AnwApi,
+    width: i32,
+    height: i32,
+    format: i32,
+) -> i32 {
+    (api.set_geometry)(window, width, height, format)
 }
 
 /// dlsym'd hidden entry points. `Send` (function pointers are).
 pub struct AnwApi {
+    acquire: libloading::Symbol<'static, AcquireFn>,
+    release: libloading::Symbol<'static, ReleaseFn>,
+    get_width: libloading::Symbol<'static, GetWidthFn>,
+    get_height: libloading::Symbol<'static, GetHeightFn>,
+    set_geometry: libloading::Symbol<'static, SetGeometryFn>,
     set_buffer_count:
         libloading::Symbol<'static, unsafe extern "C" fn(*mut c_void, usize) -> c_int>,
     query: libloading::Symbol<
@@ -132,6 +158,11 @@ impl AnwApi {
             };
         }
         Ok(Self {
+            acquire: sym!(b"ANativeWindow_acquire"),
+            release: sym!(b"ANativeWindow_release"),
+            get_width: sym!(b"ANativeWindow_getWidth"),
+            get_height: sym!(b"ANativeWindow_getHeight"),
+            set_geometry: sym!(b"ANativeWindow_setBuffersGeometry"),
             set_buffer_count: sym!(b"ANativeWindow_setBufferCount"),
             query: sym!(b"ANativeWindow_query"),
             dequeue_buffer: sym!(b"ANativeWindow_dequeueBuffer"),

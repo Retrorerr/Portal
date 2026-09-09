@@ -126,13 +126,13 @@ impl AnlandSession {
         window_holder: Arc<winit::window::Window>,
         cfg: &AnlandConfig,
     ) -> Result<Self, String> {
-        unsafe { anw::ANativeWindow_acquire(window) };
         let anw = unsafe { AnwApi::load() }?;
+        unsafe { anw::acquire(window, &anw) };
         // Idempotent (re)connect to the CPU API, mirroring the reference.
         unsafe {
             AnwApi::api_disconnect(window, 2);
             if AnwApi::api_connect(window, 2) != 0 {
-                anw::ANativeWindow_release(window);
+                anw::release(window, &anw);
                 return Err(
                     "ANativeWindow api_connect(CPU) failed: window is owned by another API (EGL?)"
                         .into(),
@@ -141,8 +141,8 @@ impl AnlandSession {
         }
         let (win_w, win_h) = unsafe {
             (
-                anw::ANativeWindow_getWidth(window),
-                anw::ANativeWindow_getHeight(window),
+                anw::get_width(window, &anw),
+                anw::get_height(window, &anw),
             )
         };
         let (w, h) = if win_w > 0 && win_h > 0 {
@@ -156,12 +156,12 @@ impl AnlandSession {
             cfg.height
         );
         let r = unsafe {
-            anw::ANativeWindow_setBuffersGeometry(window, w as i32, h as i32, anw::FORMAT_RGBA_8888)
+            anw::set_buffers_geometry(window, &anw, w as i32, h as i32, anw::FORMAT_RGBA_8888)
         };
         if r != 0 {
             unsafe {
                 AnwApi::api_disconnect(window, 2);
-                anw::ANativeWindow_release(window);
+                anw::release(window, &anw);
             }
             return Err(format!("ANativeWindow_setBuffersGeometry failed: {r}"));
         }
@@ -171,7 +171,7 @@ impl AnlandSession {
         if r != 0 {
             unsafe {
                 AnwApi::api_disconnect(window, 2);
-                anw::ANativeWindow_release(window);
+                anw::release(window, &anw);
             }
             return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
         }
@@ -328,7 +328,7 @@ impl AnlandSession {
         }
         unsafe {
             AnwApi::api_disconnect(inner.window, 2);
-            anw::ANativeWindow_release(inner.window);
+            anw::release(inner.window, &inner.anw);
         }
         let (q, f, b, fb) = (
             inner.frames_queued.load(Ordering::Relaxed),
