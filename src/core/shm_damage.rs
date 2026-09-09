@@ -34,22 +34,23 @@
 //!   scale, invalid viewport, non-finite floats) returns `Err` and the caller
 //!   must fall back to a full upload. Correctness always beats optimisation.
 //! - Accumulation is generation-tracked: damage is unioned across all commits
-//!   since the last successful texture upload; resize/new-buffer forces full.
+//!   since the last successful texture upload; resize/view drift forces full.
 //!
 //! Ghosting fix (explicit content-generation gate, `ShmSyncTracker`): damage
 //! rects alone cannot prove a partial upload is safe, because the cached GLES
 //! texture's true contents are a function of *which committed buffer state it
 //! was last synced to* and *every subsequent mutation* — not just the latest
 //! damage rectangle. In particular, same-`wl_buffer` reuse with new contents,
-//! buffer replacement/rotation, damage-history eviction, failed GL uploads,
+//! geometry/interpretation changes, damage-history eviction, failed GL uploads,
 //! and viewport/scale/transform reinterpretation can all leave the texture
 //! behind the damage chain while every individual rect looks valid. The gate
 //! therefore tracks an explicit monotonic content generation per commit and
 //! the exact generation the texture provably contains; partial upload is
 //! allowed only with a complete, ordered damage record for every generation
-//! in between, on the same buffer object, geometry, format interpretation,
-//! and view. Anything uncertain forces exactly one full upload, after which
-//! the generation resynchronizes and partials may resume.
+//! in between, with stable geometry, format interpretation, and view. Normal
+//! Wayland buffer rotation is valid because damage describes changes to the
+//! surface contents, not changes to wl_buffer identity. Anything uncertain
+//! forces exactly one full upload, after which partials may resume.
 //!
 //! On the `+1 logical pixel` conservative expansion (kept deliberately): it
 //! is not bug-hiding padding but protocol-rounding coverage. Clients report
@@ -693,10 +694,10 @@ pub struct CommitSyncEvent {
     /// A (possibly re-attached) SHM buffer was committed, so the content
     /// generation advances and fresh damage is required to cover it.
     pub new_content: bool,
-    /// The committed wl_buffer object differs from the one the cached texture
-    /// was synced to. Same object + complete damage may partial-upload;
-    /// a replaced object must fully resync (object identity is not content
-    /// identity, and a fresh/rotated buffer has no proven pixel history).
+    /// The committed wl_buffer object differs from the previous commit.
+    /// Object identity is diagnostic only: the cached GLES texture represents
+    /// the Wayland surface's previous committed content, and complete surface
+    /// damage advances that content across a client's normal buffer rotation.
     pub new_object: bool,
     pub fingerprint: SyncFingerprint,
     /// This generation's damage was completely recorded (converted,
@@ -723,7 +724,7 @@ pub enum SyncDecision {
 /// Invariant: a cached GLES texture may receive a partial update only when
 /// Portal knows exactly which committed SHM-buffer generation that texture
 /// represents (`uploaded`) and holds complete, ordered damage for every
-/// subsequent generation up to `committed`, with no identity/geometry/
+/// subsequent generation up to `committed`, with no geometry/
 /// interpretation drift in between. Anything else forces exactly one full
 /// upload, after which the generation resynchronizes and partials may resume.
 ///
@@ -739,12 +740,11 @@ pub struct ShmSyncTracker {
     /// Generation the GL texture provably contains (`None` = unknown).
     uploaded: Option<u64>,
     /// Every generation in `(uploaded, committed]` has usable damage, with no
-    /// identity/geometry drift since the last successful upload.
+    /// geometry/interpretation drift since the last successful upload.
     complete: bool,
     gap_reason: Option<&'static str>,
     uploaded_fp: Option<SyncFingerprint>,
     current_fp: Option<SyncFingerprint>,
-    object_changed: bool,
 }
 
 impl ShmSyncTracker {
@@ -756,7 +756,6 @@ impl ShmSyncTracker {
             gap_reason: None,
             uploaded_fp: None,
             current_fp: None,
-            object_changed: false,
         }
     }
 
@@ -770,11 +769,6 @@ impl ShmSyncTracker {
     pub fn note_commit(&mut self, ev: CommitSyncEvent) {
         if ev.new_content {
             self.committed += 1;
-            if ev.new_object && self.uploaded.is_some() {
-                // A replaced buffer object has no proven pixel history, even
-                // at identical dimensions.
-                self.object_changed = true;
-            }
             if !ev.damage_complete {
                 self.complete = false;
                 self.gap_reason = ev.damage_reason;
@@ -811,11 +805,6 @@ impl ShmSyncTracker {
                 reason: "unknown-generation",
             };
         };
-        if self.object_changed {
-            return SyncDecision::Full {
-                reason: "buffer-replaced",
-            };
-        }
         if !self.complete {
             return SyncDecision::Full {
                 reason: self.gap_reason.unwrap_or("history-gap"),
@@ -846,7 +835,6 @@ impl ShmSyncTracker {
         self.uploaded_fp = self.current_fp;
         self.complete = true;
         self.gap_reason = None;
-        self.object_changed = false;
     }
 
     pub fn committed(&self) -> u64 {
@@ -1299,30 +1287,21 @@ mod tests {
     }
 
     #[test]
-    fn sync_buffer_object_replacement_forces_full_then_resumes() {
+    fn sync_buffer_rotation_with_complete_damage_stays_partial() {
         let mut t = ShmSyncTracker::new();
         t.note_commit(content(fp(800, 600), true));
         t.mark_uploaded(true);
         t.note_commit(content(fp(800, 600), false));
         t.mark_uploaded(true);
-        // Rotated/fresh wl_buffer object: no proven pixel history.
+        // Normal double-buffer rotation still describes the next surface
+        // content relative to the cached texture through complete damage.
         t.note_commit(content(fp(800, 600), true));
-        assert_eq!(
-            t.decide(),
-            SyncDecision::Full {
-                reason: "buffer-replaced"
-            }
-        );
-        // Failure to resync must not clear the requirement.
+        assert_eq!(t.decide(), SyncDecision::Partial);
+        // A failed partial upload must leave the generation pending.
         t.mark_uploaded(false);
-        assert_eq!(
-            t.decide(),
-            SyncDecision::Full {
-                reason: "buffer-replaced"
-            }
-        );
+        assert_eq!(t.decide(), SyncDecision::Partial);
         t.mark_uploaded(true);
-        // After one successful full upload, partials resume safely.
+        // After success, later complete generations remain partial.
         t.note_commit(content(fp(800, 600), false));
         assert_eq!(t.decide(), SyncDecision::Partial);
     }

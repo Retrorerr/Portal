@@ -381,13 +381,21 @@ impl EGLContext {
     pub unsafe fn make_current(&self) -> Result<(), MakeCurrentError> {
         #[cfg(target_os = "android")]
         {
-            let pbuffer_attribs = vec![ffi::egl::WIDTH, 1, ffi::egl::HEIGHT, 1, ffi::egl::NONE];
-            let pbuffer = ffi::egl::CreatePbufferSurface(
-                **self.display.get_display_handle(),
-                self.config_id,
-                pbuffer_attribs.as_ptr() as *const c_int,
-            );
-            wrap_egl_call_bool(|| {
+            // Texture imports need this context, not a different drawable.
+            // Keep the acquired window backbuffer current across imports and
+            // avoid allocating a throwaway pbuffer on every texture update.
+            if self.is_current() {
+                return Ok(());
+            }
+            let pbuffer_attribs = [ffi::egl::WIDTH, 1, ffi::egl::HEIGHT, 1, ffi::egl::NONE];
+            let pbuffer = wrap_egl_call_ptr(|| {
+                ffi::egl::CreatePbufferSurface(
+                    **self.display.get_display_handle(),
+                    self.config_id,
+                    pbuffer_attribs.as_ptr() as *const c_int,
+                )
+            })?;
+            let result = wrap_egl_call_bool(|| {
                 ffi::egl::MakeCurrent(
                     **self.display.get_display_handle(),
                     pbuffer,
@@ -396,7 +404,13 @@ impl EGLContext {
                 )
             })
             .map(|_| ())
-            .map_err(Into::into)
+            .map_err(Into::into);
+            if pbuffer != ffi::egl::NO_SURFACE {
+                // EGL defers destruction until this surface is no longer
+                // current. No owner otherwise retains this temporary handle.
+                ffi::egl::DestroySurface(**self.display.get_display_handle(), pbuffer);
+            }
+            result
         }
         #[cfg(not(target_os = "android"))]
         {

@@ -15,7 +15,7 @@ use crate::{
 use std::sync::Arc;
 use std::{
     any::TypeId,
-    collections::{hash_map::Entry, HashMap},
+    collections::HashMap,
     sync::Mutex,
 };
 use tracing::{error, instrument, warn};
@@ -43,6 +43,8 @@ pub struct RendererSurfaceState {
     pub(crate) buffer_has_alpha: Option<bool>,
     pub(crate) buffer: Option<Buffer>,
     pub(crate) damage: DamageBag<i32, BufferCoord>,
+    /// Last successful import into the renderer's per-surface texture.
+    /// Client wl_buffer rotation does not change that texture's identity.
     pub(crate) renderer_seen: HashMap<(TypeId, usize), CommitCounter>,
     pub(crate) textures: HashMap<(TypeId, usize), Box<dyn std::any::Any>>,
     /// Explicit SHM content-generation gate (ghosting fix): proves a partial
@@ -154,8 +156,9 @@ impl RendererSurfaceState {
         let attrs = guard.current();
 
         let new_buffer = matches!(attrs.buffer, Some(BufferAssignment::NewBuffer(_)));
-        // Whether the committed wl_buffer object differs from the one the
-        // cached texture was synced to. Captured before replacement below.
+        // Whether the committed wl_buffer object differs from the previous
+        // commit. This is diagnostic only for SHM sync: Wayland damage tracks
+        // surface-content continuity across normal client buffer rotation.
         let mut new_object = false;
         match attrs.buffer.take() {
             Some(BufferAssignment::NewBuffer(buffer)) => {
@@ -208,9 +211,10 @@ impl RendererSurfaceState {
         // Every NewBuffer commit advances an explicit content generation in
         // `shm_sync`; a partial texture upload is allowed only while the
         // tracker proves the complete damage chain from the last successful
-        // GL upload (same buffer object, same geometry, same
-        // viewport/scale/transform interpretation, no history gap). Anything
-        // else forces exactly one full resync at import time.
+        // GL upload (same geometry and viewport/scale/transform
+        // interpretation, no history gap). Normal wl_buffer rotation is
+        // surface-content continuous; anything uncertain forces exactly one
+        // full resync at import time.
         {
             use super::shm_damage::{buffer_to_buffer, surface_to_buffer};
             let view_src = Some(surface_view.src);
@@ -228,14 +232,14 @@ impl RendererSurfaceState {
                         }
                     },
                     Damage::Surface(rect) => match surface_to_buffer(
-                        rect,
-                        buffer_dimensions,
-                        surface_size,
-                        view_src,
-                        view_dst,
-                        self.buffer_scale,
-                        self.buffer_transform,
-                    ) {
+                            rect,
+                            buffer_dimensions,
+                            surface_size,
+                            view_src,
+                            view_dst,
+                            self.buffer_scale,
+                            self.buffer_transform,
+                        ) {
                         Ok(Some(r)) => validated.push(r),
                         Ok(None) => {}
                         Err(_) => {
@@ -381,6 +385,11 @@ impl RendererSurfaceState {
         self.buffer_scale
     }
 
+    /// Actual attached buffer dimensions in buffer pixels, before scale/transform.
+    pub fn buffer_dimensions(&self) -> Option<Size<i32, BufferCoord>> {
+        self.buffer_dimensions
+    }
+
     /// Returns the transform of the current attached buffer
     pub fn buffer_transform(&self) -> Transform {
         self.buffer_transform
@@ -435,6 +444,7 @@ impl RendererSurfaceState {
         self.buffer = None;
         self.textures.clear();
         self.damage.reset();
+        self.renderer_seen.clear();
         self.shm_sync.reset();
         self.surface_view = None;
         self.buffer_has_alpha = None;
@@ -616,24 +626,24 @@ where
         let mut data_ref = data.lock().unwrap();
         let data = &mut *data_ref;
 
-        let last_commit = data.renderer_seen.get(&texture_id);
-        // `DamageBag::damage_since` returns `None` on evicted/reset history:
-        // completeness of the chain can then no longer be demonstrated.
-        if data.damage.damage_since(last_commit.copied()).is_none() {
-            data.shm_sync.note_history_gap("history-gap");
-        }
-        let buffer_damage = data.damage_since(last_commit.copied());
-        // Explicit content-generation gate (ghosting fix): a partial upload
-        // is allowed only while the tracker proves the complete damage chain
-        // from the last successful GL upload. Anything else uploads the whole
-        // buffer once, which resynchronizes the generation.
-        let gate = data.shm_sync.decide();
-        if let SyncDecision::Full { reason } = gate {
-            tracing::debug!("shm.sync resync reason={reason}");
-        }
-        let force_full = !matches!(gate, SyncDecision::Partial | SyncDecision::UpToDate);
-        if let Entry::Vacant(e) = data.textures.entry(texture_id) {
+        if !data.textures.contains_key(&texture_id) {
             if let Some(buffer) = data.buffer.as_ref() {
+                let last_commit = data.renderer_seen.get(&texture_id);
+                // Damage describes changes to surface contents. Accumulate
+                // from the last successful update of the shared texture.
+                if data.damage.damage_since(last_commit.copied()).is_none() {
+                    data.shm_sync.note_history_gap("history-gap");
+                }
+                let buffer_damage = data.damage_since(last_commit.copied());
+                // Explicit content-generation gate (ghosting fix): a partial
+                // upload is allowed only while the tracker proves the complete
+                // damage chain from the last successful GL upload. Anything
+                // else uploads the whole buffer once.
+                let gate = data.shm_sync.decide();
+                if let SyncDecision::Full { reason } = gate {
+                    tracing::debug!("shm.sync resync reason={reason}");
+                }
+                let force_full = !matches!(gate, SyncDecision::Partial | SyncDecision::UpToDate);
                 // There is no point in importing a single pixel buffer
                 if matches!(
                     crate::backend::renderer::buffer_type(buffer),
@@ -659,7 +669,14 @@ where
                     if force_full { &full_damage } else { &partial_damage };
                 match renderer.import_buffer(buffer, Some(states), damage) {
                     Some(Ok(m)) => {
-                        e.insert(Box::new(m));
+                        data.textures.insert(texture_id, Box::new(m));
+                        if force_full {
+                            // A texture resync can change pixels outside the
+                            // client's incremental damage. The output damage
+                            // tracker must redraw them too, including in older
+                            // EGL buffers restored on subsequent frames.
+                            data.damage.add(full_damage.iter().copied());
+                        }
                         data.renderer_seen.insert(texture_id, data.current_commit());
                         // Only success advances the proven generation; the
                         // upload path reports GL failures as errors so a

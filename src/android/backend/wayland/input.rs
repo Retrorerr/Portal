@@ -288,6 +288,7 @@ pub struct WinitTouchStartedEvent {
     pub(crate) position: RelativePosition,
     pub(crate) global_position: PhysicalPosition<f64>,
     pub(crate) id: u64,
+    pub(crate) native_protocol: bool,
 }
 
 impl Event<WinitInput> for WinitTouchStartedEvent {
@@ -333,6 +334,7 @@ pub struct WinitTouchMovedEvent {
     pub(crate) position: RelativePosition,
     pub(crate) global_position: PhysicalPosition<f64>,
     pub(crate) id: u64,
+    pub(crate) native_protocol: bool,
 }
 
 impl Event<WinitInput> for WinitTouchMovedEvent {
@@ -384,6 +386,7 @@ pub struct WinitTouchEndedEvent {
     /// carry dummy coordinates that handlers must ignore (release-at-current
     /// or drop) — never edge-snapped into guest clicks.
     pub(crate) in_guest: bool,
+    pub(crate) native_protocol: bool,
 }
 
 impl Event<WinitInput> for WinitTouchEndedEvent {
@@ -409,6 +412,7 @@ impl TouchEvent<WinitInput> for WinitTouchEndedEvent {
 pub struct WinitTouchCancelledEvent {
     pub(crate) time: u64,
     pub(crate) id: u64,
+    pub(crate) native_protocol: bool,
 }
 
 impl Event<WinitInput> for WinitTouchCancelledEvent {

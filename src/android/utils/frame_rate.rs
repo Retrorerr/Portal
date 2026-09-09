@@ -6,17 +6,18 @@
 //! request at all.
 //!
 //! This module issues a supported per-window preference:
-//! `ANativeWindow_setFrameRate[WithChangeStrategy](<preferred> Hz, DEFAULT,
+//! `ANativeWindow_setFrameRate[WithChangeStrategy](<preferred> Hz, AT_LEAST,
 //! ONLY_IF_SEAMLESS)`, where `<preferred>` is resolved from
 //! `Display.getSupportedModes()` (144 Hz on the OnePlus Pad 3, otherwise the
-//! device's own maximum). Sustained compositor demand may temporarily select
-//! a supported 60 Hz multiple through the host-tested cadence policy. Neither
-//! request nor physical observations change the nominal Wayland mode.
+//! device's own maximum). The interactive desktop never downshifts based on
+//! observed client commit cadence. Neither the request nor physical
+//! observations change the nominal Wayland mode.
 //! Semantics per the NDK:
 //! - `frameRate` is a hint; the system may stay on a lower refresh when idle
 //!   or when no better match exists. Unsupported modes are never forced.
-//! - `COMPATIBILITY_DEFAULT (0)` lets the system use VRR/power-saving and
-//!   lets Portal adapt via pull-down. Never uses fixed-source video semantics.
+//! - Android 16's `COMPATIBILITY_AT_LEAST (2)` expresses that faster UI,
+//!   animation and scrolling cadence is useful even when current commits are
+//!   slower. Older releases use `COMPATIBILITY_DEFAULT (0)`.
 //! - `ONLY_IF_SEAMLESS (0)` preserves UX: no mode switch with visual
 //!   interruption (black screen). Power-saving behaviour is preserved.
 //!
@@ -30,10 +31,10 @@ use winit::platform::android::activity::AndroidApp;
 /// Fallback interactive desktop hint in Hz, used only when the supported-mode
 /// list is unavailable. The live path resolves the preferred rate from
 /// `Display.getSupportedModes()`; this stays as the sane default.
-pub const DESIRED_FRAME_RATE_HZ: f32 = 120.0;
+pub const DESIRED_FRAME_RATE_HZ: f32 = 144.0;
 
 /// Fallback interactive desktop hint in millihertz (see [`DESIRED_FRAME_RATE_HZ`]).
-pub const DESIRED_FRAME_RATE_MILLIHZ: i32 = 120_000;
+pub const DESIRED_FRAME_RATE_MILLIHZ: i32 = 144_000;
 
 /// Resolve the preferred frame-rate hint in Hz from the display modes Android
 /// reports (144.0 on the OnePlus Pad 3, otherwise the device maximum).
@@ -51,6 +52,9 @@ pub fn preferred_frame_rate_hz(android_app: &AndroidApp) -> f32 {
 /// `ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT` — no inherent restriction.
 /// Correct for games/UIs; preserves VRR and power-saving.
 const COMPATIBILITY_DEFAULT: i8 = 0;
+/// Public `Surface.FRAME_RATE_COMPATIBILITY_AT_LEAST` added in API 36.
+/// The native window implementation consumes the same compatibility enum.
+const COMPATIBILITY_AT_LEAST: i8 = 2;
 /// `ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS` — never cause a
 /// non-seamless (visually interrupting) mode switch.
 const CHANGE_ONLY_IF_SEAMLESS: i8 = 0;
@@ -85,6 +89,16 @@ pub fn ensure_high_refresh_rate_hz(android_app: &AndroidApp, rate_hz: f32) {
         return;
     };
     let raw_window = native_window.ptr().as_ptr().cast::<std::ffi::c_void>();
+    let compatibility = if device_api_level() >= 36 {
+        COMPATIBILITY_AT_LEAST
+    } else {
+        COMPATIBILITY_DEFAULT
+    };
+    let compatibility_name = if compatibility == COMPATIBILITY_AT_LEAST {
+        "at-least"
+    } else {
+        "default"
+    };
 
     // SAFETY: `dlopen`/`dlsym`/`dlclose` with NUL-terminated literals; the
     // resolved function pointers are only called with a live ANativeWindow
@@ -108,18 +122,23 @@ pub fn ensure_high_refresh_rate_hz(android_app: &AndroidApp, rate_hz: f32) {
             type WithStrategyFn =
                 unsafe extern "system" fn(*mut std::ffi::c_void, f32, i8, i8) -> i32;
             let func: WithStrategyFn = std::mem::transmute(with_strategy_addr);
-            let status = func(
-                raw_window,
-                rate_hz,
-                COMPATIBILITY_DEFAULT,
-                CHANGE_ONLY_IF_SEAMLESS,
-            );
+            let mut status = func(raw_window, rate_hz, compatibility, CHANGE_ONLY_IF_SEAMLESS);
+            let mut applied_compatibility = compatibility_name;
+            if status != 0 && compatibility == COMPATIBILITY_AT_LEAST {
+                status = func(
+                    raw_window,
+                    rate_hz,
+                    COMPATIBILITY_DEFAULT,
+                    CHANGE_ONLY_IF_SEAMLESS,
+                );
+                applied_compatibility = "default-fallback";
+            }
             log::info!(
-                "frame-rate: ANativeWindow_setFrameRateWithChangeStrategy({rate_hz}Hz, compat=DEFAULT, seamless) status={status}"
+                "frame-rate: ANativeWindow_setFrameRateWithChangeStrategy({rate_hz}Hz, compat={applied_compatibility}, seamless) status={status}"
             );
             crate::android::diagnostics::host_event(
                 "frame-rate",
-                &format!("api=setFrameRateWithChangeStrategy rate_hz={rate_hz} compat=default strategy=seamless status={status}"),
+                &format!("api=setFrameRateWithChangeStrategy rate_hz={rate_hz} compat={applied_compatibility} strategy=seamless status={status}"),
             );
             libc::dlclose(handle);
             return;
@@ -132,13 +151,18 @@ pub fn ensure_high_refresh_rate_hz(android_app: &AndroidApp, rate_hz: f32) {
         if !legacy_addr.is_null() {
             type SetFrameRateFn = unsafe extern "system" fn(*mut std::ffi::c_void, f32, i8) -> i32;
             let func: SetFrameRateFn = std::mem::transmute(legacy_addr);
-            let status = func(raw_window, rate_hz, COMPATIBILITY_DEFAULT);
+            let mut status = func(raw_window, rate_hz, compatibility);
+            let mut applied_compatibility = compatibility_name;
+            if status != 0 && compatibility == COMPATIBILITY_AT_LEAST {
+                status = func(raw_window, rate_hz, COMPATIBILITY_DEFAULT);
+                applied_compatibility = "default-fallback";
+            }
             log::info!(
-                "frame-rate: ANativeWindow_setFrameRate({rate_hz}Hz, compat=DEFAULT) status={status}"
+                "frame-rate: ANativeWindow_setFrameRate({rate_hz}Hz, compat={applied_compatibility}) status={status}"
             );
             crate::android::diagnostics::host_event(
                 "frame-rate",
-                &format!("api=setFrameRate rate_hz={rate_hz} compat=default status={status}"),
+                &format!("api=setFrameRate rate_hz={rate_hz} compat={applied_compatibility} status={status}"),
             );
         } else {
             log::warn!(
@@ -151,4 +175,11 @@ pub fn ensure_high_refresh_rate_hz(android_app: &AndroidApp, rate_hz: f32) {
         }
         libc::dlclose(handle);
     }
+}
+
+fn device_api_level() -> i32 {
+    unsafe extern "C" {
+        fn android_get_device_api_level() -> libc::c_int;
+    }
+    unsafe { android_get_device_api_level() }
 }

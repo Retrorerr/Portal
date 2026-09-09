@@ -10,7 +10,7 @@ use std::{
     ptr,
     rc::Rc,
     sync::{
-        atomic::{AtomicBool, AtomicPtr, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
         mpsc::{channel, Receiver, Sender},
         Arc, Mutex, RwLock, RwLockWriteGuard,
     },
@@ -65,6 +65,35 @@ use wayland_server::protocol::wl_buffer;
 #[allow(clippy::all, missing_docs, missing_debug_implementations)]
 pub mod ffi {
     include!(concat!(env!("OUT_DIR"), "/gl_bindings.rs"));
+}
+
+/// Cumulative, lock-free SHM upload counters for low-overhead compositor
+/// diagnostics. Durations are CPU wall time spent in the import/upload path;
+/// asynchronous GPU/DMA completion can surface later in render or swap time.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ShmUploadMetrics {
+    pub calls: u64,
+    pub full_uploads: u64,
+    pub partial_uploads: u64,
+    pub bytes: u64,
+    pub cpu_time_ns: u64,
+}
+
+static SHM_UPLOAD_CALLS: AtomicU64 = AtomicU64::new(0);
+static SHM_UPLOAD_FULL: AtomicU64 = AtomicU64::new(0);
+static SHM_UPLOAD_PARTIAL: AtomicU64 = AtomicU64::new(0);
+static SHM_UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
+static SHM_UPLOAD_CPU_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot cumulative SHM upload counters without resetting them.
+pub fn shm_upload_metrics() -> ShmUploadMetrics {
+    ShmUploadMetrics {
+        calls: SHM_UPLOAD_CALLS.load(Ordering::Relaxed),
+        full_uploads: SHM_UPLOAD_FULL.load(Ordering::Relaxed),
+        partial_uploads: SHM_UPLOAD_PARTIAL.load(Ordering::Relaxed),
+        bytes: SHM_UPLOAD_BYTES.load(Ordering::Relaxed),
+        cpu_time_ns: SHM_UPLOAD_CPU_NS.load(Ordering::Relaxed),
+    }
 }
 
 crate::utils::ids::id_gen!(renderer_id);
@@ -757,6 +786,9 @@ impl ImportMemWl for GlesRenderer {
     ) -> Result<GlesTexture, GlesError> {
         use crate::wayland::shm::with_buffer_contents;
 
+        let profile_started = std::time::Instant::now();
+        let mut profile_upload: Option<(u64, bool)> = None;
+
         // why not store a `GlesTexture`? because the user might do so.
         // this is guaranteed a non-public internal type, so we are good.
         type CacheMap = HashMap<usize, ShmTextureCacheEntry>;
@@ -769,7 +801,7 @@ impl ImportMemWl for GlesRenderer {
                 .unwrap()
         });
 
-        with_buffer_contents(buffer, |ptr, len, data| {
+        let result = with_buffer_contents(buffer, |ptr, len, data| {
             let offset = data.offset;
             let width = data.width;
             let height = data.height;
@@ -887,6 +919,7 @@ impl ImportMemWl for GlesRenderer {
                             pixelsize as i64,
                             true,
                         );
+                        profile_upload = Some((stats.bytes_uploaded.max(0) as u64, true));
                         debug!(
                             "shm.upload full buffer={}x{} rects=1 damaged={}/{} {:.2}% bytes={} reason=new-texture",
                             width,
@@ -948,6 +981,7 @@ impl ImportMemWl for GlesRenderer {
                         pixelsize as i64,
                     );
                     if is_full {
+                        profile_upload = Some((stats.bytes_uploaded.max(0) as u64, true));
                         debug!(
                             "shm.upload full buffer={}x{} rects=1 damaged={}/{} {:.2}% bytes={} reason={}",
                             width,
@@ -980,6 +1014,7 @@ impl ImportMemWl for GlesRenderer {
                             ptr.offset(offset as isize) as *const _,
                         );
                     } else {
+                        profile_upload = Some((stats.bytes_uploaded.max(0) as u64, false));
                         debug!(
                             "shm.upload partial buffer={}x{} rects={} damaged={}/{} {:.2}% bytes={} reason={}",
                             width,
@@ -1046,7 +1081,22 @@ impl ImportMemWl for GlesRenderer {
 
             Ok(texture)
         })
-        .map_err(GlesError::BufferAccessError)?
+        .map_err(GlesError::BufferAccessError)?;
+
+        if let (Ok(_), Some((bytes, full))) = (&result, profile_upload) {
+            SHM_UPLOAD_CALLS.fetch_add(1, Ordering::Relaxed);
+            SHM_UPLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
+            SHM_UPLOAD_CPU_NS.fetch_add(
+                profile_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
+            if full {
+                SHM_UPLOAD_FULL.fetch_add(1, Ordering::Relaxed);
+            } else {
+                SHM_UPLOAD_PARTIAL.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
     }
 }
 
@@ -1576,6 +1626,13 @@ impl ExportMem for GlesRenderer {
 
 impl Bind<EGLSurface> for GlesRenderer {
     fn bind<'a>(&mut self, surface: &'a mut EGLSurface) -> Result<GlesTarget<'a>, GlesError> {
+        // Acquire this surface's back buffer now so buffer-age queries after
+        // Bind refer to the buffer that render() will draw. Merely wrapping
+        // the surface leaves the previous/surfaceless context current.
+        // SAFETY: the renderer owns this context on the calling render thread.
+        unsafe {
+            self.egl.make_current_with_surface(surface)?;
+        }
         Ok(GlesTarget(GlesTargetInternal::Surface { surface }))
     }
 }

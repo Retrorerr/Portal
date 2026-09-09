@@ -6,9 +6,8 @@ use std::{
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Linear resolution used by nested KWin before Portal upscales to the
-/// Android native surface. 0.8 on the Pad 3 maps 3392x2400 to 2714x1920.
-pub const DESKTOP_RENDER_LINEAR_SCALE: f64 = 0.8;
+/// Render at the Android surface's native resolution; KDE UI scale is independent.
+pub const DESKTOP_RENDER_LINEAR_SCALE: f64 = 1.0;
 
 #[cfg(all(not(test), feature = "portal-debug"))]
 pub const APP_FILES_ROOT: &str = "/data/data/app.polarbear/files";

@@ -5,7 +5,6 @@ pub mod core {
     pub mod clipboard_policy;
     pub mod clipboard_sync;
     pub mod config;
-    pub mod content_cadence;
     pub mod coordinate_transform;
     pub mod ime_policy;
     pub mod pointer_buttons;

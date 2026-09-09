@@ -1,0 +1,117 @@
+diff --git a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+index 1a4a8de..fb8284f 100644
+--- a/src/backends/wayland/wayland_output.cpp
++++ b/src/backends/wayland/wayland_output.cpp
+@@ -153,6 +153,13 @@ WaylandOutput::~WaylandOutput()
+ void WaylandOutput::setPrimaryBuffer(wl_buffer *buffer)
+ {
+     m_presentationBuffer = buffer;
++    m_presentationBufferDamage.reset();
++}
++
++void WaylandOutput::setPrimaryBuffer(wl_buffer *buffer, const QRegion &bufferDamage)
++{
++    m_presentationBuffer = buffer;
++    m_presentationBufferDamage = bufferDamage;
+ }
+ 
+ static void handleDiscarded(void *data,
+@@ -196,7 +203,12 @@ void WaylandOutput::present(const std::shared_ptr<OutputFrame> &frame)
+         return;
+     }
+     m_surface->attachBuffer(m_presentationBuffer);
+-    m_surface->damage(frame->damage());
++    if (m_presentationBufferDamage) {
++        m_surface->damageBuffer(*m_presentationBufferDamage);
++    } else {
++        m_surface->damage(frame->damage());
++    }
++    m_presentationBufferDamage.reset();
+     m_surface->setScale(std::ceil(scale()));
+     m_presentationBuffer = nullptr;
+     if (auto presentationTime = m_backend->display()->presentationTime()) {
+diff --git a/src/backends/wayland/wayland_output.h b/src/backends/wayland/wayland_output.h
+index bb64301..2d7a3a7 100644
+--- a/src/backends/wayland/wayland_output.h
++++ b/src/backends/wayland/wayland_output.h
+@@ -15,2 +15,3 @@
+ #include <QObject>
++#include <QRegion>
+ #include <QTimer>
+@@ -85,6 +86,7 @@ public:
+ 
+     void present(const std::shared_ptr<OutputFrame> &frame);
+     void setPrimaryBuffer(wl_buffer *buffer);
++    void setPrimaryBuffer(wl_buffer *buffer, const QRegion &bufferDamage);
+ 
+     void frameDiscarded();
+     void framePresented(std::chrono::nanoseconds timestamp, uint32_t refreshRate);
+@@ -106,6 +108,7 @@ private:
+     bool m_ready = false;
+     std::shared_ptr<OutputFrame> m_frame;
+     wl_buffer *m_presentationBuffer = nullptr;
++    std::optional<QRegion> m_presentationBufferDamage;
+     quint32 m_pendingConfigureSerial = 0;
+     QSize m_pendingConfigureSize;
+     QTimer m_configureThrottleTimer;
+diff --git a/src/backends/wayland/wayland_qpainter_backend.cpp b/src/backends/wayland/wayland_qpainter_backend.cpp
+index 0733130..006e143 100644
+--- a/src/backends/wayland/wayland_qpainter_backend.cpp
++++ b/src/backends/wayland/wayland_qpainter_backend.cpp
+@@ -13,6 +13,7 @@
+ #include "platformsupport/scenes/qpainter/qpainterswapchain.h"
+ #include "wayland_backend.h"
+ #include "wayland_output.h"
++#include "qpainter_buffer_damage.h"
+ 
+ #include <KWayland/Client/surface.h>
+ 
+@@ -65,7 +66,13 @@ bool WaylandQPainterPrimaryLayer::doEndFrame(const QRegion &renderedRegion, cons
+     m_renderTime->end();
+     frame->addRenderTimeQuery(std::move(m_renderTime));
+     m_damageJournal.add(damagedRegion);
+-    m_waylandOutput->setPrimaryBuffer(m_waylandOutput->backend()->importBuffer(m_back->buffer()));
++    // QPainter maps an integer logical window onto the native QImage. Its
++    // scale can differ from ceil(output scale), which wl_surface advertises.
++    // Export the actual painted buffer coordinates, including age repair.
++    const auto bufferDamage = qpainterBufferDamage(renderedRegion,
++                                                   m_waylandOutput->geometryF().toRect().size(),
++                                                   m_back->view()->image()->size());
++    m_waylandOutput->setPrimaryBuffer(m_waylandOutput->backend()->importBuffer(m_back->buffer()), bufferDamage);
+     m_swapchain->release(m_back);
+     return true;
+ }
+diff --git a/src/backends/wayland/qpainter_buffer_damage.h b/src/backends/wayland/qpainter_buffer_damage.h
+new file mode 100644
+--- /dev/null
++++ b/src/backends/wayland/qpainter_buffer_damage.h
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#pragma once
++
++#include <QRectF>
++#include <QRegion>
++#include <QSize>
++
++namespace KWin::Wayland
++{
++// Match ItemRendererQPainter::beginFrame: setWindow(renderRect().toRect())
++// maps the logical clip to the complete QImage viewport. Do not substitute
++// wl_surface's integer buffer scale or round the rectangle inward.
++inline QRegion qpainterBufferDamage(const QRegion &logicalDamage, const QSize &window, const QSize &buffer)
++{
++    const QRect bounds(QPoint(0, 0), buffer);
++    if (window.isEmpty() || buffer.isEmpty()) {
++        return bounds;
++    }
++    const qreal sx = qreal(buffer.width()) / window.width();
++    const qreal sy = qreal(buffer.height()) / window.height();
++    QRegion result;
++    for (const QRect &rect : logicalDamage) {
++        result += QRectF(rect.x() * sx, rect.y() * sy,
++                         rect.width() * sx, rect.height() * sy)
++                      .toAlignedRect().intersected(bounds);
++    }
++    return result;
++}
++}

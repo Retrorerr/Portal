@@ -89,6 +89,14 @@ pub enum AndroidFrameTimestampSupport {
 pub struct AndroidFrameTimestampSample {
     pub frame_id: u64,
     pub timestamp_ns: i64,
+    /// Display-present time minus the end of the corresponding EGL swap.
+    pub post_swap_queue_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingFrameTimestamp {
+    frame_id: u64,
+    swap_complete_ns: i64,
 }
 
 #[derive(Debug)]
@@ -99,7 +107,7 @@ struct AndroidFrameTimestampProbe {
     get_frame_timestamp_supported: Option<EglGetFrameTimestampSupported>,
     enabled_surface: Option<RawEglSurface>,
     pending_surface: Option<RawEglSurface>,
-    pending_frame_ids: VecDeque<u64>,
+    pending_frame_ids: VecDeque<PendingFrameTimestamp>,
 }
 
 impl Default for AndroidFrameTimestampProbe {
@@ -278,7 +286,10 @@ impl AndroidFrameTimestampProbe {
             return None;
         }
         self.pending_surface = Some(surface_after);
-        self.pending_frame_ids.push_back(frame_id);
+        self.pending_frame_ids.push_back(PendingFrameTimestamp {
+            frame_id,
+            swap_complete_ns: crate::android::utils::frame_pacing::monotonic_time_ns(),
+        });
         while self.pending_frame_ids.len() > MAX_PENDING_FRAME_TIMESTAMPS {
             self.pending_frame_ids.pop_front();
         }
@@ -306,7 +317,8 @@ impl AndroidFrameTimestampProbe {
         let timestamp_name = [EGL_DISPLAY_PRESENT_TIME_ANDROID];
         let mut remaining = VecDeque::new();
         let mut presented = Vec::new();
-        while let Some(frame_id) = self.pending_frame_ids.pop_front() {
+        while let Some(pending) = self.pending_frame_ids.pop_front() {
+            let frame_id = pending.frame_id;
             let mut value = 0_i64;
             let success = unsafe {
                 get_frame_timestamps(
@@ -325,7 +337,7 @@ impl AndroidFrameTimestampProbe {
                 continue;
             }
             match value {
-                EGL_TIMESTAMP_PENDING_ANDROID => remaining.push_back(frame_id),
+                EGL_TIMESTAMP_PENDING_ANDROID => remaining.push_back(pending),
                 EGL_TIMESTAMP_INVALID_ANDROID => {
                     log::debug!("Android EGL frame id={frame_id} has no display-present timestamp")
                 }
@@ -333,6 +345,9 @@ impl AndroidFrameTimestampProbe {
                     presented.push(AndroidFrameTimestampSample {
                         frame_id,
                         timestamp_ns,
+                        post_swap_queue_ns: timestamp_ns
+                            .saturating_sub(pending.swap_complete_ns)
+                            .max(0) as u64,
                     });
                 }
                 _ => log::debug!(
@@ -635,8 +650,10 @@ where
         &mut self.renderer
     }
 
-    /// Bind the underlying window to the underlying renderer.
-    pub fn bind(&mut self) -> Result<(&mut R, R::Framebuffer<'_>), SwapBuffersError> {
+    /// Bind the window and query the age of the back buffer acquired by this bind.
+    /// Returning them together prevents callers from querying age for a stale
+    /// or surfaceless binding before Android has selected the render buffer.
+    pub fn bind(&mut self) -> Result<(&mut R, R::Framebuffer<'_>, usize), SwapBuffersError> {
         // NOTE: we must resize before making the current context current, otherwise the back
         // buffer will be latched. Some nvidia drivers may not like it, but a lot of wayland
         // software does the order that way due to mesa latching back buffer on each
@@ -661,9 +678,27 @@ where
             self.bind_size = Some(window_size);
         }
 
+        let display = AndroidFrameTimestampProbe::raw_display(&self._display);
+        let surface = self.egl_surface.get_surface_handle();
         let fb = self.renderer.bind(&mut self.egl_surface)?;
-
-        Ok((&mut self.renderer, fb))
+        let mut age = 0;
+        if self.damage_tracking {
+            // SAFETY: both handles are owned by self and remain alive while
+            // the returned framebuffer borrows this backend. Query only after
+            // Bind has made this exact EGLSurface current on this thread.
+            let success = unsafe {
+                smithay::backend::egl::ffi::egl::QuerySurface(
+                    display,
+                    surface,
+                    smithay::backend::egl::ffi::egl::BUFFER_AGE_EXT as i32,
+                    &mut age,
+                )
+            };
+            if success != EGL_TRUE {
+                age = 0;
+            }
+        }
+        Ok((&mut self.renderer, fb, age.max(0) as usize))
     }
 
     /// Retrieve the underlying `EGLSurface` for advanced operations
@@ -686,22 +721,6 @@ where
     pub fn poll_android_frame_timestamps(&mut self) -> Vec<AndroidFrameTimestampSample> {
         self.frame_timestamps
             .poll(&self._display, &self.egl_surface)
-    }
-
-    /// Retrieve the buffer age of the current backbuffer of the window.
-    ///
-    /// This will only return a meaningful value, if this `WinitGraphicsBackend`
-    /// is currently bound (by previously calling [`WinitGraphicsBackend::bind`]).
-    ///
-    /// Otherwise and on error this function returns `None`.
-    /// If you are using this value actively e.g. for damage-tracking you should
-    /// likely interpret an error just as if "0" was returned.
-    pub fn buffer_age(&self) -> Option<usize> {
-        if self.damage_tracking {
-            self.egl_surface.buffer_age().map(|x| x as usize)
-        } else {
-            Some(0)
-        }
     }
 
     /// Submits the back buffer to the window by swapping, requires the window to be previously

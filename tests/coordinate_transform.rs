@@ -196,6 +196,25 @@ fn reduced_internal_resolution_upscales_to_the_native_viewport() {
 }
 
 #[test]
+fn configured_desktop_resolution_is_native_without_changing_kde_scale() {
+    use localdesktop::core::{
+        config::DESKTOP_RENDER_LINEAR_SCALE,
+        coordinate_transform::{kwin_logical_to_physical_pixels, AuthoritativeDisplayState},
+    };
+    assert_eq!(DESKTOP_RENDER_LINEAR_SCALE, 1.0);
+    for (width, height) in [(3392, 2400), (2400, 3392), (1600, 1000)] {
+        for scale in [1.0, 1.5, 2.0, 2.25] {
+            let mut state = AuthoritativeDisplayState::new(width, height, 320, 144000);
+            state.update_kwin_scale(scale);
+            state.update_render_scale(DESKTOP_RENDER_LINEAR_SCALE);
+            let pixels = kwin_logical_to_physical_pixels(state.configure_size(), scale);
+            assert!((pixels.0 as f64 - width as f64).abs() <= scale);
+            assert!((pixels.1 as f64 - height as f64).abs() <= scale);
+        }
+    }
+}
+
+#[test]
 fn logical_configure_rounding_policy_invariants() {
     use localdesktop::core::coordinate_transform::{
         kwin_logical_to_physical_pixels, physical_to_kwin_logical_configure,

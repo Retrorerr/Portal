@@ -17,6 +17,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::Color32F;
 use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{self, CursorImageStatus, CursorImageSurfaceData};
+use smithay::input::touch::{DownEvent, MotionEvent as TouchMotion, UpEvent};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_pointer::ButtonState as WlButtonState;
 use smithay::reexports::wayland_server::Resource;
@@ -29,7 +30,7 @@ use smithay::wayland::{
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, Event, InputEvent, KeyboardKeyEvent,
-        PointerAxisEvent, PointerButtonEvent,
+        PointerAxisEvent, PointerButtonEvent, TouchEvent,
     },
     output::{Mode, Scale},
 };
@@ -332,88 +333,139 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                     );
                 }
                 InputEvent::TouchDown { event } => {
-                    // Just move the cursor. Which button (if any) this gesture sends is only known
-                    // once the finger moves, lifts, or sits still long enough to be a long press.
-                    emit_pointer_motion(
-                        &mut backend.compositor,
-                        event.x(),
-                        event.y(),
-                        event.time_msec(),
-                    );
+                    if event.native_protocol {
+                        let focus = get_surface(&backend.compositor.state)
+                            .map(|surface| (surface.wl_surface().clone(), (0.0, 0.0).into()));
+                        let touch = backend.compositor.touch.clone();
+                        touch.down(
+                            &mut backend.compositor.state,
+                            focus,
+                            &DownEvent {
+                                slot: event.slot(),
+                                location: (event.x(), event.y()).into(),
+                                serial: SERIAL_COUNTER.next_serial(),
+                                time: event.time_msec(),
+                            },
+                        );
+                        touch.frame(&mut backend.compositor.state);
+                    } else {
+                        // Just move the cursor. Which button (if any) this gesture sends is only known
+                        // once the finger moves, lifts, or sits still long enough to be a long press.
+                        emit_pointer_motion(
+                            &mut backend.compositor,
+                            event.x(),
+                            event.y(),
+                            event.time_msec(),
+                        );
+                    }
                 }
                 InputEvent::TouchMotion { event } => {
-                    let time = event.time_msec();
+                    if event.native_protocol {
+                        let focus = get_surface(&backend.compositor.state)
+                            .map(|surface| (surface.wl_surface().clone(), (0.0, 0.0).into()));
+                        let touch = backend.compositor.touch.clone();
+                        touch.motion(
+                            &mut backend.compositor.state,
+                            focus,
+                            &TouchMotion {
+                                slot: event.slot(),
+                                location: (event.x(), event.y()).into(),
+                                time: event.time_msec(),
+                            },
+                        );
+                        touch.frame(&mut backend.compositor.state);
+                    } else {
+                        let time = event.time_msec();
 
-                    // The centralizer only emits motion in Drag mode, and flips into it on the
-                    // first move after a long press — that transition is where the grab starts.
-                    if !backend.pointer_pressed {
-                        emit_pointer_press(&mut backend.compositor, BTN_LEFT, time);
-                        backend.pointer_pressed = true;
+                        // The centralizer only emits motion in Drag mode, and flips into it on the
+                        // first move after a long press — that transition is where the grab starts.
+                        if !backend.pointer_pressed {
+                            emit_pointer_press(&mut backend.compositor, BTN_LEFT, time);
+                            backend.pointer_pressed = true;
+                        }
+
+                        emit_pointer_motion(&mut backend.compositor, event.x(), event.y(), time);
                     }
-
-                    emit_pointer_motion(&mut backend.compositor, event.x(), event.y(), time);
                 }
                 InputEvent::TouchUp { event } => {
-                    use crate::core::pointer_buttons::{
-                        resolve_touch_lift, GuestTouchEnd, TouchLiftAction,
-                    };
-                    let time = event.time_msec();
-                    if event.mode == TouchMode::Scroll {
-                        backend.stop_scroll_source(AxisSource::Continuous, time);
-                    }
-                    let end = match event.mode {
-                        TouchMode::Undecided => GuestTouchEnd::Tap,
-                        TouchMode::LongPress => GuestTouchEnd::LongPress,
-                        TouchMode::Scroll => GuestTouchEnd::Scroll,
-                        TouchMode::Drag => GuestTouchEnd::Drag,
-                    };
-                    match resolve_touch_lift(backend.pointer_pressed, end, event.in_guest) {
-                        TouchLiftAction::ReleaseAtCurrent => {
-                            // End of a drag at the current guest pointer location.
-                            // The lift coordinates are deliberately unused: a
-                            // border/outside release must never synthesize edge
-                            // movement or snap the drag to a fake Plasma edge.
-                            let current = backend.compositor.pointer.current_location();
-                            emit_pointer_motion(
-                                &mut backend.compositor,
-                                current.x,
-                                current.y,
-                                time,
-                            );
-                            emit_pointer_release(&mut backend.compositor, BTN_LEFT, time);
-                            backend.pointer_pressed = false;
+                    if event.native_protocol {
+                        let touch = backend.compositor.touch.clone();
+                        touch.up(
+                            &mut backend.compositor.state,
+                            &UpEvent {
+                                slot: event.slot(),
+                                serial: SERIAL_COUNTER.next_serial(),
+                                time: event.time_msec(),
+                            },
+                        );
+                        touch.frame(&mut backend.compositor.state);
+                    } else {
+                        use crate::core::pointer_buttons::{
+                            resolve_touch_lift, GuestTouchEnd, TouchLiftAction,
+                        };
+                        let time = event.time_msec();
+                        if event.mode == TouchMode::Scroll {
+                            backend.stop_scroll_source(AxisSource::Continuous, time);
                         }
-                        // A tap: left click where the finger lifted (always
-                        // in-guest here; border lifts are dropped at ingestion).
-                        TouchLiftAction::ClickLeft => emit_pointer_click(
-                            &mut backend.compositor,
-                            BTN_LEFT,
-                            event.x,
-                            event.y,
-                            time,
-                        ),
-                        // Held still, then lifted without moving: a context menu.
-                        TouchLiftAction::ClickRight => emit_pointer_click(
-                            &mut backend.compositor,
-                            BTN_RIGHT,
-                            event.x,
-                            event.y,
-                            time,
-                        ),
-                        // A scroll consumed the gesture, or a border lift with
-                        // nothing held: nothing to click or release.
-                        TouchLiftAction::Ignore => {}
+                        let end = match event.mode {
+                            TouchMode::Undecided => GuestTouchEnd::Tap,
+                            TouchMode::LongPress => GuestTouchEnd::LongPress,
+                            TouchMode::Scroll => GuestTouchEnd::Scroll,
+                            TouchMode::Drag => GuestTouchEnd::Drag,
+                        };
+                        match resolve_touch_lift(backend.pointer_pressed, end, event.in_guest) {
+                            TouchLiftAction::ReleaseAtCurrent => {
+                                // End of a drag at the current guest pointer location.
+                                // The lift coordinates are deliberately unused: a
+                                // border/outside release must never synthesize edge
+                                // movement or snap the drag to a fake Plasma edge.
+                                let current = backend.compositor.pointer.current_location();
+                                emit_pointer_motion(
+                                    &mut backend.compositor,
+                                    current.x,
+                                    current.y,
+                                    time,
+                                );
+                                emit_pointer_release(&mut backend.compositor, BTN_LEFT, time);
+                                backend.pointer_pressed = false;
+                            }
+                            // A tap: left click where the finger lifted (always
+                            // in-guest here; border lifts are dropped at ingestion).
+                            TouchLiftAction::ClickLeft => emit_pointer_click(
+                                &mut backend.compositor,
+                                BTN_LEFT,
+                                event.x,
+                                event.y,
+                                time,
+                            ),
+                            // Held still, then lifted without moving: a context menu.
+                            TouchLiftAction::ClickRight => emit_pointer_click(
+                                &mut backend.compositor,
+                                BTN_RIGHT,
+                                event.x,
+                                event.y,
+                                time,
+                            ),
+                            // A scroll consumed the gesture, or a border lift with
+                            // nothing held: nothing to click or release.
+                            TouchLiftAction::Ignore => {}
+                        }
                     }
                 }
                 InputEvent::TouchCancel { event } => {
-                    backend.stop_scroll_source(AxisSource::Continuous, event.time_msec());
-                    if backend.pointer_pressed {
-                        emit_pointer_release(
-                            &mut backend.compositor,
-                            BTN_LEFT,
-                            event.time() as u32,
-                        );
-                        backend.pointer_pressed = false;
+                    if event.native_protocol {
+                        let touch = backend.compositor.touch.clone();
+                        touch.cancel(&mut backend.compositor.state);
+                    } else {
+                        backend.stop_scroll_source(AxisSource::Continuous, event.time_msec());
+                        if backend.pointer_pressed {
+                            emit_pointer_release(
+                                &mut backend.compositor,
+                                BTN_LEFT,
+                                event.time() as u32,
+                            );
+                            backend.pointer_pressed = false;
+                        }
                     }
                 }
                 InputEvent::PointerMotionAbsolute { event, .. } => {
@@ -872,12 +924,20 @@ pub fn log_presentation_state(reason: &str, state: &State) {
     }
     let display = &state.authoritative_display_state;
     let snap = display.presentation_snapshot();
+    let pixels = state.kwin_surface.as_ref().and_then(|surface| {
+        smithay::backend::renderer::utils::with_renderer_surface_state(surface, |renderer| {
+            renderer
+                .buffer_dimensions()
+                .map(|size| (size.w as f64, size.h as f64))
+        })
+        .flatten()
+    });
     let fmt_size = |size: Option<(f64, f64)>| match size {
         Some((w, h)) => format!("{w:.0}x{h:.0}"),
         None => "none".to_owned(),
     };
     log::info!(
-        "presentation.state reason={reason} gen={} host={}x{} req={}x{} reqgen={} ack={} surf={} buf={} bscale={:?} plasma={:.3} rgen={} rhost={}x{} rlogic={:.0}x{:.0} commit={} view={:.0},{:.0}+{:.0}x{:.0} scale={:.3} conv={}",
+        "presentation.state reason={reason} gen={} host={}x{} req={}x{} reqgen={} ack={} surf={} buf={} pixels={} bscale={:?} plasma={:.3} rgen={} rhost={}x{} rlogic={:.0}x{:.0} commit={} view={:.0},{:.0}+{:.0}x{:.0} scale={:.3} conv={}",
         snap.generation,
         snap.host.0,
         snap.host.1,
@@ -887,6 +947,7 @@ pub fn log_presentation_state(reason: &str, state: &State) {
         snap.acked_serial,
         fmt_size(display.last_surface_size),
         fmt_size(display.last_buffer_size),
+        fmt_size(pixels),
         display.last_buffer_scale,
         snap.plasma_scale,
         snap.rendered_generation,
@@ -962,17 +1023,6 @@ fn maybe_poll_refresh_rate(backend: &mut WaylandBackend) {
         }
     }
     backend.last_refresh_poll_ms = Some(now_ms);
-    if let Some(rate) = backend.content_cadence.evaluate(
-        now_ms,
-        backend.refresh_rate_millihz,
-        &backend.supported_refresh_millihz,
-    ) {
-        crate::android::utils::frame_rate::ensure_high_refresh_rate_hz(
-            &backend.android_app,
-            rate as f32 / 1000.0,
-        );
-    }
-
     let observed = crate::android::utils::ndk::refresh_rate_millihz(&backend.android_app);
     if !crate::core::android_integration::is_valid_refresh_millihz(observed) {
         return;
@@ -1114,9 +1164,7 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) -> Result<bool, String> {
                     commit,
                 );
                 if is_new_frame {
-                    backend
-                        .content_cadence
-                        .committed(backend.clock.now().as_millis() as u64);
+                    backend.pipeline_stats.note_kwin_commit();
                     activity = true;
                     backend.output_dirty = true;
                     let was_converged = backend
@@ -1210,6 +1258,9 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         winit.poll_android_frame_timestamps()
     };
     for sample in timestamp_samples {
+        backend
+            .pipeline_stats
+            .note_present(sample.post_swap_queue_ns);
         complete_kwin_android_presentation(backend, sample);
     }
 
@@ -1351,19 +1402,16 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         ));
         backend.output_damage_signature = Some(damage_signature);
     }
-    // EGL buffer age tells the tracker which previous damage must be repainted
-    // into the current back buffer. A new geometry/scale has no valid history.
-    let buffer_age = if tracker_was_reset {
-        0
-    } else {
-        winit.buffer_age().unwrap_or(0)
-    };
-
+    let render_started = std::time::Instant::now();
+    let upload_before = smithay::backend::renderer::gles::shm_upload_metrics();
     let (rendered_elements, output_damage) = {
-        let (renderer, mut framebuffer) = winit.bind().map_err(|error| {
+        let (renderer, mut framebuffer, acquired_age) = winit.bind().map_err(|error| {
             backend.frame_in_flight = false;
             format!("Failed to bind EGL surface: {error}")
         })?;
+        // Age belongs to the buffer selected by this bind. A new output
+        // geometry has no restoration history even if EGL reports an age.
+        let buffer_age = if tracker_was_reset { 0 } else { acquired_age };
 
         let compositor = &mut backend.compositor;
 
@@ -1514,6 +1562,26 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
 
         (elements, output_damage)
     };
+    let upload_after = smithay::backend::renderer::gles::shm_upload_metrics();
+    let damage_pixels = output_damage
+        .iter()
+        .map(|rect| (rect.size.w.max(0) as u64).saturating_mul(rect.size.h.max(0) as u64))
+        .sum();
+    backend.pipeline_stats.note_render(
+        render_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        damage_pixels,
+        upload_after.calls.saturating_sub(upload_before.calls),
+        upload_after
+            .full_uploads
+            .saturating_sub(upload_before.full_uploads),
+        upload_after
+            .partial_uploads
+            .saturating_sub(upload_before.partial_uploads),
+        upload_after.bytes.saturating_sub(upload_before.bytes),
+        upload_after
+            .cpu_time_ns
+            .saturating_sub(upload_before.cpu_time_ns),
+    );
 
     // Schedule KWin's next CPU-rendered buffer before the vsynced Android swap
     // can block. The current wl_buffers remain retained by `rendered_elements`
@@ -1542,13 +1610,18 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         // Dirty input/protocol state need not mutate pixels. Frame callbacks
         // below still let clients advance, but no EGL buffer is queued.
         backend.frame_in_flight = false;
+        backend.pipeline_stats.note_no_damage();
         (false, None)
     } else {
+        let swap_started = std::time::Instant::now();
         match winit.submit(
             Some(&output_damage),
             timeline.map(|timeline| timeline.expected_present_ns),
         ) {
             Ok(id) => {
+                backend
+                    .pipeline_stats
+                    .note_submit(swap_started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
                 if let Some(timeline) = timeline {
                     backend.frame_timeline_stats.note_submit(timeline);
                 }
@@ -1645,6 +1718,11 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
         .display
         .flush_clients()
         .map_err(|error| format!("Failed to flush presentation feedback: {error}"))?;
+
+    backend.pipeline_stats.maybe_report(
+        backend.refresh_rate_millihz,
+        backend.physical_refresh_millihz,
+    );
 
     Ok(())
 }

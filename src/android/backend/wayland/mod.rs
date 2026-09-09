@@ -6,6 +6,7 @@ pub mod gl_import;
 mod input;
 mod keymap;
 pub mod output_state;
+mod pipeline_stats;
 pub mod protocol;
 pub mod socket_watcher;
 pub(crate) mod surface_control_cursor;
@@ -57,6 +58,12 @@ pub struct WaylandBackend {
     pub scroll_centroid: Option<PhysicalPosition<f64>>,
     /// Whether the current touchscreen gesture has emitted its first scroll frame.
     pub touch_scroll_started: bool,
+    /// This gesture is owned exclusively by the real Wayland touch protocol.
+    /// It must never also enter Portal's pointer-emulation fallback.
+    pub native_touch_active: bool,
+    /// Prefer native `wl_touch` when KWin has actually bound it. An app-private
+    /// `touch-mode` file containing `pointer` selects the compatibility path.
+    pub native_touch_preferred: bool,
     /// What the current gesture has been resolved to.
     pub touch_mode: TouchMode,
     /// Location where the gesture's first finger landed.
@@ -102,8 +109,6 @@ pub struct WaylandBackend {
     /// Whether the preferred `ANativeWindow` hint has been issued for the current
     /// native window. Reset on suspend (window destroyed); re-issued on resume.
     pub frame_rate_requested: bool,
-    pub content_cadence: crate::core::content_cadence::ContentCadence,
-    pub supported_refresh_millihz: Vec<i32>,
     /// Currently pressed evdev physical scancodes.
     pub pressed_keys: HashSet<u32>,
     /// Guest-side mouse button policy: presses in letterbox borders are
@@ -142,6 +147,7 @@ pub struct WaylandBackend {
     /// event-driven redraw.
     pub frame_timeline: Option<crate::android::utils::frame_pacing::AndroidFrameTimeline>,
     pub frame_timeline_stats: crate::android::utils::frame_pacing::FrameTimelineStats,
+    pub pipeline_stats: pipeline_stats::PipelineStats,
     /// Android 16 cursor-only layer. The desktop remains on EGL; `None` is the
     /// fully compatible GLES cursor fallback.
     pub surface_control_cursor: Option<surface_control_cursor::SurfaceControlCursor>,
@@ -224,6 +230,7 @@ impl WaylandBackend {
         self.touch_points.clear();
         self.scroll_centroid = None;
         self.touch_scroll_started = false;
+        self.native_touch_active = false;
         self.touch_mode = TouchMode::Undecided;
         self.touch_down_position = None;
         self.touch_down_time = None;
@@ -232,6 +239,10 @@ impl WaylandBackend {
 
     /// Release any synthesized pointer grab and clear pending presentation state on suspend.
     pub fn suspend_input_and_presentation(&mut self) {
+        if self.native_touch_active {
+            let touch = self.compositor.touch.clone();
+            touch.cancel(&mut self.compositor.state);
+        }
         self.reset_touch_state();
         // All fingers are gone on suspend: drop any border-suppressed ids too
         // (reset_touch_state preserves them for the partial-lift case above).

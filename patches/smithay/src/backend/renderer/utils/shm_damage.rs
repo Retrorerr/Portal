@@ -18,13 +18,15 @@
 //! a cached texture's true contents depend on *which committed buffer state
 //! it was last synced to* plus *every subsequent mutation* — not just the
 //! latest damage rectangle (same-`wl_buffer` reuse with new contents, buffer
-//! replacement/rotation, damage-history eviction, failed GL uploads, and
+//! geometry/interpretation changes, damage-history eviction, failed GL uploads, and
 //! viewport/scale/transform reinterpretation can all strand the texture
 //! behind an apparently valid damage chain). `ShmSyncTracker` therefore gates
 //! every import on an explicit monotonic content generation: partial upload
 //! only with a complete, ordered damage record for every generation since the
-//! last successful upload, on the same buffer object/geometry/interpretation;
-//! anything uncertain forces exactly one full resync.
+//! last successful upload, with stable geometry/interpretation. Normal client
+//! buffer rotation remains valid because Wayland damage describes changes to
+//! surface contents rather than wl_buffer identity; uncertainty forces one
+//! full resync.
 //!
 //! The `+1 logical pixel` expansion is kept deliberately as protocol-rounding
 //! coverage (clients report integer damage and may inward-round true
@@ -278,10 +280,10 @@ pub struct CommitSyncEvent {
     /// A (possibly re-attached) SHM buffer was committed, so the content
     /// generation advances and fresh damage is required to cover it.
     pub new_content: bool,
-    /// The committed wl_buffer object differs from the one the cached texture
-    /// was synced to. A replaced object must fully resync: object identity is
-    /// not content identity, and a fresh/rotated buffer has no proven pixel
-    /// history.
+    /// The committed wl_buffer object differs from the previous commit.
+    /// Object identity is diagnostic only: the cached GLES texture represents
+    /// the Wayland surface's previous committed content, and complete surface
+    /// damage advances that content across a client's normal buffer rotation.
     pub new_object: bool,
     pub fingerprint: SyncFingerprint,
     /// This generation's damage was completely recorded (converted,
@@ -308,7 +310,7 @@ pub enum SyncDecision {
 /// Invariant: a cached GLES texture may receive a partial update only when
 /// the compositor knows exactly which committed SHM-buffer generation that
 /// texture represents (`uploaded`) and holds complete, ordered damage for
-/// every subsequent generation up to `committed`, with no identity/geometry/
+/// every subsequent generation up to `committed`, with no geometry/
 /// interpretation drift in between. Anything else forces exactly one full
 /// upload, after which the generation resynchronizes and partials may resume.
 ///
@@ -324,12 +326,11 @@ pub struct ShmSyncTracker {
     /// Generation the GL texture provably contains (`None` = unknown).
     uploaded: Option<u64>,
     /// Every generation in `(uploaded, committed]` has usable damage, with no
-    /// identity/geometry drift since the last successful upload.
+    /// geometry/interpretation drift since the last successful upload.
     complete: bool,
     gap_reason: Option<&'static str>,
     uploaded_fp: Option<SyncFingerprint>,
     current_fp: Option<SyncFingerprint>,
-    object_changed: bool,
 }
 
 impl ShmSyncTracker {
@@ -341,7 +342,6 @@ impl ShmSyncTracker {
             gap_reason: None,
             uploaded_fp: None,
             current_fp: None,
-            object_changed: false,
         }
     }
 
@@ -355,9 +355,6 @@ impl ShmSyncTracker {
     pub fn note_commit(&mut self, ev: CommitSyncEvent) {
         if ev.new_content {
             self.committed += 1;
-            if ev.new_object && self.uploaded.is_some() {
-                self.object_changed = true;
-            }
             if !ev.damage_complete {
                 self.complete = false;
                 self.gap_reason = ev.damage_reason;
@@ -394,11 +391,6 @@ impl ShmSyncTracker {
                 reason: "unknown-generation",
             };
         };
-        if self.object_changed {
-            return SyncDecision::Full {
-                reason: "buffer-replaced",
-            };
-        }
         if !self.complete {
             return SyncDecision::Full {
                 reason: self.gap_reason.unwrap_or("history-gap"),
@@ -429,7 +421,6 @@ impl ShmSyncTracker {
         self.uploaded_fp = self.current_fp;
         self.complete = true;
         self.gap_reason = None;
-        self.object_changed = false;
     }
 
     pub fn committed(&self) -> u64 {
@@ -603,18 +594,14 @@ mod tests {
     }
 
     #[test]
-    fn sync_gate_object_replacement_and_gap_force_full() {
+    fn sync_gate_buffer_rotation_is_partial_but_gap_forces_full() {
         let mut t = ShmSyncTracker::new();
         t.note_commit(sync_content(sync_fp(800, 600), true));
         t.mark_uploaded(true);
-        // Rotated buffer object: no proven pixel history.
+        // Normal buffer rotation remains partial when surface damage is
+        // complete and geometry/interpretation are unchanged.
         t.note_commit(sync_content(sync_fp(800, 600), true));
-        assert_eq!(
-            t.decide(),
-            SyncDecision::Full {
-                reason: "buffer-replaced"
-            }
-        );
+        assert_eq!(t.decide(), SyncDecision::Partial);
         t.mark_uploaded(true);
         // Evicted history: completeness unprovable.
         t.note_commit(sync_content(sync_fp(800, 600), false));
