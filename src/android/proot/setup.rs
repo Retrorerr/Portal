@@ -63,6 +63,13 @@ const CLIPBOARD_PUSH: &str = include_str!("../../../assets/localdesktop-clipboar
 const WL_COPY_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-copy");
 const WL_PASTE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-paste");
 const KWIN_LIBRARY: &[u8] = include_bytes!("../../../assets/kwin-debian-arm64/libkwin.so.6.3.6");
+/// Project Anland load-time stub: satisfies the lfdevs kwin_wayland binary's
+/// AnlandBackend reference when QPainter sessions run the overlay libkwin
+/// (which has no Anland backend). Preloaded ONLY in QPainter mode; traps if
+/// ever called. Source: guest-built from the recipe in
+/// `assets/guest-arm64/anland-stub-recipe.txt`. Unified overlay build (single
+/// libkwin with Anland backend + damage fix) will retire this stub.
+const ANLAND_STUB_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/libanland-stub.so");
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -1333,8 +1340,66 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
+    // Keep the QPainter overlay present and the default loader path free of
+    // shadows on every launch (idempotent; see sync_kwin_overlay).
+    sync_kwin_overlay(fs_root);
 
     sync_guest_network_config(fs_root);
+}
+
+/// Install Portal's ABI-matched Debian KWin overlay and migrate the
+/// pre-Anland layout. Runs on every provisioning pass AND every session
+/// launch (via `sync_session_runtime_files`), so existing runtimes converge
+/// without re-provisioning.
+///
+/// Project Anland layout: the overlay lives in `/usr/local/lib/portal` (NOT
+/// `/usr/local/lib`) so it can never shadow the distro libkwin through the
+/// default loader path. The kwin wrapper adds the portal dir to
+/// LD_LIBRARY_PATH only for QPainter sessions; Anland sessions resolve the
+/// distro (lfdevs Anland-backend) libkwin untouched.
+fn sync_kwin_overlay(fs_root: &Path) {
+    let kwin_dir = fs_root.join("usr/local/lib/portal");
+    let _ = fs::create_dir_all(&kwin_dir);
+    let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
+    let fresh = fs::metadata(&kwin_library)
+        .map(|m| m.len() == KWIN_LIBRARY.len() as u64)
+        .unwrap_or(false);
+    if !fresh {
+        let kwin_temporary = kwin_library.with_extension("6.3.6.tmp");
+        if fs::write(&kwin_temporary, KWIN_LIBRARY).is_ok() {
+            let _ = fs::set_permissions(&kwin_temporary, fs::Permissions::from_mode(0o755));
+            let _ = fs::rename(&kwin_temporary, &kwin_library);
+        }
+        for (link, target) in [
+            ("libkwin.so.6", "libkwin.so.6.3.6"),
+            ("libkwin.so", "libkwin.so.6"),
+        ] {
+            let path = kwin_dir.join(link);
+            let _ = fs::remove_file(&path);
+            let _ = symlink(target, path);
+        }
+    }
+    // Migration: remove pre-Anland overlay links that shadowed libkwin.so.6
+    // from the default loader path. Only our overlay ever lived at these
+    // paths (the distro libkwin lives under /usr/lib).
+    for legacy in ["libkwin.so.6.3.6", "libkwin.so.6", "libkwin.so"] {
+        let path = fs_root.join("usr/local/lib").join(legacy);
+        if path.is_symlink() || path.is_file() {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    // Project Anland load-time stub for QPainter sessions (see ANLAND_STUB_BINARY).
+    let stub_path = kwin_dir.join("libanland-stub.so");
+    let stub_fresh = fs::metadata(&stub_path)
+        .map(|m| m.len() == ANLAND_STUB_BINARY.len() as u64)
+        .unwrap_or(false);
+    if !stub_fresh {
+        let stub_tmp = stub_path.with_extension("so.tmp");
+        if fs::write(&stub_tmp, ANLAND_STUB_BINARY).is_ok() {
+            let _ = fs::set_permissions(&stub_tmp, fs::Permissions::from_mode(0o755));
+            let _ = fs::rename(&stub_tmp, &stub_path);
+        }
+    }
 }
 
 /// Select Portal's profile once for runtimes that previously defaulted to the
@@ -1544,46 +1609,7 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     // guest_scale_factor; the guest Plasma session must run at 1:1 (scale 1) to prevent double scaling.
     let ui_scale = 1;
     sync_session_runtime_files(fs_root, ui_scale);
-
-    // Install Portal's ABI-matched Debian KWin library atomically on every
-    // provisioning pass. Project Anland: the overlay lives in
-    // /usr/local/lib/portal (NOT /usr/local/lib) so it can never shadow the
-    // distro libkwin through the default loader path; the kwin wrapper adds
-    // the portal dir to LD_LIBRARY_PATH only for QPainter sessions. Anland
-    // sessions use the distro (lfdevs Anland-backend) libkwin untouched.
-    let kwin_dir = fs_root.join("usr/local/lib/portal");
-    fs::create_dir_all(&kwin_dir).expect("Failed to create KWin library directory");
-    let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
-    let kwin_temporary = kwin_library.with_extension("6.3.6.tmp");
-    fs::write(&kwin_temporary, KWIN_LIBRARY).expect("Failed to stage Portal KWin library");
-    fs::set_permissions(&kwin_temporary, fs::Permissions::from_mode(0o755))
-        .expect("Failed to set Portal KWin library permissions");
-    fs::rename(&kwin_temporary, &kwin_library).expect("Failed to install Portal KWin library");
-    for (link, target) in [
-        ("libkwin.so.6", "libkwin.so.6.3.6"),
-        ("libkwin.so", "libkwin.so.6"),
-    ] {
-        let path = kwin_dir.join(link);
-        let _ = fs::remove_file(&path);
-        symlink(target, path).expect("Failed to link Portal KWin library");
-    }
-    // One-time migration: remove the pre-Anland overlay links that shadowed
-    // libkwin.so.6 from the default loader path (/usr/local/lib is in the
-    // system ld.so search order). These files were written by older Portal
-    // provisioning runs; the distro-owned library is the fallback and must
-    // resolve there now.
-    for legacy in ["libkwin.so.6.3.6", "libkwin.so.6", "libkwin.so"] {
-        let path = fs_root.join("usr/local/lib").join(legacy);
-        // Only remove what looks like our overlay (symlink or Portal-built
-        // library); never touch distro files (distro never ships here).
-        if path.is_symlink() {
-            let _ = fs::remove_file(&path);
-        } else if path.is_file() {
-            // Portal's overlay is the only regular file ever placed at these
-            // paths by provisioning; the distro libkwin lives under /usr/lib.
-            let _ = fs::remove_file(&path);
-        }
-    }
+    sync_kwin_overlay(fs_root);
 
     // All builds need the socket fstat fix in this existing library. A
     // nested gdb frequently dies before it can attach under Android's PRoot;

@@ -63,6 +63,12 @@ fi
 printf 'anland_mode=%s socket=%s\n' "$anland_mode" "${ANLAND_SOCKET:-unset}" >> "$log_file"
 if [ "$anland_mode" -eq 0 ]; then
     export LD_LIBRARY_PATH="/usr/local/lib/portal${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    # Project Anland load-time stub (QPainter only): the lfdevs binary needs
+    # AnlandBackend at load while the overlay lib has none. Covers normal and
+    # gdb launches below; never set in Anland mode.
+    if [ -r /usr/local/lib/portal/libanland-stub.so ]; then
+        export LD_PRELOAD="/usr/local/lib/portal/libanland-stub.so${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
 fi
 export QT_FORCE_STDERR_LOGGING=1
 export QT_LOGGING_RULES="kwin_core.warning=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
