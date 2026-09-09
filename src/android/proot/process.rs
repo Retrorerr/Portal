@@ -42,6 +42,26 @@ impl ArchProcess {
     where
         I: IntoIterator<Item = (String, String)>,
     {
+        self.run_with_cancel_env_and_binds(
+            cancel,
+            environment,
+            std::iter::empty::<crate::core::runtime::BindMount>(),
+        )
+    }
+
+    /// Run a guest process with lifecycle cancellation, explicit environment
+    /// variables and additional bind mounts (used by the Anland GPU session
+    /// for its broker-socket dir and Mesa overlay; empty for QPainter).
+    pub fn run_with_cancel_env_and_binds<I, B>(
+        self,
+        cancel: Arc<AtomicBool>,
+        environment: I,
+        binds: B,
+    ) -> Output
+    where
+        I: IntoIterator<Item = (String, String)>,
+        B: IntoIterator<Item = crate::core::runtime::BindMount>,
+    {
         let runtime = PRootRuntime::active();
         let mut spec = ProcessSpec::new(self.command);
         if let Some(user) = self.user {
@@ -49,6 +69,9 @@ impl ArchProcess {
         }
         for (key, value) in environment {
             spec = spec.with_env(key, value);
+        }
+        for bind in binds {
+            spec.extra_binds.push(bind);
         }
         runtime.execute(spec, self.log, Some(cancel))
     }

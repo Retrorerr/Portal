@@ -4,7 +4,7 @@ mod event_centralizer;
 mod event_handler;
 pub mod gl_import;
 mod input;
-mod keymap;
+pub mod keymap;
 pub mod output_state;
 mod pipeline_stats;
 pub mod protocol;
@@ -153,6 +153,10 @@ pub struct WaylandBackend {
     pub surface_control_cursor: Option<surface_control_cursor::SurfaceControlCursor>,
     /// Whether a frame is currently in flight to the Android compositor.
     pub frame_in_flight: bool,
+    /// Project Anland GPU session. `Some` while the zero-copy dma-buf path
+    /// owns the window; `None` in the preserved Smithay/QPainter mode. The
+    /// two renderers never own the window simultaneously.
+    pub anland: Option<crate::android::anland::AnlandSession>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

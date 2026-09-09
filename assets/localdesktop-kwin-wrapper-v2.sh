@@ -52,7 +52,18 @@ for name in HOME USER LOGNAME WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
     printf 'env %s=%q\n' "$name" "$value" >> "$log_file"
 done
 ulimit -c unlimited 2>/dev/null || true
-export LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Project Anland: when the host runs a GPU session it exports ANLAND_SOCKET.
+# The distro libkwin (lfdevs Anland build) owns the Anland backend, so the
+# Portal QPainter overlay in /usr/local/lib/portal must NOT shadow it here.
+# (The overlay relocation keeps /usr/local/lib itself free of libkwin.so.6.)
+anland_mode=0
+if [ -n "${ANLAND_SOCKET:-}" ]; then
+    anland_mode=1
+fi
+printf 'anland_mode=%s socket=%s\n' "$anland_mode" "${ANLAND_SOCKET:-unset}" >> "$log_file"
+if [ "$anland_mode" -eq 0 ]; then
+    export LD_LIBRARY_PATH="/usr/local/lib/portal${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 export QT_FORCE_STDERR_LOGGING=1
 export QT_LOGGING_RULES="kwin_core.warning=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
 
@@ -87,7 +98,9 @@ fi
 printf 'stack_capture=%s path=%s\n' "$stack_capture" "${segfault_lib:-unavailable}" >> "$log_file"
 
 run_real_kwin() {
-    export LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    if [ "$anland_mode" -eq 0 ]; then
+        export LD_LIBRARY_PATH="/usr/local/lib/portal${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
     export QT_FORCE_STDERR_LOGGING=1
     if [ -n "$segfault_lib" ]; then
         export LD_PRELOAD="$segfault_lib${LD_PRELOAD:+:$LD_PRELOAD}"
@@ -98,6 +111,14 @@ run_real_kwin() {
     # session. This captures loader, protocol and signal-handler diagnostics
     # even when the guest process exits before a host frame exists.
     # Always disable KWin's internal guest screen locker; device locking belongs to Android.
+    # In Anland mode force the Anland backend explicitly (env alone also
+    # selects it) so the backend choice is unambiguous in the logs.
+    if [ "$anland_mode" -eq 1 ]; then
+        case " $* " in
+            *" --anland "*) ;;
+            *) set -- "$@" --anland ;;
+        esac
+    fi
     /usr/bin/kwin_wayland --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" 2>&1 | tee -a "$log_file"
     return "${PIPESTATUS[0]}"
 }
