@@ -1823,6 +1823,13 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         touch_points: std::collections::HashMap::new(),
         scroll_centroid: None,
         touch_scroll_started: false,
+        native_touch_active: false,
+        native_touch_preferred: std::fs::read_to_string(format!(
+            "{}/touch-mode",
+            crate::core::config::APP_FILES_ROOT
+        ))
+        .map(|value| !value.trim().eq_ignore_ascii_case("pointer"))
+        .unwrap_or(true),
         touch_mode: TouchMode::Undecided,
         touch_down_position: None,
         touch_down_time: None,
@@ -1850,10 +1857,6 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         last_plasma_poll_ms: None,
         last_refresh_poll_ms: None,
         frame_rate_requested: false,
-        content_cadence: Default::default(),
-        supported_refresh_millihz: crate::android::utils::ndk::supported_refresh_rates_millihz(
-            &android_app,
-        ),
         kwin_commit_gate: crate::core::presentation::KwinCommitGate::new(),
         socket_watcher: None,
         output_dirty: true,
@@ -1863,6 +1866,7 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
             .and_then(crate::android::utils::frame_pacing::AndroidFramePacer::new),
         frame_timeline: None,
         frame_timeline_stats: Default::default(),
+        pipeline_stats: Default::default(),
         surface_control_cursor: None,
         frame_in_flight: false,
         android_app,

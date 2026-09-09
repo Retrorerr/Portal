@@ -63,13 +63,15 @@ impl FrameTimelineStats {
             self.lateness_ns += (now - timeline.deadline_ns) as u128;
         }
         if self.started.elapsed() >= std::time::Duration::from_secs(5) {
+            let elapsed_seconds = self.started.elapsed().as_secs_f64().max(0.001);
             let average_late_us = if self.late_submissions == 0 {
                 0
             } else {
                 (self.lateness_ns / self.late_submissions as u128 / 1_000) as u64
             };
             log::info!(
-                "frame.timeline callbacks={} submissions={} late={} avg_late_us={}",
+                "frame.timeline callback_hz={:.2} callbacks={} submissions={} late={} avg_late_us={}",
+                self.callbacks as f64 / elapsed_seconds,
                 self.callbacks,
                 self.submissions,
                 self.late_submissions,

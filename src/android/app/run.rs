@@ -235,7 +235,6 @@ fn resume_wayland(
     // resolved in `configure_output` so KWin, the output mode, and Android
     // all agree.
     if !backend.frame_rate_requested {
-        backend.content_cadence = Default::default();
         let rate_hz = ndk::preferred_high_refresh_millihz(&backend.android_app) as f32 / 1000.0;
         crate::android::utils::frame_rate::ensure_high_refresh_rate_hz(
             &backend.android_app,

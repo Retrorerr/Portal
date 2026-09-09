@@ -23,6 +23,16 @@ impl<D: SeatHandler> TouchHandle<D> {
         let mut guard = self.known_instances.lock().unwrap();
         guard.push((touch.downgrade(), None));
     }
+
+    /// Whether at least one live client has bound `wl_touch` for this seat.
+    ///
+    /// Compositors can use this to select a native touch path without sending
+    /// gestures into a protocol sink that no client is listening to.
+    pub fn has_client(&self) -> bool {
+        let mut guard = self.known_instances.lock().unwrap();
+        guard.retain(|(touch, _)| touch.upgrade().is_ok());
+        !guard.is_empty()
+    }
 }
 
 impl<D: SeatHandler + 'static> TouchHandle<D> {
