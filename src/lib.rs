@@ -20,6 +20,7 @@ pub mod core {
 #[cfg(target_os = "android")]
 pub mod android {
     pub mod accessibility;
+    pub mod anland;
     pub mod clipboard;
     pub mod clipboard_broker;
     pub mod diagnostics;

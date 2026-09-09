@@ -27,7 +27,7 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::Transform;
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Ime, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::WindowId;
 
@@ -175,6 +175,11 @@ fn resume_wayland(
     event_loop: &ActiveEventLoop,
     android_app: &winit::platform::android::activity::AndroidApp,
 ) -> bool {
+    // Project Anland: explicit renderer selection. The GPU path owns the
+    // window via dequeue/queue and never creates a Smithay EGL surface.
+    if crate::android::anland::is_anland_requested() {
+        return resume_anland(backend, event_loop, android_app);
+    }
     if backend.graphic_renderer.is_none() {
         match bind(event_loop) {
             Ok(winit) => {
@@ -266,6 +271,173 @@ fn resume_wayland(
     true
 }
 
+/// Project Anland resume: take over the window for zero-copy GPU
+/// presentation instead of binding the Smithay EGL renderer. The guest
+/// session launched below picks up the Anland broker socket, Mesa overlay
+/// and KWin environment from `launch()`; KWin selects its Anland backend via
+/// `$ANLAND_SOCKET` and renders with OpenGL/freedreno into our buffers.
+fn resume_anland(
+    backend: &mut crate::android::backend::wayland::WaylandBackend,
+    event_loop: &ActiveEventLoop,
+    android_app: &winit::platform::android::activity::AndroidApp,
+) -> bool {
+    if backend.anland.is_some() {
+        log::info!("Ignoring redundant Anland resume while GPU session is active");
+        return true;
+    }
+    if backend.graphic_renderer.is_some() {
+        log::warn!(
+            "anland.session Smithay renderer unexpectedly active; dropping it for the GPU takeover"
+        );
+        backend.graphic_renderer = None;
+    }
+    let (window, raw) = match crate::android::anland::create_window(event_loop) {
+        Ok(pair) => pair,
+        Err(error) => {
+            log::error!("anland.session window creation failed: {error}");
+            accessibility::set_runtime_active(false);
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return false;
+        }
+    };
+    let size = window.inner_size();
+    if size.width == 0 || size.height == 0 {
+        log::error!(
+            "anland.session invalid Android surface {}x{}; refusing GPU takeover",
+            size.width,
+            size.height
+        );
+        accessibility::set_runtime_active(false);
+        event_loop.set_control_flow(ControlFlow::Wait);
+        return false;
+    }
+    // Same sticky per-window high-refresh hint as the Smithay path.
+    if !backend.frame_rate_requested {
+        let rate_hz = ndk::preferred_high_refresh_millihz(android_app) as f32 / 1000.0;
+        crate::android::utils::frame_rate::ensure_high_refresh_rate_hz(android_app, rate_hz);
+        backend.frame_rate_requested = true;
+        ndk::log_display_modes(android_app);
+    }
+    backend.last_refresh_poll_ms = Some(backend.clock.now().as_millis() as u64);
+    let refresh_mhz = ndk::preferred_high_refresh_millihz(android_app).max(1) as u32;
+    let config = crate::android::anland::AnlandConfig {
+        width: size.width,
+        height: size.height,
+        refresh_mhz,
+        socket_path: crate::android::anland::host_socket_path(),
+    };
+    match crate::android::anland::AnlandSession::start(raw, window, &config) {
+        Ok(session) => {
+            log::info!(
+                "anland.session=active compositor=kwin-opengl(expected) driver=freedreno(expected) window={}x{} refresh_mhz={}",
+                size.width,
+                size.height,
+                refresh_mhz
+            );
+            backend.anland = Some(session);
+        }
+        Err(error) => {
+            log::error!("anland.session=start failed (stable QPainter path untouched): {error}");
+            accessibility::set_runtime_active(false);
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return false;
+        }
+    }
+    accessibility::set_runtime_active(true);
+    pipewire_standalone_aaudio::spawn_after_ready(android_app.clone());
+    launch();
+    crate::android::utils::frame_pacing::prioritize_current_render_thread();
+    true
+}
+
+/// Forward raw window input to the Anland producer as fixed-size input
+/// events. Milestone scope: touch, pointer motion/buttons/wheel and mapped
+/// evdev keys. Pointer deltas are zeroed (absolute positions are authoritative
+/// for the Pad use case); relative-motion clients are a known limitation.
+fn forward_anland_input(
+    backend: &crate::android::backend::wayland::WaylandBackend,
+    event: &WindowEvent,
+) {
+    use crate::android::anland::protocol::InputEvent as AnlandInput;
+    let Some(session) = backend.anland.as_ref() else {
+        return;
+    };
+    match event {
+        WindowEvent::Touch(touch) => {
+            let action = match touch.phase {
+                TouchPhase::Started => crate::android::anland::protocol::INPUT_ACTION_DOWN,
+                TouchPhase::Moved => crate::android::anland::protocol::INPUT_ACTION_MOVE,
+                TouchPhase::Ended | TouchPhase::Cancelled => {
+                    crate::android::anland::protocol::INPUT_ACTION_UP
+                }
+            };
+            session.send_input(&AnlandInput::touch(
+                action,
+                touch.location.x as f32,
+                touch.location.y as f32,
+                touch.id as i32,
+            ));
+            session.send_input(&AnlandInput::touch_frame());
+        }
+        WindowEvent::CursorMoved { position, .. } => {
+            session.send_input(&AnlandInput::pointer_motion(
+                position.x as f32,
+                position.y as f32,
+                0.0,
+                0.0,
+            ));
+        }
+        WindowEvent::MouseInput { state, button, .. } => {
+            let code = match button {
+                MouseButton::Left => 0x110,
+                MouseButton::Right => 0x111,
+                MouseButton::Middle => 0x112,
+                MouseButton::Back => 0x116,
+                MouseButton::Forward => 0x115,
+                MouseButton::Other(b) => 0x110 + (*b as u32),
+            };
+            session.send_input(&AnlandInput::pointer_button(
+                code,
+                *state == ElementState::Pressed,
+            ));
+        }
+        WindowEvent::MouseWheel { delta, .. } => match delta {
+            MouseScrollDelta::LineDelta(x, y) => {
+                if *y != 0.0 {
+                    session.send_input(&AnlandInput::pointer_axis(0, *y, *y as i32));
+                }
+                if *x != 0.0 {
+                    session.send_input(&AnlandInput::pointer_axis(1, *x, *x as i32));
+                }
+            }
+            MouseScrollDelta::PixelDelta(pos) => {
+                if pos.y != 0.0 {
+                    session.send_input(&AnlandInput::pointer_axis(0, pos.y as f32, 0));
+                }
+                if pos.x != 0.0 {
+                    session.send_input(&AnlandInput::pointer_axis(1, pos.x as f32, 0));
+                }
+            }
+        },
+        WindowEvent::KeyboardInput { event, .. } => {
+            if event.state == ElementState::Pressed && event.repeat {
+                // Compositor-side autorepeat owns repeats; forward the press.
+            }
+            let Some(scancode) = crate::android::backend::wayland::keymap::physicalkey_to_scancode(
+                event.physical_key,
+            ) else {
+                return;
+            };
+            let action = match event.state {
+                ElementState::Pressed => crate::android::anland::protocol::INPUT_ACTION_DOWN,
+                ElementState::Released => crate::android::anland::protocol::INPUT_ACTION_UP,
+            };
+            session.send_input(&AnlandInput::key(action, scancode as i32));
+        }
+        _ => {}
+    }
+}
+
 fn configure_toplevel(surface: &ToplevelSurface, width: i32, height: i32) -> Option<u32> {
     surface.with_pending_state(|state| {
         state.size.replace((width, height).into());
@@ -334,6 +506,10 @@ impl PolarBearApp {
                 log::debug!("Software keyboard bridge could not be hidden: {error}");
             }
             backend.graphic_renderer = None;
+            // Project Anland: the error screen needs the window back.
+            if let Some(session) = backend.anland.take() {
+                session.stop();
+            }
         }
         accessibility::set_runtime_active(false);
         ime::reset();
@@ -582,7 +758,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let mut runtime_failed = false;
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
-            if backend.graphic_renderer.is_none() {
+            // Anland GPU mode owns no Smithay renderer; the session on
+            // `backend.anland` is the renderer for liveness purposes.
+            if backend.graphic_renderer.is_none() && backend.anland.is_none() {
                 if matches!(event, WindowEvent::CloseRequested) {
                     event_loop.exit();
                 } else {
@@ -593,6 +771,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 }
                 return;
             }
+
+            // Project Anland: mirror raw input to the GPU producer. The
+            // Smithay handlers below stay warm (state machines, gesture
+            // tracking) but render nothing while their renderer is None.
+            forward_anland_input(backend, &event);
 
             match &event {
                 // Focus changes are common during rotation, popup dismissal and app switching.
@@ -628,7 +811,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
 
             // Handle the centralized events
             handle(event, backend, event_loop);
-            runtime_failed = backend.graphic_renderer.is_none();
+            runtime_failed = backend.graphic_renderer.is_none() && backend.anland.is_none();
         }
         if runtime_failed {
             self.enter_runtime_error("Wayland lost its renderer while handling a window event");
@@ -643,6 +826,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             if let Err(error) = ime::hide(&backend.android_app) {
                 log::debug!("Software keyboard bridge could not be hidden on suspend: {error}");
+            }
+            // Project Anland: stop the GPU session first, while the
+            // ANativeWindow is still valid (bounded joins, then disconnect).
+            if let Some(session) = backend.anland.take() {
+                session.stop();
             }
             backend.socket_watcher = None;
             // Drop child layers while this lifecycle generation's parent

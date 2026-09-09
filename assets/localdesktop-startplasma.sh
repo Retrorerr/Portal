@@ -37,6 +37,15 @@ export LOCALDESKTOP_GDB_BACKTRACE=${LOCALDESKTOP_GDB_BACKTRACE:-@GDB_BACKTRACE@}
 # diagnosis. Set WAYLAND_DEBUG=1 explicitly when tracing protocols.
 export WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}
 
+# Project Anland: the host exports ANLAND_SOCKET for GPU sessions. KWin then
+# selects its Anland backend (see the kwin_wayland wrapper) and must NOT use
+# Smithay's wayland-0: it serves its own clients on wayland-1, exactly like
+# the nested QPainter KWin does today.
+if [ -n "${ANLAND_SOCKET:-}" ]; then
+    export WAYLAND_DISPLAY=wayland-1
+    export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
+fi
+
 state_dir=/var/lib/localdesktop
 mkdir -p "$state_dir"
 ready_marker="$state_dir/plasma-ready"
@@ -72,7 +81,10 @@ done
 for name in HOME USER LOGNAME WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
     XDG_CURRENT_DESKTOP DESKTOP_SESSION KDE_FULL_SESSION KDE_SESSION_VERSION \
     KDE_USE_SYSTEMD PLASMA_USE_SYSTEMD QT_NO_XDG_DESKTOP_PORTAL \
-    WAYLAND_DEBUG LOCALDESKTOP_CLIPBOARD_HOST LOCALDESKTOP_CLIPBOARD_PORT; do
+    WAYLAND_DEBUG LOCALDESKTOP_CLIPBOARD_HOST LOCALDESKTOP_CLIPBOARD_PORT \
+    ANLAND_SOCKET ANLAND MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER \
+    FD_FORCE_KGSL FD_KGSL_ENABLE_DMABUF ANLAND_SKIP_IMPLICIT_SYNC_WAIT \
+    ANLAND_DISABLE_AUDIO; do
     eval "value=\${$name-}"
     printf 'env %s=%q\n' "$name" "$value" >> "$session_log"
 done

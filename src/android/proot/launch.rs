@@ -206,12 +206,45 @@ pub fn launch() {
 
         let started = Instant::now();
         let broker_environment = crate::android::clipboard::ClipboardBridge::broker_environment();
+        // Project Anland: the GPU session needs its broker-socket dir, the
+        // Mesa freedreno overlay and the KWin Anland environment. QPainter
+        // sessions pass nothing extra (empty env + binds).
+        let anland = crate::android::anland::is_anland_requested();
+        let mut extra_env: Vec<(String, String)> = Vec::new();
+        let mut extra_binds: Vec<crate::core::runtime::BindMount> = Vec::new();
+        if anland {
+            extra_env = crate::android::anland::guest_mesa_env();
+            extra_binds = crate::android::anland::session_binds();
+            // The broker socket dir must exist before proot binds it.
+            let sock_dir = crate::android::anland::host_socket_path()
+                .parent()
+                .map(|p| p.to_path_buf());
+            if let Some(dir) = sock_dir {
+                let _ = std::fs::create_dir_all(&dir);
+            }
+            // Drop a stale socket so the broker can bind fresh.
+            let _ = std::fs::remove_file(crate::android::anland::host_socket_path());
+            log::info!(
+                "anland.launch env={} binds={}",
+                extra_env
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                extra_binds.len()
+            );
+        }
+        let broker_environment = broker_environment.into_iter().chain(extra_env);
         let output = ArchProcess {
             command: local_config.command.launch,
             user: Some(username),
             log: Some(Arc::new(|it| log::info!("guest-session: {}", it))),
         }
-        .run_with_cancel_and_env(thread_cancel.clone(), broker_environment);
+        .run_with_cancel_env_and_binds(
+            thread_cancel.clone(),
+            broker_environment,
+            extra_binds,
+        );
         let status = output.status.code();
         diagnostics::desktop_exit(status, started.elapsed().as_millis());
         log::warn!(

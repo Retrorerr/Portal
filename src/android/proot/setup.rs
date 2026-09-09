@@ -1546,9 +1546,12 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     sync_session_runtime_files(fs_root, ui_scale);
 
     // Install Portal's ABI-matched Debian KWin library atomically on every
-    // provisioning pass. /usr/local/lib is already first in the wrapper's
-    // loader path, so the package-owned library remains an untouched fallback.
-    let kwin_dir = fs_root.join("usr/local/lib");
+    // provisioning pass. Project Anland: the overlay lives in
+    // /usr/local/lib/portal (NOT /usr/local/lib) so it can never shadow the
+    // distro libkwin through the default loader path; the kwin wrapper adds
+    // the portal dir to LD_LIBRARY_PATH only for QPainter sessions. Anland
+    // sessions use the distro (lfdevs Anland-backend) libkwin untouched.
+    let kwin_dir = fs_root.join("usr/local/lib/portal");
     fs::create_dir_all(&kwin_dir).expect("Failed to create KWin library directory");
     let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
     let kwin_temporary = kwin_library.with_extension("6.3.6.tmp");
@@ -1563,6 +1566,23 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
         let path = kwin_dir.join(link);
         let _ = fs::remove_file(&path);
         symlink(target, path).expect("Failed to link Portal KWin library");
+    }
+    // One-time migration: remove the pre-Anland overlay links that shadowed
+    // libkwin.so.6 from the default loader path (/usr/local/lib is in the
+    // system ld.so search order). These files were written by older Portal
+    // provisioning runs; the distro-owned library is the fallback and must
+    // resolve there now.
+    for legacy in ["libkwin.so.6.3.6", "libkwin.so.6", "libkwin.so"] {
+        let path = fs_root.join("usr/local/lib").join(legacy);
+        // Only remove what looks like our overlay (symlink or Portal-built
+        // library); never touch distro files (distro never ships here).
+        if path.is_symlink() {
+            let _ = fs::remove_file(&path);
+        } else if path.is_file() {
+            // Portal's overlay is the only regular file ever placed at these
+            // paths by provisioning; the distro libkwin lives under /usr/lib.
+            let _ = fs::remove_file(&path);
+        }
     }
 
     // All builds need the socket fstat fix in this existing library. A
@@ -1869,6 +1889,7 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         pipeline_stats: Default::default(),
         surface_control_cursor: None,
         frame_in_flight: false,
+        anland: None,
         android_app,
     })
 }
