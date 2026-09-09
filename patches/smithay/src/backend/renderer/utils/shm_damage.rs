@@ -201,7 +201,12 @@ pub fn surface_to_buffer(
 }
 
 /// Convert one `wl_surface.damage_buffer` (already buffer pixels) rect.
-/// Pure clamp/validate: no scaling, no transform.
+///
+/// Conservative 2px outward expansion before clamping: KWin QPainter integer
+/// window rounding leaves <=0.5px systematic shift at far edges (worst at
+/// bottom-right) plus raster/filter bleed. Over-cover stays tiny (e.g.
+/// 29px -> 33px) and never triggers near-full fallback; under-cover is
+/// forbidden. `Ok(None)` = empty/outside (skip); `Err` = invalid geometry.
 pub fn buffer_to_buffer(
     rect: Rectangle<i32, BufferCoord>,
     buffer: Size<i32, BufferCoord>,
@@ -212,7 +217,24 @@ pub fn buffer_to_buffer(
     if buffer.w <= 0 || buffer.h <= 0 {
         return Err(ShmDamageFallback::InvalidGeometry);
     }
-    Ok(rect.intersection(Rectangle::from_size(buffer)))
+    // i64 expansion then clamp: Wayland allows damage_buffer(0,0,INT32_MAX,
+    // INT32_MAX) to mean full (KWin cursor does this). i32 `x+w+2` would
+    // overflow and panic in debug. Huge rects clamp to full buffer.
+    let x0 = rect.loc.x as i64 - 2;
+    let y0 = rect.loc.y as i64 - 2;
+    let x1 = rect.loc.x as i64 + rect.size.w as i64 + 2;
+    let y1 = rect.loc.y as i64 + rect.size.h as i64 + 2;
+    let cx0 = x0.max(0).min(buffer.w as i64);
+    let cy0 = y0.max(0).min(buffer.h as i64);
+    let cx1 = x1.max(0).min(buffer.w as i64);
+    let cy1 = y1.max(0).min(buffer.h as i64);
+    if cx1 <= cx0 || cy1 <= cy0 {
+        return Ok(None);
+    }
+    Ok(Some(Rectangle::from_extremities(
+        Point::<i32, BufferCoord>::from((cx0 as i32, cy0 as i32)),
+        Point::<i32, BufferCoord>::from((cx1 as i32, cy1 as i32)),
+    )))
 }
 
 /// Merge overlapping/touching rects to bound `glTexSubImage2D` calls.
@@ -510,9 +532,10 @@ mod tests {
         let r = buffer_to_buffer(Rectangle::new((-50, -20).into(), (100, 100).into()), buffer)
             .unwrap()
             .unwrap();
+        // +2px outward expansion before clamping: (-52,-22,104,104) -> (0,0,52,82).
         assert_eq!(r.loc.x, 0);
         assert_eq!(r.loc.y, 0);
-        assert_eq!((r.size.w, r.size.h), (50, 80));
+        assert_eq!((r.size.w, r.size.h), (52, 82));
         assert!(
             buffer_to_buffer(Rectangle::new((900, 700).into(), (50, 50).into()), buffer)
                 .unwrap()

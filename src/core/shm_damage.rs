@@ -326,8 +326,11 @@ pub fn surface_to_buffer(
 
 /// Convert one `wl_surface.damage_buffer` (already buffer pixels) rect.
 ///
-/// Pure clamp/validate: no scaling, no transform. `Ok(None)` = empty/outside
-/// (skip); `Err` = invalid buffer geometry (full fallback).
+/// Conservative 2px outward expansion before clamping (mirrors Smithay
+/// `backend::renderer::utils::shm_damage::buffer_to_buffer` field-for-field).
+/// Covers KWin integer-window rounding shift (<=0.5px far-field, worst at
+/// bottom-right) plus raster bleed. Tiny (29px -> 33px), never near-full.
+/// `Ok(None)` = empty/outside (skip); `Err` = invalid geometry (full fallback).
 pub fn buffer_to_buffer(
     damage: (i32, i32, i32, i32),
     buffer: BufferSize,
@@ -339,7 +342,26 @@ pub fn buffer_to_buffer(
     if buffer.w <= 0 || buffer.h <= 0 {
         return Err(DamageFallback::InvalidGeometry);
     }
-    Ok(BufferRect { x, y, w, h }.clamp_to(buffer))
+    // i64 expansion then clamp: Wayland allows damage_buffer(0,0,INT32_MAX,
+    // INT32_MAX) to mean full (KWin cursor does this). i32 `x-2` / `w+4`
+    // would overflow and panic in debug. Huge rects clamp to full buffer.
+    let x0 = x as i64 - 2;
+    let y0 = y as i64 - 2;
+    let x1 = x as i64 + w as i64 + 2;
+    let y1 = y as i64 + h as i64 + 2;
+    let cx0 = x0.max(0).min(buffer.w as i64);
+    let cy0 = y0.max(0).min(buffer.h as i64);
+    let cx1 = x1.max(0).min(buffer.w as i64);
+    let cy1 = y1.max(0).min(buffer.h as i64);
+    if cx1 <= cx0 || cy1 <= cy0 {
+        return Ok(None);
+    }
+    Ok(Some(BufferRect {
+        x: cx0 as i32,
+        y: cy0 as i32,
+        w: (cx1 - cx0) as i32,
+        h: (cy1 - cy0) as i32,
+    }))
 }
 
 /// Merge overlapping/touching rects to bound `glTexSubImage2D` calls.
@@ -928,9 +950,38 @@ mod tests {
     }
 
     #[test]
+    fn int32_max_damage_buffer_means_full_without_overflow() {
+        // Wayland convention damage_buffer(0,0,INT32_MAX,INT32_MAX) means full
+        // (KWin cursor does this on every cursor commit). Debug builds panic
+        // on i32 overflow; the fix uses i64 and clamps to full buffer.
+        let buffer = buf(64, 64);
+        let r = buffer_to_buffer((0, 0, i32::MAX, i32::MAX), buffer)
+            .expect("valid")
+            .expect("non-empty");
+        assert_eq!(
+            r,
+            BufferRect {
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 64
+            },
+            "{r:?}"
+        );
+        // Still partial for tiny damage (no full fallback, performance kept).
+        let tiny = buffer_to_buffer((10, 10, 4, 4), buffer)
+            .expect("valid")
+            .expect("non-empty");
+        assert!(tiny.w <= 10 && tiny.h <= 10, "{tiny:?}");
+        let plan = decide_upload(vec![tiny], buffer, false, false, 4);
+        assert!(!plan.is_full());
+    }
+
+    #[test]
     fn negative_and_out_of_bounds_damage_is_clamped_not_lost() {
         let buffer = buf(800, 600);
-        // Partly outside top-left: clamped, still partial.
+        // Partly outside top-left: expanded by 2px each side, then clamped.
+        // (-50,-20,100,100) -> (-52,-22,104,104) -> (0,0,52,82). Still partial.
         let r = buffer_to_buffer((-50, -20, 100, 100), buffer)
             .unwrap()
             .unwrap();
@@ -939,8 +990,8 @@ mod tests {
             BufferRect {
                 x: 0,
                 y: 0,
-                w: 50,
-                h: 80
+                w: 52,
+                h: 82
             }
         );
         // Fully outside: skipped (None), not fallback.
@@ -1455,5 +1506,154 @@ mod tests {
             }
         );
         assert_eq!(t.uploaded(), None);
+    }
+
+    fn old_buffer_to_buffer_verbatim(
+        damage: (i32, i32, i32, i32),
+        buffer: BufferSize,
+    ) -> Option<BufferRect> {
+        let (x, y, w, h) = damage;
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        BufferRect { x, y, w, h }.clamp_to(buffer)
+    }
+
+    /// Fractional-only regression: KWin integer-window rounding leaves <=0.5px
+    /// systematic shift at far edges (worst bottom-right). Old verbatim
+    /// `damage_buffer` preserves the 1px miss vs float-ideal truth at
+    /// fractional scales; the fixed +2px expansion covers it. Integer 1.0/2.0
+    /// are exact and pass on both old and new.
+    #[test]
+    fn fractional_far_edge_thin_is_covered_only_with_expansion() {
+        let host = (3392, 2400);
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            let cfg_w = ((host.0 as f64 / scale).round().max(1.0)) as i32;
+            let cfg_h = ((host.1 as f64 / scale).round().max(1.0)) as i32;
+            let buf_w = ((cfg_w as f64 * scale) + 0.5).floor() as i32;
+            let buf_h = ((cfg_h as f64 * scale) + 0.5).floor() as i32;
+            let buffer = buf(buf_w, buf_h);
+            let win_w = ((buf_w as f64 / scale) + 0.5).floor() as i32;
+            let win_h = ((buf_h as f64 / scale) + 0.5).floor() as i32;
+            // Far-edge 23x19 cursor (worst systematic shift, bottom-right).
+            let lx = (win_w - 23).max(0);
+            let ly = (win_h - 19).max(0);
+            // KWin old mapping (rounded window, no +1): direct scale + floor/ceil.
+            let sx_old = buf_w as f64 / win_w as f64;
+            let sy_old = buf_h as f64 / win_h as f64;
+            let old_x0 = (lx as f64 * sx_old).floor() as i32;
+            let old_y0 = (ly as f64 * sy_old).floor() as i32;
+            let old_x1 = ((lx as f64 + 23.0) * sx_old).ceil() as i32;
+            let old_y1 = ((ly as f64 + 19.0) * sy_old).ceil() as i32;
+            let old_rect = (
+                old_x0,
+                old_y0,
+                (old_x1 - old_x0).max(1),
+                (old_y1 - old_y0).max(1),
+            );
+            // Float-ideal truth (exact fractional scale, outward-aligned).
+            let ideal_x0 = (lx as f64 * scale).floor() as i32;
+            let ideal_y0 = (ly as f64 * scale).floor() as i32;
+            let ideal_x1 = ((lx as f64 + 23.0) * scale).ceil() as i32;
+            let ideal_y1 = ((ly as f64 + 19.0) * scale).ceil() as i32;
+            let ideal = BufferRect {
+                x: ideal_x0,
+                y: ideal_y0,
+                w: (ideal_x1 - ideal_x0).max(1),
+                h: (ideal_y1 - ideal_y0).max(1),
+            }
+            .clamp_to(buffer)
+            .expect("ideal inside");
+            let old_cov = old_buffer_to_buffer_verbatim(
+                (old_rect.0, old_rect.1, old_rect.2, old_rect.3),
+                buffer,
+            );
+            let new_cov =
+                buffer_to_buffer((old_rect.0, old_rect.1, old_rect.2, old_rect.3), buffer)
+                    .expect("valid")
+                    .expect("non-empty");
+            // New must always cover ideal (invariant: never under-cover).
+            assert!(
+                new_cov.x <= ideal.x
+                    && new_cov.y <= ideal.y
+                    && new_cov.x + new_cov.w >= ideal.x + ideal.w
+                    && new_cov.y + new_cov.h >= ideal.y + ideal.h,
+                "scale={scale} new {new_cov:?} must cover ideal {ideal:?} (kwin {old_rect:?})"
+            );
+            let old_covers = match old_cov {
+                Some(o) => {
+                    o.x <= ideal.x
+                        && o.y <= ideal.y
+                        && o.x + o.w >= ideal.x + ideal.w
+                        && o.y + o.h >= ideal.y + ideal.h
+                }
+                None => false,
+            };
+            if scale == 1.0 || scale == 2.0 {
+                assert!(
+                    old_covers,
+                    "scale={scale} integer must naturally pass on old (old {old_cov:?} vs ideal {ideal:?})"
+                );
+            } else {
+                // At least one fractional scale must expose the old 1px miss;
+                // assert per-scale only when geometry actually shifts across a
+                // pixel boundary (1.25 far-edge does; 1.5 centre may not).
+                // The global regression below enforces at least one miss.
+                let _ = old_covers;
+            }
+            // Tiny stays tiny: expanded far-edge thin must not become full.
+            let plan = decide_upload(vec![new_cov], buffer, false, false, 4);
+            assert!(
+                !plan.is_full(),
+                "scale={scale} expanded thin must stay partial"
+            );
+        }
+        // Global: old verbatim must miss ideal at 1.25 far-edge (proves test
+        // would fail without the fix). Recompute that exact case.
+        {
+            let scale = 1.25;
+            let cfg_w = ((host.0 as f64 / scale).round().max(1.0)) as i32;
+            let cfg_h = ((host.1 as f64 / scale).round().max(1.0)) as i32;
+            let buf_w = ((cfg_w as f64 * scale) + 0.5).floor() as i32;
+            let buf_h = ((cfg_h as f64 * scale) + 0.5).floor() as i32;
+            let buffer = buf(buf_w, buf_h);
+            let win_w = ((buf_w as f64 / scale) + 0.5).floor() as i32;
+            let win_h = ((buf_h as f64 / scale) + 0.5).floor() as i32;
+            let lx = (win_w - 23).max(0);
+            let ly = (win_h - 19).max(0);
+            let sx_old = buf_w as f64 / win_w as f64;
+            let sy_old = buf_h as f64 / win_h as f64;
+            let old_x0 = (lx as f64 * sx_old).floor() as i32;
+            let old_y0 = (ly as f64 * sy_old).floor() as i32;
+            let old_x1 = ((lx as f64 + 23.0) * sx_old).ceil() as i32;
+            let old_y1 = ((ly as f64 + 19.0) * sy_old).ceil() as i32;
+            let old_rect = (
+                old_x0,
+                old_y0,
+                (old_x1 - old_x0).max(1),
+                (old_y1 - old_y0).max(1),
+            );
+            let ideal_x0 = (lx as f64 * scale).floor() as i32;
+            let ideal_y0 = (ly as f64 * scale).floor() as i32;
+            let ideal_x1 = ((lx as f64 + 23.0) * scale).ceil() as i32;
+            let ideal_y1 = ((ly as f64 + 19.0) * scale).ceil() as i32;
+            let ideal = BufferRect {
+                x: ideal_x0,
+                y: ideal_y0,
+                w: (ideal_x1 - ideal_x0).max(1),
+                h: (ideal_y1 - ideal_y0).max(1),
+            }
+            .clamp_to(buffer)
+            .unwrap();
+            let old_cov =
+                old_buffer_to_buffer_verbatim((old_rect.0, old_rect.1, old_rect.2, old_rect.3), buffer)
+                    .unwrap();
+            let misses = !(old_cov.x <= ideal.x
+                && old_cov.x + old_cov.w >= ideal.x + ideal.w);
+            assert!(
+                misses,
+                "1.25 far-edge thin must expose old verbatim miss (old {old_cov:?} vs ideal {ideal:?})"
+            );
+        }
     }
 }

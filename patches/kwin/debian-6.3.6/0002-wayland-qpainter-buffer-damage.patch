@@ -66,7 +66,7 @@ index 0733130..006e143 100644
  
  #include <KWayland/Client/surface.h>
  
-@@ -65,7 +66,13 @@ bool WaylandQPainterPrimaryLayer::doEndFrame(const QRegion &renderedRegion, cons
+@@ -65,7 +66,16 @@ bool WaylandQPainterPrimaryLayer::doEndFrame(const QRegion &renderedRegion, cons
      m_renderTime->end();
      frame->addRenderTimeQuery(std::move(m_renderTime));
      m_damageJournal.add(damagedRegion);
@@ -74,8 +74,11 @@ index 0733130..006e143 100644
 +    // QPainter maps an integer logical window onto the native QImage. Its
 +    // scale can differ from ceil(output scale), which wl_surface advertises.
 +    // Export the actual painted buffer coordinates, including age repair.
++    // The window rect (not just size) is used so non-zero output origins
++    // map correctly; damage is over-covered by 1 logical px (tiny, never
++    // full) so fractional rounding / raster bleed can never under-cover.
 +    const auto bufferDamage = qpainterBufferDamage(renderedRegion,
-+                                                   m_waylandOutput->geometryF().toRect().size(),
++                                                   m_waylandOutput->geometryF().toRect(),
 +                                                   m_back->view()->image()->size());
 +    m_waylandOutput->setPrimaryBuffer(m_waylandOutput->backend()->importBuffer(m_back->buffer()), bufferDamage);
      m_swapchain->release(m_back);
@@ -85,10 +88,11 @@ diff --git a/src/backends/wayland/qpainter_buffer_damage.h b/src/backends/waylan
 new file mode 100644
 --- /dev/null
 +++ b/src/backends/wayland/qpainter_buffer_damage.h
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,50 @@
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +#pragma once
 +
++#include <QRect>
 +#include <QRectF>
 +#include <QRegion>
 +#include <QSize>
@@ -98,18 +102,38 @@ new file mode 100644
 +// Match ItemRendererQPainter::beginFrame: setWindow(renderRect().toRect())
 +// maps the logical clip to the complete QImage viewport. Do not substitute
 +// wl_surface's integer buffer scale or round the rectangle inward.
-+inline QRegion qpainterBufferDamage(const QRegion &logicalDamage, const QSize &window, const QSize &buffer)
++//
++// Invariant: every backing-QImage pixel whose content changed must be
++// included in the returned buffer damage. Over-cover by 1-2px is allowed;
++// under-cover is forbidden. The 1 logical px expansion keeps tiny damage
++// tiny (e.g. 23px -> 25px logical -> ~31px buffer at 1.25x) while covering
++// fractional window rounding (<=0.5px systematic shift at far edges, worst
++// at bottom-right) and raster/filter bleed. Integer 1.0/2.0 scales are
++// exact and naturally pass; fractional 1.25/1.5/1.75 expose the old bug.
++// The window rect origin is subtracted so non-zero output origins and
++// negative damage map correctly; the result is always clipped to the image.
++inline QRegion qpainterBufferDamage(const QRegion &logicalDamage, const QRect &window, const QSize &buffer)
 +{
 +    const QRect bounds(QPoint(0, 0), buffer);
 +    if (window.isEmpty() || buffer.isEmpty()) {
++        return bounds;
++    }
++    // Huge/infinite fallback (new swapchain, age eviction) means full.
++    // Avoids int overflow in per-rect expansion math on INT32_MAX sentinels.
++    const QRect bound = logicalDamage.boundingRect();
++    if (bound.width() >= (1 << 30) || bound.height() >= (1 << 30)) {
 +        return bounds;
 +    }
 +    const qreal sx = qreal(buffer.width()) / window.width();
 +    const qreal sy = qreal(buffer.height()) / window.height();
 +    QRegion result;
 +    for (const QRect &rect : logicalDamage) {
-+        result += QRectF(rect.x() * sx, rect.y() * sy,
-+                         rect.width() * sx, rect.height() * sy)
++        // Conservative protocol-rounding cover: true fractional client
++        // damage could extend ~1 logical px beyond the reported integer
++        // rect on every side. Outward expansion only copies current pixels.
++        const QRect expanded = rect.adjusted(-1, -1, 1, 1);
++        result += QRectF((expanded.x() - window.x()) * sx, (expanded.y() - window.y()) * sy,
++                         expanded.width() * sx, expanded.height() * sy)
 +                      .toAlignedRect().intersected(bounds);
 +    }
 +    return result;
