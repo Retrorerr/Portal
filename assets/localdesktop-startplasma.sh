@@ -195,16 +195,20 @@ rm -f "$config_dir/autostart/konsole.desktop" "$config_dir/autostart/org.kde.kon
 
 # IBus input-method bus for X11/GTK clients (Portal IBus engine bridges
 # editable focus and host commits to the Android IME; proven with Firefox).
-# Runs inside the Plasma session (full session-bus env) as an autostart
-# entry so it lives exactly as long as the session. Daemon, engine default
-# and packages are ensured idempotently; any failure degrades to evdev keys.
+# The launcher MUST stay off the critical splash->desktop path: it returns
+# instantly and does all work (daemon start, engine selection) in a detached
+# background task with bounded waits. No package installation here (packages are
+# provisioned pre-session by setup) and no fixed sleep. Any failure degrades
+# to evdev keys. Started after the panel so it can never contend with shell
+# startup.
 mkdir -p "$config_dir/autostart"
 cat > "$config_dir/autostart/portal-ibus-daemon.desktop" <<'DESKTOP_EOF'
 [Desktop Entry]
 Type=Application
 Name=Portal IBus Daemon
-Exec=sh -c 'command -v ibus-daemon >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive; apt-get install -y ibus gir1.2-ibus-1.0 python3-gi >>/tmp/portal-ibus-install.log 2>&1 || true); ibus-daemon -s -d >>/tmp/portal-ibus-daemon.log 2>&1; sleep 4; ibus engine portal >>/tmp/portal-ibus-daemon.log 2>&1 || true'
+Exec=/usr/local/bin/portal-ibus-lazy
 X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel
 NoDisplay=true
 DESKTOP_EOF
 
