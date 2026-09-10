@@ -63,6 +63,11 @@ const PORTAL_IME_DESKTOP: &str = include_str!("../../../assets/portal-ime.deskto
 /// (proven: Firefox URL bar/input/textarea/contenteditable, exact Unicode).
 const PORTAL_IBUS_ENGINE: &str = include_str!("../../../assets/portal-ibus-engine.py");
 const PORTAL_IBUS_COMPONENT: &str = include_str!("../../../assets/portal-ibus-component.xml");
+/// IBus lazy starter for the Plasma autostart entry. Returns in milliseconds
+/// and does all work detached with bounded waits: never apt-get, never a
+/// fixed sleep on the splash->desktop path. Packages are provisioned
+/// pre-session by `provision_ibus_packages`.
+const PORTAL_IBUS_LAZY: &str = include_str!("../../../assets/portal-ibus-lazy.sh");
 const CLIPBOARD_SYNC: &str = include_str!("../../../assets/localdesktop-clipboard-sync.sh");
 const CLIPBOARD_PUSH: &str = include_str!("../../../assets/localdesktop-clipboard-push.sh");
 const WL_COPY_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-copy");
@@ -1370,6 +1375,12 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/portal-ibus-engine"),
         PORTAL_IBUS_ENGINE,
     );
+    // Non-blocking autostart launcher for the IBus daemon/engine (see
+    // assets/portal-ibus-lazy.sh). Deployed idempotently like the engine.
+    write_executable(
+        &fs_root.join("usr/local/bin/portal-ibus-lazy"),
+        PORTAL_IBUS_LAZY,
+    );
     let ibus_component_path = fs_root.join("usr/share/ibus/component/portal.xml");
     if let Some(parent) = ibus_component_path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -1696,6 +1707,41 @@ pub fn sync_guest_ssl_certificates(fs_root: &Path) {
     }
 }
 
+/// Best-effort detached provisioning of the IBus input-method packages.
+/// The Plasma autostart entry only ever starts an already-installed daemon
+/// (never apt-get, never a fixed sleep), so packages must exist BEFORE the
+/// session starts. Skipped entirely when the daemon is already installed or
+/// a previous run completed. Runs on a detached thread and must never block
+/// session startup: failures (e.g. offline) are logged and retried on a
+/// later launch, and the session degrades to evdev keys meanwhile.
+fn provision_ibus_packages(fs_root: &Path) {
+    if fs_root.join("usr/bin/ibus-daemon").is_file() {
+        return;
+    }
+    const MARKER: &str = "var/lib/localdesktop/ibus-provisioned-v1";
+    if fs_root.join(MARKER).is_file() {
+        return;
+    }
+    std::thread::spawn(|| {
+        let output = ArchProcess {
+            command: "DEBIAN_FRONTEND=noninteractive apt-get update >>/tmp/portal-ibus-provision.log 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y ibus gir1.2-ibus-1.0 python3-gi >>/tmp/portal-ibus-provision.log 2>&1".into(),
+            user: None,
+            log: None,
+        }
+        .run();
+        let root = Path::new(PRODUCTION_FS_ROOT);
+        if output.status.success() && root.join("usr/bin/ibus-daemon").is_file() {
+            let _ = std::fs::write(root.join(MARKER), b"completed\n");
+            log::info!("IBus input-method packages provisioned pre-session");
+        } else {
+            log::warn!(
+                "IBus package provisioning deferred (status {:?}); X11/GTK input degrades to evdev keys until a later launch",
+                output.status.code()
+            );
+        }
+    });
+}
+
 fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let username = get_application_context().local_config.user.username;
@@ -1705,6 +1751,9 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     let ui_scale = 1;
     sync_session_runtime_files(fs_root, ui_scale);
     sync_kwin_overlay(fs_root);
+    // IBus packages pre-session (detached, non-blocking); the autostart
+    // launcher only starts an installed daemon, never package-manages.
+    provision_ibus_packages(fs_root);
 
     // All builds need the socket fstat fix in this existing library. A
     // nested gdb frequently dies before it can attach under Android's PRoot;

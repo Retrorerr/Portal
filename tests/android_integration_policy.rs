@@ -25,6 +25,7 @@ const ANDROID_IME_SOURCE: &str = include_str!("../src/android/ime.rs");
 const KWIN_WRAPPER_SOURCE: &str = include_str!("../assets/localdesktop-kwin-wrapper-v2.sh");
 const STARTPLASMA_SOURCE: &str = include_str!("../assets/localdesktop-startplasma.sh");
 const PORTAL_IME_BRIDGE_SOURCE: &str = include_str!("../assets/portal-ime-bridge.py");
+const PORTAL_IBUS_LAZY_SOURCE: &str = include_str!("../assets/portal-ibus-lazy.sh");
 
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
@@ -303,6 +304,29 @@ fn debian_package_management_and_tablet_mode_policy() {
     assert!(PLASMA_LAUNCHER_SOURCE.contains("update-mime-database"));
     assert!(PLASMA_LAUNCHER_SOURCE.contains("update-desktop-database"));
     assert!(PLASMA_LAUNCHER_SOURCE.contains("kbuildsycoca6 --noincremental"));
+}
+
+#[test]
+fn ibus_autostart_never_blocks_session_startup() {
+    // No package management anywhere on the splash->desktop path.
+    assert!(!STARTPLASMA_SOURCE.contains("apt-get"));
+    // The autostart entry delegates to the lazy launcher (returns in
+    // milliseconds), starts after the panel, and carries no fixed sleep.
+    assert!(STARTPLASMA_SOURCE.contains("Exec=/usr/local/bin/portal-ibus-lazy"));
+    assert!(STARTPLASMA_SOURCE.contains("X-KDE-autostart-after=panel"));
+    assert!(!STARTPLASMA_SOURCE.contains("sleep 4; ibus engine portal"));
+    // The lazy launcher detaches all work with bounded waits: no apt-get,
+    // no blocking sleep on the critical path.
+    assert!(PORTAL_IBUS_LAZY_SOURCE.contains(") >/dev/null 2>&1 < /dev/null &"));
+    assert!(PORTAL_IBUS_LAZY_SOURCE.contains("exit 0"));
+    assert!(!PORTAL_IBUS_LAZY_SOURCE.contains("apt-get"));
+    assert!(!PORTAL_IBUS_LAZY_SOURCE.contains("sleep 4"));
+    // Setup provisions IBus packages pre-session (detached, marker-gated)
+    // and deploys the lazy launcher into the guest.
+    assert!(ANDROID_SETUP_SOURCE.contains("provision_ibus_packages"));
+    assert!(ANDROID_SETUP_SOURCE.contains("ibus-provisioned-v1"));
+    assert!(ANDROID_SETUP_SOURCE.contains("usr/local/bin/portal-ibus-lazy"));
+    assert!(ANDROID_SETUP_SOURCE.contains("PORTAL_IBUS_LAZY"));
 }
 
 #[test]
