@@ -215,15 +215,17 @@ pub fn launch() {
         if anland {
             extra_env = crate::android::anland::guest_mesa_env();
             extra_binds = crate::android::anland::session_binds();
-            // The broker socket dir must exist before proot binds it.
+            // The broker socket dir must exist before proot binds it. Never
+            // remove the socket file here: the Anland session binds it at
+            // resume time, before this launch worker runs (unlinking a live
+            // broker socket makes the guest path ENOENT while the listener
+            // survives unlinked).
             let sock_dir = crate::android::anland::host_socket_path()
                 .parent()
                 .map(|p| p.to_path_buf());
             if let Some(dir) = sock_dir {
                 let _ = std::fs::create_dir_all(&dir);
             }
-            // Drop a stale socket so the broker can bind fresh.
-            let _ = std::fs::remove_file(crate::android::anland::host_socket_path());
             log::info!(
                 "anland.launch env={} binds={}",
                 extra_env

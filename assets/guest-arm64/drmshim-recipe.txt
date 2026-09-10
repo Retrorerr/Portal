@@ -1,0 +1,42 @@
+Project Anland DRM render-device shim — build recipe (guest-native ARM64 glibc).
+
+KWin's Anland backend requires a DRM render device at init
+(openRenderDevice) even for the surfaceless path, but /dev/dri/renderD128 is
+not openable from the Android app sandbox (SELinux/DAC) on devices like the
+OnePlus Pad 3 (OxygenOS). Without a device, KWin logs
+"no usable DRM render device; cannot bring up OpenGL compositing" and exits.
+
+This shim fakes ONLY the open()+version probe so init can proceed. Proven on
+the Pad 3 (Adreno 830, lfdevs Mesa 26.2 freedreno/KGSL): with the shim, KWin
+logs "OpenGL compositing has been successfully initialized"; the single
+non-fatal ioctl observed is 0xc010640c (ENOTTY-tolerated, logged). Every other
+ioctl passes through, and every faked/unhandled ioctl number is logged to
+stderr (captured in /var/lib/localdesktop/kwin.log) for audit.
+
+Preloaded ONLY when ANLAND_SOCKET is set (see
+assets/localdesktop-kwin-wrapper-v2.sh); never in QPainter mode.
+
+Reproduce in the Debian 13 guest (native ARM64, gcc) — full source was
+/tmp/drmshim.c on the build device; logic:
+
+  #define _GNU_SOURCE
+  #include <dlfcn.h> <fcntl.h> <stdarg.h> <stdio.h> <string.h>
+  #include <sys/ioctl.h> <unistd.h>
+  struct drm_version { int major, minor, patch; size_t nlen, dlen, desclen;
+                       char *name, *date, *desc; };
+  #define DRM_IOCTL_VERSION _IOWR('d', 0x00, struct drm_version)
+  - intercept open/open64 of /dev/dri/renderD128 and /dev/dri/card0:
+    return a dup of /dev/null, log it, remember the fd;
+  - intercept ioctl on remembered fds:
+    DRM_IOCTL_VERSION -> report driver "msm" v1.1.0 (length query + fill);
+    anything else -> log the number, fail ENOTTY.
+
+  cc -shared -fPIC -O2 -o drmshim.so drmshim.c -ldl
+
+Verify in-guest (lfdevs KWin + Mesa env + a broker on the socket):
+
+  LD_PRELOAD=/tmp/drmshim.so /usr/bin/kwin_wayland --anland --no-lockscreen
+
+Retirement path: a null-tolerant KWin patch (allow missing DrmDevice on the
+surfaceless path) rebuilt into the overlay libkwin would remove the need for
+faking; until then this shim is the smallest contained workaround.

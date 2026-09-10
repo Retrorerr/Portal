@@ -86,6 +86,20 @@ type GetWidthFn = unsafe extern "C" fn(*mut c_void) -> i32;
 type GetHeightFn = unsafe extern "C" fn(*mut c_void) -> i32;
 type SetGeometryFn = unsafe extern "C" fn(*mut c_void, i32, i32, i32) -> i32;
 
+/// CPU-locked buffer out-param for the connect ritual below.
+#[repr(C)]
+pub struct ANativeWindowBufferLock {
+    pub width: i32,
+    pub height: i32,
+    pub stride: i32,
+    pub format: i32,
+    pub bits: *mut c_void,
+    pub reserved: [u32; 6],
+}
+
+type LockFn = unsafe extern "C" fn(*mut c_void, *mut ANativeWindowBufferLock, *mut c_void) -> i32;
+type UnlockAndPostFn = unsafe extern "C" fn(*mut c_void) -> i32;
+
 pub unsafe fn acquire(window: *mut c_void, api: &AnwApi) {
     (api.acquire)(window)
 }
@@ -119,6 +133,8 @@ pub struct AnwApi {
     get_width: libloading::Symbol<'static, GetWidthFn>,
     get_height: libloading::Symbol<'static, GetHeightFn>,
     set_geometry: libloading::Symbol<'static, SetGeometryFn>,
+    lock: libloading::Symbol<'static, LockFn>,
+    unlock_and_post: libloading::Symbol<'static, UnlockAndPostFn>,
     set_buffer_count:
         libloading::Symbol<'static, unsafe extern "C" fn(*mut c_void, usize) -> c_int>,
     query: libloading::Symbol<
@@ -163,6 +179,8 @@ impl AnwApi {
             get_width: sym!(b"ANativeWindow_getWidth"),
             get_height: sym!(b"ANativeWindow_getHeight"),
             set_geometry: sym!(b"ANativeWindow_setBuffersGeometry"),
+            lock: sym!(b"ANativeWindow_lock"),
+            unlock_and_post: sym!(b"ANativeWindow_unlockAndPost"),
             set_buffer_count: sym!(b"ANativeWindow_setBufferCount"),
             query: sym!(b"ANativeWindow_query"),
             dequeue_buffer: sym!(b"ANativeWindow_dequeueBuffer"),
@@ -171,6 +189,10 @@ impl AnwApi {
         })
     }
 
+    /// Direct struct perform() connect. Retained as ABI documentation only:
+    /// a misdirected indirect call here crashed on the Pad 3 (OxygenOS
+    /// table layout), so sessions must use [`Self::connect_cpu_ritual`].
+    #[allow(dead_code)]
     pub unsafe fn api_connect(window: *mut c_void, api: c_int) -> c_int {
         let w = window as *mut AnwWindow;
         match (*w).perform {
@@ -179,6 +201,57 @@ impl AnwApi {
         }
     }
 
+    /// Connect the window to the CPU API without touching the fragile
+    /// struct `perform()` slot: the legacy lock/unlock pair connects
+    /// internally. One unrendered (black) frame is posted and immediately
+    /// replaced once the producer connects; the screen shows the app
+    /// background until then either way.
+    pub unsafe fn connect_cpu_ritual(&self, window: *mut c_void) -> Result<(), String> {
+        let mut out: ANativeWindowBufferLock = std::mem::zeroed();
+        let r = (self.lock)(window, &mut out, std::ptr::null_mut());
+        if r != 0 {
+            return Err(format!("ANativeWindow_lock connect ritual failed: {r}"));
+        }
+        let r = (self.unlock_and_post)(window);
+        if r != 0 {
+            return Err(format!("ANativeWindow_unlockAndPost failed: {r}"));
+        }
+        Ok(())
+    }
+
+    /// In-object table dump (read-only). Retained for bring-up forensics;
+    /// not used by sessions: the supposed slot addresses disagree with the
+    /// dlsym'd entries on OxygenOS, so nothing may call through the table.
+    #[allow(dead_code)]
+    pub unsafe fn dump_table(&self, window: *mut c_void) {
+        let w = window as *const AnwWindow;
+        let slots = [
+            ("setSwapInterval", (*w).set_swap_interval.map(|f| f as usize)),
+            ("query", (*w).query.map(|f| f as usize)),
+            ("perform", (*w).perform.map(|f| f as usize)),
+            ("dequeueBuffer", (*w).dequeue_buffer.map(|f| f as usize)),
+            ("queueBuffer", (*w).queue_buffer.map(|f| f as usize)),
+            ("cancelBuffer", (*w).cancel_buffer.map(|f| f as usize)),
+        ];
+        for (name, addr) in slots {
+            match addr {
+                Some(a) => log::info!("anland.anw_table {name}=0x{a:x}"),
+                None => log::info!("anland.anw_table {name}=null"),
+            }
+        }
+        log::info!(
+            "anland.anw_sym setBufferCount=0x{:x} query=0x{:x} dequeue=0x{:x} queue=0x{:x} cancel=0x{:x} lock=0x{:x} unlockPost=0x{:x}",
+            *self.set_buffer_count as usize,
+            *self.query as usize,
+            *self.dequeue_buffer as usize,
+            *self.queue_buffer as usize,
+            *self.cancel_buffer as usize,
+            *self.lock as usize,
+            *self.unlock_and_post as usize,
+        );
+    }
+
+    #[allow(dead_code)]
     pub unsafe fn api_disconnect(window: *mut c_void, api: c_int) -> c_int {
         let w = window as *mut AnwWindow;
         match (*w).perform {

@@ -66,10 +66,15 @@ const KWIN_LIBRARY: &[u8] = include_bytes!("../../../assets/kwin-debian-arm64/li
 /// Project Anland load-time stub: satisfies the lfdevs kwin_wayland binary's
 /// AnlandBackend reference when QPainter sessions run the overlay libkwin
 /// (which has no Anland backend). Preloaded ONLY in QPainter mode; traps if
-/// ever called. Source: guest-built from the recipe in
-/// `assets/guest-arm64/anland-stub-recipe.txt`. Unified overlay build (single
-/// libkwin with Anland backend + damage fix) will retire this stub.
+/// ever called. Recipe: `assets/guest-arm64/anland-stub-recipe.txt`.
+/// A unified overlay build (single libkwin with Anland backend + damage fix)
+/// will retire this stub.
 const ANLAND_STUB_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/libanland-stub.so");
+/// Project Anland DRM render-device shim: fakes the open()+version probe so
+/// KWin's Anland backend initializes OpenGL on devices where the app sandbox
+/// cannot open /dev/dri/renderD128. Preloaded ONLY in Anland sessions.
+/// Source recipe: `assets/guest-arm64/drmshim-recipe.txt`.
+const DRMSHIM_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/drmshim.so");
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -1398,6 +1403,18 @@ fn sync_kwin_overlay(fs_root: &Path) {
         if fs::write(&stub_tmp, ANLAND_STUB_BINARY).is_ok() {
             let _ = fs::set_permissions(&stub_tmp, fs::Permissions::from_mode(0o755));
             let _ = fs::rename(&stub_tmp, &stub_path);
+        }
+    }
+    // Project Anland DRM shim for Anland sessions (see DRMSHIM_BINARY).
+    let shim_path = kwin_dir.join("drmshim.so");
+    let shim_fresh = fs::metadata(&shim_path)
+        .map(|m| m.len() == DRMSHIM_BINARY.len() as u64)
+        .unwrap_or(false);
+    if !shim_fresh {
+        let shim_tmp = shim_path.with_extension("so.tmp");
+        if fs::write(&shim_tmp, DRMSHIM_BINARY).is_ok() {
+            let _ = fs::set_permissions(&shim_tmp, fs::Permissions::from_mode(0o755));
+            let _ = fs::rename(&shim_tmp, &shim_path);
         }
     }
 }
