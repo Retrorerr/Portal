@@ -1942,6 +1942,7 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         surface_control_cursor: None,
         frame_in_flight: false,
         anland: None,
+        pending_pastes: Vec::new(),
         android_app,
     })
 }

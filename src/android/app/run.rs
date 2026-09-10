@@ -1,5 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-
 use super::build::{PolarBearApp, PolarBearBackend};
 use crate::android::{
     accessibility::{self, AppUserEvent},
@@ -351,9 +351,25 @@ fn resume_anland(
 }
 
 /// Forward raw window input to the Anland producer as fixed-size input
-/// events. Milestone scope: touch, pointer motion/buttons/wheel and mapped
-/// evdev keys. Pointer deltas are zeroed (absolute positions are authoritative
-/// for the Pad use case); relative-motion clients are a known limitation.
+/// events. Pointer motion carries session-synthesized relative deltas (the
+/// KWin backend emits both absolute and relative motion per event; zeroed
+/// deltas froze the touchpad cursor). Both CursorMoved and AndroidPointerMoved
+/// (touchpad/mouse hover with raw device identity) feed the same path.
+///
+/// Motion is hot (60Hz+): logged at info at most once per second so physical
+/// tests stay observable in logcat without flooding it.
+static LAST_MOTION_LOG_NS: AtomicU64 = AtomicU64::new(0);
+
+fn note_motion_logged(x: f64, y: f64, detail: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    if now.wrapping_sub(LAST_MOTION_LOG_NS.load(Ordering::Relaxed)) >= 1_000_000_000 {
+        LAST_MOTION_LOG_NS.store(now, Ordering::Relaxed);
+        log::info!("anland.input motion x={x:.1} y={y:.1} ({detail})");
+    }
+}
 fn forward_anland_input(
     backend: &crate::android::backend::wayland::WaylandBackend,
     event: &WindowEvent,
@@ -371,6 +387,11 @@ fn forward_anland_input(
                     crate::android::anland::protocol::INPUT_ACTION_UP
                 }
             };
+            note_motion_logged(
+                touch.location.x,
+                touch.location.y,
+                &format!("touch action={action} id={}", touch.id),
+            );
             session.send_input(&AnlandInput::touch(
                 action,
                 touch.location.x as f32,
@@ -380,12 +401,21 @@ fn forward_anland_input(
             session.send_input(&AnlandInput::touch_frame());
         }
         WindowEvent::CursorMoved { position, .. } => {
-            session.send_input(&AnlandInput::pointer_motion(
-                position.x as f32,
-                position.y as f32,
-                0.0,
-                0.0,
-            ));
+            note_motion_logged(position.x, position.y, "cursor");
+            session.send_pointer_motion(position.x as f32, position.y as f32);
+        }
+        WindowEvent::AndroidPointerMoved {
+            position,
+            android_device_id,
+            source,
+            tool_type,
+            ..
+        } => {
+            log::debug!(
+                "anland.input pointer dev={android_device_id} src={source:#x} tool={tool_type}"
+            );
+            note_motion_logged(position.x, position.y, "android-pointer");
+            session.send_pointer_motion(position.x as f32, position.y as f32);
         }
         WindowEvent::MouseInput { state, button, .. } => {
             let code = match button {
@@ -396,13 +426,13 @@ fn forward_anland_input(
                 MouseButton::Forward => 0x115,
                 MouseButton::Other(b) => 0x110 + (*b as u32),
             };
-            session.send_input(&AnlandInput::pointer_button(
-                code,
-                *state == ElementState::Pressed,
-            ));
+            let pressed = *state == ElementState::Pressed;
+            log::info!("anland.input button code={code:#x} pressed={pressed}");
+            session.send_input(&AnlandInput::pointer_button(code, pressed));
         }
         WindowEvent::MouseWheel { delta, .. } => match delta {
             MouseScrollDelta::LineDelta(x, y) => {
+                log::debug!("anland.input wheel lines x={x} y={y}");
                 if *y != 0.0 {
                     session.send_input(&AnlandInput::pointer_axis(0, *y, *y as i32));
                 }
@@ -411,6 +441,11 @@ fn forward_anland_input(
                 }
             }
             MouseScrollDelta::PixelDelta(pos) => {
+                log::debug!(
+                    "anland.input wheel pixels x={:.1} y={:.1}",
+                    pos.x,
+                    pos.y
+                );
                 if pos.y != 0.0 {
                     session.send_input(&AnlandInput::pointer_axis(0, pos.y as f32, 0));
                 }
@@ -432,6 +467,9 @@ fn forward_anland_input(
                 ElementState::Pressed => crate::android::anland::protocol::INPUT_ACTION_DOWN,
                 ElementState::Released => crate::android::anland::protocol::INPUT_ACTION_UP,
             };
+            log::info!(
+                "anland.input key action={action} scancode={scancode}"
+            );
             session.send_input(&AnlandInput::key(action, scancode as i32));
         }
         _ => {}
@@ -695,10 +733,14 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         }
 
         for text in ime::drain_commits() {
-            if !backend.compositor.state.commit_android_text(&text) {
+            if backend.anland.is_some() {
+                inject_committed_text_anland(&text, backend);
+            } else if !backend.compositor.state.commit_android_text(&text) {
                 inject_committed_text(&text, backend, event_loop);
             }
         }
+
+        drain_due_pastes(backend);
 
         for event in accessibility::drain_pending_events() {
             let event = centralize_injected_keyboard(
@@ -776,6 +818,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             // Smithay handlers below stay warm (state machines, gesture
             // tracking) but render nothing while their renderer is None.
             forward_anland_input(backend, &event);
+            // Deferred X11 pastes flush on any input too (not just user
+            // events), so continued typing fires them promptly.
+            drain_due_pastes(backend);
 
             match &event {
                 // Focus changes are common during rotation, popup dismissal and app switching.
@@ -882,12 +927,134 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     }
 }
 
+/// Emit one evdev key edge on the Anland session (no Smithay involvement).
+fn anland_key(session: &crate::android::anland::AnlandSession, scancode: u32, pressed: bool) {
+    use crate::android::anland::protocol::InputEvent as AnlandInput;
+    session.send_input(&AnlandInput::key(
+        if pressed {
+            crate::android::anland::protocol::INPUT_ACTION_DOWN
+        } else {
+            crate::android::anland::protocol::INPUT_ACTION_UP
+        },
+        scancode as i32,
+    ));
+}
+
+/// Anland-mode routing for Android IME commits (QPainter path untouched).
+///
+/// Delivery follows the focused-client kind, because X11 clients never
+/// activate KWin's input method (no XIM bridge) while Wayland text clients
+/// do (bridge ACTIVATE, tracked by `is_ime_context_active`):
+/// - backspace runs / enter: layout-independent evdev keys (14 / 28);
+/// - Wayland text client focused: full-Unicode TEXT_INPUT to KWin's input
+///   method (`commitText`), same destination as the bridge's commit_string;
+/// - otherwise (X11/unknown): ASCII via evdev keys (existing mapping),
+///   non-ASCII via Android clipboard + deferred Ctrl+V (the guest sync
+///   daemon serves it into the Wayland/X selection; benign on failure —
+///   text stays pasted-ready in the clipboard).
+/// Preedit has no backend channel (KWin exposes only commitText) and stays
+/// dropped; commits are never duplicated (exactly one branch runs).
+fn inject_committed_text_anland(
+    text: &str,
+    backend: &mut crate::android::backend::wayland::WaylandBackend,
+) {
+    let Some(session) = backend.anland.as_ref() else {
+        return;
+    };
+    if !text.is_empty() && text.chars().all(|c| c == '\x08') {
+        let count = text.chars().count();
+        log::info!("anland.ime {count} backspace(s) via evdev keys");
+        for _ in text.chars() {
+            anland_key(session, 14, true);
+            anland_key(session, 14, false);
+        }
+        return;
+    }
+    if text == "\n" || text == "\r\n" || text == "\r" {
+        log::info!("anland.ime enter via evdev key");
+        anland_key(session, 28, true);
+        anland_key(session, 28, false);
+        return;
+    }
+    if crate::android::ime::is_ime_context_active() {
+        if session.send_text(text) {
+            return;
+        }
+        log::warn!("anland.ime send_text failed; falling back");
+    }
+    let events = committed_ascii_to_key_events(text);
+    if !events.is_empty() {
+        log::info!(
+            "anland.ime ascii commit via evdev keys ({} chars)",
+            text.chars().count()
+        );
+        for (scancode, shift_required) in events {
+            // Same shared-modifier rule as the Smithay path: the physical
+            // keyboard state is still tracked centrally in both renderers.
+            let shift_edge = shift_required && !backend.pressed_keys.contains(&42);
+            if shift_edge {
+                anland_key(session, 42, true);
+            }
+            anland_key(session, scancode, true);
+            anland_key(session, scancode, false);
+            if shift_edge {
+                anland_key(session, 42, false);
+            }
+        }
+        return;
+    }
+    if text.is_empty() {
+        return;
+    }
+    match crate::android::clipboard::write_text(&backend.android_app, text) {
+        Ok(()) => {
+            let deadline = backend.clock.now().as_millis() as u64 + 600;
+            backend.pending_pastes.push(
+                crate::android::backend::wayland::PendingAnlandPaste {
+                    deadline_ms: deadline,
+                    text: text.to_string(),
+                },
+            );
+            log::info!(
+                "anland.ime non-ascii staged for deferred paste ({} chars)",
+                text.chars().count()
+            );
+        }
+        Err(error) => log::warn!("anland.ime clipboard stage failed: {error}"),
+    }
+}
+
+/// Fire due deferred pastes (Ctrl+V) once the clipboard had time to arrive
+/// guest-side. Called on user events and after forwarded input: never blocks.
+fn drain_due_pastes(backend: &mut crate::android::backend::wayland::WaylandBackend) {
+    if backend.pending_pastes.is_empty() || backend.anland.is_none() {
+        return;
+    }
+    let now_ms = backend.clock.now().as_millis() as u64;
+    let mut i = 0;
+    while i < backend.pending_pastes.len() {
+        if backend.pending_pastes[i].deadline_ms <= now_ms {
+            let paste = backend.pending_pastes.remove(i);
+            if let Some(session) = backend.anland.as_ref() {
+                for (code, pressed) in [(29u32, true), (47, true), (47, false), (29, false)] {
+                    anland_key(session, code, pressed);
+                }
+                log::info!(
+                    "anland.ime deferred paste fired ({} chars)",
+                    paste.text.chars().count()
+                );
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// Forward Android IME commits through the same physical-key path as a hardware keyboard.
 ///
-/// The compositor currently receives evdev key events, not arbitrary Unicode strings. The
+/// The Smithay compositor receives evdev key events, not arbitrary Unicode strings. The
 /// host-testable policy intentionally handles printable ASCII plus editing/control keys; a
-/// non-ASCII commit is logged and dropped until the guest text-input-v3/virtual-keyboard bridge
-/// can carry it without guessing the user's keyboard layout.
+/// non-ASCII commit is logged and dropped (Anland mode routes those via TEXT_INPUT/paste).
 fn inject_committed_text(
     text: &str,
     backend: &mut crate::android::backend::wayland::WaylandBackend,

@@ -209,6 +209,18 @@ impl InputEvent {
             payload,
         }
     }
+
+    /// TEXT_INPUT header (type 9): `{size}` + `size` trailing UTF-8 bytes sent
+    /// as a second write on the data channel (same framing as clipboard).
+    /// The KWin backend feeds the bytes to `inputMethod()->commitText()`.
+    pub fn text_input(size: u32) -> Self {
+        let mut payload = [0u8; 16];
+        put_u32(&mut payload, 0, size);
+        Self {
+            ev_type: INPUT_TYPE_TEXT_INPUT,
+            payload,
+        }
+    }
 }
 
 impl OutputEvent {

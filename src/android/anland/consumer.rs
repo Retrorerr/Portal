@@ -123,8 +123,14 @@ struct Inner {
     /// back to VSYNC-gated pacing. Only the render thread reads.
     wake: OwnedFd,
     /// Monotonic-nanos deadline (CLOCK_MONOTONIC) until which the loop
-    /// selects every vsync tick. Past it, only the 2Hz heartbeat selects.
+    /// selects every vsync tick. Past it, only the 1Hz heartbeat selects.
     demand_until_ns: AtomicU64,
+    /// Last forwarded pointer position (buffer pixels) for relative-delta
+    /// synthesis. The KWin backend emits both absolute and relative motion
+    /// from each POINTER_MOTION (`pointerMotion(pos, delta, delta)`), and
+    /// relative clients (games, kinetic velocity) need real dx/dy — winit
+    /// only carries absolute positions, so the session tracks them.
+    last_pointer: Mutex<Option<(f32, f32)>>,
     /// Display-VSYNC tick source (Choreographer, timer fallback).
     vsync: Mutex<Option<sys::VsyncPump>>,
 }
@@ -268,6 +274,7 @@ impl AnlandSession {
             client_active: AtomicBool::new(false),
             wake,
             demand_until_ns: AtomicU64::new(0),
+            last_pointer: Mutex::new(None),
             vsync: Mutex::new(Some(vsync)),
         });
         // Collect window slots (dup dma-buf fds, hold one spare back).
@@ -361,9 +368,65 @@ impl AnlandSession {
         }
     }
 
+    /// Forward absolute pointer motion with session-synthesized relative
+    /// deltas. winit carries only absolute positions; the KWin backend emits
+    /// both absolute and relative motion per event, and relative clients
+    /// (plus KWin's velocity/kinetic path) need real dx/dy — zeroed deltas
+    /// left the touchpad cursor frozen. First motion after session start (or
+    /// a jump) reports zero delta, never a spike.
+    pub fn send_pointer_motion(&self, x: f32, y: f32) {
+        let (dx, dy) = {
+            let mut last = self.inner.last_pointer.lock().unwrap();
+            let d = match *last {
+                Some((lx, ly)) => (x - lx, y - ly),
+                None => (0.0, 0.0),
+            };
+            *last = Some((x, y));
+            d
+        };
+        self.send_input(&InputEvent::pointer_motion(x, y, dx, dy));
+    }
+
+    /// Forward committed IME text (UTF-8) to KWin's input method
+    /// (`inputMethod()->commitText()`). Framing: the type-9 header plus the
+    /// raw bytes as a second write, mirroring the clipboard convention the
+    /// producer's `poll_input_event_extend_data` expects. Returns false when
+    /// no generation is connected (caller falls back: bridge FIFO, keys).
+    pub fn send_text(&self, text: &str) -> bool {
+        if text.is_empty() || text.len() > 4096 {
+            return false;
+        }
+        let inner = &self.inner;
+        if !inner.running.load(Ordering::Acquire) {
+            return false;
+        }
+        kick(inner, INPUT_BURST_MS);
+        let _guard = inner.io_lock.lock().unwrap();
+        let gen = inner.gen.lock().unwrap();
+        let Some(gen) = gen.as_ref() else { return false };
+        if inner.connected_gen.lock().unwrap().as_ref() != Some(&gen.id) {
+            return false;
+        }
+        let body = InputEvent::text_input(text.len() as u32);
+        let mut wire = [0u8; 8 + 20];
+        wire[0..4].copy_from_slice(&DATA_MSG_INPUT_EVENT.to_ne_bytes());
+        wire[4..8].copy_from_slice(&20u32.to_ne_bytes());
+        wire[8..12].copy_from_slice(&body.ev_type.to_ne_bytes());
+        wire[12..28].copy_from_slice(&body.payload);
+        if sys::send_all(&gen.data, &wire).is_err()
+            || sys::send_all(&gen.data, text.as_bytes()).is_err()
+        {
+            drop(gen);
+            drop(_guard);
+            enter_fallback(inner, "text send failed");
+            return false;
+        }
+        log::info!("anland.input text committed ({} bytes)", text.len());
+        true
+    }
+
     /// Current proof counters: (queued, fenced, bare, fallbacks).
-    pub fn stats(&self) -> (u64, u64, u64, u64) {
-        (
+    pub fn stats(&self) -> (u64, u64, u64, u64) {        (
             self.inner.frames_queued.load(Ordering::Relaxed),
             self.inner.frames_fenced.load(Ordering::Relaxed),
             self.inner.frames_bare.load(Ordering::Relaxed),

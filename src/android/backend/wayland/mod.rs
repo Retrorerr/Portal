@@ -157,6 +157,20 @@ pub struct WaylandBackend {
     /// owns the window; `None` in the preserved Smithay/QPainter mode. The
     /// two renderers never own the window simultaneously.
     pub anland: Option<crate::android::anland::AnlandSession>,
+    /// Deferred X11 Unicode pastes (Anland mode): (deadline `clock` ms, text).
+    /// The Android clipboard write returns immediately, but the guest sync
+    /// daemon needs ~a vsync-or-two to serve it into the Wayland clipboard;
+    /// Ctrl+V fires when the deadline passes on a frame callback, never by
+    /// blocking the event loop. Failure is benign (text stays in the
+    /// clipboard; the user pastes manually).
+    pub pending_pastes: Vec<PendingAnlandPaste>,
+}
+
+/// One deferred Ctrl+V paste for X11 clients (see `pending_pastes`).
+#[derive(Debug, Clone)]
+pub struct PendingAnlandPaste {
+    pub deadline_ms: u64,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
