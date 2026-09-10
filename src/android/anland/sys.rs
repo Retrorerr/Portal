@@ -7,6 +7,10 @@
 use std::io;
 use std::mem;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+};
 
 // ---------------------------------------------------------------------------
 // byte-stream framing
@@ -264,6 +268,320 @@ pub fn munmap_index(ptr: *mut u32) {
     if !ptr.is_null() {
         unsafe {
             libc::munmap(ptr as *mut libc::c_void, 4);
+        }
+    }
+}
+
+/// Poll two fds for readability with a millisecond timeout.
+/// Returns `(a_ready, b_ready)`; timeout yields `(false, false)`.
+pub fn poll_two(a: &OwnedFd, b: &OwnedFd, timeout_ms: i32) -> io::Result<(bool, bool)> {
+    use std::os::unix::io::AsRawFd;
+    let mut pfds = [
+        libc::pollfd {
+            fd: a.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: b.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let r = unsafe { libc::poll(pfds.as_mut_ptr(), 2, timeout_ms as libc::c_int) };
+    if r < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok((false, false));
+        }
+        return Err(err);
+    }
+    if r == 0 {
+        return Ok((false, false));
+    }
+    for p in pfds.iter() {
+        if p.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+            return Err(io::Error::new(io::ErrorKind::ConnectionReset, "hup/err"));
+        }
+    }
+    Ok((
+        pfds[0].revents & libc::POLLIN != 0,
+        pfds[1].revents & libc::POLLIN != 0,
+    ))
+}
+
+/// Monotonic clock in nanoseconds (pacing math must be wall-clock immune).
+pub fn now_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
+    (ts.tv_sec.max(0) as u64)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(ts.tv_nsec.max(0) as u64)
+}
+
+// ---------------------------------------------------------------------------
+// VSYNC pump (Android Choreographer, dlopen'd — no NDK dependency)
+// ---------------------------------------------------------------------------
+
+type FrameCallback64 = unsafe extern "C" fn(frame_time_nanos: i64, data: *mut libc::c_void);
+
+#[derive(Clone, Copy)]
+struct ChoreoApi {
+    _lib: *mut libc::c_void,
+    looper_prepare: unsafe extern "C" fn(i32) -> *mut libc::c_void,
+    looper_poll_once: unsafe extern "C" fn(i32, *mut i32, *mut i32, *mut *mut libc::c_void) -> i32,
+    looper_release: unsafe extern "C" fn(*mut libc::c_void),
+    get_instance: unsafe extern "C" fn() -> *mut libc::c_void,
+    post_frame_callback64:
+        unsafe extern "C" fn(*mut libc::c_void, FrameCallback64, *mut libc::c_void),
+}
+
+// SAFETY: function pointers loaded once, then only called.
+unsafe impl Send for ChoreoApi {}
+unsafe impl Sync for ChoreoApi {}
+
+fn load_choreo() -> Option<ChoreoApi> {
+    // NUL-terminated symbol names as byte strings (no c-string concat needed).
+    unsafe fn sym(lib: *mut libc::c_void, name: &[u8]) -> Option<*mut libc::c_void> {
+        let p = unsafe { libc::dlsym(lib, name.as_ptr() as *const libc::c_char) };
+        if p.is_null() {
+            None
+        } else {
+            Some(p)
+        }
+    }
+    unsafe {
+        let lib = libc::dlopen(
+            b"libandroid.so\0".as_ptr() as *const libc::c_char,
+            libc::RTLD_NOW,
+        );
+        if lib.is_null() {
+            return None;
+        }
+        macro_rules! load {
+            ($name:expr, $ty:ty) => {
+                match sym(lib, $name) {
+                    Some(p) => std::mem::transmute::<*mut libc::c_void, $ty>(p),
+                    None => {
+                        libc::dlclose(lib);
+                        return None;
+                    }
+                }
+            };
+        }
+        Some(ChoreoApi {
+            _lib: lib,
+            looper_prepare: load!(
+                b"ALooper_prepare\0",
+                unsafe extern "C" fn(i32) -> *mut libc::c_void
+            ),
+            looper_poll_once: load!(
+                b"ALooper_pollOnce\0",
+                unsafe extern "C" fn(i32, *mut i32, *mut i32, *mut *mut libc::c_void) -> i32
+            ),
+            looper_release: load!(
+                b"ALooper_release\0",
+                unsafe extern "C" fn(*mut libc::c_void)
+            ),
+            get_instance: load!(
+                b"AChoreographer_getInstance\0",
+                unsafe extern "C" fn() -> *mut libc::c_void
+            ),
+            post_frame_callback64: load!(
+                b"AChoreographer_postFrameCallback64\0",
+                unsafe extern "C" fn(*mut libc::c_void, FrameCallback64, *mut libc::c_void)
+            ),
+        })
+    }
+}
+
+static CHOREO: OnceLock<Option<ChoreoApi>> = OnceLock::new();
+
+fn choreo_api() -> Option<&'static ChoreoApi> {
+    CHOREO.get_or_init(load_choreo).as_ref()
+}
+
+/// Choreographer frame trampoline: runs on the pump thread's looper, writes
+/// one tick per display vsync. `data` is the heap holder for the tick fd,
+/// alive exactly while the pump thread runs (reclaimed on thread exit).
+/// Callback context: heap holder owned by the pump thread. The trampoline
+/// runs on the pump thread's looper, so bumping `count` needs no sync.
+struct TickHolder {
+    tick_fd: libc::c_int,
+    count: u64,
+}
+
+unsafe extern "C" fn frame_trampoline(_when_ns: i64, data: *mut libc::c_void) {
+    if data.is_null() {
+        return;
+    }
+    let holder = unsafe { &mut *(data as *mut TickHolder) };
+    holder.count += 1;
+    let one: u64 = 1;
+    unsafe {
+        libc::write(
+            holder.tick_fd,
+            &one as *const u64 as *const libc::c_void,
+            8,
+        );
+    }
+}
+
+fn pump_thread_choreo(api: ChoreoApi, tick_fd: libc::c_int, running: Arc<AtomicBool>) {
+    unsafe {
+        let looper = (api.looper_prepare)(1); // ALOOPER_PREPARE_ALLOW_NON_CALLBACKS
+        if looper.is_null() {
+            log::warn!("anland.vsync looper_prepare failed; timer fallback");
+            pump_thread_timer(tick_fd, running, 16_666_666);
+            return;
+        }
+        let choreo = (api.get_instance)();
+        if choreo.is_null() {
+            log::warn!("anland.vsync choreographer instance null; timer fallback");
+            (api.looper_release)(looper);
+            pump_thread_timer(tick_fd, running, 16_666_666);
+            return;
+        }
+        // Holder owned by this thread; the callback only ever runs here.
+        let holder = Box::new(TickHolder { tick_fd, count: 0 });
+        let holder_ptr = Box::into_raw(holder) as *mut libc::c_void;
+        let mut last_count: u64 = 0;
+        let mut last_log_ns = now_ns();
+        while running.load(Ordering::Acquire) {
+            (api.post_frame_callback64)(choreo, frame_trampoline, holder_ptr);
+            // Returns on callback dispatch, or after 250ms so stop() stays
+            // bounded without cross-thread looper wakeups.
+            let r = (api.looper_poll_once)(
+                250,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            // r: LOOPER_POLL_WAKE=-1, CALLBACK=1, TIMEOUT=0, ERROR=-2..-4.
+            let now = now_ns();
+            if now.wrapping_sub(last_log_ns) >= 5_000_000_000 {
+                let total = unsafe { (*(holder_ptr as *mut TickHolder)).count };
+                log::info!(
+                    "anland.vsync alive callbacks_5s={} poll_last={r}",
+                    total.wrapping_sub(last_count)
+                );
+                last_count = total;
+                last_log_ns = now;
+            }
+        }
+        // A callback posted but never dispatched (stop raced it) simply never
+        // fires: the looper is no longer pumped after this thread exits.
+        let _ = Box::from_raw(holder_ptr as *mut TickHolder);
+        (api.looper_release)(looper);
+    }
+}
+
+fn pump_thread_timer(tick_fd: libc::c_int, running: Arc<AtomicBool>, period_ns: u64) {
+    let step = std::time::Duration::from_millis(50);
+    let mut acc: u64 = 0;
+    let mut ticks: u64 = 0;
+    let mut last_log_ns = now_ns();
+    while running.load(Ordering::Acquire) {
+        std::thread::sleep(step);
+        acc += 50_000_000;
+        if acc >= period_ns {
+            acc = 0;
+            ticks += 1;
+            let one: u64 = 1;
+            unsafe {
+                libc::write(
+                    tick_fd,
+                    &one as *const u64 as *const libc::c_void,
+                    8,
+                );
+            }
+        }
+        let now = now_ns();
+        if now.wrapping_sub(last_log_ns) >= 5_000_000_000 {
+            log::info!("anland.vsync alive ticks_5s={ticks} mode=timer");
+            ticks = 0;
+            last_log_ns = now;
+        }
+    }
+}
+
+/// Display-VSYNC tick source for demand-driven presentation.
+///
+/// Preferred mode is Android Choreographer on a dedicated looper thread (one
+/// eventfd write per display vsync, no polling, no timers). When the NDK
+/// symbols are unavailable it degrades to a nanosleep timer at the panel
+/// rate. The render loop polls the tick fd alongside its kick fd, so both
+/// modes share the pacing logic.
+pub struct VsyncPump {
+    tick: OwnedFd,
+    running: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    mode: &'static str,
+    period_ns: u64,
+}
+
+impl VsyncPump {
+    pub fn start(refresh_mhz: u32) -> io::Result<Self> {
+        let tick = make_eventfd()?;
+        // refresh is millihertz (144000 = 144Hz): period_ns = 1e12/mHz.
+        let period_ns = if refresh_mhz > 0 {
+            1_000_000_000_000u64 / refresh_mhz.max(1) as u64
+        } else {
+            16_666_666
+        };
+        let running = Arc::new(AtomicBool::new(true));
+        let tick_fd = tick.as_raw_fd();
+        let (mode, handle) = match choreo_api() {
+            Some(api) => {
+                let api = *api;
+                let running = running.clone();
+                let h = std::thread::Builder::new()
+                    .name("anland-vsync".into())
+                    .spawn(move || pump_thread_choreo(api, tick_fd, running))
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                ("choreographer", h)
+            }
+            None => {
+                let running = running.clone();
+                let h = std::thread::Builder::new()
+                    .name("anland-vsync-timer".into())
+                    .spawn(move || pump_thread_timer(tick_fd, running, period_ns))
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                ("timer", h)
+            }
+        };
+        log::info!("anland.vsync mode={mode} period_ns={period_ns}");
+        Ok(Self {
+            tick,
+            running,
+            handle: Some(handle),
+            mode,
+            period_ns,
+        })
+    }
+
+    pub fn tick_fd(&self) -> &OwnedFd {
+        &self.tick
+    }
+
+    pub fn mode(&self) -> &'static str {
+        self.mode
+    }
+
+    pub fn period_ns(&self) -> u64 {
+        self.period_ns
+    }
+
+    pub fn stop(mut self) {
+        self.running.store(false, Ordering::Release);
+        if let Some(h) = self.handle.take() {
+            // Bounded by construction (250ms looper poll / 50ms timer step).
+            let _ = h.join();
         }
     }
 }

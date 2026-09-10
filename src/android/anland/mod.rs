@@ -84,13 +84,39 @@ pub fn guest_socket_path() -> &'static str {
 /// Stock Debian Mesa 25 cannot drive KGSL (proven: llvmpipe fallback);
 /// the staged `mesa-kgsl-layer` overlay plus these variables select the
 /// lfdevs freedreno path with linear dma-buf sharing for Anland import.
+///
+/// This mirrors the upstream `anland-termux` session recipe
+/// (`MESA_LOADER_DRIVER_OVERRIDE=kgsl TURNIP_KMD=kgsl GALLIUM_DRIVER=freedreno
+/// FD_FORCE_KGSL=1 XWAYLAND_FORCE_KGSL_SURFACELESS=1`). Two upstream vars are
+/// deliberately NOT set: `EGL_PLATFORM=surfaceless` and
+/// `ANLAND_NO_DRM_DEVICE=1` switch KWin into "surfaceless EGL without a KWin
+/// DrmDevice" (QtQuick software fallback, OffscreenQuickView texture
+/// failures) and wedge its composites after a few frames (proven by bisect:
+/// 4 fenced frames, then KWin `consumer disconnected, entering fallback`
+/// with our acquire fences pending forever). KWin's render-node probe is
+/// already solved by the `drmshim.so` preload (thousands of fenced frames
+/// last milestone), so KWin keeps its proven init.
+/// - `XWAYLAND_FORCE_KGSL_SURFACELESS=1`: the `-91` XWayland's KGSL glamor
+///   backend instead of GBM (which cannot work without a render node).
+///   Proven: `Xwayland glamor: using KGSL surfaceless EGL backend`.
+/// - `MOZ_ENABLE_WAYLAND=1`: explicit native backend for Firefox
+///   (per-launch overrides can still force X11 for A/B tests).
 pub fn guest_mesa_env() -> Vec<(String, String)> {
     vec![
         ("MESA_LOADER_DRIVER_OVERRIDE".into(), "kgsl".into()),
-        ("GALLIUM_DRIVER".into(), "kgsl".into()),
+        ("GALLIUM_DRIVER".into(), "freedreno".into()),
         ("FD_FORCE_KGSL".into(), "1".into()),
         // PR #85 opt-in: expose linear dma-buf import/export on KGSL.
         ("FD_KGSL_ENABLE_DMABUF".into(), "1".into()),
+        ("TURNIP_KMD".into(), "kgsl".into()),
+        ("XWAYLAND_FORCE_KGSL_SURFACELESS".into(), "1".into()),
+        // Firefox backend selection: X11. Proven by A/B (about:support via
+        // Marionette): native Wayland = WebRender (Software) — its dmabuf
+        // compositor needs GBM/a render node (absent in PRoot, no override
+        // possible). X11 + KGSL glamor + forced WR prefs (see setup.rs
+        // sync_firefox_config) = real GPU `Compositing: WebRender` on
+        // Adreno 830 with correct rendering (screenshot-verified).
+        ("MOZ_ENABLE_WAYLAND".into(), "0".into()),
         ("ANLAND_SOCKET".into(), guest_socket_path().into()),
         ("ANLAND".into(), "1".into()),
         ("ANLAND_SKIP_IMPLICIT_SYNC_WAIT".into(), "1".into()),
@@ -123,6 +149,14 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
         (
             lib.join("libEGL_mesa.so.0.0.0"),
             "/usr/lib/aarch64-linux-gnu/libEGL_mesa.so.0.0.0",
+        ),
+        // Matched GLX dispatch for X11 clients: stock glvnd libGL stays,
+        // but it must load the layer's libGLX_mesa (26.2) so the DRI driver
+        // (layer kgsl_dri 26.2) matches its loader. Without this, GLX falls
+        // back to llvmpipe (proven via glxinfo on :1).
+        (
+            lib.join("libGLX_mesa.so.0.0.0"),
+            "/usr/lib/aarch64-linux-gnu/libGLX_mesa.so.0.0.0",
         ),
         (
             lib.join("libgbm.so.1.0.0"),

@@ -242,6 +242,15 @@ defaultPref("media.cubeb.sandbox", false);
 defaultPref("security.sandbox.content.level", 0);
 defaultPref("media.allow-audio-non-utility", true);
 defaultPref("media.rdd-process.enabled", false);
+// Project Anland GPU compositing (see src/android/anland/mod.rs): there is
+// no DRM render node in PRoot, so Firefox's gfxInfo concludes SOFTWARE_GL
+// and blocklists hardware compositing — even though real Adreno contexts
+// work (proven: WebGL freedreno, glxtest EGL freedreno). These prefs force
+// the GPU path back on for the X11/XWayland backend (KGSL glamor), where
+// basic compositing needs no GBM allocation. Native Wayland stays SWGL
+// until a render node exists (dmabuf-GBM is unavoidable there).
+defaultPref("gfx.webrender.all", true);
+defaultPref("layers.acceleration.force-enabled", true);
 
 "#;
 
