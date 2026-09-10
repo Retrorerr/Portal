@@ -1,4 +1,4 @@
-icon: assets/portal-icon.png
+icon: assets/portal-debug-icon.png
 android:
   assets:
     - assets/setup-progress-v2.html
@@ -10,18 +10,18 @@ android:
     - assets/libs
   gradle: true
   manifest:
-    package: app.polarbear.portal
+    package: app.polarbear
     sdk:
       min_sdk_version: 21
       target_sdk_version: 35
     application:
-      label: "Portal"
-      extract_native_libs: true # Required for proot invocations
-      use_cleartext_traffic: true # Required for the loopback setup-progress WebSocket.
+      label: "Portal Debug"
+      extract_native_libs: true
+      use_cleartext_traffic: true
       services:
         - name: app.polarbear.KeyboardAccessibilityService
           permission: android.permission.BIND_ACCESSIBILITY_SERVICE
-          label: "@string/keyboard_service_label"
+          label: "Portal Debug"
           enabled: true
           exported: false
           intent_filters:
