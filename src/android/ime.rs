@@ -95,6 +95,7 @@ pub fn is_wayland_text_input_active() -> bool {
 
 static IME_CONTEXT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static IME_CMD_FIFO: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static ENGINE_CMD_FIFO: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
 pub fn is_ime_context_active() -> bool {
     IME_CONTEXT_ACTIVE.load(Ordering::Acquire)
@@ -124,6 +125,41 @@ pub fn send_ime_command(cmd: &str) -> bool {
     false
 }
 
+/// Write one line to the IBus engine command FIFO (X11/GTK delivery; the
+/// engine self-gates on real editable focus). False when the engine side is
+/// unreachable (daemon/engine down) — caller degrades, never duplicates.
+pub fn send_engine_command(cmd: &str) -> bool {
+    let mut guard = match ENGINE_CMD_FIFO.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    if let Some(file) = guard.as_mut() {
+        use std::io::Write;
+        if file.write_all(cmd.as_bytes()).is_ok() && file.flush().is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Format + send a commit through the IBus engine (any UTF-8).
+pub fn send_engine_text(text: &str) -> bool {
+    match crate::core::clipboard_broker::encode_base64(text.as_bytes()) {
+        Ok(b64) => send_engine_command(&format!("COMMIT:{b64}\n")),
+        Err(_) => false,
+    }
+}
+
+/// Format + send a backspace run through the IBus engine.
+pub fn send_engine_delete(count: usize) -> bool {
+    send_engine_command(&format!("DELETE:{count}\n"))
+}
+
+/// Send Return through the IBus engine.
+pub fn send_engine_enter() -> bool {
+    send_engine_command("ENTER\n")
+}
+
 pub fn handle_fifo_line(line: &str) {
     let trimmed = line.trim();
     log::info!("Portal IME FIFO line received: '{trimmed}'");
@@ -137,28 +173,46 @@ pub fn handle_fifo_line(line: &str) {
 }
 
 pub fn dispatch_committed_text(text: String) -> bool {
-    // 1. If an input-method context is active in KWin, dispatch via zwp_input_method_context_v1!
+    // 1. If an input-method context is active in KWin, dispatch via the
+    // guest input-method channels. Both bridges report through the same
+    // ACTIVATE flag but self-gate on real focus, so a dual send delivers
+    // exactly once:
+    // - Wayland text client focused: portal-ime-bridge holds the
+    //   zwp_input_method_context_v1 (commit_string / delete / keysym);
+    //   the IBus engine has no editable focus and drops the command.
+    // - X11/GTK client focused (e.g. Firefox URL bar): the Portal IBus
+    //   engine holds the editable FocusIn (forward_key_event); the bridge
+    //   has no active context and drops the command.
+    // FIFO writes only mean "framed"; delivery is decided focus-side.
+    // (X11 must NOT go through clipboard+Ctrl+V: direct commits only.)
     if is_ime_context_active() {
         if text.chars().all(|c| c == '\x08') && !text.is_empty() {
             let count = text.len();
-            if send_ime_command(&format!("DELETE:{count}\n")) {
-                log::info!("Dispatched {count} backspace(s) via input-method context protocol");
+            let mut framed = send_ime_command(&format!("DELETE:{count}\n"));
+            framed |= send_engine_delete(count);
+            if framed {
+                log::info!("Dispatched {count} backspace(s) via input-method channels");
                 return true;
             }
         } else if text == "\n" || text == "\r\n" || text == "\r" {
-            if send_ime_command("ENTER\n") {
-                log::info!("Dispatched enter key via input-method context protocol");
+            let mut framed = send_ime_command("ENTER\n");
+            framed |= send_engine_enter();
+            if framed {
+                log::info!("Dispatched enter key via input-method channels");
                 return true;
             }
         } else {
+            let mut framed = false;
             if let Ok(b64) = crate::core::clipboard_broker::encode_base64(text.as_bytes()) {
-                if send_ime_command(&format!("COMMIT:{b64}\n")) {
-                    log::info!(
-                        "Dispatched commit_string via input-method context protocol ({} bytes)",
-                        text.len()
-                    );
-                    return true;
-                }
+                framed |= send_ime_command(&format!("COMMIT:{b64}\n"));
+            }
+            framed |= send_engine_text(&text);
+            if framed {
+                log::info!(
+                    "Dispatched commit_string via input-method channels ({} bytes)",
+                    text.len()
+                );
+                return true;
             }
         }
     }
@@ -181,15 +235,22 @@ pub fn start_ime_fifo_listener(rootfs_path: &std::path::Path) {
     {
         let events_fifo_path = rootfs_path.join("tmp/portal-ime-events.fifo");
         let commands_fifo_path = rootfs_path.join("tmp/portal-ime-commands.fifo");
+        let engine_fifo_path = rootfs_path.join("tmp/portal-ime-engine.fifo");
         let legacy_fifo_path = rootfs_path.join("tmp/portal-ime.fifo");
 
         log::info!(
-            "Ensuring Portal IME FIFOs (events: {}, commands: {})",
+            "Ensuring Portal IME FIFOs (events: {}, commands: {}, engine: {})",
             events_fifo_path.display(),
-            commands_fifo_path.display()
+            commands_fifo_path.display(),
+            engine_fifo_path.display()
         );
 
-        for path in [&events_fifo_path, &commands_fifo_path, &legacy_fifo_path] {
+        for path in [
+            &events_fifo_path,
+            &commands_fifo_path,
+            &engine_fifo_path,
+            &legacy_fifo_path,
+        ] {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -209,6 +270,18 @@ pub fn start_ime_fifo_listener(rootfs_path: &std::path::Path) {
             .open(&commands_fifo_path)
         {
             if let Ok(mut guard) = IME_CMD_FIFO.lock() {
+                *guard = Some(file);
+            }
+        }
+
+        // O_RDWR open never blocks even with no reader yet (engine starts
+        // with the session); a failed open just leaves degraded mode.
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&engine_fifo_path)
+        {
+            if let Ok(mut guard) = ENGINE_CMD_FIFO.lock() {
                 *guard = Some(file);
             }
         }

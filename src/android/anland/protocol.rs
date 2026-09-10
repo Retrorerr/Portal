@@ -50,6 +50,14 @@ pub const INPUT_TYPE_DISPLAY_REFRESH: u32 = 7;
 pub const INPUT_TYPE_CLIPBOARD: u32 = 8;
 #[allow(dead_code)]
 pub const INPUT_TYPE_TEXT_INPUT: u32 = 9;
+/// Touchpad finger-source smooth scroll (buffer-px delta). The rebuilt KWin
+/// backend emits these with PointerAxisSource::Finger (kinetic scrolling)
+/// and applies the Portal Touchpad kcminputrc settings (factor/direction).
+/// Unlike INPUT_TYPE_POINTER_AXIS there is no discrete component.
+pub const INPUT_TYPE_POINTER_AXIS_FINGER: u32 = 13;
+/// Terminates an active finger scroll stream (zero-delta event preserving
+/// the finger source, like the nested backend's axisStopped handler).
+pub const INPUT_TYPE_POINTER_AXIS_STOP: u32 = 14;
 
 pub const INPUT_ACTION_DOWN: i32 = 0;
 pub const INPUT_ACTION_UP: i32 = 1;
@@ -197,6 +205,27 @@ impl InputEvent {
         put_i32(&mut payload, 8, discrete);
         Self {
             ev_type: INPUT_TYPE_POINTER_AXIS,
+            payload,
+        }
+    }
+
+    /// Finger-source scroll value (axis 0 = vertical, 1 = horizontal).
+    pub fn finger_axis(axis: u32, value: f32) -> Self {
+        let mut payload = [0u8; 16];
+        put_u32(&mut payload, 0, axis);
+        put_f32(&mut payload, 4, value);
+        Self {
+            ev_type: INPUT_TYPE_POINTER_AXIS_FINGER,
+            payload,
+        }
+    }
+
+    /// Finger scroll stream terminator (axis 0 = vertical, 1 = horizontal).
+    pub fn finger_stop(axis: u32) -> Self {
+        let mut payload = [0u8; 16];
+        put_u32(&mut payload, 0, axis);
+        Self {
+            ev_type: INPUT_TYPE_POINTER_AXIS_STOP,
             payload,
         }
     }

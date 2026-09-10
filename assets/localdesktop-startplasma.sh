@@ -193,6 +193,21 @@ else
 fi
 rm -f "$config_dir/autostart/konsole.desktop" "$config_dir/autostart/org.kde.konsole.desktop"
 
+# IBus input-method bus for X11/GTK clients (Portal IBus engine bridges
+# editable focus and host commits to the Android IME; proven with Firefox).
+# Runs inside the Plasma session (full session-bus env) as an autostart
+# entry so it lives exactly as long as the session. Daemon, engine default
+# and packages are ensured idempotently; any failure degrades to evdev keys.
+mkdir -p "$config_dir/autostart"
+cat > "$config_dir/autostart/portal-ibus-daemon.desktop" <<'DESKTOP_EOF'
+[Desktop Entry]
+Type=Application
+Name=Portal IBus Daemon
+Exec=sh -c 'command -v ibus-daemon >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive; apt-get install -y ibus gir1.2-ibus-1.0 python3-gi >>/tmp/portal-ibus-install.log 2>&1 || true); ibus-daemon -s -d >>/tmp/portal-ibus-daemon.log 2>&1; sleep 4; ibus engine portal >>/tmp/portal-ibus-daemon.log 2>&1 || true'
+X-GNOME-Autostart-enabled=true
+NoDisplay=true
+DESKTOP_EOF
+
 # The Debian image is assembled by extracting a deterministic package closure,
 # so maintainer scripts do not run during image creation. Generate only the
 # small runtime databases desktop applications actually consume. Each command

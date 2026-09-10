@@ -58,11 +58,24 @@ const CRASH_HANDLER_BINARY: &[u8] =
 const CRASH_HANDLER_SOURCE: &str = include_str!("../../../assets/localdesktop-crash-handler.c");
 const PORTAL_IME_BRIDGE: &str = include_str!("../../../assets/portal-ime-bridge.py");
 const PORTAL_IME_DESKTOP: &str = include_str!("../../../assets/portal-ime.desktop");
+/// Project Anland X11/GTK input-method bridge: IBus engine routing X11
+/// editable focus (real FocusIn/FocusOut) and host commits into GTK clients
+/// (proven: Firefox URL bar/input/textarea/contenteditable, exact Unicode).
+const PORTAL_IBUS_ENGINE: &str = include_str!("../../../assets/portal-ibus-engine.py");
+const PORTAL_IBUS_COMPONENT: &str = include_str!("../../../assets/portal-ibus-component.xml");
 const CLIPBOARD_SYNC: &str = include_str!("../../../assets/localdesktop-clipboard-sync.sh");
 const CLIPBOARD_PUSH: &str = include_str!("../../../assets/localdesktop-clipboard-push.sh");
 const WL_COPY_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-copy");
 const WL_PASTE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-paste");
 const KWIN_LIBRARY: &[u8] = include_bytes!("../../../assets/kwin-debian-arm64/libkwin.so.6.3.6");
+/// Project Anland unified KWin library: on-device build of Debian KWin 6.3.6
+/// with the Anland backend plus the Portal Touchpad port (NaturalScroll /
+/// ScrollFactor over D-Bus + kcminputrc, Finger source, axis-stop). Served
+/// ONLY to Anland GPU sessions from `/usr/local/lib/portal-anland` so the
+/// QPainter overlay path is untouched; the stock distro libkwin is never
+/// modified. Synced idempotently on every launch (restart/reinstall persist).
+const KWIN_ANLAND_LIBRARY: &[u8] =
+    include_bytes!("../../../assets/kwin-anland-arm64/libkwin.so.6.3.6");
 /// Project Anland load-time stub: satisfies the lfdevs kwin_wayland binary's
 /// AnlandBackend reference when QPainter sessions run the overlay libkwin
 /// (which has no Anland backend). Preloaded ONLY in QPainter mode; traps if
@@ -1349,6 +1362,19 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/portal-ime-bridge"),
         PORTAL_IME_BRIDGE,
     );
+    // Project Anland X11/GTK input-method bridge: IBus engine routing X11
+    // editable focus and host commits into GTK clients (proven: Firefox URL
+    // bar/input/textarea/contenteditable, exact Unicode). Synced idempotently
+    // like the ime bridge (size-gated rewrite).
+    write_executable(
+        &fs_root.join("usr/local/bin/portal-ibus-engine"),
+        PORTAL_IBUS_ENGINE,
+    );
+    let ibus_component_path = fs_root.join("usr/share/ibus/component/portal.xml");
+    if let Some(parent) = ibus_component_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(ibus_component_path, PORTAL_IBUS_COMPONENT);
     let ime_desktop_path = fs_root.join("usr/share/applications/portal-ime.desktop");
     if let Some(parent) = ime_desktop_path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -1370,7 +1396,8 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
 /// `/usr/local/lib`) so it can never shadow the distro libkwin through the
 /// default loader path. The kwin wrapper adds the portal dir to
 /// LD_LIBRARY_PATH only for QPainter sessions; Anland sessions resolve the
-/// distro (lfdevs Anland-backend) libkwin untouched.
+/// unified Anland libkwin from `/usr/local/lib/portal-anland`
+/// (see `sync_kwin_anland_overlay`).
 fn sync_kwin_overlay(fs_root: &Path) {
     let kwin_dir = fs_root.join("usr/local/lib/portal");
     let _ = fs::create_dir_all(&kwin_dir);
@@ -1424,6 +1451,48 @@ fn sync_kwin_overlay(fs_root: &Path) {
         if fs::write(&shim_tmp, DRMSHIM_BINARY).is_ok() {
             let _ = fs::set_permissions(&shim_tmp, fs::Permissions::from_mode(0o755));
             let _ = fs::rename(&shim_tmp, &shim_path);
+        }
+    }
+    // Project Anland unified KWin library (Anland backend + Portal Touchpad).
+    // Served from its own dir so the QPainter overlay above is never shadowed.
+    sync_kwin_anland_overlay(fs_root);
+}
+
+/// Install Portal's Anland-unified KWin library for GPU sessions. Runs on
+/// every provisioning pass AND every session launch (via
+/// `sync_session_runtime_files`), so existing runtimes converge without
+/// re-provisioning and the setting survives restarts and reinstalls.
+///
+/// Layout: `/usr/local/lib/portal-anland` (NOT `/usr/local/lib/portal`, NOT
+/// `/usr/lib`) so neither the QPainter overlay nor the distro libkwin is
+/// shadowed. The kwin wrapper puts this dir first on LD_LIBRARY_PATH only
+/// for Anland sessions; the AnlandBackend symbol resolves from the unified
+/// lib, so the load-time stub must never be preloaded there.
+fn sync_kwin_anland_overlay(fs_root: &Path) {
+    let kwin_dir = fs_root.join("usr/local/lib/portal-anland");
+    let _ = fs::create_dir_all(&kwin_dir);
+    let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
+    let fresh = fs::metadata(&kwin_library)
+        .map(|m| m.len() == KWIN_ANLAND_LIBRARY.len() as u64)
+        .unwrap_or(false);
+    if !fresh {
+        let kwin_temporary = kwin_library.with_extension("6.3.6.tmp");
+        if fs::write(&kwin_temporary, KWIN_ANLAND_LIBRARY).is_ok() {
+            let _ = fs::set_permissions(&kwin_temporary, fs::Permissions::from_mode(0o755));
+            let _ = fs::rename(&kwin_temporary, &kwin_library);
+        }
+        // Atomic symlink swap (temp + rename): KWin must never observe a
+        // half-deployed soname chain if a launch races a previous update.
+        for (link, target) in [
+            ("libkwin.so.6", "libkwin.so.6.3.6"),
+            ("libkwin.so", "libkwin.so.6"),
+        ] {
+            let path = kwin_dir.join(link);
+            let tmp = kwin_dir.join(format!("{link}.tmp"));
+            let _ = fs::remove_file(&tmp);
+            if symlink(target, &tmp).is_ok() {
+                let _ = fs::rename(&tmp, &path);
+            }
         }
     }
 }
@@ -1942,7 +2011,6 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         surface_control_cursor: None,
         frame_in_flight: false,
         anland: None,
-        pending_pastes: Vec::new(),
         android_app,
     })
 }
