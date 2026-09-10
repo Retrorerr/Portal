@@ -188,12 +188,22 @@ run_real_kwin() {
     # session. This captures loader, protocol and signal-handler diagnostics
     # even when the guest process exits before a host frame exists.
     # Always disable KWin's internal guest screen locker; device locking belongs to Android.
-    # In Anland mode force the Anland backend explicitly (env alone also
-    # selects it) so the backend choice is unambiguous in the logs.
+    # In Anland mode prefer the Anland backend explicitly, but ONLY when the
+    # installed kwin_wayland advertises --anland: the lfdevs Anland build
+    # accepts it, while stock distro kwin_wayland exits(1) on unknown
+    # options, wedging the session in a compositor restart loop. Env
+    # (ANLAND_SOCKET) plus the unified libkwin selects the backend
+    # otherwise, so probing keeps both binaries working.
     if [ "$anland_mode" -eq 1 ]; then
         case " $* " in
             *" --anland "*) ;;
-            *) set -- "$@" --anland ;;
+            *)
+                if /usr/bin/kwin_wayland --help 2>/dev/null | grep -qF -- '--anland'; then
+                    set -- "$@" --anland
+                else
+                    printf 'anland backend via env only (binary lacks --anland)\n' >> "$log_file"
+                fi
+                ;;
         esac
     fi
     /usr/bin/kwin_wayland --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" 2>&1 | tee -a "$log_file"

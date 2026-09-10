@@ -500,6 +500,11 @@ fn input_method_bridge_and_fallback_policy() {
     assert!(KWIN_WRAPPER_SOURCE.contains("kwin-variant"));
     assert!(KWIN_WRAPPER_SOURCE.contains("sha256sum"));
     assert!(KWIN_WRAPPER_SOURCE.contains("falling back to stock"));
+    // 2d. --anland is probe-gated: stock distro kwin_wayland exits(1) on
+    // unknown options (compositor restart loop), so the flag is only passed
+    // when the binary advertises it; env + unified libkwin otherwise.
+    assert!(KWIN_WRAPPER_SOURCE.contains("grep -q"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("binary lacks --anland"));
 
     // 3. Startplasma sets kwinrc InputMethod and VirtualKeyboardMode
     assert!(STARTPLASMA_SOURCE.contains("InputMethod=/usr/share/applications/portal-ime.desktop"));
