@@ -330,6 +330,15 @@ fn ibus_autostart_never_blocks_session_startup() {
 }
 
 #[test]
+fn anland_session_forces_wayland_qpa_for_plasma_clients() {
+    // On the Anland path, Plasma/KDE Qt clients must select the Wayland
+    // backend explicitly; otherwise ksmserver/plasmashell can fall back to
+    // xcb, fail to start, and plasma_session waits forever for
+    // org.kde.ksmserver. DISPLAY stays set for XWayland/Firefox (X11).
+    assert!(STARTPLASMA_SOURCE.contains("QT_QPA_PLATFORM=wayland"));
+}
+
+#[test]
 fn automatic_tablet_and_laptop_mode_switching_policy() {
     use tablet_mode::{
         is_desktop_pointer, is_physical_alphabetic_keyboard, InputDeviceDescriptor,

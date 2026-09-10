@@ -331,3 +331,23 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
     assert!(setup.contains("\"tmp/.X11-unix\""));
     assert!(setup.contains("\"tmp/.ICE-unix\""));
 }
+
+#[test]
+fn production_runtime_artifact_matches_manifest_and_archive_verification() {
+    let artifact = RuntimeArtifact::production();
+    assert_eq!(artifact.version, "debian13-arm64-2026.09.05.3");
+    assert_eq!(
+        artifact.sha256,
+        "aa75ea96300c26a9cfdffb443aff954a3cbe89146ffe32bba7287415e89e00f3"
+    );
+    assert_eq!(artifact.compressed_bytes, 896188212);
+    assert!(artifact.url.starts_with("https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.09.05.3/"));
+    let archive_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/portal-debian13-arm64-2026.09.05.3.tar.xz");
+    if archive_path.exists() {
+        artifact
+            .verify(&archive_path)
+            .expect("RuntimeArtifact::verify failed on target archive");
+    }
+}
+
