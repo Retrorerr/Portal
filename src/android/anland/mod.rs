@@ -117,6 +117,11 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         // sync_firefox_config) = real GPU `Compositing: WebRender` on
         // Adreno 830 with correct rendering (screenshot-verified).
         ("MOZ_ENABLE_WAYLAND".into(), "0".into()),
+        // XInput2 for X11 clients: KWin forwards native touch through the
+        // xwayland-touch XI2 device (direct touch, 20 slots, server-verified
+        // via xinput). Without this Firefox X11 only sees KWin's pointer
+        // emulation (tap works, drag/scroll/pinch don't).
+        ("MOZ_USE_XINPUT2".into(), "1".into()),
         ("ANLAND_SOCKET".into(), guest_socket_path().into()),
         ("ANLAND".into(), "1".into()),
         ("ANLAND_SKIP_IMPLICIT_SYNC_WAIT".into(), "1".into()),
