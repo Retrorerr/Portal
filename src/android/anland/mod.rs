@@ -122,6 +122,11 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         // via xinput). Without this Firefox X11 only sees KWin's pointer
         // emulation (tap works, drag/scroll/pinch don't).
         ("MOZ_USE_XINPUT2".into(), "1".into()),
+        // GTK input method: IBus. The Portal IBus engine bridges X11/GTK
+        // editable focus to the Android IME (real FocusIn/FocusOut, commit,
+        // delete, enter). Qt/Wayland clients are unaffected (QT_IM_MODULE
+        // unset keeps native Wayland text-input).
+        ("GTK_IM_MODULE".into(), "ibus".into()),
         ("ANLAND_SOCKET".into(), guest_socket_path().into()),
         ("ANLAND".into(), "1".into()),
         ("ANLAND_SKIP_IMPLICIT_SYNC_WAIT".into(), "1".into()),

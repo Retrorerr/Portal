@@ -129,6 +129,9 @@ pub fn to_physical_key(keycode: Keycode) -> PhysicalKey {
         Keycode::Break => KeyCode::Pause,
         // These are exactly the same
         Keycode::ScrollLock => KeyCode::ScrollLock,
+        // Lock keys must survive as identified physical keys: KWin/xkbcommon
+        // toggles the locked modifier state from the evdev code itself.
+        Keycode::CapsLock => KeyCode::CapsLock,
 
         Keycode::Yen => KeyCode::IntlYen,
         Keycode::Kana => KeyCode::Lang1,

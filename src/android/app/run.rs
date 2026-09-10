@@ -430,30 +430,46 @@ fn forward_anland_input(
             log::info!("anland.input button code={code:#x} pressed={pressed}");
             session.send_input(&AnlandInput::pointer_button(code, pressed));
         }
-        WindowEvent::MouseWheel { delta, .. } => match delta {
-            MouseScrollDelta::LineDelta(x, y) => {
-                log::debug!("anland.input wheel lines x={x} y={y}");
-                if *y != 0.0 {
-                    session.send_input(&AnlandInput::pointer_axis(0, *y, *y as i32));
+        WindowEvent::MouseWheel {
+            delta, phase, ..
+        } => {
+            // Scroll-stop terminates live finger streams so KWin emits
+            // axis-stop and kinetic scrolling settles (phase arrives with
+            // zero deltas from the touchpad state machine).
+            let finished = matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled);
+            match delta {
+                MouseScrollDelta::LineDelta(x, y) => {
+                    log::debug!("anland.input wheel lines x={x} y={y}");
+                    if *y != 0.0 {
+                        session.send_input(&AnlandInput::pointer_axis(0, *y, *y as i32));
+                    }
+                    if *x != 0.0 {
+                        session.send_input(&AnlandInput::pointer_axis(1, *x, *x as i32));
+                    }
                 }
-                if *x != 0.0 {
-                    session.send_input(&AnlandInput::pointer_axis(1, *x, *x as i32));
+                MouseScrollDelta::PixelDelta(pos) => {
+                    // Physical touchpad smooth scroll: finger-source events.
+                    // The rebuilt backend emits these with Finger source
+                    // (kinetic) and applies the Portal Touchpad kcminputrc
+                    // settings; the host sends raw buffer-px deltas and must
+                    // not scale or invert (no double application).
+                    log::debug!(
+                        "anland.input finger scroll x={:.1} y={:.1}",
+                        pos.x,
+                        pos.y
+                    );
+                    if pos.y != 0.0 {
+                        session.send_finger_axis(0, pos.y as f32);
+                    }
+                    if pos.x != 0.0 {
+                        session.send_finger_axis(1, pos.x as f32);
+                    }
                 }
             }
-            MouseScrollDelta::PixelDelta(pos) => {
-                log::debug!(
-                    "anland.input wheel pixels x={:.1} y={:.1}",
-                    pos.x,
-                    pos.y
-                );
-                if pos.y != 0.0 {
-                    session.send_input(&AnlandInput::pointer_axis(0, pos.y as f32, 0));
-                }
-                if pos.x != 0.0 {
-                    session.send_input(&AnlandInput::pointer_axis(1, pos.x as f32, 0));
-                }
+            if finished {
+                session.send_finger_stops();
             }
-        },
+        }
         WindowEvent::KeyboardInput { event, .. } => {
             if event.state == ElementState::Pressed && event.repeat {
                 // Compositor-side autorepeat owns repeats; forward the press.
@@ -740,8 +756,6 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             }
         }
 
-        drain_due_pastes(backend);
-
         for event in accessibility::drain_pending_events() {
             let event = centralize_injected_keyboard(
                 event.scancode,
@@ -818,9 +832,6 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             // Smithay handlers below stay warm (state machines, gesture
             // tracking) but render nothing while their renderer is None.
             forward_anland_input(backend, &event);
-            // Deferred X11 pastes flush on any input too (not just user
-            // events), so continued typing fires them promptly.
-            drain_due_pastes(backend);
 
             match &event {
                 // Focus changes are common during rotation, popup dismissal and app switching.
@@ -982,70 +993,37 @@ fn inject_committed_text_anland(
         }
         log::warn!("anland.ime send_text failed; falling back");
     }
-    let events = committed_ascii_to_key_events(text);
-    if !events.is_empty() {
-        log::info!(
-            "anland.ime ascii commit via evdev keys ({} chars)",
-            text.chars().count()
-        );
-        for (scancode, shift_required) in events {
-            // Same shared-modifier rule as the Smithay path: the physical
-            // keyboard state is still tracked centrally in both renderers.
-            let shift_edge = shift_required && !backend.pressed_keys.contains(&42);
-            if shift_edge {
-                anland_key(session, 42, true);
-            }
-            anland_key(session, scancode, true);
-            anland_key(session, scancode, false);
-            if shift_edge {
-                anland_key(session, 42, false);
-            }
-        }
-        return;
-    }
     if text.is_empty() {
         return;
     }
-    match crate::android::clipboard::write_text(&backend.android_app, text) {
-        Ok(()) => {
-            let deadline = backend.clock.now().as_millis() as u64 + 600;
-            backend.pending_pastes.push(
-                crate::android::backend::wayland::PendingAnlandPaste {
-                    deadline_ms: deadline,
-                    text: text.to_string(),
-                },
-            );
-            log::info!(
-                "anland.ime non-ascii staged for deferred paste ({} chars)",
-                text.chars().count()
-            );
-        }
-        Err(error) => log::warn!("anland.ime clipboard stage failed: {error}"),
-    }
-}
-
-/// Fire due deferred pastes (Ctrl+V) once the clipboard had time to arrive
-/// guest-side. Called on user events and after forwarded input: never blocks.
-fn drain_due_pastes(backend: &mut crate::android::backend::wayland::WaylandBackend) {
-    if backend.pending_pastes.is_empty() || backend.anland.is_none() {
+    // Deliver to both input-method channels; each self-gates on real focus
+    // (KWin IM context for Wayland text clients, IBus editable focus for
+    // X11/GTK), so exactly one lands — and no focus-kind detection race can
+    // lose text while ACTIVATE is still in flight. Both drops are silent
+    // no-ops, so sending to both is safe. (Do NOT early-return on send
+    // success: sent only means framed; delivery is decided focus-side.)
+    let mut framed = session.send_text(text);
+    framed |= crate::android::ime::send_engine_text(text);
+    if framed {
         return;
     }
-    let now_ms = backend.clock.now().as_millis() as u64;
-    let mut i = 0;
-    while i < backend.pending_pastes.len() {
-        if backend.pending_pastes[i].deadline_ms <= now_ms {
-            let paste = backend.pending_pastes.remove(i);
-            if let Some(session) = backend.anland.as_ref() {
-                for (code, pressed) in [(29u32, true), (47, true), (47, false), (29, false)] {
-                    anland_key(session, code, pressed);
-                }
-                log::info!(
-                    "anland.ime deferred paste fired ({} chars)",
-                    paste.text.chars().count()
-                );
-            }
-        } else {
-            i += 1;
+    // Neither channel could take it (no session, engine down): degraded
+    // ASCII keys so plain Latin text still types somewhere sane.
+    let events = committed_ascii_to_key_events(text);
+    if events.is_empty() {
+        log::warn!("anland.ime commit dropped (no channel, non-ascii)");
+        return;
+    }
+    log::info!("anland.ime ascii commit via evdev keys (degraded)");
+    for (scancode, shift_required) in events {
+        let shift_edge = shift_required && !backend.pressed_keys.contains(&42);
+        if shift_edge {
+            anland_key(session, 42, true);
+        }
+        anland_key(session, scancode, true);
+        anland_key(session, scancode, false);
+        if shift_edge {
+            anland_key(session, 42, false);
         }
     }
 }

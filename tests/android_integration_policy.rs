@@ -452,8 +452,21 @@ fn input_method_bridge_and_fallback_policy() {
     assert!(ANDROID_SETUP_SOURCE.contains("usr/local/bin/portal-ime-bridge"));
     assert!(ANDROID_SETUP_SOURCE.contains("usr/share/applications/portal-ime.desktop"));
 
+    // 1b. Setup syncs the Anland unified libkwin to its own dir every launch.
+    assert!(ANDROID_SETUP_SOURCE.contains("usr/local/lib/portal-anland"));
+
     // 2. KWin wrapper passes --inputmethod to launch portal-ime-bridge
     assert!(KWIN_WRAPPER_SOURCE.contains("--inputmethod /usr/local/bin/portal-ime-bridge"));
+
+    // 2b. Anland sessions load the unified Anland libkwin (Anland backend +
+    // Portal Touchpad) from its own dir; the stub is never preloaded there.
+    assert!(KWIN_WRAPPER_SOURCE.contains("/usr/local/lib/portal-anland"));
+    // 2c. Deterministic KWin A/B without APK rebuilds: kwin-variant selects
+    // unified/stock/ab candidates, every run logs SHA256 attributions, and
+    // failed sanity checks fall back to stock (never unloadable).
+    assert!(KWIN_WRAPPER_SOURCE.contains("kwin-variant"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("sha256sum"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("falling back to stock"));
 
     // 3. Startplasma sets kwinrc InputMethod and VirtualKeyboardMode
     assert!(STARTPLASMA_SOURCE.contains("InputMethod=/usr/share/applications/portal-ime.desktop"));
@@ -471,6 +484,11 @@ fn input_method_bridge_and_fallback_policy() {
     assert!(ANDROID_IME_SOURCE.contains("send_ime_command(&format!(\"DELETE:{count}\\n\"))"));
     assert!(ANDROID_IME_SOURCE.contains("send_ime_command(\"ENTER\\n\")"));
     assert!(ANDROID_IME_SOURCE.contains("send_ime_command(&format!(\"COMMIT:{b64}\\n\"))"));
+    // 5b. X11/GTK commits (Firefox) route through the Portal IBus engine on
+    // the same active flag: dual send, each bridge self-gates on real focus.
+    assert!(ANDROID_IME_SOURCE.contains("send_engine_delete(count)"));
+    assert!(ANDROID_IME_SOURCE.contains("send_engine_enter()"));
+    assert!(ANDROID_IME_SOURCE.contains("send_engine_text(&text)"));
     assert!(PORTAL_IME_BRIDGE_SOURCE.contains("send_enter()"));
     assert!(PORTAL_IME_BRIDGE_SOURCE.contains("0xff0d"));
     assert!(ANDROID_IME_SOURCE.contains("Falling back to evdev key synthesis"));

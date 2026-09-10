@@ -131,6 +131,9 @@ struct Inner {
     /// relative clients (games, kinetic velocity) need real dx/dy — winit
     /// only carries absolute positions, so the session tracks them.
     last_pointer: Mutex<Option<(f32, f32)>>,
+    /// Active touchpad finger-scroll axes as a bitmask (bit 0 = vertical,
+    /// bit 1 = horizontal). Scroll-stop events go only to live streams.
+    finger_axes: Mutex<u8>,
     /// Display-VSYNC tick source (Choreographer, timer fallback).
     vsync: Mutex<Option<sys::VsyncPump>>,
 }
@@ -275,6 +278,7 @@ impl AnlandSession {
             wake,
             demand_until_ns: AtomicU64::new(0),
             last_pointer: Mutex::new(None),
+            finger_axes: Mutex::new(0),
             vsync: Mutex::new(Some(vsync)),
         });
         // Collect window slots (dup dma-buf fds, hold one spare back).
@@ -425,8 +429,37 @@ impl AnlandSession {
         true
     }
 
+    /// Forward one touchpad finger-scroll value (axis 0 = vertical,
+    /// 1 = horizontal) and mark the stream live for stop events.
+    pub fn send_finger_axis(&self, axis: u32, value: f32) {
+        if axis < 2 {
+            if let Ok(mut live) = self.inner.finger_axes.lock() {
+                *live |= 1u8 << axis;
+            }
+        }
+        self.send_input(&InputEvent::finger_axis(axis, value));
+    }
+
+    /// Terminate live touchpad finger-scroll streams (both axes if active).
+    /// Called on scroll end/cancel so KWin emits axis-stop and kinetic
+    /// scrolling settles instead of hanging mid-gesture.
+    pub fn send_finger_stops(&self) {
+        let live = self
+            .inner
+            .finger_axes
+            .lock()
+            .map(|mut live| std::mem::replace(&mut *live, 0))
+            .unwrap_or(0);
+        for axis in 0..2u32 {
+            if live & (1u8 << axis) != 0 {
+                self.send_input(&InputEvent::finger_stop(axis));
+            }
+        }
+    }
+
     /// Current proof counters: (queued, fenced, bare, fallbacks).
-    pub fn stats(&self) -> (u64, u64, u64, u64) {        (
+    pub fn stats(&self) -> (u64, u64, u64, u64) {
+        (
             self.inner.frames_queued.load(Ordering::Relaxed),
             self.inner.frames_fenced.load(Ordering::Relaxed),
             self.inner.frames_bare.load(Ordering::Relaxed),

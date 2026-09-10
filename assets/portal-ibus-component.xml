@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Portal IBus component: X11/GTK input-method bridge to the Android IME.
+     Installed by Portal into /usr/share/ibus/component/portal.xml. The
+     engine process is spawned on demand by ibus-daemon. -->
+<component>
+    <name>org.freedesktop.IBus.Portal</name>
+    <description>Portal Android IME bridge</description>
+    <exec>/usr/local/bin/portal-ibus-engine --ibus</exec>
+    <version>1.0</version>
+    <license>GPL-3.0</license>
+    <author>Portal</author>
+    <homepage></homepage>
+    <textdomain>portal</textdomain>
+    <engines>
+        <engine>
+            <name>portal</name>
+            <longname>Portal</longname>
+            <description>Portal Android IME bridge (X11/GTK)</description>
+            <language>en</language>
+            <license>GPL-3.0</license>
+            <author>Portal</author>
+            <icon></icon>
+            <layout>us</layout>
+            <rank>99</rank>
+        </engine>
+    </engines>
+</component>

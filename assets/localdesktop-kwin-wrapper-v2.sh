@@ -70,6 +70,64 @@ if [ "$anland_mode" -eq 0 ]; then
         export LD_PRELOAD="/usr/local/lib/portal/libanland-stub.so${LD_PRELOAD:+:$LD_PRELOAD}"
     fi
 else
+    # Project Anland KWin variant selection (deterministic A/B without APK
+    # rebuilds): /var/lib/localdesktop/kwin-variant selects the libkwin for
+    # Anland sessions. Values: "unified" (default ship behavior),
+    # "stock" (exact untouched distro lfdevs binaries), or "ab:<name>"
+    # (bisect candidate at /usr/local/lib/portal-ab/<name>/libkwin.so.6.3.6,
+    # staged out-of-band; never touched by the per-launch overlay sync).
+    # The file is read once here, before KWin starts; nothing is swapped
+    # while KWin is alive. Any failed sanity check falls back to stock and
+    # is logged, so KWin is never left unloadable or half-deployed.
+    kwin_variant=unified
+    if [ -r /var/lib/localdesktop/kwin-variant ]; then
+        read -r kwin_variant < /var/lib/localdesktop/kwin-variant
+    fi
+    kwin_anland_dir=/usr/local/lib/portal-anland
+    case "$kwin_variant" in
+        ab:*)
+            ab_name=${kwin_variant#ab:}
+            case "$ab_name" in
+                *[!a-zA-Z0-9._-]* | "" | .* | *..*)
+                    printf 'kwin_variant=%s status=rejected-bad-name falling back to stock\n' \
+                        "$kwin_variant" >> "$log_file"
+                    kwin_variant=stock
+                    ;;
+                *)
+                    kwin_anland_dir="/usr/local/lib/portal-ab/$ab_name"
+                    ;;
+            esac
+            ;;
+    esac
+    if [ "$kwin_variant" != "stock" ]; then
+        # Sanity: real file, plausible size, resolving soname chain. The
+        # per-launch sync writes the library atomically (temp+rename), so a
+        # complete file here is never partial; a failed check selects stock.
+        if [ -r "$kwin_anland_dir/libkwin.so.6.3.6" ] \
+            && [ "$(wc -c < "$kwin_anland_dir/libkwin.so.6.3.6" 2>/dev/null || echo 0)" -ge 1000000 ] \
+            && [ -r "$kwin_anland_dir/libkwin.so.6" ]; then
+            export LD_LIBRARY_PATH="$kwin_anland_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        else
+            printf 'kwin_variant=%s status=incomplete-lib falling back to stock\n' \
+                "$kwin_variant" >> "$log_file"
+            kwin_variant=stock
+        fi
+    fi
+    printf 'kwin_variant=%s anland_lib_dir=%s\n' \
+        "$kwin_variant" "$kwin_anland_dir" >> "$log_file"
+    # Exact binaries mapped for this run (post-mortem A/B attribution).
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum /usr/bin/kwin_wayland >> "$log_file" 2>/dev/null || true
+        if [ "$kwin_variant" != "stock" ]; then
+            sha256sum "$kwin_anland_dir/libkwin.so.6.3.6" >> "$log_file" 2>/dev/null || true
+        else
+            sha256sum /usr/lib/aarch64-linux-gnu/libkwin.so.6 >> "$log_file" 2>/dev/null || true
+        fi
+    fi
+    # Project Anland unified libkwin (Anland backend + Portal Touchpad) is
+    # served from its own dir so the QPainter overlay and distro libkwin are
+    # never shadowed. It provides the AnlandBackend symbol itself, so the
+    # load-time stub must never be preloaded here (it would win and trap).
     # Project Anland DRM shim (Anland only): the app sandbox cannot open
     # /dev/dri/renderD128, which KWin's Anland backend requires at init.
     # Never set in QPainter mode.
@@ -113,6 +171,12 @@ printf 'stack_capture=%s path=%s\n' "$stack_capture" "${segfault_lib:-unavailabl
 run_real_kwin() {
     if [ "$anland_mode" -eq 0 ]; then
         export LD_LIBRARY_PATH="/usr/local/lib/portal${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    elif [ "${kwin_variant:-unified}" != "stock" ] && [ -n "${kwin_anland_dir:-}" ] \
+        && [ -r "$kwin_anland_dir/libkwin.so.6.3.6" ]; then
+        case "$LD_LIBRARY_PATH" in
+            "$kwin_anland_dir"*) ;;
+            *) export LD_LIBRARY_PATH="$kwin_anland_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+        esac
     fi
     export QT_FORCE_STDERR_LOGGING=1
     if [ -n "$segfault_lib" ]; then
