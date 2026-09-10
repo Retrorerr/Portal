@@ -25,8 +25,34 @@ use super::protocol::*;
 use super::sys;
 
 const FENCE_WAIT_MS: i32 = 5000;
+/// Acquire-fence wait: blocking, generous. The dequeue only returns slots
+/// SurfaceFlinger considers free, and the fence is near-always signaled
+/// already; the wait sleeps in the fence ioctl on this dedicated thread
+/// (no CPU spin). A short quantum + queue-back was tried and REVERTED: it
+/// presents stale buffers early, collapsing the SF/KWin phase separation —
+/// KWin then renders into scanout-active dma-bufs (SKIP_IMPLICIT_SYNC_WAIT
+/// disables the implicit guard), hanging KGSL so later fences never signal
+/// and every subsequent acquire pends forever. Invariant restored: every
+/// buffer handed to `queueBuffer` was just rendered by KWin into a properly
+/// released slot. On (near-impossible) timeout the buffer is CANCELLED back
+/// to the free pool, never presented.
 const ACQUIRE_WAIT_MS: i32 = 1000;
 const JOIN_TIMEOUT: Duration = Duration::from_secs(8);
+
+// Demand-driven presentation budgets (see render_loop).
+/// Full-rate window after any forwarded input event (touch/pointer/key).
+const INPUT_BURST_MS: u64 = 1500;
+/// Full-rate tail after client-CPU activity (video/animation without touch).
+const SELF_SUSTAIN_MS: u64 = 2000;
+/// Full-rate window after producer connect and session start (window mapping,
+/// startup animation).
+const CONNECT_BURST_MS: u64 = 3000;
+const START_BURST_MS: u64 = 5000;
+/// Idle ceiling: at most one select per second (clock minute-updates land
+/// within a second — fine for a clock; cursor blink resumes on input).
+const HEARTBEAT_NS: u64 = 1_000_000_000;
+/// Instrumentation window for the `anland.fps` line.
+const FPS_WINDOW_NS: u64 = 2_000_000_000;
 
 /// One collected window slot handed to the producer.
 struct SlotInfo {
@@ -82,6 +108,37 @@ struct Inner {
     fallback_count: AtomicU64,
     /// Whether the plasma-ready marker was written for this session.
     ready_marked: AtomicBool,
+    /// GUI-client CPU sampler state: (total watched jiffies, sample ns,
+    /// consecutive busy windows). Updated only by the event thread.
+    client_prev: Mutex<(u64, u64, u32)>,
+    /// Watched-PID cache: (pids, last full-scan ns). A full /proc scan runs
+    /// at most every 5s; between scans only cached PIDs are re-statted (with
+    /// cmdline re-verification against PID reuse). Keeps the 500ms sampler
+    /// at ~0.3% instead of 3%.
+    client_cache: Mutex<(Vec<u32>, u64)>,
+    /// Transition latch for busy logging (quiet -> active).
+    client_active: AtomicBool,
+    /// Kick channel: input forwarding and busy composites write here so the
+    /// render loop wakes for an immediate select (input latency), then falls
+    /// back to VSYNC-gated pacing. Only the render thread reads.
+    wake: OwnedFd,
+    /// Monotonic-nanos deadline (CLOCK_MONOTONIC) until which the loop
+    /// selects every vsync tick. Past it, only the 2Hz heartbeat selects.
+    demand_until_ns: AtomicU64,
+    /// Display-VSYNC tick source (Choreographer, timer fallback).
+    vsync: Mutex<Option<sys::VsyncPump>>,
+}
+
+/// Extend the full-rate presentation deadline and wake the render loop for
+/// an immediate select. Racy max-update is harmless: a lost race only
+/// shortens a burst, and every kick source re-kicks continuously
+/// (input stream, per-frame busy composites).
+fn kick(inner: &Arc<Inner>, burst_ms: u64) {
+    let until = sys::now_ns().wrapping_add(burst_ms.wrapping_mul(1_000_000));
+    inner
+        .demand_until_ns
+        .fetch_max(until, Ordering::AcqRel);
+    let _ = sys::eventfd_write(&inner.wake, 1);
 }
 
 unsafe impl Send for Inner {}
@@ -180,6 +237,11 @@ impl AnlandSession {
             refresh: cfg.refresh_mhz,
         };
         let broker = Arc::new(Broker::new(screen, cfg.socket_path.clone()));
+        // Demand pacing: kick channel + display-VSYNC tick source. Pump
+        // failure fails the session loudly (never a silent free-spin).
+        let wake = sys::make_eventfd().map_err(|e| format!("wake eventfd: {e}"))?;
+        let vsync =
+            sys::VsyncPump::start(cfg.refresh_mhz).map_err(|e| format!("vsync pump: {e}"))?;
         let inner = Arc::new(Inner {
             window,
             anw,
@@ -201,6 +263,12 @@ impl AnlandSession {
             frames_bare: AtomicU64::new(0),
             fallback_count: AtomicU64::new(0),
             ready_marked: AtomicBool::new(false),
+            client_prev: Mutex::new((0, 0, 0)),
+            client_cache: Mutex::new((Vec::new(), 0)),
+            client_active: AtomicBool::new(false),
+            wake,
+            demand_until_ns: AtomicU64::new(0),
+            vsync: Mutex::new(Some(vsync)),
         });
         // Collect window slots (dup dma-buf fds, hold one spare back).
         collect_buffers(&inner, total)?;
@@ -243,6 +311,18 @@ impl AnlandSession {
             cfg.socket_path.display()
         );
         log::info!("anland.qpainter_path=disabled (Smithay SHM upload not used in Anland mode)");
+        // Session-start burst covers window mapping + startup animation;
+        // the loop then lapses to heartbeat unless input/work sustains it.
+        kick(&inner, START_BURST_MS);
+        if let Ok(vsync) = inner.vsync.lock() {
+            if let Some(pump) = vsync.as_ref() {
+                log::info!(
+                    "anland.pacing demand-driven vsync={} period_ns={}",
+                    pump.mode(),
+                    pump.period_ns()
+                );
+            }
+        }
         Ok(Self {
             inner,
             render_thread: Some(render_thread),
@@ -259,6 +339,10 @@ impl AnlandSession {
         if !inner.running.load(Ordering::Acquire) {
             return;
         }
+        // Input means the user is active: full-rate presentation window plus
+        // an immediate wake (the select bypasses the vsync gate once, then
+        // subsequent frames lock to ticks — low latency without free-spin).
+        kick(inner, INPUT_BURST_MS);
         let _guard = inner.io_lock.lock().unwrap();
         let gen = inner.gen.lock().unwrap();
         let Some(gen) = gen.as_ref() else { return };
@@ -297,6 +381,8 @@ impl AnlandSession {
         let inner = self.inner.clone();
         inner.running.store(false, Ordering::Release);
         inner.window_live.store(false, Ordering::Release);
+        // Unblock a render loop parked in its vsync/kick poll promptly.
+        let _ = sys::eventfd_write(&inner.wake, 1);
         // Return the held spare to the queue so a thread blocked in
         // dequeueBuffer wakes promptly (cancel presents nothing).
         if let Ok(mut spare) = inner.spare.lock() {
@@ -306,6 +392,13 @@ impl AnlandSession {
         }
         if let Some(h) = self.render_thread.take() {
             join_bounded(h, JOIN_TIMEOUT, "render");
+        }
+        // The render thread is joined: no reader of the vsync tick remains,
+        // so the pump can stop (its thread joins bounded by construction).
+        if let Ok(mut vsync) = inner.vsync.lock() {
+            if let Some(pump) = vsync.take() {
+                pump.stop();
+            }
         }
         if let Some(h) = self.event_thread.take() {
             join_bounded(h, JOIN_TIMEOUT, "event");
@@ -571,6 +664,9 @@ fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receive
         return;
     }
     *inner.connected_gen.lock().unwrap() = Some(generation);
+    // Connect burst: the producer's first frames (window mapping) present at
+    // full rate even before any input arrives.
+    kick(&inner, CONNECT_BURST_MS);
     // Seed the producer's render-loop pacing with the live display rate.
     let refresh = inner.refresh_mhz;
     let mut wire = [0u8; 8 + 20];
@@ -589,6 +685,38 @@ fn render_loop(inner: Arc<Inner>) {
     let mut cur_fence: Option<OwnedFd> = None;
     let mut pending: Option<u64> = None; // generation a select was issued on
     let mut idle_logged = false;
+    // Thread-local dups of the pacing fds (same immunity rationale).
+    let (tick, wake) = {
+        let vsync = inner.vsync.lock().unwrap();
+        let Some(pump) = vsync.as_ref() else {
+            log::error!("anland.render no vsync pump; stopping (no silent free-spin)");
+            return;
+        };
+        match (dup_owned(pump.tick_fd()), dup_owned(&inner.wake)) {
+            (Ok(t), Ok(w)) => (t, w),
+            _ => {
+                log::error!("anland.render pacing dup failed; stopping");
+                return;
+            }
+        }
+    };
+    // Demand + instrumentation state.
+    let mut last_select_ns: u64 = 0;
+    let mut win_start_ns = sys::now_ns();
+    let mut win_frames: u64 = 0;
+    let mut win_comp_us: u64 = 0;
+    let mut win_comp_max_us: u64 = 0;
+    let mut win_skips: u64 = 0;
+    let mut win_stalls: u64 = 0;
+    // Temporary gate tracing (demand-tuning build): first decisions + alive.
+    let mut iters: u64 = 0;
+    let mut selects: u64 = 0;
+    let mut alive_ns = sys::now_ns();
+    // Per-sink 1 Hz rate limiters (monotonic ns of last log per sink).
+    let mut log_stall_ns: u64 = 0;
+    let mut log_unknown_ns: u64 = 0;
+    let mut log_mismatch_ns: u64 = 0;
+    let mut log_gen0_ns: u64 = 0;
     while inner.running.load(Ordering::Acquire) {
         // Snapshot generation.
         let (gen_id, fence_dup) = {
@@ -604,10 +732,71 @@ fn render_loop(inner: Arc<Inner>) {
             pending = None;
             idle_logged = false;
         }
-        // Blocking dequeue (BufferQueue backpressure = frame pacing).
+        // Demand gate: select on every display-vsync tick while the user is
+        // active (input bursts, connect/start bursts, self-sustaining busy
+        // composites), immediately on kick (input latency), and otherwise at
+        // most at the 2Hz heartbeat. Skipped ticks do no dequeue/select at
+        // all: KWin stays idle, no GPU work is submitted, no frame is queued.
         if !inner.window_live.load(Ordering::Acquire) {
             break;
         }
+        let now = sys::now_ns();
+        let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
+        let timeout_ms = if demanding { 50 } else { 500 };
+        let (tick_ready, wake_ready) = match sys::poll_two(&tick, &wake, timeout_ms) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("anland.render pacing poll failed: {e}");
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+        };
+        if tick_ready {
+            drain_fd(&tick);
+        }
+        if wake_ready {
+            drain_fd(&wake);
+        }
+        let now = sys::now_ns();
+        let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
+        let since_last = now.wrapping_sub(last_select_ns);
+        let want = wake_ready
+            || (tick_ready && (demanding || since_last >= HEARTBEAT_NS))
+            || (!tick_ready && !wake_ready && !demanding && since_last >= HEARTBEAT_NS);
+        iters += 1;
+        if iters <= 30 {
+            log::info!(
+                "anland.gate iter={iters} tick={tick_ready} wake={wake_ready} demanding={demanding} since_last_us={} want={want}",
+                since_last / 1000
+            );
+        }
+        if now.wrapping_sub(alive_ns) >= 10_000_000_000 {
+            let (q, f, b, fb) = (
+                inner.frames_queued.load(Ordering::Relaxed),
+                inner.frames_fenced.load(Ordering::Relaxed),
+                inner.frames_bare.load(Ordering::Relaxed),
+                inner.fallback_count.load(Ordering::Relaxed),
+            );
+            log::info!(
+                "anland.render alive iters={iters} selects={selects} queued={q} fenced={f} bare={b} fallbacks={fb}"
+            );
+            alive_ns = now;
+        }
+        if !want {
+            win_skips += 1;
+            log_fps_window(
+                &inner,
+                &mut win_start_ns,
+                &mut win_frames,
+                &mut win_comp_us,
+                &mut win_comp_max_us,
+                &mut win_skips,
+                &mut win_stalls,
+            );
+            continue;
+        }
+        // Selected: this dequeue hands us the slot KWin will render into.
+        // (BufferQueue backpressure still applies when all slots are live.)
         let (anb, acquire) = match unsafe { inner.anw.dequeue(inner.window) } {
             Ok(v) => v,
             Err(r) => {
@@ -619,9 +808,20 @@ fn render_loop(inner: Arc<Inner>) {
             }
         };
         if acquire >= 0 {
-            // CPU-wait the acquire fence (SurfaceFlinger done with the slot).
+            // Blocking acquire wait (see ACQUIRE_WAIT_MS). Never queue-back:
+            // presenting a buffer SF hasn't released invites KWin to render
+            // into scanout-active memory (GPU hang, proven). Cancel instead.
             let fence = unsafe { OwnedFd::from_raw_fd(acquire) };
-            let _ = sys::wait_fence(fence, ACQUIRE_WAIT_MS);
+            if sys::wait_fence(fence, ACQUIRE_WAIT_MS).is_err() {
+                win_stalls += 1;
+                let now = sys::now_ns();
+                if now.wrapping_sub(log_stall_ns) >= 1_000_000_000 {
+                    log::warn!("anland.sink acquire-stall (SF release pending >1s); cancelling");
+                    log_stall_ns = now;
+                }
+                unsafe { inner.anw.cancel(inner.window, anb, -1) };
+                continue;
+            }
         }
         // Match slot -> producer index.
         let idx = inner
@@ -631,8 +831,15 @@ fn render_loop(inner: Arc<Inner>) {
             .iter()
             .position(|s| s.anb == anb);
         let Some(idx) = idx else {
-            // Unknown slot (e.g. the held spare surfaced): hand straight back.
-            unsafe { inner.anw.queue(inner.window, anb, -1) };
+            // Unknown slot (e.g. the held spare surfaced, or SF reallocated
+            // buffers): CANCEL back to the free pool, never present — it was
+            // not rendered by KWin (see ACQUIRE_WAIT_MS invariant).
+            let now = sys::now_ns();
+            if iters <= 30 || now.wrapping_sub(log_unknown_ns) >= 1_000_000_000 {
+                log::info!("anland.sink unknown-slot cancel-back (SF may have reallocated)");
+                log_unknown_ns = now;
+            }
+            unsafe { inner.anw.cancel(inner.window, anb, -1) };
             continue;
         };
         if cur_gen == 0 {
@@ -643,11 +850,19 @@ fn render_loop(inner: Arc<Inner>) {
                     "anland.render fallback: presenting unrendered frames until producer connects"
                 );
                 idle_logged = true;
+            } else {
+                let now = sys::now_ns();
+                if now.wrapping_sub(log_gen0_ns) >= 10_000_000_000 {
+                    log::info!("anland.sink gen0-fallback still unconnected");
+                    log_gen0_ns = now;
+                }
             }
             thread::sleep(Duration::from_millis(16));
             continue;
         }
         // select_dmabuf: shm write + eventfd signal under io_lock.
+        // t_select spans signal -> render fence: KWin's composite latency.
+        let t_select_ns = sys::now_ns();
         {
             let _guard = inner.io_lock.lock().unwrap();
             let gen = inner.gen.lock().unwrap();
@@ -658,13 +873,20 @@ fn render_loop(inner: Arc<Inner>) {
                         drop(gen);
                         drop(_guard);
                         enter_fallback(&inner, "eventfd signal failed");
-                        unsafe { inner.anw.queue(inner.window, anb, -1) };
+                        unsafe { inner.anw.cancel(inner.window, anb, -1) };
                         continue;
                     }
                     pending = Some(cur_gen);
                 }
                 _ => {
-                    unsafe { inner.anw.queue(inner.window, anb, -1) };
+                    let now = sys::now_ns();
+                    if iters <= 60 || now.wrapping_sub(log_mismatch_ns) >= 1_000_000_000 {
+                        log::info!(
+                            "anland.sink gen-mismatch cancel-back cur={cur_gen}"
+                        );
+                        log_mismatch_ns = now;
+                    }
+                    unsafe { inner.anw.cancel(inner.window, anb, -1) };
                     continue;
                 }
             }
@@ -672,10 +894,12 @@ fn render_loop(inner: Arc<Inner>) {
         // refresh_done: 5s poll on our fence dup, then non-blocking recvmsg.
         let rfence = refresh_done(&inner, cur_fence.as_ref(), pending == Some(cur_gen));
         if pending == Some(cur_gen) && rfence == FENCE_LOST {
-            unsafe { inner.anw.queue(inner.window, anb, -1) };
+            log::warn!("anland.render fence lost (generation died); buffer cancelled, not presented");
+            unsafe { inner.anw.cancel(inner.window, anb, -1) };
             continue;
         }
         pending = None;
+        selects += 1;
         let q = unsafe { inner.anw.queue(inner.window, anb, rfence) };
         if q != 0 {
             log::warn!("anland.render queueBuffer failed: {q}");
@@ -711,9 +935,74 @@ fn render_loop(inner: Arc<Inner>) {
                     n - f
                 );
             }
+            // Composite latency is recorded for the fps line, but it must NOT
+            // drive demand: KWin's Anland backend re-renders the full scene
+            // on every select (proven: 7.5ms even with plasmashell frozen),
+            // so a latency threshold can never distinguish idle from busy.
+            // Video/animation protection comes from the client-CPU sampler.
+            let comp_ns = sys::now_ns().wrapping_sub(t_select_ns);
+            win_frames += 1;
+            win_comp_us += comp_ns / 1000;
+            win_comp_max_us = win_comp_max_us.max(comp_ns / 1000);
+            last_select_ns = sys::now_ns();
+            log_fps_window(
+                &inner,
+                &mut win_start_ns,
+                &mut win_frames,
+                &mut win_comp_us,
+                &mut win_comp_max_us,
+                &mut win_skips,
+                &mut win_stalls,
+            );
         }
     }
     log::info!("anland.render thread stopped");
+}
+
+/// Drain an eventfd counter after poll signalled it. A single read clears
+/// accumulated ticks; errors are harmless (next poll re-arms).
+fn drain_fd(fd: &OwnedFd) {
+    let _ = sys::eventfd_read(fd);
+}
+
+/// Emit `anland.fps` once per window: present rate, KWin composite latency
+/// (signal->fence), skip share (demand gating working set), acquire stalls.
+#[allow(clippy::too_many_arguments)]
+fn log_fps_window(
+    inner: &Arc<Inner>,
+    win_start_ns: &mut u64,
+    win_frames: &mut u64,
+    win_comp_us: &mut u64,
+    win_comp_max_us: &mut u64,
+    win_skips: &mut u64,
+    win_stalls: &mut u64,
+) {
+    let now = sys::now_ns();
+    if now.wrapping_sub(*win_start_ns) < FPS_WINDOW_NS {
+        return;
+    }
+    let elapsed_ns = now.wrapping_sub(*win_start_ns).max(1);
+    let frames = *win_frames;
+    let skips = *win_skips;
+    let hz = frames as f64 * 1_000_000_000.0 / elapsed_ns as f64;
+    let avg_us = if frames > 0 {
+        *win_comp_us / frames
+    } else {
+        0
+    };
+    let skip_pct = skips * 100 / (frames + skips).max(1);
+    let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
+    log::info!(
+        "anland.fps hz={hz:.1} comp_avg_us={avg_us} comp_max_us={} skip_pct={skip_pct} acquire_stalls={} demanding={demanding}",
+        *win_comp_max_us,
+        *win_stalls,
+    );
+    *win_start_ns = now;
+    *win_frames = 0;
+    *win_comp_us = 0;
+    *win_comp_max_us = 0;
+    *win_skips = 0;
+    *win_stalls = 0;
 }
 
 const FENCE_LOST: i32 = -2;
@@ -799,7 +1088,11 @@ fn event_loop(inner: Arc<Inner>) {
         };
         match sys::poll_readable(data, 500) {
             Ok(true) => {}
-            Ok(false) => continue,
+            Ok(false) => {
+                // No producer output event: sample GUI-client CPU for demand.
+                sample_client_activity(&inner);
+                continue;
+            }
             Err(_) => {
                 cur_gen = 0;
                 cur_data = None;
@@ -853,4 +1146,172 @@ fn event_loop(inner: Arc<Inner>) {
         }
     }
     log::info!("anland.event thread stopped");
+}
+
+/// GUI-client CPU activity sampler (demand input for video/animation).
+///
+/// Runs on the event thread's 500ms poll cadence. Sums user+sys jiffies over
+/// watched guest client processes; any window above threshold kicks
+/// full-rate presentation. Watched: Wayland/X11 clients (video raster and
+/// software decode burn client CPU here — our Firefox is SWGL, so playback
+/// always shows up). Deliberately NOT watched: KWin (our selects drive its
+/// CPU — feedback loop) and our own process. Fail-quiet (no kick on error),
+/// never fail-busy.
+
+/// utime+stime jiffies for one PID (0 on any read/parse failure).
+fn proc_jiffies(pid: u32) -> u64 {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return 0;
+    };
+    // comm is parenthesized and may contain spaces: split after last ')'.
+    let Some(end) = stat.rfind(')') else {
+        return 0;
+    };
+    let fields: Vec<&str> = stat[end + 1..].split_whitespace().collect();
+    // fields[0] = state (overall field 3): utime=14 -> [11], stime=15 -> [12].
+    if fields.len() < 13 {
+        return 0;
+    }
+    let u: u64 = fields[11].parse().unwrap_or(0);
+    let s: u64 = fields[12].parse().unwrap_or(0);
+    u.wrapping_add(s)
+}
+
+fn sample_client_activity(inner: &Arc<Inner>) {
+    // Substrings matched against /proc/PID/cmdline (NULs are fine: the
+    // binary name itself is matched, separators don't matter).
+    // NOTE: plasmashell is deliberately NOT watched. It burns ~2.6% CPU
+    // continuously at idle (tray/clock polling) with no visible motion, and
+    // all of its input-driven animations (hover, window management) coincide
+    // with input kicks. Watching it flaps demand.
+    // Real video lives in watched apps (SWGL raster always shows up).
+    const WATCH: &[&str] = &[
+        // Path prefix covers every Firefox process kind (main, content,
+        // gpu, rdd, forkserver, utility): all exec from /usr/lib/firefox*
+        // (also matches firefox-esr). Binary-name matching would miss kinds
+        // whose cmdline differs; nothing else lives under that path.
+        "/usr/lib/firefox",
+        "chromium",
+        "chrome",
+        "electron",
+        "Xwayland",
+        "dolphin",
+        "konsole",
+        "systemsettings",
+        "discover",
+        "vlc",
+        "mpv",
+        "kded6",
+        "krunner",
+    ];
+    // ~2% of one core within the 500ms window (USER_HZ=100). Idle plasmashell
+    // sits ~1.4% (below); any video raster/decode is far above.
+    const BUSY_JIFFIES_PER_WINDOW: u64 = 1;
+    // Full /proc re-scan cadence for PID discovery (cached PIDs are cheap).
+    const FULL_SCAN_NS: u64 = 5_000_000_000;
+    let self_pid = std::process::id();
+    let now = sys::now_ns();
+    // Fast path: re-stat cached PIDs (with cmdline re-verification).
+    let mut total: u64 = 0;
+    let mut cached: Vec<u32> = Vec::new();
+    let mut scanned: usize = 0;
+    let full_scan = {
+        let cache = inner.client_cache.lock().unwrap();
+        now.wrapping_sub(cache.1) >= FULL_SCAN_NS
+    };
+    if !full_scan {
+        let cache = inner.client_cache.lock().unwrap();
+        for &pid in cache.0.iter() {
+            if pid == self_pid {
+                continue;
+            }
+            let Ok(cmd) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+                continue;
+            };
+            if cmd.is_empty() || cmd[0] != b'/' {
+                continue;
+            }
+            let mut watched = false;
+            for w in WATCH {
+                if cmd.windows(w.len()).any(|s| s == w.as_bytes()) {
+                    watched = true;
+                    break;
+                }
+            }
+            if !watched {
+                continue; // PID reused by another binary: drop from cache
+            }
+            cached.push(pid);
+            total = total.wrapping_add(proc_jiffies(pid));
+        }
+    } else {
+        // Slow path: full scan, repopulate the cache.
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            log::warn!("anland.demand sampler: cannot read /proc (fail-quiet)");
+            return;
+        };
+        for entry in dir.flatten() {
+            scanned += 1;
+            let name = entry.file_name();
+            let Some(pid_str) = name.to_str() else {
+                continue;
+            };
+            let Ok(pid) = pid_str.parse::<u32>() else {
+                continue;
+            };
+            if pid == self_pid {
+                continue;
+            }
+            let Ok(cmd) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+                continue;
+            };
+            if cmd.is_empty() || cmd[0] != b'/' {
+                continue;
+            }
+            let mut watched = false;
+            for w in WATCH {
+                if cmd.windows(w.len()).any(|s| s == w.as_bytes()) {
+                    watched = true;
+                    break;
+                }
+            }
+            if !watched {
+                continue;
+            }
+            cached.push(pid);
+            total = total.wrapping_add(proc_jiffies(pid));
+        }
+        *inner.client_cache.lock().unwrap() = (cached, now);
+        // Temporary sampler visibility (demand-tuning build).
+        let peek = inner.client_prev.lock().unwrap();
+        let peek_delta = total.wrapping_sub(peek.0);
+        log::info!("anland.demand scan procs={scanned} watched={} total={total} delta500ms={peek_delta}", inner.client_cache.lock().unwrap().0.len());
+    }
+    let mut prev = inner.client_prev.lock().unwrap();
+    let (prev_total, prev_ns, streak) = *prev;
+    if prev_ns == 0 {
+        *prev = (total, now, 0);
+        return; // first sample: baseline only
+    }
+    let delta = total.wrapping_sub(prev_total);
+    if delta >= BUSY_JIFFIES_PER_WINDOW {
+        let streak = streak.saturating_add(1);
+        *prev = (total, now, streak);
+        drop(prev);
+        // Single-window blips (clock tick, tray poll) must not hold
+        // full-rate: require sustained activity. Video/animation keeps
+        // every window busy, so the 1s ramp is the only cost.
+        if streak >= 2 {
+            if !inner.client_active.swap(true, Ordering::AcqRel) {
+                log::info!("anland.demand client-activity kick (jiffies_500ms={delta})");
+            }
+            kick(inner, SELF_SUSTAIN_MS);
+        }
+    } else {
+        *prev = (total, now, 0);
+        drop(prev);
+        if inner.client_active.swap(false, Ordering::AcqRel) {
+            log::info!("anland.demand clients quiet; lapsing to heartbeat");
+        }
+    }
 }
