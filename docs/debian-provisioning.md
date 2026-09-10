@@ -30,6 +30,8 @@ real package payloads. The v2 image corrects that conflict for `usr/lib/ssl`.
 For a new image, change the image version in the packager, build, publish its
 archive under the corresponding `runtime-<version>` GitHub release, and commit
 the generated manifest. Do not replace assets under an existing version. Run
+`python scripts/publish_runtime_release.py` to validate, publish, or restore the
+release idempotently with size and SHA-256 safety guards. Run
 `python scripts/verify_runtime_release.py` before building the APK; the APK CI
 also checks the public URL and GitHub asset digest. No developer rootfs is used
 to produce the image or install the app.

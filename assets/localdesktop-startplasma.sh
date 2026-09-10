@@ -43,6 +43,11 @@ export WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}
 # the nested QPainter KWin does today.
 if [ -n "${ANLAND_SOCKET:-}" ]; then
     export WAYLAND_DISPLAY=wayland-1
+    # Force Plasma/KDE Qt clients onto the Wayland QPA backend on the Anland
+    # path: without this, ksmserver/plasmashell can fall back to xcb, fail to
+    # start, and plasma_session waits forever for org.kde.ksmserver. DISPLAY
+    # stays set for XWayland/Firefox (X11), which select xcb explicitly.
+    export QT_QPA_PLATFORM=wayland
     export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
 fi
 
