@@ -69,6 +69,13 @@ if [ "$anland_mode" -eq 0 ]; then
     if [ -r /usr/local/lib/portal/libanland-stub.so ]; then
         export LD_PRELOAD="/usr/local/lib/portal/libanland-stub.so${LD_PRELOAD:+:$LD_PRELOAD}"
     fi
+else
+    # Project Anland DRM shim (Anland only): the app sandbox cannot open
+    # /dev/dri/renderD128, which KWin's Anland backend requires at init.
+    # Never set in QPainter mode.
+    if [ -r /usr/local/lib/portal/drmshim.so ]; then
+        export LD_PRELOAD="/usr/local/lib/portal/drmshim.so${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
 fi
 export QT_FORCE_STDERR_LOGGING=1
 export QT_LOGGING_RULES="kwin_core.warning=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"

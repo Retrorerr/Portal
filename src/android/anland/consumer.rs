@@ -80,6 +80,8 @@ struct Inner {
     frames_fenced: AtomicU64,
     frames_bare: AtomicU64,
     fallback_count: AtomicU64,
+    /// Whether the plasma-ready marker was written for this session.
+    ready_marked: AtomicBool,
 }
 
 unsafe impl Send for Inner {}
@@ -128,17 +130,11 @@ impl AnlandSession {
     ) -> Result<Self, String> {
         let anw = unsafe { AnwApi::load() }?;
         unsafe { anw::acquire(window, &anw) };
-        // Idempotent (re)connect to the CPU API, mirroring the reference.
-        unsafe {
-            AnwApi::api_disconnect(window, 2);
-            if AnwApi::api_connect(window, 2) != 0 {
-                anw::release(window, &anw);
-                return Err(
-                    "ANativeWindow api_connect(CPU) failed: window is owned by another API (EGL?)"
-                        .into(),
-                );
-            }
-        }
+        // Connect to the CPU API via the lock/unlock ritual (see anw.rs):
+        // the in-object perform() slot is not trusted for indirect calls
+        // (its supposed address disagrees with every dlsym'd entry on this
+        // device), while the dlsym'd dequeue/queue path is proven working.
+        unsafe { anw.connect_cpu_ritual(window)? };
         let (win_w, win_h) = unsafe {
             (
                 anw::get_width(window, &anw),
@@ -160,7 +156,6 @@ impl AnlandSession {
         };
         if r != 0 {
             unsafe {
-                AnwApi::api_disconnect(window, 2);
                 anw::release(window, &anw);
             }
             return Err(format!("ANativeWindow_setBuffersGeometry failed: {r}"));
@@ -170,7 +165,6 @@ impl AnlandSession {
         let r = unsafe { anw.set_buffer_count(window, total) };
         if r != 0 {
             unsafe {
-                AnwApi::api_disconnect(window, 2);
                 anw::release(window, &anw);
             }
             return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
@@ -206,6 +200,7 @@ impl AnlandSession {
             frames_fenced: AtomicU64::new(0),
             frames_bare: AtomicU64::new(0),
             fallback_count: AtomicU64::new(0),
+            ready_marked: AtomicBool::new(false),
         });
         // Collect window slots (dup dma-buf fds, hold one spare back).
         collect_buffers(&inner, total)?;
@@ -327,7 +322,10 @@ impl AnlandSession {
             }
         }
         unsafe {
-            AnwApi::api_disconnect(inner.window, 2);
+            // No API disconnect: the window was connected via the lock ritual
+            // and struct perform() is untrusted. The NativeActivity window is
+            // destroyed by the framework right after suspend, which drops all
+            // API state; a renderer-flag switch always lands on a fresh window.
             anw::release(inner.window, &inner.anw);
         }
         let (q, f, b, fb) = (
@@ -686,6 +684,22 @@ fn render_loop(inner: Arc<Inner>) {
             inner.frames_queued.fetch_add(1, Ordering::Relaxed);
             if rfence >= 0 {
                 inner.frames_fenced.fetch_add(1, Ordering::Relaxed);
+                // Readiness contract (mirrors the Smithay path's first-frame
+                // marker): the producer connected, GPU-rendered into our
+                // dma-buf, and we queued it to SurfaceFlinger with a real
+                // sync-file fence. Evidence is labeled honestly: queue with
+                // fence (SF waits GPU-side), not a display-present timestamp.
+                if !inner.ready_marked.swap(true, Ordering::AcqRel) {
+                    let bufs = inner.buffers.lock().map(|b| b.len()).unwrap_or(0);
+                    crate::android::diagnostics::mark_plasma_frame_presented_for_generation_with_evidence(
+                        bufs,
+                        1,
+                        cur_gen,
+                        "anland-queue-fenced",
+                        None,
+                    );
+                    log::info!("anland.session=ready first fenced frame queued (plasma-ready marked)");
+                }
             } else {
                 inner.frames_bare.fetch_add(1, Ordering::Relaxed);
             }

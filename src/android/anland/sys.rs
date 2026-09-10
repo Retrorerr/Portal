@@ -178,24 +178,51 @@ pub fn make_eventfd() -> io::Result<OwnedFd> {
     unsafe { Ok(OwnedFd::from_raw_fd(fd)) }
 }
 
+/// Signal an eventfd counter (+1). Uses write(2): eventfds are not sockets,
+/// so send(2) fails (this exact bug looped fallback during bring-up).
 pub fn eventfd_write(fd: &OwnedFd, value: u64) -> io::Result<()> {
     let bytes = value.to_ne_bytes();
-    send_all(fd, &bytes)
+    let mut off = 0;
+    while off < bytes.len() {
+        let n = unsafe {
+            libc::write(
+                fd.as_raw_fd(),
+                bytes[off..].as_ptr() as *const libc::c_void,
+                bytes.len() - off,
+            )
+        };
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        off += n as usize;
+    }
+    Ok(())
 }
 
+#[allow(dead_code)]
 pub fn eventfd_read(fd: &OwnedFd) -> io::Result<u64> {
     let mut bytes = [0u8; 8];
     // Non-blocking drain: the producer may have signalled several frames.
     let n = unsafe {
-        libc::recv(
+        libc::read(
             fd.as_raw_fd(),
             bytes.as_mut_ptr() as *mut libc::c_void,
             bytes.len(),
-            libc::MSG_DONTWAIT,
         )
     };
+    // Temporarily non-blocking via fcntl is overkill here; the caller only
+    // drains after select wakeups. A short blocking read is acceptable, but
+    // all current call sites drain a just-signalled fd, so require 8 bytes.
     if n != 8 {
-        return Err(io::Error::last_os_error());
+        return Err(if n < 0 {
+            io::Error::last_os_error()
+        } else {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "short eventfd read")
+        });
     }
     Ok(u64::from_ne_bytes(bytes))
 }
