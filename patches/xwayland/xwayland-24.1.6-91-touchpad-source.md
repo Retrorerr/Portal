@@ -165,3 +165,25 @@ surfaceless glamor active; Anland READY gen-1 fenced, `fallbacks=0`.
 A real-mouse wheel baseline is unavailable (no real mouse on hand). The
 candidate matrix (criteria 1-15 in the task) has NOT been executed — there
 is no candidate binary.
+
+## Candidate validation history (physical, OnePlus Pad 3)
+
+- v1 (`445670cb…`, per-event values): session healthy (fenced, no
+  fallbacks, KGSL intact); `xwayland-touchpad` device present with the
+  property exclusively; all finger scroll reached it (XI2 capture). Firefox:
+  scrolled normally, **no momentum**. Root cause found afterwards: XI2
+  scroll valuators carry running positions and GTK/server difference
+  consecutive values, so per-event values read back as ~zero/jitter and can
+  never yield APZ velocity.
+- v2 (`b91f5579…`, accumulated surface-px positions): **FAILED the matrix
+  and was reverted.** Firefox scrolling degraded to unusable/laggy and drag
+  release felt stuck (session-wide event processing saturated). Mechanism:
+  with increment 1.0 and pixel totals, the server's legacy button emulation
+  fires a press/release pair at nearly every pixel crossing — an event
+  storm. The missing piece is `SCROLL_FLAG_DONT_EMULATE` on the touchpad
+  device (smooth-only by design; legacy clients must not get per-pixel
+  button floods). Any future v3 must set it, then re-run the full matrix.
+- Default stays `stock`: no wheel-source validation is possible without a
+  real mouse, and no candidate has passed the matrix. The candidate remains
+  an explicitly selectable experimental variant (currently the v2 binary;
+  not for general use).

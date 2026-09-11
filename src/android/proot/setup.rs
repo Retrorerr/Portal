@@ -81,6 +81,22 @@ const KWIN_LIBRARY: &[u8] = include_bytes!("../../../assets/kwin-debian-arm64/li
 /// modified. Synced idempotently on every launch (restart/reinstall persist).
 const KWIN_ANLAND_LIBRARY: &[u8] =
     include_bytes!("../../../assets/kwin-anland-arm64/libkwin.so.6.3.6");
+/// Phase B XWayland touchpad-source candidate: CI build of pinned lfdevs
+/// 461772ae (2:24.1.6-91) plus Portal 0005 (package 2:24.1.6-91portal1),
+/// served ONLY from `/usr/local/lib/portal-xwayland` when the session
+/// explicitly selects `xwayland-variant=candidate`. `/usr/bin/Xwayland`
+/// (stock) is never overwritten; the KWin wrapper falls back to stock on
+/// any staging problem. Pins: `assets/xwayland-candidate/SHA256SUMS`.
+const XWAYLAND_CANDIDATE_BINARY: &[u8] =
+    include_bytes!("../../../assets/xwayland-candidate/Xwayland");
+/// Expected SHA-256 of the staged candidate Xwayland (guest-side selection
+/// gate refuses anything else; mirrors SHA256SUMS).
+const XWAYLAND_CANDIDATE_SHA256: &str =
+    "b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d";
+/// Stock Debian trixie arm64 xinput (diagnostic tool for the XI2 proof;
+/// same overlay staging, never in the default loader path).
+const XWAYLAND_XINPUT_BINARY: &[u8] =
+    include_bytes!("../../../assets/xwayland-candidate/xinput");
 /// Project Anland load-time stub: satisfies the lfdevs kwin_wayland binary's
 /// AnlandBackend reference when QPainter sessions run the overlay libkwin
 /// (which has no Anland backend). Preloaded ONLY in QPainter mode; traps if
@@ -1467,6 +1483,8 @@ fn sync_kwin_overlay(fs_root: &Path) {
     // Project Anland unified KWin library (Anland backend + Portal Touchpad).
     // Served from its own dir so the QPainter overlay above is never shadowed.
     sync_kwin_anland_overlay(fs_root);
+    // Phase B XWayland touchpad-source candidate (own dir, stock default).
+    sync_xwayland_candidate_overlay(fs_root);
 }
 
 /// Install Portal's Anland-unified KWin library for GPU sessions. Runs on
@@ -1503,6 +1521,37 @@ fn sync_kwin_anland_overlay(fs_root: &Path) {
             let _ = fs::remove_file(&tmp);
             if symlink(target, &tmp).is_ok() {
                 let _ = fs::rename(&tmp, &path);
+            }
+        }
+    }
+}
+
+/// Stage the Phase B XWayland touchpad-source candidate plus the xinput
+/// diagnostic into `/usr/local/lib/portal-xwayland` (NOT `/usr/bin`, NOT
+/// the default loader path). Runs on every provisioning pass AND every
+/// session launch, so existing runtimes converge without re-provisioning.
+///
+/// Staging is inert by itself: the KWin wrapper only puts this dir on PATH
+/// when the session explicitly selects `xwayland-variant=candidate`, and it
+/// SHA-validates the binary there first (falling back to stock otherwise).
+/// Sync is idempotent (size-freshness, atomic temp+rename, 0755) mirroring
+/// the KWin overlay above.
+fn sync_xwayland_candidate_overlay(fs_root: &Path) {
+    let candidate_dir = fs_root.join("usr/local/lib/portal-xwayland");
+    let _ = fs::create_dir_all(&candidate_dir);
+    for (name, payload) in [
+        ("Xwayland", XWAYLAND_CANDIDATE_BINARY),
+        ("xinput", XWAYLAND_XINPUT_BINARY),
+    ] {
+        let target = candidate_dir.join(name);
+        let fresh = fs::metadata(&target)
+            .map(|m| m.len() == payload.len() as u64)
+            .unwrap_or(false);
+        if !fresh {
+            let tmp = candidate_dir.join(format!("{name}.tmp"));
+            if fs::write(&tmp, payload).is_ok() {
+                let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755));
+                let _ = fs::rename(&tmp, &target);
             }
         }
     }
