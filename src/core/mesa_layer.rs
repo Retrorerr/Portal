@@ -83,6 +83,12 @@ pub fn is_marker_valid(marker_path: &Path, version: &str, sha256: &str) -> bool 
 
 /// Authoritative layer validation. Cheap: existence + file-type + symlink
 /// shape + minimal content presence. No full-tree hashing.
+///
+/// Note (proven on-device): the pinned archive stores DRI drivers as
+/// in-layer symlinks (`dri/kgsl_dri.so -> libdril_dri.so`), not regular
+/// files. Required files therefore accept either a regular file or a
+/// symlink that resolves within the layer to a file; broken or escaping
+/// links are rejected.
 pub fn validate_layer_dir(layer: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(
         layer.is_dir(),
@@ -90,13 +96,7 @@ pub fn validate_layer_dir(layer: &Path) -> anyhow::Result<()> {
         layer.display()
     );
     for rel in REQUIRED_REGULAR_FILES {
-        let path = layer.join(rel);
-        let meta = fs::symlink_metadata(&path)
-            .map_err(|_| anyhow::anyhow!("mesa layer missing required file {rel}"))?;
-        anyhow::ensure!(
-            meta.file_type().is_file(),
-            "mesa layer entry is not a regular file: {rel}"
-        );
+        require_file_or_in_layer_symlink(layer, rel)?;
     }
     for (link_rel, expected_target) in REQUIRED_SONAME_LINKS {
         let link_path = layer.join(link_rel);
@@ -201,9 +201,45 @@ pub fn validate_layer_dir(layer: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Require `rel` to exist as a file, accepting an in-layer symlink.
+/// Regular files pass directly. Symlinks must resolve within `layer` to
+/// an existing file (covers `dri/kgsl_dri.so -> libdril_dri.so` in the
+/// pinned archive). Broken, directory, or escaping links are rejected.
+fn require_file_or_in_layer_symlink(layer: &Path, rel: &str) -> anyhow::Result<()> {
+    let path = layer.join(rel);
+    let meta = fs::symlink_metadata(&path)
+        .map_err(|_| anyhow::anyhow!("mesa layer missing required file {rel}"))?;
+    if meta.file_type().is_file() {
+        return Ok(());
+    }
+    if meta.file_type().is_symlink() {
+        let target = fs::read_link(&path)
+            .map_err(|e| anyhow::anyhow!("mesa layer broken link {rel}: {e}"))?;
+        let resolved = if target.is_absolute() {
+            PathBuf::from(&target)
+        } else {
+            path.parent()
+                .unwrap_or_else(|| Path::new("/"))
+                .join(&target)
+        };
+        let layer_canon = normalize_lexically(layer);
+        let resolved_canon = normalize_lexically(&resolved);
+        anyhow::ensure!(
+            resolved_canon.starts_with(&layer_canon),
+            "mesa layer link {rel} escapes layer: {}",
+            target.display()
+        );
+        anyhow::ensure!(
+            resolved.is_file(),
+            "mesa layer link {rel} target is not a file"
+        );
+        return Ok(());
+    }
+    anyhow::bail!("mesa layer entry is not a file: {rel}")
+}
+
 /// Lexically normalize a path (resolve `.`/`..` without touching the FS).
-fn normalize_lexically(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
+fn normalize_lexically(path: &Path) -> PathBuf {    let mut out = PathBuf::new();
     for comp in path.components() {
         use std::path::Component::*;
         match comp {
@@ -463,6 +499,24 @@ mod tests {
             if REQUIRED_SONAME_LINKS.iter().any(|(l, _)| l == rel) {
                 continue;
             }
+            // The pinned archive stores kgsl_dri.so as an in-layer symlink
+            // (kgsl_dri.so -> libdril_dri.so); materialize that shape here.
+            if *rel == "usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so" {
+                let dri = root.join("usr/lib/aarch64-linux-gnu/dri");
+                fs::create_dir_all(&dri).unwrap();
+                fs::write(dri.join("libdril_dri.so"), b"fake-dri").unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::symlink;
+                    let _ = fs::remove_file(dri.join("kgsl_dri.so"));
+                    symlink("libdril_dri.so", dri.join("kgsl_dri.so")).unwrap();
+                }
+                #[cfg(not(unix))]
+                {
+                    fs::write(dri.join("kgsl_dri.so"), b"fake-dri").unwrap();
+                }
+                continue;
+            }
             let p = root.join(rel);
             if rel.ends_with(".so")
                 || rel.ends_with(".so.0.0.0")
@@ -500,6 +554,28 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         valid_tree(t.path(), "mesa-kgsl-layer");
         validate_layer_dir(&t.path().join("mesa-kgsl-layer")).unwrap();
+    }
+
+    #[test]
+    fn validation_accepts_in_layer_symlinked_dri_driver() {
+        // Proven on-device: kgsl_dri.so -> libdril_dri.so in the pinned
+        // archive. A strict regular-file requirement breaks the working
+        // layer; in-layer symlinks must validate.
+        let t = tempfile::tempdir().unwrap();
+        valid_tree(t.path(), "mesa-kgsl-layer");
+        let kgsl = t.path().join(
+            "mesa-kgsl-layer/usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so",
+        );
+        assert!(kgsl.exists());
+        validate_layer_dir(&t.path().join("mesa-kgsl-layer")).unwrap();
+        // An escaping symlink must still be rejected.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            fs::remove_file(&kgsl).unwrap();
+            symlink("/etc/passwd", &kgsl).unwrap();
+            assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer")).is_err());
+        }
     }
 
     #[test]

@@ -15,6 +15,21 @@ const SHA: &str = "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52
 
 fn build_valid_tree(root: &Path) {
     for rel in REQUIRED_REGULAR_FILES.iter().chain(REQUIRED_DIRS.iter()) {
+        if *rel == "usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so" {
+            let dri = root.join("usr/lib/aarch64-linux-gnu/dri");
+            fs::create_dir_all(&dri).unwrap();
+            fs::write(dri.join("libdril_dri.so"), b"fake-dri").unwrap();
+            #[cfg(unix)]
+            {
+                let _ = fs::remove_file(dri.join("kgsl_dri.so"));
+                std::os::unix::fs::symlink("libdril_dri.so", dri.join("kgsl_dri.so")).unwrap();
+            }
+            #[cfg(not(unix))]
+            {
+                fs::write(dri.join("kgsl_dri.so"), b"fake-dri").unwrap();
+            }
+            continue;
+        }
         let p = root.join(rel);
         if REQUIRED_DIRS.contains(rel) {
             fs::create_dir_all(&p).unwrap();
