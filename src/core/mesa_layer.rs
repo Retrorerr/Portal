@@ -5,6 +5,13 @@
 //! filesystem logic operating on an explicit base directory so unit and
 //! integration tests can exercise crash windows with tempdirs without
 //! touching the real production asset.
+//!
+//! Identity model: every layer carries a Portal-owned internal identity
+//! file (`.portal-mesa-identity`) with the exact pinned version + archive
+//! SHA it was extracted from. A layer counts as the CURRENT layer only
+//! when structure validates AND the internal identity exactly matches the
+//! expected pin AND the external completion marker matches. Structural
+//! validity alone never relabels an old tree as a new pin.
 
 use std::{
     fs,
@@ -48,6 +55,13 @@ pub const REQUIRED_DIRS: &[&str] = &[
     "usr/share/drirc.d",
 ];
 
+/// Portal-owned identity file inside every layer root, written at
+/// extraction time from the currently pinned version + archive SHA.
+/// Lets validation tell "structurally fine but built from an older pin"
+/// apart from "the current pin", so recovery can never relabel an old
+/// tree by rewriting the external marker alone.
+pub const IDENTITY_REL: &str = ".portal-mesa-identity";
+
 /// Filesystem locations for one Mesa base directory.
 #[derive(Debug, Clone)]
 pub struct LayerPaths {
@@ -74,6 +88,12 @@ pub fn marker_content(version: &str, sha256: &str) -> String {
     format!("{version}\n{sha256}\n")
 }
 
+/// Exact internal identity content for a version + SHA pair
+/// (version line, SHA line; same bytes as the external marker).
+pub fn identity_content(version: &str, sha256: &str) -> String {
+    format!("{version}\n{sha256}\n")
+}
+
 /// True when the marker file exists with the exact expected content.
 pub fn is_marker_valid(marker_path: &Path, version: &str, sha256: &str) -> bool {
     fs::read_to_string(marker_path)
@@ -81,15 +101,16 @@ pub fn is_marker_valid(marker_path: &Path, version: &str, sha256: &str) -> bool 
         .unwrap_or(false)
 }
 
-/// Authoritative layer validation. Cheap: existence + file-type + symlink
-/// shape + minimal content presence. No full-tree hashing.
+/// Structural validation. Cheap: existence + file-type + symlink shape +
+/// minimal content presence. No full-tree hashing. Identity-agnostic: use
+/// `validate_layer_dir` for "is this the CURRENT pin" decisions.
 ///
 /// Note (proven on-device): the pinned archive stores DRI drivers as
 /// in-layer symlinks (`dri/kgsl_dri.so -> libdril_dri.so`), not regular
 /// files. Required files therefore accept either a regular file or a
 /// symlink that resolves within the layer to a file; broken or escaping
 /// links are rejected.
-pub fn validate_layer_dir(layer: &Path) -> anyhow::Result<()> {
+pub fn validate_structure(layer: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(
         layer.is_dir(),
         "mesa layer missing directory: {}",
@@ -238,8 +259,73 @@ fn require_file_or_in_layer_symlink(layer: &Path, rel: &str) -> anyhow::Result<(
     anyhow::bail!("mesa layer entry is not a file: {rel}")
 }
 
+/// Authoritative layer validation for an expected pin: structure must
+/// validate AND the internal identity file must exactly match the expected
+/// version + SHA. A structurally valid tree from any other pin is invalid
+/// here and must never be relabelled by rewriting the external marker.
+pub fn validate_layer_dir(layer: &Path, expected_version: &str, expected_sha: &str) -> anyhow::Result<()> {
+    validate_structure(layer)?;
+    validate_identity(layer, expected_version, expected_sha)?;
+    Ok(())
+}
+
+/// Check the internal identity file against the expected pin.
+pub fn validate_identity(layer: &Path, expected_version: &str, expected_sha: &str) -> anyhow::Result<()> {
+    let path = layer.join(IDENTITY_REL);
+    let content = fs::read_to_string(&path)
+        .map_err(|_| anyhow::anyhow!("mesa layer missing internal identity ({IDENTITY_REL})"))?;
+    anyhow::ensure!(
+        content == identity_content(expected_version, expected_sha),
+        "mesa layer internal identity does not match expected pin"
+    );
+    Ok(())
+}
+
+/// Write the internal identity file into a layer (fresh staging, or the
+/// one-time legacy migration). Best-effort persistence: fsync failures are
+/// ignored (some Android filesystems reject them); the external marker is
+/// only written after a successful revalidation, so a lost write simply
+/// retries later instead of corrupting state.
+pub fn write_identity(layer: &Path, version: &str, sha256: &str) -> anyhow::Result<()> {
+    let path = layer.join(IDENTITY_REL);
+    fs::write(&path, identity_content(version, sha256))?;
+    sync_file_best_effort(&path);
+    if let Some(parent) = path.parent() {
+        sync_dir_best_effort(parent);
+    }
+    Ok(())
+}
+
+/// One-time safe migration for a layer installed before the internal
+/// identity file existed. Migrates ONLY when the external marker already
+/// proves the SAME current pin (exact version + SHA match) and the tree
+/// is structurally valid; the identity file must additionally be absent.
+/// Returns Ok(true) when migration happened, Ok(false) when not
+/// applicable. Never manufactures identity for an ambiguously old tree:
+/// stale markers, foreign pins, and invalid structures all return false.
+pub fn try_migrate_legacy_identity(
+    layer: &Path,
+    marker_path: &Path,
+    version: &str,
+    sha256: &str,
+) -> anyhow::Result<bool> {
+    if !is_marker_valid(marker_path, version, sha256) {
+        return Ok(false);
+    }
+    if fs::symlink_metadata(layer.join(IDENTITY_REL)).is_ok() {
+        return Ok(false);
+    }
+    if validate_structure(layer).is_err() {
+        return Ok(false);
+    }
+    write_identity(layer, version, sha256)?;
+    validate_layer_dir(layer, version, sha256)?;
+    Ok(true)
+}
+
 /// Lexically normalize a path (resolve `.`/`..` without touching the FS).
-fn normalize_lexically(path: &Path) -> PathBuf {    let mut out = PathBuf::new();
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
     for comp in path.components() {
         use std::path::Component::*;
         match comp {
@@ -253,38 +339,51 @@ fn normalize_lexically(path: &Path) -> PathBuf {    let mut out = PathBuf::new()
     out
 }
 
-/// True when marker matches exactly AND the target tree validates.
+/// True when marker matches exactly AND the target tree validates as the
+/// CURRENT pin (structure + internal identity).
 pub fn is_provisioned_at(base: &Path, version: &str, sha256: &str) -> bool {
     let paths = layer_paths(base);
-    is_marker_valid(&paths.marker, version, sha256) && validate_layer_dir(&paths.target).is_ok()
+    is_marker_valid(&paths.marker, version, sha256)
+        && validate_layer_dir(&paths.target, version, sha256).is_ok()
 }
 
-/// Best-effort fsync of a file.
-pub fn sync_file(path: &Path) {
+/// Best-effort fsync of a file: failures are ignored. Some Android
+/// filesystems reject fsync (notably directory fsync on certain mounts),
+/// so persistence here is a hint, not a guarantee — crash consistency
+/// comes from marker/identity revalidation on the next launch, which
+/// simply retries when a write was lost.
+pub fn sync_file_best_effort(path: &Path) {
     if let Ok(f) = fs::File::open(path) {
         let _ = f.sync_all();
     }
 }
 
-/// Best-effort fsync of a directory (durability of renames).
-pub fn sync_dir(path: &Path) {
+/// Best-effort fsync of a directory (durability hint for renames).
+/// See `sync_file_best_effort` for why failures are ignored.
+pub fn sync_dir_best_effort(path: &Path) {
     if let Ok(f) = fs::File::open(path) {
         let _ = f.sync_all();
     }
 }
 
-/// Durably write the completion marker (temp + rename + sync).
-pub fn write_marker_durable(marker_path: &Path, version: &str, sha256: &str) -> anyhow::Result<()> {
+/// Write the completion marker (temp + rename + best-effort syncs). The
+/// marker is only written after the target has revalidated, so a lost
+/// write degrades to a retry, never to a false completion claim.
+pub fn write_marker_best_effort(
+    marker_path: &Path,
+    version: &str,
+    sha256: &str,
+) -> anyhow::Result<()> {
     if let Some(parent) = marker_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let tmp = marker_path.with_extension("complete.tmp");
     fs::write(&tmp, marker_content(version, sha256))?;
-    sync_file(&tmp);
+    sync_file_best_effort(&tmp);
     fs::rename(&tmp, marker_path)?;
-    sync_file(marker_path);
+    sync_file_best_effort(marker_path);
     if let Some(parent) = marker_path.parent() {
-        sync_dir(parent);
+        sync_dir_best_effort(parent);
     }
     Ok(())
 }
@@ -298,57 +397,67 @@ pub enum Recovery {
     PromotedStaging,
     /// Valid previous was restored to target.
     RestoredPrevious,
-    /// Stale marker was repaired because the target already validates.
+    /// Stale marker was repaired because the target already validates as
+    /// the current pin (structure + internal identity already matched).
     RepairedMarker,
+    /// A pre-identity install with a current-pin marker received its
+    /// internal identity in place; no download was needed.
+    Migrated,
     /// Stale staging/previous cleaned; a fresh download is needed.
     NeedsProvision,
 }
 
 /// Recover an interrupted promotion (crash between `target -> previous`
-/// and `staging -> target`).
+/// and `staging -> target`). All "valid" judgments below mean valid for
+/// the CURRENT pin (structure + internal identity); a structurally valid
+/// tree from any other pin is never promoted, restored, or relabelled.
 ///
-/// - target missing + staging valid -> promote staging.
-/// - target missing + staging invalid + previous valid -> restore previous.
-/// - target valid + marker stale -> repair marker (no download).
+/// - target missing + current staging valid -> promote staging.
+/// - target missing + staging invalid + current previous valid -> restore.
+/// - target current-valid + marker stale -> repair marker (no download).
+/// - target structurally valid + current marker + identity absent ->
+///   one-time in-place migration (no download).
 /// - otherwise clean disposable staging and report.
 pub fn recover_interrupted(base: &Path, version: &str, sha256: &str) -> anyhow::Result<Recovery> {
     let paths = layer_paths(base);
-    let target_valid = validate_layer_dir(&paths.target).is_ok();
-    let staging_valid = validate_layer_dir(&paths.staging).is_ok();
-    let previous_valid = validate_layer_dir(&paths.previous).is_ok();
+    let target_current = validate_layer_dir(&paths.target, version, sha256).is_ok();
+    let staging_current = validate_layer_dir(&paths.staging, version, sha256).is_ok();
+    let previous_current = validate_layer_dir(&paths.previous, version, sha256).is_ok();
     let marker_valid = is_marker_valid(&paths.marker, version, sha256);
 
     let target_exists = fs::symlink_metadata(&paths.target).is_ok();
 
     if !target_exists {
-        if staging_valid {
+        if staging_current {
             fs::rename(&paths.staging, &paths.target)
                 .map_err(|e| anyhow::anyhow!("recovery: cannot promote staging: {e}"))?;
-            validate_layer_dir(&paths.target).map_err(|e| {
+            validate_layer_dir(&paths.target, version, sha256).map_err(|e| {
                 anyhow::anyhow!("recovery: promoted staging failed validation: {e}")
             })?;
-            write_marker_durable(&paths.marker, version, sha256)?;
-            sync_dir(base);
-            if previous_valid {
+            write_marker_best_effort(&paths.marker, version, sha256)?;
+            sync_dir_best_effort(base);
+            if previous_current {
                 let _ = fs::remove_dir_all(&paths.previous);
             }
             return Ok(Recovery::PromotedStaging);
         }
-        if previous_valid {
+        if previous_current {
             if paths.staging.exists() {
                 let _ = fs::remove_dir_all(&paths.staging);
             }
             fs::rename(&paths.previous, &paths.target)
                 .map_err(|e| anyhow::anyhow!("recovery: cannot restore previous: {e}"))?;
-            validate_layer_dir(&paths.target).map_err(|e| {
+            validate_layer_dir(&paths.target, version, sha256).map_err(|e| {
                 anyhow::anyhow!("recovery: restored previous failed validation: {e}")
             })?;
-            write_marker_durable(&paths.marker, version, sha256)?;
-            sync_dir(base);
+            write_marker_best_effort(&paths.marker, version, sha256)?;
+            sync_dir_best_effort(base);
             return Ok(Recovery::RestoredPrevious);
         }
-        // No valid tree anywhere: drop invalid staging so the next
-        // provision starts fresh, but never claim completion.
+        // No current-pin tree anywhere: drop invalid staging so the next
+        // provision starts fresh, but never claim completion. A wrong-pin
+        // previous is left alone (not current, not ours to delete here;
+        // promotion clears room when the new pin arrives).
         if fs::symlink_metadata(&paths.staging).is_ok() {
             let _ = fs::remove_dir_all(&paths.staging);
         }
@@ -359,28 +468,42 @@ pub fn recover_interrupted(base: &Path, version: &str, sha256: &str) -> anyhow::
     }
 
     // Target exists.
-    if target_valid {
-        // Discard corrupt staging; it must never replace a good tree.
-        if fs::symlink_metadata(&paths.staging).is_ok() && !staging_valid {
+    if target_current {
+        // Discard non-current staging; it must never replace a good tree.
+        if fs::symlink_metadata(&paths.staging).is_ok() && !staging_current {
             let _ = fs::remove_dir_all(&paths.staging);
         }
         if !marker_valid {
-            write_marker_durable(&paths.marker, version, sha256)?;
+            write_marker_best_effort(&paths.marker, version, sha256)?;
             return Ok(Recovery::RepairedMarker);
         }
         return Ok(Recovery::None);
     }
 
-    // Target exists but is invalid: do not touch previous here; the
-    // promotion path decides. Just report that provisioning is needed.
+    // Target exists but is not the current pin: maybe a pre-identity
+    // install whose marker already proves the same current pin.
+    if try_migrate_legacy_identity(&paths.target, &paths.marker, version, sha256)? {
+        if fs::symlink_metadata(&paths.staging).is_ok()
+            && validate_layer_dir(&paths.staging, version, sha256).is_err()
+        {
+            let _ = fs::remove_dir_all(&paths.staging);
+        }
+        return Ok(Recovery::Migrated);
+    }
+
+    // Target exists but is invalid (or foreign-pin): do not touch previous
+    // here; the promotion path decides. Just report provisioning is needed.
     Ok(Recovery::NeedsProvision)
 }
 
 /// Promote an already-extracted, already-validated staging tree.
 ///
-/// Uses `validator` for both the pre-promotion and post-promotion checks
-/// so tests can inject post-promotion failure. Production passes
-/// `validate_layer_dir`.
+/// Uses `validator` for the pre-promotion, parking-decision, and
+/// post-promotion checks so tests can inject post-promotion failure.
+/// Production passes `|p| validate_layer_dir(p, version, sha)`, so a
+/// foreign-pin target is never parked as "known-good": it is cleared to
+/// make room (leaving it would silently serve the wrong Mesa under the
+/// new pin's binds).
 pub fn promote_with_validator(
     base: &Path,
     version: &str,
@@ -442,15 +565,16 @@ pub fn promote_with_validator(
         anyhow::bail!("mesa promotion: promoted target failed validation: {e}");
     }
 
-    // 8-9. Only now claim completion, durably.
-    write_marker_durable(&paths.marker, version, sha256)?;
-    sync_file(
+    // 8-9. Only now claim completion (best-effort persistence; a lost
+    // write degrades to a retry, never to a false claim).
+    write_marker_best_effort(&paths.marker, version, sha256)?;
+    sync_file_best_effort(
         &paths
             .target
             .join("usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so"),
     );
-    sync_dir(&paths.target);
-    sync_dir(base);
+    sync_dir_best_effort(&paths.target);
+    sync_dir_best_effort(base);
 
     // 10. Drop the parked tree only after the new target + marker prove out.
     if moved_to_previous {
@@ -459,9 +583,12 @@ pub fn promote_with_validator(
     Ok(())
 }
 
-/// Production promotion entry point.
+/// Production promotion entry point (staging must already carry the
+/// current internal identity; the Android wrapper writes it post-extract).
 pub fn promote_staged(base: &Path, version: &str, sha256: &str) -> anyhow::Result<()> {
-    promote_with_validator(base, version, sha256, validate_layer_dir)
+    promote_with_validator(base, version, sha256, |p| {
+        validate_layer_dir(p, version, sha256)
+    })
 }
 
 #[cfg(test)]
@@ -547,13 +674,33 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(root.join("usr/share/drirc.d")).unwrap();
+        // Test trees carry the test pin's internal identity.
+        write_identity(&root, V, S).unwrap();
     }
 
     #[test]
     fn validation_accepts_complete_tree() {
         let t = tempfile::tempdir().unwrap();
         valid_tree(t.path(), "mesa-kgsl-layer");
-        validate_layer_dir(&t.path().join("mesa-kgsl-layer")).unwrap();
+        validate_layer_dir(&t.path().join("mesa-kgsl-layer"), V, S).unwrap();
+    }
+
+    #[test]
+    fn validation_rejects_foreign_identity() {
+        let t = tempfile::tempdir().unwrap();
+        valid_tree(t.path(), "mesa-kgsl-layer");
+        let root = t.path().join("mesa-kgsl-layer");
+        // Wrong version and wrong SHA are both rejected despite valid
+        // structure: an old pin must never validate as the current one.
+        fs::write(root.join(IDENTITY_REL), identity_content("99.9", S)).unwrap();
+        assert!(validate_layer_dir(&root, V, S).is_err());
+        fs::write(root.join(IDENTITY_REL), identity_content(V, "0".repeat(64).as_str())).unwrap();
+        assert!(validate_layer_dir(&root, V, S).is_err());
+        fs::remove_file(root.join(IDENTITY_REL)).unwrap();
+        assert!(validate_layer_dir(&root, V, S).is_err());
+        // Restoring the right identity validates again.
+        write_identity(&root, V, S).unwrap();
+        validate_layer_dir(&root, V, S).unwrap();
     }
 
     #[test]
@@ -567,14 +714,14 @@ mod tests {
             "mesa-kgsl-layer/usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so",
         );
         assert!(kgsl.exists());
-        validate_layer_dir(&t.path().join("mesa-kgsl-layer")).unwrap();
+        validate_layer_dir(&t.path().join("mesa-kgsl-layer"), V, S).unwrap();
         // An escaping symlink must still be rejected.
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
             fs::remove_file(&kgsl).unwrap();
             symlink("/etc/passwd", &kgsl).unwrap();
-            assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer")).is_err());
+            assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer"), V, S).is_err());
         }
     }
 
@@ -587,7 +734,7 @@ mod tests {
                 .join("mesa-kgsl-layer/usr/lib/aarch64-linux-gnu/libgbm.so.1.0.0"),
         )
         .unwrap();
-        assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer")).is_err());
+        assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer"), V, S).is_err());
     }
 
     #[test]
@@ -604,7 +751,7 @@ mod tests {
         }
         // On Windows symlinks are materialized as copies (tolerated), so a
         // missing SONAME is the meaningful failure there.
-        assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer")).is_err());
+        assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer"), V, S).is_err());
     }
 
     #[test]
@@ -616,13 +763,13 @@ mod tests {
                 .join("mesa-kgsl-layer/usr/lib/aarch64-linux-gnu/gbm/dri_gbm.so"),
         )
         .unwrap();
-        assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer")).is_err());
+        assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer"), V, S).is_err());
         valid_tree(t.path(), "mesa-kgsl-layer2");
         fs::remove_file(
             t.path()
                 .join("mesa-kgsl-layer2/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"),
         )
         .unwrap();
-        assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer2")).is_err());
+        assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer2"), V, S).is_err());
     }
 }

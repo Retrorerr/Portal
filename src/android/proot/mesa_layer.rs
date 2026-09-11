@@ -15,13 +15,21 @@
 //! the completion marker is invalidated BEFORE the working tree is
 //! touched, staging is fully validated before promotion, the previous
 //! good tree is parked (not deleted) until the replacement validates
-//! again post-rename and the marker is durably written. A crash between
+//! again post-rename and the marker is written. A crash between
 //! `target -> previous` and `staging -> target` is recovered on the next
 //! launch (promote valid staging, else restore previous). The last
 //! known-good tree is never deleted before its replacement proves out.
 //! Validation is authoritative in `crate::core::mesa_layer`
 //! (`validate_layer_dir`), derived from `session_binds()` so the two
 //! cannot silently diverge. Marker alone is never proof.
+//!
+//! Pin identity: every layer carries an internal `.portal-mesa-identity`
+//! file (version + archive SHA, written at extraction). A layer counts as
+//! current only when structure, internal identity, and the external
+//! marker all agree on the pins below, so a future pin change can never
+//! relabel an old tree. Installs predating the identity file migrate
+//! in place only when their external marker already proves the same
+//! current pin.
 
 use sha2::{Digest, Sha256};
 use std::{
@@ -74,16 +82,9 @@ fn files_root() -> PathBuf {
     Path::new(crate::core::config::APP_FILES_ROOT).to_path_buf()
 }
 
-fn layer_dir() -> PathBuf {
-    files_root().join("mesa-kgsl-layer")
-}
-
-fn marker_path() -> PathBuf {
-    files_root().join(LAYER_MARKER)
-}
-
 /// True when the exact pinned layer is fully staged: marker matches
-/// exactly AND the authoritative runtime chain validates.
+/// exactly AND the authoritative runtime chain validates as the current
+/// pin (structure + internal identity).
 pub fn is_provisioned() -> bool {
     crate::core::mesa_layer::is_provisioned_at(&files_root(), LAYER_VERSION, LAYER_SHA256)
 }
@@ -124,7 +125,10 @@ fn provision_inner(report: &impl Fn(String)) -> anyhow::Result<()> {
     report("Checking Mesa KGSL layer…".to_string());
 
     // Recover an interrupted promotion first: a valid parked/staged tree
-    // must not trigger a redundant 11 MB download.
+    // must not trigger a redundant 11 MB download. Recovery also performs
+    // the one-time legacy migration (current-pin marker, identity absent)
+    // and repairs a stale marker only when the target already carries the
+    // current internal identity.
     match crate::core::mesa_layer::recover_interrupted(&base, LAYER_VERSION, LAYER_SHA256) {
         Ok(crate::core::mesa_layer::Recovery::PromotedStaging) => {
             log::info!("mesa KGSL layer: recovered interrupted promotion (staged -> live)");
@@ -133,6 +137,10 @@ fn provision_inner(report: &impl Fn(String)) -> anyhow::Result<()> {
         Ok(crate::core::mesa_layer::Recovery::RestoredPrevious) => {
             log::info!("mesa KGSL layer: restored previous good tree after interruption");
             report("Mesa layer restored after interruption.".to_string());
+        }
+        Ok(crate::core::mesa_layer::Recovery::Migrated) => {
+            log::info!("mesa KGSL layer: recorded internal identity for pre-identity install (no download)");
+            report("Mesa layer already present.".to_string());
         }
         Ok(crate::core::mesa_layer::Recovery::RepairedMarker) => {
             log::info!("mesa KGSL layer: repaired stale marker (tree already valid)");
@@ -144,14 +152,6 @@ fn provision_inner(report: &impl Fn(String)) -> anyhow::Result<()> {
         }
     }
     if is_provisioned() {
-        return Ok(());
-    }
-    // Valid tree but stale/missing marker (e.g. hand-placed): repair the
-    // marker without a download. Marker alone is never proof, so this
-    // only runs after authoritative validation succeeds.
-    if crate::core::mesa_layer::validate_layer_dir(&layer_dir()).is_ok() {
-        crate::core::mesa_layer::write_marker_durable(&marker_path(), LAYER_VERSION, LAYER_SHA256)?;
-        log::info!("mesa KGSL layer {LAYER_VERSION}: marker repaired (tree valid)");
         return Ok(());
     }
 
@@ -190,12 +190,17 @@ fn provision_attempt(base: &Path, attempt: u32, report: &impl Fn(String)) -> any
 
     report("Extracting Mesa layer…".to_string());
     extract_to_staging(&paths.archive, &paths.staging)?;
-    // Authoritative validation of staging (full runtime chain, not just
-    // two sentinels). Failure here must not touch the live tree.
-    crate::core::mesa_layer::validate_layer_dir(&paths.staging).map_err(|e| {
-        let _ = fs::remove_dir_all(&paths.staging);
-        anyhow::anyhow!("extracted layer failed validation: {e:#}")
-    })?;
+    // Stamp the staging tree with the current pin before validating: the
+    // internal identity is what binds this tree to this exact archive.
+    crate::core::mesa_layer::write_identity(&paths.staging, LAYER_VERSION, LAYER_SHA256)?;
+    // Authoritative validation of staging (full runtime chain + pin
+    // identity, not just two sentinels). Failure here must not touch the
+    // live tree.
+    crate::core::mesa_layer::validate_layer_dir(&paths.staging, LAYER_VERSION, LAYER_SHA256)
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&paths.staging);
+            anyhow::anyhow!("extracted layer failed validation: {e:#}")
+        })?;
 
     report("Promoting Mesa layer…".to_string());
     crate::core::mesa_layer::promote_staged(base, LAYER_VERSION, LAYER_SHA256)?;
