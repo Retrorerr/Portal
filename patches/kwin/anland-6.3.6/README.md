@@ -77,3 +77,38 @@ distro libkwin, and `/usr/lib` symlinks are never touched by this path.
 * QPainter sessions keep using `assets/kwin-debian-arm64` (damage fix);
   this tree was deliberately NOT given the QPainter damage patch, so the
   unified lib must not serve QPainter sessions.
+
+## Reproducibility status (A/B validated, sources incomplete)
+
+The shipped `assets/kwin-anland-arm64/libkwin.so.6.3.6` (10,492,360 bytes)
+is the canonical default and is physically validated (fenced GPU frames,
+full touchpad battery — see input parity records). What is proven about it:
+
+* contains the lfdevs Anland backend (39 `AnlandBackend` refs, same count
+  as the distro `-95` lib; `--anland` works; ABI loads with the pinned
+  `kwin_wayland` `4ad23a5a…`);
+* contains an extra `KWin::AnlandInputBackendAdaptor` class absent from the
+  distro lib (the Portal input-path delta; behaviorally proven: PixelDelta
+  finger scrolling, axis-stop, NaturalScroll/ScrollFactor, kcminputrc
+  persistence all work with it and fail without it);
+* carries no Portal D-Bus/touchpad *name* strings (device path, setting
+  keys): the 13/14 protocol handling and any D-Bus wiring live in code
+  (integer dispatch), not in string literals.
+
+What is NOT yet checked in (do not silently replace the proven asset):
+
+* the `src/backends/anland/anland_input.{cpp,h}` sources and the exact
+  `processInputEvent` 13/14 hook diff — they existed only under
+  `/root/kwinbuild/` on a previous tablet guest (wiped with it) and were
+  never versioned. The nested-backend counterpart IS versioned as
+  `patches/kwin/debian-6.3.6/0001-wayland-portal-touchpad-scroll-settings.patch`
+  and documents the same semantics for the other backend.
+* To reproduce: pristine Debian KWin 6.3.6 source at
+  `b8de4329447824b1b1e7a36b3a57acfd069f1423`, plus the lfdevs Anland
+  backend overlay (`anland_backend_debian13_v5` + `Debian13_v5/kwin.patch`
+  per the SuperTurtleDev/anland producer tree), plus the Portal delta
+  above, built with the cmake invocation in "Build" using a Debian 13
+  ARM64 environment with KWin/Qt6/KF6 development packages, then stripped.
+  Until such a rebuild is validated (AnlandBackend present, Portal input
+  behavior identical, SONAME `libkwin.so.6`, hardware session green), the
+  shipped binary stays authoritative.
