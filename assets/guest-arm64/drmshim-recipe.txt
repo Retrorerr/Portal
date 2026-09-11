@@ -6,11 +6,13 @@ not openable from the Android app sandbox (SELinux/DAC) on devices like the
 OnePlus Pad 3 (OxygenOS). Without a device, KWin logs
 "no usable DRM render device; cannot bring up OpenGL compositing" and exits.
 
-This shim fakes ONLY the open()+version probe so init can proceed. Proven on
-the Pad 3 (Adreno 830, lfdevs Mesa 26.2 freedreno/KGSL): with the shim, KWin
-logs "OpenGL compositing has been successfully initialized"; the single
-non-fatal ioctl observed is 0xc010640c (ENOTTY-tolerated, logged). Every other
-ioctl passes through, and every faked/unhandled ioctl number is logged to
+This shim presents the render node backed by the real /dev/kgsl-3d0 plus a
+correct version probe so init can proceed to real GPU. Proven on the Pad 3
+(Adreno 830, lfdevs KWin 6.3.6-95 + Mesa 26.3 kgsl winsys): KWin composites
+with GPU fences; the tolerated non-fatal ioctls observed are 0xc010640c
+(DRM GET_CAP) and 0x4020644e (MSM submit-ish on the probe path). DRM ioctls
+other than VERSION fail ENOTTY (logged); every non-DRM ioctl passes through
+to the real device, and every faked/unhandled ioctl number is logged to
 stderr (captured in /var/lib/localdesktop/kwin.log) for audit.
 
 Preloaded ONLY when ANLAND_SOCKET is set (see
@@ -25,11 +27,18 @@ recurses). The staged `drmshim.so` is built from it; `setup.rs`
       -ffreestanding -fno-stack-protector -o drmshim.so drmshim.c
 
 Logic:
-  - intercept open/open64/openat of /dev/dri/renderD128 and /dev/dri/card0:
-    return a real fd for /dev/null, log it, remember the fd;
+  - intercept open/open64/openat/openat64 of /dev/dri/renderD128 and
+    /dev/dri/card0: return a real fd for /dev/kgsl-3d0 (fall back to
+    /dev/null where KGSL is absent), log it with its backing, remember it;
+  - track dups of remembered fds (dup/dup2/dup3/fcntl/fcntl64: Mesa dups
+    the node via fcntl64 and queries VERSION on the copy);
   - intercept ioctl on remembered fds:
-    DRM_IOCTL_VERSION -> report driver "msm" v1.1.0 (length query + fill);
-    anything else -> log the number, fail ENOTTY.
+    DRM_IOCTL_VERSION -> report driver "kgsl" v1.1.0 (length query + fill).
+    The name steers Mesa's fd_device_new away from the MSM winsys (whose
+    GEM ioctls need an unobtainable real render node) into the kgsl winsys,
+    which probes the passed fd itself and drives the real GPU;
+    non-DRM ioctls -> pass through to the real backing device;
+    other DRM ioctls -> log the number, fail ENOTTY.
 
 Correctness constraints (proven by failure, do not regress):
   - struct drm_version is INTERLEAVED (int major, minor, patch, pad, then

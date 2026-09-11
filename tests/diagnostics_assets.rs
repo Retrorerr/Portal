@@ -214,22 +214,39 @@ fn drmshim_reports_version_with_correct_drm_version_layout() {
     assert!(DRMSHIM_SOURCE.contains(
         "_Static_assert(sizeof(struct drm_version) == 64"
     ));
-    assert!(DRMSHIM_SOURCE.contains("MSM Snapdragon DRM (portal-shimmed)"));
+    assert!(DRMSHIM_SOURCE.contains("KGSL-backed DRM node (portal-shimmed)"));
     // close() must stay uninterposed: a raw-SVC close replacement breaks
     // processes under PRoot (proven by bisect: EFAULT after successful
     // reads with close-only interposition).
     assert!(!DRMSHIM_SOURCE.contains("int close("));
     assert!(DRMSHIM_SOURCE.contains("close() is deliberately"));
     assert!(DRMSHIM_SOURCE.contains("register long r0 __asm__(\"x0\")"));
+    // KGSL-backed render node: the fake fd is a real /dev/kgsl-3d0 open so
+    // the kgsl winsys probe succeeds against real hardware; the reported
+    // DRM version name steers Mesa away from the MSM winsys (whose GEM
+    // ioctls need an unobtainable real render node). Dups of fake fds stay
+    // fake (Mesa dups via fcntl64); non-DRM ioctls pass through to the real
+    // device instead of failing.
+    assert!(DRMSHIM_SOURCE.contains("/dev/kgsl-3d0"));
+    assert!(DRMSHIM_SOURCE.contains("version_name[] = \"kgsl\""));
+    assert!(DRMSHIM_SOURCE.contains("int fcntl64("));
+    assert!(DRMSHIM_SOURCE.contains("int dup3("));
+    assert!(DRMSHIM_SOURCE.contains("int openat64("));
     // The staged binary matches the source contract: AArch64 shared object
-    // exporting exactly open/open64/openat/ioctl (never close).
+    // exporting exactly open/open64/openat/openat64/ioctl/dup/fcntl-family
+    // (never close).
     assert_eq!(&DRMSHIM_BINARY[..4], b"\x7fELF");
     assert_eq!(u16::from_le_bytes([DRMSHIM_BINARY[18], DRMSHIM_BINARY[19]]), 183);
     for symbol in [
         b"\x00open\x00".as_slice(),
         b"\x00open64\x00".as_slice(),
         b"\x00openat\x00".as_slice(),
+        b"\x00openat64\x00".as_slice(),
         b"\x00ioctl\x00".as_slice(),
+        b"\x00dup\x00".as_slice(),
+        b"\x00dup3\x00".as_slice(),
+        b"\x00fcntl\x00".as_slice(),
+        b"\x00fcntl64\x00".as_slice(),
     ] {
         assert!(
             DRMSHIM_BINARY.windows(symbol.len()).any(|w| w == symbol),

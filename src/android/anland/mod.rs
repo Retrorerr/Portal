@@ -81,9 +81,6 @@ pub fn guest_socket_path() -> &'static str {
 }
 
 /// Mesa freedreno/KGSL environment for the Anland guest session.
-/// Stock Debian Mesa 25 cannot drive KGSL (proven: llvmpipe fallback);
-/// the staged `mesa-kgsl-layer` overlay plus these variables select the
-/// lfdevs freedreno path with linear dma-buf sharing for Anland import.
 ///
 /// This mirrors the upstream `anland-termux` session recipe
 /// (`MESA_LOADER_DRIVER_OVERRIDE=kgsl TURNIP_KMD=kgsl GALLIUM_DRIVER=freedreno
@@ -91,21 +88,19 @@ pub fn guest_socket_path() -> &'static str {
 /// deliberately NOT set (it forces QtQuick software fallback with
 /// OffscreenQuickView texture failures).
 ///
-/// `ANLAND_NO_DRM_DEVICE=1` switches KWin's Anland backend into surfaceless
-/// operation without a KWin DrmDevice (no GBM render node required). This is
-/// REQUIRED on sandboxes where no DRM render node can ever work: the node is
-/// SELinux-denied (EACCES) so the shim can only fake open()+version, while
-/// libdrm's mandatory sysfs device-info lookup is likewise SELinux-denied
-/// (EACCES) and every real GPU ioctl (MSM GEM/params) fails on the fake fd.
-/// Both failure stages were proven on-device with stock Mesa 25 and the
-/// lfdevs 26.3 Mesa alike, so no Mesa version can satisfy the GBM path here.
+/// The hardware path needs three guest-side pieces beyond these variables:
+/// the lfdevs KWin stack (runtime overlay), the `mesa-kgsl-layer` overlay
+/// (lfdevs Mesa 26.3 with the kgsl winsys; stock Mesa has no kgsl winsys at
+/// all), and the `drmshim.so` preload, which presents the (sandbox-denied)
+/// render node backed by the real /dev/kgsl-3d0 and answers the DRM version
+/// probe so Mesa selects the kgsl winsys. `ANLAND_NO_DRM_DEVICE` is NOT set
+/// here: the accelerated configuration is the default.
 ///
-/// An older bisect blamed this mode for wedging composites after 4 fenced
-/// frames (`consumer disconnected` with acquire fences pending forever), but
-/// that predates the demand-driven vsync pacing, eventfd write, and fence
-/// fixes, so the verdict is re-tested rather than assumed. KWin's own
-/// render-node probe stays solved by the `drmshim.so` preload for paths
-/// that still probe it.
+/// Emergency software fallback: if `<guest>/var/lib/localdesktop/kwin-glmode`
+/// contains `sw`, the KWin wrapper forces surfaceless software rendering
+/// instead (see `software_gl_fallback_requested`). That mode is explicitly
+/// labelled everywhere (bare-frame READY evidence, relaxed first-frame
+/// watchdog) and must never silently become the default.
 /// - `XWAYLAND_FORCE_KGSL_SURFACELESS=1`: the `-91` XWayland's KGSL glamor
 ///   backend instead of GBM (which cannot work without a render node).
 ///   Proven: `Xwayland glamor: using KGSL surfaceless EGL backend`.
@@ -139,14 +134,31 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         ("GTK_IM_MODULE".into(), "ibus".into()),
         ("ANLAND_SOCKET".into(), guest_socket_path().into()),
         ("ANLAND".into(), "1".into()),
-        // No DRM render node is obtainable in the sandbox (see above): run
-        // KWin's Anland backend surfaceless instead of exiting on GBM setup.
-        ("ANLAND_NO_DRM_DEVICE".into(), "1".into()),
         ("ANLAND_SKIP_IMPLICIT_SYNC_WAIT".into(), "1".into()),
         // The audio engine has no host counterpart yet; skip it entirely.
         ("ANLAND_DISABLE_AUDIO".into(), "1".into()),
         ("KWIN_GL_DEBUG".into(), "1".into()),
     ]
+}
+
+/// Guest flag selecting the emergency software-GL fallback (`sw`) instead of
+/// the default hardware-accelerated path. Read by the KWin wrapper (which
+/// forces the surfaceless environment) and mirrored host-side so readiness
+/// and watchdog policy match the actual renderer. Absent (or anything else)
+/// means hardware: genuine fenced evidence is required as usual.
+pub fn kwin_glmode_flag_path() -> std::path::PathBuf {
+    std::path::Path::new(crate::core::config::PRODUCTION_FS_ROOT)
+        .join("var/lib/localdesktop/kwin-glmode")
+}
+
+/// True only when the explicit emergency software fallback is requested.
+/// The hardware path (default) keeps the tight fence watchdog and requires
+/// fenced READY evidence; the software path (llvmpipe, CPU-synchronous)
+/// labels bare frames honestly and allows a long cold first-frame budget.
+pub fn software_gl_fallback_requested() -> bool {
+    std::fs::read_to_string(kwin_glmode_flag_path())
+        .map(|s| s.trim().to_ascii_lowercase() == "sw")
+        .unwrap_or(false)
 }
 
 /// Bind mounts for the Anland guest session: broker socket dir + Mesa overlay.
@@ -155,15 +167,17 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
     let files = std::path::Path::new(crate::core::config::APP_FILES_ROOT);
     let mesa = files.join("mesa-kgsl-layer");
     let mut binds = vec![BindMount::new(files.join("anland"), "/tmp/anland")];
-    // Mesa overlay (mirrors the proven probe binds). Each entry is skipped
-    // when the layer file is absent so QPainter sessions are unaffected.
+    // Mesa overlay: lfdevs Mesa 26.3 (kgsl winsys) over stock paths. Each
+    // entry is skipped when the layer file is absent so QPainter sessions
+    // and layer-less installs are unaffected (KWin then cannot do GPU and
+    // the session fails closed instead of silently falling back).
     let lib = mesa.join("usr/lib/aarch64-linux-gnu");
     let share = mesa.join("usr/share");
     let pairs = [
         (lib.join("dri"), "/usr/lib/aarch64-linux-gnu/dri"),
         (
-            lib.join("libgallium-26.2.0-devel.so"),
-            "/usr/lib/aarch64-linux-gnu/libgallium-26.2.0-devel.so",
+            lib.join("libgallium-26.3.0-devel.so"),
+            "/usr/lib/aarch64-linux-gnu/libgallium-26.3.0-devel.so",
         ),
         (
             lib.join("libvulkan_freedreno.so"),
@@ -174,8 +188,8 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
             "/usr/lib/aarch64-linux-gnu/libEGL_mesa.so.0.0.0",
         ),
         // Matched GLX dispatch for X11 clients: stock glvnd libGL stays,
-        // but it must load the layer's libGLX_mesa (26.2) so the DRI driver
-        // (layer kgsl_dri 26.2) matches its loader. Without this, GLX falls
+        // but it must load the layer's libGLX_mesa (26.3) so the DRI driver
+        // (layer kgsl_dri 26.3) matches its loader. Without this, GLX falls
         // back to llvmpipe (proven via glxinfo on :1).
         (
             lib.join("libGLX_mesa.so.0.0.0"),
@@ -184,6 +198,22 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
         (
             lib.join("libgbm.so.1.0.0"),
             "/usr/lib/aarch64-linux-gnu/libgbm.so.1.0.0",
+        ),
+        // SONAME entries: the loader resolves DT_NEEDED by SONAME, so the
+        // real-name files above are dead weight unless these names resolve
+        // to the layer too (otherwise stock libgbm/EGL/GLX silently win and
+        // the layer never engages; proven via LD_DEBUG).
+        (
+            lib.join("libgbm.so.1"),
+            "/usr/lib/aarch64-linux-gnu/libgbm.so.1",
+        ),
+        (
+            lib.join("libEGL_mesa.so.0"),
+            "/usr/lib/aarch64-linux-gnu/libEGL_mesa.so.0",
+        ),
+        (
+            lib.join("libGLX_mesa.so.0"),
+            "/usr/lib/aarch64-linux-gnu/libGLX_mesa.so.0",
         ),
         (lib.join("gbm"), "/usr/lib/aarch64-linux-gnu/gbm"),
         (share.join("vulkan/icd.d"), "/usr/share/vulkan/icd.d"),

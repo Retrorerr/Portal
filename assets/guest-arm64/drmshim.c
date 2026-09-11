@@ -7,14 +7,18 @@
  * KWin logs "no usable DRM render device; cannot bring up OpenGL compositing"
  * and exits.
  *
- * This shim fakes ONLY the open()+version probe so init can proceed:
- *   - intercept open/open64/openat of /dev/dri/renderD128 and /dev/dri/card0:
- *     return a real fd for /dev/null, log it, remember the fd;
+ * This shim presents the render node backed by the real /dev/kgsl-3d0 plus
+ * a correct version probe so init can proceed to real GPU:
+ *   - intercept open/open64/openat/openat64 of /dev/dri/renderD128 and
+ *     /dev/dri/card0: return a real fd for /dev/kgsl-3d0 (/dev/null fallback
+ *     where KGSL is absent), log it with its backing, remember the fd;
+ *   - track dups of remembered fds (dup/dup2/dup3/fcntl/fcntl64);
  *   - intercept ioctl on remembered fds:
- *     DRM_IOCTL_VERSION -> report driver "msm" v1.1.0 (length query + fill);
- *     anything else -> log the number, fail ENOTTY.
+ *     DRM_IOCTL_VERSION -> report driver "kgsl" v1.1.0 (length query + fill);
+ *     non-DRM ioctls -> pass through to the real backing device;
+ *     other DRM ioctls -> log the number, fail ENOTTY.
  * Every other call passes through untouched. NOTE: close() is deliberately
- * NOT interposed. A raw-SVC close replacement breaks the process under PRoot
+ * NOT interposed. A raw-SVC close replacement breaks processes under PRoot
  * (proven by bisect: interposing only close makes cat/python fail with
  * EFAULT after successful reads; open/openat/ioctl-only variants are clean).
  * fds are therefore tracked monotonically (bounded table); a closed fake fd
@@ -31,8 +35,8 @@
  * KWin died at "Failed to create gbm device". The layout below is asserted at
  * compile time. Do not "simplify" it.
  *
- * Freestanding (-nostdlib): raw AArch64 SVC for openat/write/ioctl/close so
- * the shim never recurses into libc. errno is set through libc's own
+ * Freestanding (-nostdlib): raw AArch64 SVC for openat/write/ioctl/dup/fcntl
+ * so the shim never recurses into libc. errno is set through libc's own
  * __errno_location (resolved from the already-loaded libc at process start).
  *
  * Preloaded ONLY when ANLAND_SOCKET is set (see
@@ -197,9 +201,24 @@ static int is_dri_node(const char *path) {
     return shim_streq(path, "/dev/dri/renderD128") || shim_streq(path, "/dev/dri/card0");
 }
 
-/* Open /dev/null for real and present it as the DRM node. */
+/* Present the DRM node using the real KGSL device as backing where
+ * possible. Rationale (proven on-device, see recipe): Mesa's freedreno
+ * fd_device_new routes by DRM version name — "msm" selects the MSM winsys
+ * (whose GEM ioctls need a real MSM DRM node, absent here), anything else
+ * selects the kgsl winsys, which probes the PASSED fd itself with
+ * KGSL_PROP_DEVICE_INFO. A /dev/null backing fails that probe (ENOTTY) so
+ * GPU init can never succeed; a real /dev/kgsl-3d0 backing answers it from
+ * the kernel, and all subsequent KGSL ioctls pass through to real hardware.
+ * DRM ioctls on the tracked fd keep failing ENOTTY, which callers treat as
+ * "unsupported" (graceful), never as fatal. Falls back to /dev/null when
+ * KGSL is absent (old behavior: version probe only). */
 static int fake_open_node(const char *label, const char *path) {
-    long fd = svc4(SYS_openat, AT_FDCWD, (long)"/dev/null", O_RDONLY, 0);
+    long fd = svc4(SYS_openat, AT_FDCWD, (long)"/dev/kgsl-3d0", 2 /* O_RDWR */, 0);
+    const char *backing = "kgsl-3d0";
+    if (fd < 0 || fd > 0x7FFFFFFF) {
+        fd = svc4(SYS_openat, AT_FDCWD, (long)"/dev/null", O_RDONLY, 0);
+        backing = "/dev/null";
+    }
     if (fd < 0 || fd > 0x7FFFFFFF)
         return -1;
     remember_fd((int)fd);
@@ -209,6 +228,8 @@ static int fake_open_node(const char *label, const char *path) {
     shim_log(path);
     shim_log(") -> fd ");
     shim_log_int((int)fd);
+    shim_log(" backing=");
+    shim_log(backing);
     shim_log("\n");
     return (int)fd;
 }
@@ -362,8 +383,12 @@ int fcntl64(int fd, int cmd, ...) {
     return do_fcntl(fd, cmd, arg);
 }
 
-static const char version_name[] = "msm";
-static const char version_desc[] = "MSM Snapdragon DRM (portal-shimmed)";
+/* The reported name steers Mesa's winsys selection (see above): anything
+ * but "msm" selects the kgsl winsys, which then probes the (real,
+ * kgsl-backed) fd itself. "msm" would select the MSM winsys whose GEM
+ * ioctls cannot work here. Version numbers are unused on the kgsl path. */
+static const char version_name[] = "kgsl";
+static const char version_desc[] = "KGSL-backed DRM node (portal-shimmed)";
 
 static size_t bounded_copy(char *dst, size_t dst_len, const char *src, size_t src_len) {
     size_t n = dst_len < src_len ? dst_len : src_len;
@@ -401,6 +426,15 @@ int ioctl(int fd, unsigned long request, ...) {
     if (DRM_IOCTL_TYPE(request) == DRM_IOCTL_VERSION_TYPE &&
         DRM_IOCTL_NR(request) == DRM_IOCTL_VERSION_NR) {
         return handle_version_ioctl((struct drm_version *)arg);
+    }
+    if (DRM_IOCTL_TYPE(request) != DRM_IOCTL_VERSION_TYPE) {
+        /* Non-DRM ioctls (notably KGSL 'k' ioctls when the backing is the
+         * real /dev/kgsl-3d0) must reach the real device: the kgsl winsys
+         * probes with KGSL_PROP_DEVICE_INFO and drives the GPU through
+         * them. Failing them here would break the very path the shim
+         * exists to enable. On a /dev/null backing they fail ENOTTY
+         * naturally, identical to before. */
+        return set_errno_ret(raw_syscall6(SYS_ioctl, (long)fd, (long)request, (long)arg, 0, 0, 0));
     }
     shim_log("drmshim: UNHANDLED ioctl ");
     shim_log_ulong_hex(request);
