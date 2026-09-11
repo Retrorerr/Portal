@@ -1,19 +1,28 @@
-//! Phase A failure-injection tests for the transactional Mesa KGSL layer.
+//! Mesa KGSL layer transaction + pinned-identity tests.
 //!
 //! All state is built under tempdirs; the real production asset is never
 //! touched.
 
 use localdesktop::core::mesa_layer::{
-    is_marker_valid, is_provisioned_at, layer_paths, marker_content, promote_with_validator,
-    recover_interrupted, validate_layer_dir, write_marker_durable, Recovery, REQUIRED_DIRS,
-    REQUIRED_REGULAR_FILES, REQUIRED_SONAME_LINKS,
+    identity_content, is_marker_valid, is_provisioned_at, layer_paths, marker_content,
+    promote_with_validator, recover_interrupted, validate_identity, validate_layer_dir,
+    validate_structure, write_identity, write_marker_best_effort, Recovery, IDENTITY_REL,
+    REQUIRED_DIRS, REQUIRED_REGULAR_FILES, REQUIRED_SONAME_LINKS,
 };
 use std::{fs, path::Path};
 
 const VERSION: &str = "26.3.0-20260824";
 const SHA: &str = "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf";
+// A hypothetical future pin: structurally identical trees carrying this
+// identity must never validate as the current pin.
+const NEXT_VERSION: &str = "99.9.9-20990101";
+const NEXT_SHA: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
 fn build_valid_tree(root: &Path) {
+    build_tree_with_identity(root, VERSION, SHA);
+}
+
+fn build_tree_with_identity(root: &Path, version: &str, sha: &str) {
     for rel in REQUIRED_REGULAR_FILES.iter().chain(REQUIRED_DIRS.iter()) {
         if *rel == "usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so" {
             let dri = root.join("usr/lib/aarch64-linux-gnu/dri");
@@ -63,11 +72,23 @@ fn build_valid_tree(root: &Path) {
     )
     .unwrap();
     fs::create_dir_all(root.join("usr/share/drirc.d")).unwrap();
+    write_identity(root, version, sha).unwrap();
+}
+
+/// A pre-identity install: structurally valid, current-pin marker, but no
+/// internal identity file (today's on-device layer before migration).
+fn build_legacy_tree(root: &Path) {
+    build_valid_tree(root);
+    fs::remove_file(root.join(IDENTITY_REL)).unwrap();
 }
 
 fn mark(base: &Path) {
     let paths = layer_paths(base);
-    write_marker_durable(&paths.marker, VERSION, SHA).unwrap();
+    write_marker_best_effort(&paths.marker, VERSION, SHA).unwrap();
+}
+
+fn current_validator(p: &Path) -> anyhow::Result<()> {
+    validate_layer_dir(p, VERSION, SHA)
 }
 
 #[test]
@@ -77,7 +98,7 @@ fn valid_target_no_staging_is_provisioned() {
     build_valid_tree(&paths.target);
     mark(t.path());
     assert!(is_provisioned_at(t.path(), VERSION, SHA));
-    assert!(validate_layer_dir(&paths.target).is_ok());
+    assert!(validate_layer_dir(&paths.target, VERSION, SHA).is_ok());
     // Recovery must be a no-op and must not delete the good tree.
     assert_eq!(
         recover_interrupted(t.path(), VERSION, SHA).unwrap(),
@@ -97,7 +118,7 @@ fn valid_target_corrupt_staging_keeps_good_tree() {
     assert!(is_provisioned_at(t.path(), VERSION, SHA));
     recover_interrupted(t.path(), VERSION, SHA).unwrap();
     // Good tree survives; corrupt staging is reclaimed.
-    assert!(validate_layer_dir(&paths.target).is_ok());
+    assert!(validate_layer_dir(&paths.target, VERSION, SHA).is_ok());
     assert!(is_provisioned_at(t.path(), VERSION, SHA));
     assert!(!paths.staging.join("partial").exists());
 }
@@ -113,7 +134,7 @@ fn missing_target_valid_staging_and_previous_promotes_staging() {
         recover_interrupted(t.path(), VERSION, SHA).unwrap(),
         Recovery::PromotedStaging
     );
-    assert!(validate_layer_dir(&paths.target).is_ok());
+    assert!(validate_layer_dir(&paths.target, VERSION, SHA).is_ok());
     assert!(is_provisioned_at(t.path(), VERSION, SHA));
 }
 
@@ -128,7 +149,7 @@ fn missing_target_corrupt_staging_restores_previous() {
         recover_interrupted(t.path(), VERSION, SHA).unwrap(),
         Recovery::RestoredPrevious
     );
-    assert!(validate_layer_dir(&paths.target).is_ok());
+    assert!(validate_layer_dir(&paths.target, VERSION, SHA).is_ok());
     assert!(is_provisioned_at(t.path(), VERSION, SHA));
     assert!(!paths.previous.exists());
 }
@@ -192,7 +213,7 @@ fn interrupted_promotion_target_missing_is_recoverable() {
     build_valid_tree(&paths.staging);
     assert!(!paths.target.exists());
     recover_interrupted(t.path(), VERSION, SHA).unwrap();
-    assert!(validate_layer_dir(&paths.target).is_ok());
+    assert!(validate_layer_dir(&paths.target, VERSION, SHA).is_ok());
     assert!(is_provisioned_at(t.path(), VERSION, SHA));
 }
 
@@ -215,14 +236,14 @@ fn failed_validation_after_promotion_restores_previous() {
     let result = promote_with_validator(t.path(), VERSION, SHA, |p| {
         calls += 1;
         if calls <= 2 {
-            validate_layer_dir(p)
+            validate_layer_dir(p, VERSION, SHA)
         } else {
             anyhow::bail!("injected post-promotion validation failure")
         }
     });
     assert!(result.is_err());
     // Last known-good tree is restored, no valid marker is left behind.
-    assert!(validate_layer_dir(&paths.target).is_ok());
+    assert!(validate_layer_dir(&paths.target, VERSION, SHA).is_ok());
     assert_eq!(
         fs::read(
             paths
@@ -243,9 +264,9 @@ fn corrupt_staging_never_replaces_good_target() {
     mark(t.path());
     fs::create_dir_all(&paths.staging).unwrap();
     fs::write(paths.staging.join("junk"), b"bad").unwrap();
-    let result = promote_with_validator(t.path(), VERSION, SHA, validate_layer_dir);
+    let result = promote_with_validator(t.path(), VERSION, SHA, current_validator);
     assert!(result.is_err());
-    assert!(validate_layer_dir(&paths.target).is_ok());
+    assert!(validate_layer_dir(&paths.target, VERSION, SHA).is_ok());
     assert!(is_provisioned_at(t.path(), VERSION, SHA));
 }
 
@@ -264,7 +285,7 @@ fn successful_promotion_parks_and_drops_previous_only_after_proof() {
         b"new-bytes",
     )
     .unwrap();
-    promote_with_validator(t.path(), VERSION, SHA, validate_layer_dir).unwrap();
+    promote_with_validator(t.path(), VERSION, SHA, current_validator).unwrap();
     assert_eq!(
         fs::read(
             paths
@@ -277,6 +298,144 @@ fn successful_promotion_parks_and_drops_previous_only_after_proof() {
     assert!(is_provisioned_at(t.path(), VERSION, SHA));
     assert!(!paths.previous.exists());
     assert!(!paths.staging.exists());
+}
+
+// --- Pinned-identity tests ---------------------------------------------
+
+#[test]
+fn current_structure_with_current_identity_is_valid() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("mesa-kgsl-layer");
+    build_valid_tree(&root);
+    assert!(validate_structure(&root).is_ok());
+    assert!(validate_identity(&root, VERSION, SHA).is_ok());
+    assert!(validate_layer_dir(&root, VERSION, SHA).is_ok());
+    assert_eq!(
+        fs::read_to_string(root.join(IDENTITY_REL)).unwrap(),
+        identity_content(VERSION, SHA)
+    );
+}
+
+#[test]
+fn current_structure_with_wrong_version_or_sha_is_invalid() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("mesa-kgsl-layer");
+    build_valid_tree(&root);
+    fs::write(root.join(IDENTITY_REL), identity_content("0.0", SHA)).unwrap();
+    assert!(validate_layer_dir(&root, VERSION, SHA).is_err());
+    fs::write(root.join(IDENTITY_REL), identity_content(VERSION, NEXT_SHA)).unwrap();
+    assert!(validate_layer_dir(&root, VERSION, SHA).is_err());
+    fs::remove_file(root.join(IDENTITY_REL)).unwrap();
+    assert!(validate_layer_dir(&root, VERSION, SHA).is_err());
+    // Structure alone still passes: only the pin binding rejects it.
+    assert!(validate_structure(&root).is_ok());
+}
+
+#[test]
+fn structurally_valid_old_layer_is_invalid_for_new_pin() {
+    // A future pin change must reprovision, never relabel: an old tree
+    // (valid structure, old identity) is invalid for the new pin even
+    // though every runtime file is present.
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("mesa-kgsl-layer");
+    build_tree_with_identity(&root, NEXT_VERSION, NEXT_SHA);
+    assert!(validate_structure(&root).is_ok());
+    assert!(validate_layer_dir(&root, NEXT_VERSION, NEXT_SHA).is_ok());
+    assert!(validate_layer_dir(&root, VERSION, SHA).is_err());
+}
+
+#[test]
+fn legacy_install_with_current_marker_migrates_without_download() {
+    // Today's on-device layer: current marker, valid structure, no
+    // internal identity. Recovery stamps the identity in place and reports
+    // Migrated; no archive is ever needed.
+    let t = tempfile::tempdir().unwrap();
+    let paths = layer_paths(t.path());
+    build_legacy_tree(&paths.target);
+    mark(t.path());
+    assert!(!paths.target.join(IDENTITY_REL).exists());
+    assert!(!is_provisioned_at(t.path(), VERSION, SHA));
+    assert_eq!(
+        recover_interrupted(t.path(), VERSION, SHA).unwrap(),
+        Recovery::Migrated
+    );
+    assert!(is_provisioned_at(t.path(), VERSION, SHA));
+    assert_eq!(
+        fs::read_to_string(paths.target.join(IDENTITY_REL)).unwrap(),
+        identity_content(VERSION, SHA)
+    );
+    assert!(!paths.archive.exists());
+    assert!(!paths.staging.exists());
+}
+
+#[test]
+fn missing_identity_with_stale_marker_must_not_migrate() {
+    let t = tempfile::tempdir().unwrap();
+    let paths = layer_paths(t.path());
+    build_legacy_tree(&paths.target);
+    fs::write(&paths.marker, "stale\n").unwrap();
+    assert_eq!(
+        recover_interrupted(t.path(), VERSION, SHA).unwrap(),
+        Recovery::NeedsProvision
+    );
+    // Nothing manufactured: no identity, no valid marker.
+    assert!(!paths.target.join(IDENTITY_REL).exists());
+    assert!(!is_marker_valid(&paths.marker, VERSION, SHA));
+    assert!(!is_provisioned_at(t.path(), VERSION, SHA));
+}
+
+#[test]
+fn staging_with_wrong_identity_never_promotes() {
+    let t = tempfile::tempdir().unwrap();
+    let paths = layer_paths(t.path());
+    build_valid_tree(&paths.target);
+    mark(t.path());
+    // Staging carries a foreign pin's identity despite valid structure.
+    build_tree_with_identity(&paths.staging, NEXT_VERSION, NEXT_SHA);
+    let result = promote_with_validator(t.path(), VERSION, SHA, current_validator);
+    assert!(result.is_err());
+    // Good current tree and marker survive untouched.
+    assert!(validate_layer_dir(&paths.target, VERSION, SHA).is_ok());
+    assert!(is_provisioned_at(t.path(), VERSION, SHA));
+}
+
+#[test]
+fn previous_with_wrong_identity_never_restores_as_current() {
+    let t = tempfile::tempdir().unwrap();
+    let paths = layer_paths(t.path());
+    build_tree_with_identity(&paths.previous, NEXT_VERSION, NEXT_SHA);
+    fs::create_dir_all(&paths.staging).unwrap();
+    fs::write(paths.staging.join("junk"), b"x").unwrap();
+    assert!(!paths.target.exists());
+    assert_eq!(
+        recover_interrupted(t.path(), VERSION, SHA).unwrap(),
+        Recovery::NeedsProvision
+    );
+    assert!(!paths.target.exists());
+    assert!(!is_provisioned_at(t.path(), VERSION, SHA));
+}
+
+#[test]
+fn marker_repair_requires_matching_internal_identity() {
+    // Matching identity + stale marker -> repaired.
+    let t = tempfile::tempdir().unwrap();
+    let paths = layer_paths(t.path());
+    build_valid_tree(&paths.target);
+    fs::write(&paths.marker, "stale\n").unwrap();
+    assert_eq!(
+        recover_interrupted(t.path(), VERSION, SHA).unwrap(),
+        Recovery::RepairedMarker
+    );
+    // Foreign identity + stale marker -> never repaired.
+    let t2 = tempfile::tempdir().unwrap();
+    let paths2 = layer_paths(t2.path());
+    build_tree_with_identity(&paths2.target, NEXT_VERSION, NEXT_SHA);
+    fs::write(&paths2.marker, "stale\n").unwrap();
+    assert_eq!(
+        recover_interrupted(t2.path(), VERSION, SHA).unwrap(),
+        Recovery::NeedsProvision
+    );
+    assert!(!is_marker_valid(&paths2.marker, VERSION, SHA));
 }
 
 #[test]
@@ -303,6 +462,7 @@ fn validation_covers_session_binds_runtime_chain() {
         "libGLX_mesa.so.0",
         "libgbm.so.1",
         "freedreno",
+        ".portal-mesa-identity",
     ] {
         assert!(
             core_src.contains(required),
@@ -316,6 +476,8 @@ fn validation_covers_session_binds_runtime_chain() {
         "11648933",
         "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf",
         "mesa-kgsl-layer.complete",
+        ".portal-mesa-identity",
+        "write_identity",
     ] {
         assert!(android_src.contains(pin), "mesa pin missing: {pin}");
     }
