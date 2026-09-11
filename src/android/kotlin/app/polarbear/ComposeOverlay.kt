@@ -47,7 +47,14 @@ import androidx.lifecycle.ViewModelStoreOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
-import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * Manually supplied owners for the Compose hierarchy. The NativeActivity
+ * never leaves RESUMED behind: [resume] follows the Activity's resumed
+ * callback and [pause] follows suspend, so recomposition pauses while the
+ * app is backgrounded. [destroy] runs once on overlay removal and clears
+ * the ViewModelStore.
+ */
 
 private class SpikeLifecycleOwner : LifecycleOwner, ViewModelStoreOwner, SavedStateRegistryOwner {
     private val registry = LifecycleRegistry(this)
@@ -64,6 +71,24 @@ private class SpikeLifecycleOwner : LifecycleOwner, ViewModelStoreOwner, SavedSt
         registry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         registry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         registry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+    }
+
+    fun resume() {
+        try {
+            if (registry.currentState == Lifecycle.State.STARTED) {
+                registry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    fun pause() {
+        try {
+            if (registry.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                registry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+            }
+        } catch (_: Exception) {
+        }
     }
 
     fun destroy() {
@@ -97,25 +122,28 @@ object ComposeOverlay {
 
     @JvmStatic external fun nativeOnStartPlasma()
     @JvmStatic external fun nativeOnOverlayRemoved()
+    @JvmStatic external fun nativeOnOverlayShown()
+    @JvmStatic external fun nativeOnOverlayShowFailed(reason: String)
 
     private val state = mutableStateOf(STATE_IDLE)
-    private val open = AtomicBoolean(false)
     private var container: FrameLayout? = null
     private var composeView: ComposeView? = null
     private var owner: SpikeLifecycleOwner? = null
-    private var spikeReceiver: android.content.BroadcastReceiver? = null
-    // SPIKE anchoring (v2): a PopupWindow owned by the same NativeActivity.
-    // v1 attached the ComposeView to the Activity content root, but motion
-    // events never enter in-window views of a NativeActivity (they go to the
-    // native input queue only), so no button was tappable. A separate window
-    // gets its own input channel — the same proven pattern as Portal's
-    // WebView setup/recovery popup — while the Activity is never recreated.
+    // PopupWindow owned by the same NativeActivity: v1 attached the
+    // ComposeView to the Activity content root, but motion events never enter
+    // in-window views of a NativeActivity (they go to the native input queue
+    // only), so no button was tappable. A separate window gets its own input
+    // channel — the same proven pattern as Portal's WebView setup/recovery
+    // popup — while the Activity is never recreated.
     private var popup: android.widget.PopupWindow? = null
 
-    /** Show the fullscreen overlay. Idempotent; safe to call from any thread. */
-    @JvmStatic fun show(activity: Activity): Boolean {
+    /**
+     * Show the fullscreen overlay. Fire-and-forget: success or failure is
+     * reported back through nativeOnOverlayShown/nativeOnOverlayShowFailed,
+     * which is the only signal Rust trusts. Safe to call from any thread.
+     */
+    @JvmStatic fun show(activity: Activity) {
         activity.runOnUiThread { doShow(activity) }
-        return true
     }
 
     /** Update the small state text. "Desktop ready" fades the overlay out. */
@@ -133,9 +161,20 @@ object ComposeOverlay {
         }
     }
 
-    /** Immediate removal without animation. Safe to call from any thread. */
-    @JvmStatic fun hide(activity: Activity) {
-        activity.runOnUiThread { removeNow() }
+    /** Follow the NativeActivity into the foreground. Safe from any thread. */
+    @JvmStatic fun onHostResumed(activity: Activity) {
+        activity.runOnUiThread {
+            owner?.resume()
+            Log.i(TAG, "host resumed")
+        }
+    }
+
+    /** Follow the NativeActivity into the background. Safe from any thread. */
+    @JvmStatic fun onHostSuspended(activity: Activity) {
+        activity.runOnUiThread {
+            owner?.pause()
+            Log.i(TAG, "host suspended")
+        }
     }
 
     /**
@@ -165,6 +204,11 @@ object ComposeOverlay {
 
     private fun doShow(activity: Activity) {
         if (popup != null) {
+            // Re-show during a fade (e.g. recovery racing dismissal):
+            // cancel teardown, restore opacity, re-acknowledge.
+            container?.animate()?.cancel()
+            container?.alpha = 1f
+            ackShown()
             return
         }
         try {
@@ -216,44 +260,42 @@ object ComposeOverlay {
             composeView = view
             owner = lifecycleOwner
             frame.alpha = 1f
-            open.set(true)
-            registerSpikeDrive(activity)
             val blur = queryBlurSupport(activity)
             Log.i(TAG, "overlay shown; crossWindowBlur=$blur")
+            ackShown()
         } catch (e: Exception) {
             Log.e(TAG, "overlay show failed", e)
+            ackShowFailed(e.toString())
         }
     }
 
-    /**
-     * SPIKE manual-test aid: `adb shell am broadcast -a
-     * app.polarbear.SPIKE_START` fires the exact same native action as the
-     * Start Plasma button. Dynamically registered: no manifest change.
-     */
-    private fun registerSpikeDrive(activity: Activity) {
+    private fun ackShown() {
         try {
-            val receiver = object : android.content.BroadcastReceiver() {
-                override fun onReceive(c: Context?, i: android.content.Intent?) {
-                    Log.i(TAG, "spike broadcast start received")
-                    try {
-                        nativeOnStartPlasma()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "broadcast start callback failed", e)
-                    }
-                }
+            nativeOnOverlayShown()
+        } catch (_: UnsatisfiedLinkError) {
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun ackShowFailed(reason: String) {
+        try {
+            // Best effort: also tear down any half-constructed hierarchy so a
+            // later fallback screen is never covered by a stale popup.
+            try {
+                popup?.dismiss()
+            } catch (_: Exception) {
             }
-            val filter = android.content.IntentFilter("app.polarbear.SPIKE_START")
-            if (Build.VERSION.SDK_INT >= 33) {
-                activity.registerReceiver(
-                    receiver, filter, Context.RECEIVER_EXPORTED,
-                )
-            } else {
-                @Suppress("UnspecifiedRegisterReceiverFlag")
-                activity.registerReceiver(receiver, filter)
+            popup = null
+            container = null
+            composeView = null
+            try {
+                owner?.destroy()
+            } catch (_: Exception) {
             }
-            spikeReceiver = receiver
-        } catch (e: Exception) {
-            Log.e(TAG, "spike drive register failed", e)
+            owner = null
+            nativeOnOverlayShowFailed(reason)
+        } catch (_: UnsatisfiedLinkError) {
+        } catch (_: Exception) {
         }
     }
 
@@ -283,17 +325,6 @@ object ComposeOverlay {
         } catch (e: Exception) {
             Log.e(TAG, "overlay remove failed", e)
         } finally {
-            val ctx = container?.context
-            try {
-                spikeReceiver?.let {
-                    try {
-                        ctx?.unregisterReceiver(it)
-                    } catch (_: Exception) {
-                    }
-                }
-            } catch (_: Exception) {
-            }
-            spikeReceiver = null
             container = null
             composeView = null
             try {
@@ -301,7 +332,6 @@ object ComposeOverlay {
             } catch (_: Exception) {
             }
             owner = null
-            open.set(false)
             Log.i(TAG, "overlay removed; native surface undisturbed")
             try {
                 nativeOnOverlayRemoved()
