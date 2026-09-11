@@ -661,6 +661,266 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked
 
     print("Debian 13 rootfs pre-provisioning completed successfully!")
 
+# ---------------------------------------------------------------------------
+# Official lfdevs Anland Termux KWin/XWayland stack (Debian 13, ARM64).
+#
+# Stock Debian kwin_wayland has no Anland backend (its CLI rejects --anland),
+# so a runtime assembled from Debian alone cannot boot the Anland desktop.
+# The finished Portal runtime therefore deterministically overlays the pinned
+# lfdevs bundle below on top of the Debian base. Every external byte is
+# hard-pinned (URL + size + SHA-256) and any mismatch fails the build closed.
+# ---------------------------------------------------------------------------
+
+LFDEVS_ANLAND_RELEASE_URL = "https://github.com/lfdevs/anland-termux/releases/download/5.13.3"
+LFDEVS_KWIN_ZIP = {
+    "filename": "kwin_anland-5.13-debian-4_6.3.6-95.zip",
+    "size": 10604606,
+    "sha256": "56ce1da27b640c977bad5ca0b7b13196e609b5fc419703429e51805ec05e4ee4",
+    # Inner .deb digests exactly as published by lfdevs sha256sums.txt
+    # inside the zip. Verified again after extraction; never trusted blindly.
+    "members": {
+        "kwin-common_6.3.6-95_arm64.deb": "bd4d59b6d00ddc64825ea791a30381c92207b5158c746f9d1c7aca19114dc16c",
+        "kwin-data_6.3.6-95_all.deb": "5d8be6876fa86ccf9a4588c6fd9e2cc1c497e2de2f2d88a3ce371a8c8ff8c67c",
+        "kwin-wayland_6.3.6-95_arm64.deb": "9d975f02f6b8e7970bc69f9a9fa71b9148de20ca2849fe3755862c45c0676993",
+        "kwin-x11_6.3.6-95_arm64.deb": "fb406e1cd519b0dbe6a3c2f33eda931b90e13da397b9d7d757b5bebca5628713",
+        "libkwin6_6.3.6-95_arm64.deb": "0e1659dec3c82577c52bf137d243cf29eb8ad3bba56e98d591ae11d004bf5c8b",
+    },
+}
+LFDEVS_XWAYLAND_DEB = {
+    "filename": "xwayland_24.1.6-91_arm64.deb",
+    "size": 825848,
+    "sha256": "59f9c7486d6a10ad50a13622bf1d1bbf5accd015d630e4b2b0152a80577dcc64",
+}
+
+# The complete intended bundle, installed as a unit. kwin-x11 is new (the
+# Debian closure never seeded it); every hard dependency of all six packages
+# was verified to resolve inside the existing locked Debian closure, so no
+# extra Debian packages are pulled in.
+LFDEVS_OVERLAY_ORDER = ("kwin-common", "kwin-data", "kwin-wayland", "kwin-x11", "libkwin6", "xwayland")
+
+# Payload path fragments the overlay must never touch. Portal's Mesa/KGSL
+# integration and the Debian Mesa/GL stacks live outside the KWin/XWayland
+# file sets (verified: zero hits); any overlap fails the build instead of
+# silently overwriting GPU files.
+LFDEVS_OVERLAY_FORBIDDEN_PATH_FRAGMENTS = (
+    "mesa",
+    "libgl",
+    "libegl",
+    "libgles",
+    "/dri/",
+    "gallium",
+    "kgsl",
+    "vulkan",
+    "freedreno",
+    "adreno",
+    "usr/local/",
+)
+
+
+def download_pinned(url: str, dest: Path, size: int, sha256: str) -> Path:
+    """Download one external asset, failing closed on any size/hash mismatch."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not (dest.exists() and dest.stat().st_size == size):
+        print(f"Downloading pinned external asset {dest.name} ({size} bytes)...")
+        temp = dest.with_suffix(".tmp")
+        req = urllib.request.Request(url, headers={"User-Agent": "Portal-Provisioner/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp, open(temp, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            temp.replace(dest)
+        except Exception:
+            if temp.exists():
+                temp.unlink()
+            raise
+    actual_size = dest.stat().st_size
+    if actual_size != size:
+        raise ValueError(
+            f"Pinned asset size mismatch for {dest.name}: got {actual_size}, expected {size}"
+        )
+    digest = hashlib.file_digest(dest.open("rb"), "sha256").hexdigest()
+    if digest != sha256:
+        raise ValueError(
+            f"Pinned asset SHA-256 mismatch for {dest.name}: got {digest}, expected {sha256}"
+        )
+    print(f"Pinned asset verified: {dest.name} ({actual_size} bytes, sha256={digest[:16]}...)")
+    return dest
+
+
+def read_deb_control_fields(deb_path: Path) -> dict:
+    """Parse the control file of a .deb without extracting its payload."""
+    with open(deb_path, "rb") as f:
+        deb_bytes = f.read()
+    if deb_bytes[:8] != b"!<arch>\n":
+        raise ValueError(f"{deb_path} is not a valid ar archive")
+    pos = 8
+    control_bytes = None
+    control_tar_name = None
+    while pos < len(deb_bytes):
+        header = deb_bytes[pos:pos + 60]
+        if len(header) < 60:
+            break
+        name = header[:16].decode("ascii", errors="replace").strip()
+        size = int(header[48:58].decode("ascii", errors="replace").strip())
+        pos += 60
+        member_data = deb_bytes[pos:pos + size]
+        pos += size + (size % 2)
+        if name.startswith("control.tar"):
+            control_tar_name = name
+            control_bytes = member_data
+    if not control_bytes:
+        raise ValueError(f"No control member in {deb_path}")
+    ctrl_raw = decompress_tar_data(control_tar_name, control_bytes)
+    ctrl_tar = tarfile.open(fileobj=io.BytesIO(ctrl_raw))
+    fields = {}
+    for m in ctrl_tar.getmembers():
+        if Path(m.name).name == "control":
+            f = ctrl_tar.extractfile(m)
+            if f:
+                for line in f.read().decode("utf-8", errors="replace").splitlines():
+                    if ":" in line and not line.startswith(" "):
+                        k, v = line.split(":", 1)
+                        fields[k.strip()] = v.strip()
+    if "Package" not in fields or "Version" not in fields:
+        raise ValueError(f"Control file of {deb_path} lacks Package/Version")
+    return fields
+
+
+def deb_data_member_names(deb_path: Path) -> list:
+    """List data.tar member names of a .deb (for conflict inspection)."""
+    with open(deb_path, "rb") as f:
+        deb_bytes = f.read()
+    pos = 8
+    data_bytes = None
+    data_tar_name = None
+    while pos < len(deb_bytes):
+        header = deb_bytes[pos:pos + 60]
+        if len(header) < 60:
+            break
+        name = header[:16].decode("ascii", errors="replace").strip()
+        size = int(header[48:58].decode("ascii", errors="replace").strip())
+        pos += 60
+        member_data = deb_bytes[pos:pos + size]
+        pos += size + (size % 2)
+        if name.startswith("data.tar"):
+            data_tar_name = name
+            data_bytes = member_data
+    if not data_bytes:
+        raise ValueError(f"No data member in {deb_path}")
+    data_raw = decompress_tar_data(data_tar_name, data_bytes)
+    data_tar = tarfile.open(fileobj=io.BytesIO(data_raw))
+    return [m.name for m in data_tar.getmembers()]
+
+
+def fetch_lfdevs_anland_stack(cache_dir: Path) -> dict:
+    """
+    Download (through this builder, never from Temp or device state) and
+    verify the pinned lfdevs Anland stack. Returns {package_name: deb_path}
+    for the complete intended bundle. Anything unexpected fails closed.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = download_pinned(
+        f"{LFDEVS_ANLAND_RELEASE_URL}/{LFDEVS_KWIN_ZIP['filename']}",
+        cache_dir / LFDEVS_KWIN_ZIP["filename"],
+        LFDEVS_KWIN_ZIP["size"],
+        LFDEVS_KWIN_ZIP["sha256"],
+    )
+    import zipfile
+
+    with zipfile.ZipFile(zip_path) as zf:
+        present = set(zf.namelist())
+        expected = set(LFDEVS_KWIN_ZIP["members"])
+        if present != expected | {"sha256sums.txt"}:
+            raise ValueError(
+                f"KWin zip contents differ from the pinned bundle: extra={sorted(present - expected - {'sha256sums.txt'})} "
+                f"missing={sorted(expected - present)}"
+            )
+        deb_paths = {}
+        for member, pinned_digest in LFDEVS_KWIN_ZIP["members"].items():
+            data = zf.read(member)
+            digest = hashlib.sha256(data).hexdigest()
+            if digest != pinned_digest:
+                raise ValueError(
+                    f"Inner KWin bundle member SHA-256 mismatch for {member}: got {digest}"
+                )
+            dest = cache_dir / member
+            if not (dest.exists() and hashlib.file_digest(dest.open("rb"), "sha256").hexdigest() == pinned_digest):
+                dest.write_bytes(data)
+            fields = read_deb_control_fields(dest)
+            deb_paths[fields["Package"]] = dest
+    xw_path = download_pinned(
+        f"{LFDEVS_ANLAND_RELEASE_URL}/{LFDEVS_XWAYLAND_DEB['filename']}",
+        cache_dir / LFDEVS_XWAYLAND_DEB["filename"],
+        LFDEVS_XWAYLAND_DEB["size"],
+        LFDEVS_XWAYLAND_DEB["sha256"],
+    )
+    xw_fields = read_deb_control_fields(xw_path)
+    if xw_fields["Package"] != "xwayland":
+        raise ValueError(f"Unexpected package in XWayland asset: {xw_fields['Package']}")
+    deb_paths[xw_fields["Package"]] = xw_path
+    missing = [name for name in LFDEVS_OVERLAY_ORDER if name not in deb_paths]
+    if missing:
+        raise ValueError(f"lfdevs bundle incomplete after verification: missing {missing}")
+    assert_overlay_payload_safe(deb_paths)
+    print(f"lfdevs Anland stack ready: {len(deb_paths)} verified packages.")
+    return deb_paths
+
+
+def assert_overlay_payload_safe(deb_paths: dict) -> None:
+    """
+    Deliberate conflict inspection: the overlay must not ship Mesa/GL/GPU or
+    Portal-owned paths. Fails closed instead of overwriting GPU integration.
+    """
+    for name, deb_path in deb_paths.items():
+        for member in deb_data_member_names(deb_path):
+            lowered = member.lower().lstrip("./")
+            for fragment in LFDEVS_OVERLAY_FORBIDDEN_PATH_FRAGMENTS:
+                if fragment in lowered:
+                    raise ValueError(
+                        f"Refusing overlay: {deb_path.name} ships protected path '{member}' "
+                        f"(fragment '{fragment}'). Resolve the Mesa/KGSL conflict deliberately."
+                    )
+    print("Overlay payload inspection passed: no Mesa/GL/GPU/Portal path overlap.")
+
+
+def lfdevs_lock_entries(deb_paths: dict) -> dict:
+    """Build lock-style entries ({Version, Filename, SHA256, Size}) for overlay debs."""
+    entries = {}
+    for name in LFDEVS_OVERLAY_ORDER:
+        deb_path = deb_paths[name]
+        fields = read_deb_control_fields(deb_path)
+        if fields["Package"] != name:
+            raise ValueError(f"Overlay deb {deb_path.name} is package {fields['Package']}, expected {name}")
+        entries[name] = {
+            "Version": fields["Version"],
+            "Filename": deb_path.name,
+            "SHA256": hashlib.file_digest(deb_path.open("rb"), "sha256").hexdigest(),
+            "Size": deb_path.stat().st_size,
+        }
+    return entries
+
+
+def prepare_locked_packages_with_anland(base_locked: dict, cache_dir: Path) -> dict:
+    """
+    Return the effective install set: Debian base lock with the stock
+    kwin-wayland/kwin-common/kwin-data/libkwin6/xwayland payloads replaced by
+    the verified lfdevs -95/-91 bundle, plus kwin-x11 added. Stock KWin/XWayland
+    debs are never downloaded or extracted, so no conflicting payload or stale
+    dpkg metadata can survive; status/info stanzas are generated from the
+    actually installed debs by the existing machinery.
+    """
+    deb_paths = fetch_lfdevs_anland_stack(cache_dir)
+    overlay = lfdevs_lock_entries(deb_paths)
+    effective = dict(base_locked)
+    replaced = sorted(name for name in overlay if name in effective)
+    added = sorted(name for name in overlay if name not in effective)
+    effective.update(overlay)
+    print(f"Anland overlay: replaced stock packages {replaced}; added {added}.")
+    return effective
+
 if __name__ == "__main__":
     base_dir = Path(__file__).resolve().parent.parent
     target_rootfs = base_dir / "target" / "debian-13-rootfs"

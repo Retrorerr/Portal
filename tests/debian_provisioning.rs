@@ -335,19 +335,54 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
 #[test]
 fn production_runtime_artifact_matches_manifest_and_archive_verification() {
     let artifact = RuntimeArtifact::production();
-    assert_eq!(artifact.version, "debian13-arm64-2026.09.05.3");
+    assert_eq!(artifact.version, "debian13-arm64-2026.09.10.1");
     assert_eq!(
         artifact.sha256,
-        "aa75ea96300c26a9cfdffb443aff954a3cbe89146ffe32bba7287415e89e00f3"
+        "1e3fb4b38c5824ee98b840ffa1461726242efebaf1993200883e1c558208919f"
     );
-    assert_eq!(artifact.compressed_bytes, 896188212);
-    assert!(artifact.url.starts_with("https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.09.05.3/"));
+    assert_eq!(artifact.compressed_bytes, 896140656);
+    assert!(artifact.url.starts_with("https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.09.10.1/"));
     let archive_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target/portal-debian13-arm64-2026.09.05.3.tar.xz");
+        .join("target/portal-debian13-arm64-2026.09.10.1.tar.xz");
     if archive_path.exists() {
         artifact
             .verify(&archive_path)
             .expect("RuntimeArtifact::verify failed on target archive");
+    }
+}
+
+#[test]
+fn runtime_builder_pins_lfdevs_anland_stack_and_publish_validates_it() {
+    // The canonical runtime must be Anland-capable: the builder hard-pins the
+    // lfdevs KWin/XWayland bundle (URL + size + SHA-256, fail closed) and the
+    // publisher refuses any non-legacy runtime whose KWin fell back to stock.
+    let builder = include_str!("../scripts/build_debian_rootfs.py");
+    for pin in [
+        "kwin_anland-5.13-debian-4_6.3.6-95.zip",
+        "10604606",
+        "56ce1da27b640c977bad5ca0b7b13196e609b5fc419703429e51805ec05e4ee4",
+        "xwayland_24.1.6-91_arm64.deb",
+        "825848",
+        "59f9c7486d6a10ad50a13622bf1d1bbf5accd015d630e4b2b0152a80577dcc64",
+        "prepare_locked_packages_with_anland",
+        "assert_overlay_payload_safe",
+    ] {
+        assert!(builder.contains(pin), "builder missing lfdevs pin/guard: {pin}");
+    }
+    let publisher = include_str!("../scripts/publish_runtime_release.py");
+    for guard in [
+        "ANLAND_KWIN_WAYLAND_SHA256",
+        "4ad23a5aefbde02dae70ec270423b75205906be8ef8b0fd473fd32a11424bdbf",
+        "ANLAND_LIBKWIN_BACKEND_MARKER",
+        "ANLAND_XWAYLAND_SHA256",
+        "3a25266671b7615740a7da602bd6a645bc8966be04d1a69c3536f09e67df2f87",
+        "STOCK_FALLBACK_VERSIONS",
+        "validate_anland_capable",
+    ] {
+        assert!(
+            publisher.contains(guard),
+            "publisher missing Anland fail-closed guard: {guard}"
+        );
     }
 }
 

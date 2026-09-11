@@ -91,7 +91,7 @@ const ANLAND_STUB_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/li
 /// Project Anland DRM render-device shim: fakes the open()+version probe so
 /// KWin's Anland backend initializes OpenGL on devices where the app sandbox
 /// cannot open /dev/dri/renderD128. Preloaded ONLY in Anland sessions.
-/// Source recipe: `assets/guest-arm64/drmshim-recipe.txt`.
+/// Source: `assets/guest-arm64/drmshim.c` (recipe: `drmshim-recipe.txt`).
 const DRMSHIM_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/drmshim.so");
 
 /// Setup is a process that should be done **only once** when the user installed the app.

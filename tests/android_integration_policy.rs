@@ -505,6 +505,11 @@ fn input_method_bridge_and_fallback_policy() {
     // when the binary advertises it; env + unified libkwin otherwise.
     assert!(KWIN_WRAPPER_SOURCE.contains("grep -q"));
     assert!(KWIN_WRAPPER_SOURCE.contains("binary lacks --anland"));
+    // 2e. Software-GL sessions (ANLAND_NO_DRM_DEVICE=1) unset GALLIUM_DRIVER
+    // for kwin_wayland only: forcing freedreno inside the software EGL stack
+    // demands the KGSL winsys and kills EGL init (proven by matrix).
+    assert!(KWIN_WRAPPER_SOURCE.contains("ANLAND_NO_DRM_DEVICE"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("unset GALLIUM_DRIVER"));
 
     // 3. Startplasma sets kwinrc InputMethod and VirtualKeyboardMode
     assert!(STARTPLASMA_SOURCE.contains("InputMethod=/usr/share/applications/portal-ime.desktop"));

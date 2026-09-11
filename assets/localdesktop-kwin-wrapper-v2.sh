@@ -179,6 +179,17 @@ run_real_kwin() {
         esac
     fi
     export QT_FORCE_STDERR_LOGGING=1
+    # Software-GL sessions (ANLAND_NO_DRM_DEVICE=1: no GBM device can exist
+    # in the sandbox) must not force the freedreno gallium driver on KWin:
+    # inside the software EGL stack it demands the KGSL winsys, whose loader
+    # device-info is SELinux-denied, so EGL display init dies (proven:
+    # surfaceless EGL init fails with GALLIUM_DRIVER=freedreno, succeeds
+    # without). Unset it for kwin_wayland only; XWayland/Firefox keep the
+    # KGSL path. MESA_LOADER_DRIVER_OVERRIDE=kgsl is harmless here (proven).
+    if [ "${ANLAND_NO_DRM_DEVICE:-0}" = "1" ]; then
+        unset GALLIUM_DRIVER
+        printf 'anland software GL: unset GALLIUM_DRIVER for kwin_wayland\n' >> "$log_file"
+    fi
     if [ -n "$segfault_lib" ]; then
         export LD_PRELOAD="$segfault_lib${LD_PRELOAD:+:$LD_PRELOAD}"
         export SEGFAULT_SIGNALS=all

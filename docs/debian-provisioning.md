@@ -9,10 +9,14 @@ it no longer denotes an optional developer slot. Existing `arch` data and old
 
 `assets/debian-runtime.json` pins the public Portal GitHub release URL, image
 version, compressed size and SHA-256. The current image is
-`debian13-arm64-2026.09.05.3`, published in
-[the runtime release](https://github.com/Retrorerr/Portal/releases/tag/runtime-debian13-arm64-2026.09.05.3).
-It contains 1,141 locked Debian packages. The compressed archive is 896,188,212
-bytes (855 MiB). Bundling that archive in each APK would be impractical.
+`debian13-arm64-2026.09.10.1`, published in
+[the runtime release](https://github.com/Retrorerr/Portal/releases/tag/runtime-debian13-arm64-2026.09.10.1).
+It contains 1,141 locked Debian packages plus the pinned lfdevs Anland
+KWin/XWayland stack (kwin -95 bundle + XWayland 24.1.6-91, replacing the stock
+Debian KWin/XWayland payloads, which have no Anland backend). The compressed
+archive is 896,140,656 bytes (855 MiB). Bundling that archive in each APK would
+be impractical. The previous stock-KWin image `debian13-arm64-2026.09.05.3`
+remains published untouched; no release asset is ever replaced.
 
 Build the image from the existing Debian builder, not a copied guest directory:
 
@@ -30,8 +34,11 @@ real package payloads. The v2 image corrects that conflict for `usr/lib/ssl`.
 For a new image, change the image version in the packager, build, publish its
 archive under the corresponding `runtime-<version>` GitHub release, and commit
 the generated manifest. Do not replace assets under an existing version. Run
-`python scripts/publish_runtime_release.py` to validate, publish, or restore the
-release idempotently with size and SHA-256 safety guards. Run
+`python scripts/publish_runtime_release.py` to validate (including the
+fail-closed Anland-capability gate for every non-legacy version), publish, or
+restore the release idempotently with size and SHA-256 safety guards. The
+publisher writes `assets/debian-runtime.json` only after the bytes are uploaded
+and the public URL verifies; a local build never retargets the manifest. Run
 `python scripts/verify_runtime_release.py` before building the APK; the APK CI
 also checks the public URL and GitHub asset digest. No developer rootfs is used
 to produce the image or install the app.
