@@ -170,14 +170,7 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
 
     let mut dependencies = String::new();
     for dep in &config.dependencies {
-        // SPIKE-ONLY (branch compose-setup-spike): allow Gradle platform/BOM
-        // imports such as `platform('group:artifact:version')`, which must be
-        // emitted unquoted (`implementation platform('...')`).
-        if dep.starts_with("platform(") {
-            dependencies.push_str(&format!("implementation {dep}\n"));
-        } else {
-            dependencies.push_str(&format!("implementation '{dep}'\n"));
-        }
+        dependencies.push_str(&format!("implementation '{dep}'\n"));
     }
 
     let app_build_gradle = format!(
