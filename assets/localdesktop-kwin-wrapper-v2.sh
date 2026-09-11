@@ -72,16 +72,17 @@ if [ "$anland_mode" -eq 0 ]; then
 else
     # Project Anland KWin variant selection (deterministic A/B without APK
     # rebuilds): /var/lib/localdesktop/kwin-variant selects the libkwin for
-    # Anland sessions. Values: "stock" (default: exact untouched distro
-    # lfdevs binaries, guaranteed backend parity with the shipped binary),
-    # "unified" (Portal overlay lib with input additions; kept for A/B and
-    # future rebuilds), or "ab:<name>" (bisect candidate at
-    # /usr/local/lib/portal-ab/<name>/libkwin.so.6.3.6, staged out-of-band;
-    # never touched by the per-launch overlay sync).
+    # Anland sessions. Values: "unified" (default: Portal overlay libcarrying
+    # the Anland backend plus the Portal Touchpad input path — PixelDelta
+    # finger scrolling, axis-stop, NaturalScroll/ScrollFactor, kcminputrc
+    # persistence; physically validated), "stock" (exact untouched distro
+    # lfdevs binaries; kept as the A/B and recovery option), or "ab:<name>"
+    # (bisect candidate at /usr/local/lib/portal-ab/<name>/libkwin.so.6.3.6,
+    # staged out-of-band; never touched by the per-launch overlay sync).
     # The file is read once here, before KWin starts; nothing is swapped
     # while KWin is alive. Any failed sanity check falls back to stock and
     # is logged, so KWin is never left unloadable or half-deployed.
-    kwin_variant=stock
+    kwin_variant=unified
     if [ -r /var/lib/localdesktop/kwin-variant ]; then
         read -r kwin_variant < /var/lib/localdesktop/kwin-variant
     fi
