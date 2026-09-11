@@ -36,10 +36,10 @@ Origin: Portal, patches/xwayland/0005-xwayland-preserve-finger-axis-source.patch
 Forwarded: no
 Last-Update: 2026-09-11
 
-diff --git "a/hw/xwayland/xwayland-input.c" "b/hw/xwayland/xwayland-input.c"
+diff --git a/hw/xwayland/xwayland-input.c b/hw/xwayland/xwayland-input.c
 index 53cc514..f30c323 100644
---- "a/hw/xwayland/xwayland-input.c"
-+++ "b/hw/xwayland/xwayland-input.c"
+--- a/hw/xwayland/xwayland-input.c
++++ b/hw/xwayland/xwayland-input.c
 @@ -38,6 +38,7 @@
  #include <mipointer.h>
  #include <mipointrst.h>
@@ -356,10 +356,10 @@ index 53cc514..f30c323 100644
          release_relative_pointer(xwl_seat);
          release_pointer_gestures_device(xwl_seat);
      }
-diff --git "a/hw/xwayland/xwayland-input.h" "b/hw/xwayland/xwayland-input.h"
+diff --git a/hw/xwayland/xwayland-input.h b/hw/xwayland/xwayland-input.h
 index d40bca0..5c70044 100644
---- "a/hw/xwayland/xwayland-input.h"
-+++ "b/hw/xwayland/xwayland-input.h"
+--- a/hw/xwayland/xwayland-input.h
++++ b/hw/xwayland/xwayland-input.h
 @@ -57,6 +57,10 @@ struct xwl_seat {
      DeviceIntPtr pointer;
      DeviceIntPtr relative_pointer;
