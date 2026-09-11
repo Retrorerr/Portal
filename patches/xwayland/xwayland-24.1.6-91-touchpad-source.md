@@ -130,10 +130,12 @@ the original device with identical behavior.
 
 ## Test matrix status
 
-Baseline (stock, recorded 2026-09-11): Firefox V+H two-finger scroll works,
-stops dead on finger lift (no momentum); Plasma/Settings scroll works;
-speed/natural/persist work; XWayland KGSL surfaceless glamor active;
-Anland READY gen-1 fenced, `fallbacks=0`. Mouse-wheel and Ctrl+wheel
-baselines to be captured against a real mouse when available. The
+Baseline (stock, recorded 2026-09-11, confirmed physically on the OnePlus
+Pad 3 keyboard-case touchpad): Firefox V+H two-finger scroll works, stops
+dead on finger lift (no momentum); fast flick likewise stops dead the
+instant the fingers lift; Ctrl+two-finger-scroll zooms correctly;
+Plasma/Settings scroll works; speed/natural/persist work; XWayland KGSL
+surfaceless glamor active; Anland READY gen-1 fenced, `fallbacks=0`.
+A real-mouse wheel baseline is unavailable (no real mouse on hand). The
 candidate matrix (criteria 1-15 in the task) has NOT been executed — there
 is no candidate binary.
