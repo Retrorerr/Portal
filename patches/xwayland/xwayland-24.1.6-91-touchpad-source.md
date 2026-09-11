@@ -107,14 +107,20 @@ Smallest patch consistent with the GTK rule above, against the exact
    (e.g. "xwayland-touchpad"), modelled on `xwl_pointer_proc` but carrying
    **only** the two scroll valuators (same `SetScrollValuator` flags as the
    main pointer) and additionally setting the `libinput Tapping Enabled`
-   XI property (8-bit INTEGER, one item, value 1) at `DEVICE_INIT` so GTK's
-   `is_touchpad_device()` passes. No touch class, no buttons beyond what
-   scroll needs, no other libinput properties (do not fake capabilities).
+   XI property (8-bit INTEGER, one item, value 0 — tapping is not
+   implemented) at `DEVICE_INIT` so GTK's
+   `is_touchpad_device()` passes. No touch class, no other libinput
+   properties (do not fake capabilities).
 3. In `dispatch_scroll_motion()`, route finger-source frames through the
    touchpad device and wheel/continuous/tilt-source frames through the
    existing pointer device. Axis-stop emits the zero-delta frame on
    whichever device owns the in-progress gesture (track the active source
    per frame; default to the main pointer when unknown).
+   The touchpad device sends **accumulated** surface-px positions, not
+   per-event deltas: XI2 scroll valuators are running positions (GTK and
+   the server's own button emulation difference consecutive values), so
+   per-event deltas would read back as ~zero/jitter. Stop frames repeat
+   the position. The stock pointer keeps today's exact per-event values.
 4. Never touch glamor/GBM/DRI3/present paths, device init of the existing
    pointer/keyboard, or the `relative_pointer` confinement path.
 
