@@ -170,7 +170,14 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
 
     let mut dependencies = String::new();
     for dep in &config.dependencies {
-        dependencies.push_str(&format!("implementation '{}'\n", dep));
+        // SPIKE-ONLY (branch compose-setup-spike): allow Gradle platform/BOM
+        // imports such as `platform('group:artifact:version')`, which must be
+        // emitted unquoted (`implementation platform('...')`).
+        if dep.starts_with("platform(") {
+            dependencies.push_str(&format!("implementation {dep}\n"));
+        } else {
+            dependencies.push_str(&format!("implementation '{dep}'\n"));
+        }
     }
 
     let app_build_gradle = format!(
@@ -178,6 +185,8 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
             plugins {{
                 id 'com.android.application'
                 id 'org.jetbrains.kotlin.android'
+                // SPIKE-ONLY (branch compose-setup-spike): Compose compiler.
+                id 'org.jetbrains.kotlin.plugin.compose'
             }}
             android {{
                 namespace '{package}'
@@ -188,6 +197,18 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
                     targetSdk {target_sdk}
                     versionCode {version_code}
                     versionName '{version_name}'
+                }}
+                // SPIKE-ONLY (branch compose-setup-spike): enable @Composable
+                // compilation for the overlay in src/android/kotlin.
+                buildFeatures {{
+                    compose true
+                }}
+                compileOptions {{
+                    sourceCompatibility JavaVersion.VERSION_1_8
+                    targetCompatibility JavaVersion.VERSION_1_8
+                }}
+                kotlinOptions {{
+                    jvmTarget = '1.8'
                 }}
                 packagingOptions {{
                     jniLibs {{

@@ -9,6 +9,19 @@ android:
   runtime_libs:
     - assets/libs
   gradle: true
+  # SPIKE-ONLY (branch compose-setup-spike): Jetpack Compose overlay dependencies.
+  # `platform(...)` entries are emitted as `implementation platform('...')` (see
+  # patches/xbuild/xbuild/src/gradle/mod.rs); everything else is quoted.
+  dependencies:
+    - "platform('androidx.compose:compose-bom:2024.12.01')"
+    - "androidx.compose.ui:ui"
+    - "androidx.compose.runtime:runtime"
+    - "androidx.compose.foundation:foundation"
+    - "androidx.compose.material3:material3"
+    - "androidx.compose.animation:animation"
+    - "androidx.lifecycle:lifecycle-runtime:2.8.7"
+    - "androidx.lifecycle:lifecycle-viewmodel:2.8.7"
+    - "androidx.savedstate:savedstate:1.2.1"
   manifest:
     package: app.polarbear.portal
     sdk:
