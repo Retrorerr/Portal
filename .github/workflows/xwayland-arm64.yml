@@ -1,0 +1,224 @@
+# XWayland ARM64 candidate build (Phase B) — BUILD ONLY.
+#
+# Builds the pinned lfdevs 2:24.1.6-91 XWayland source natively on ARM64
+# inside a digest-pinned Debian 13 (trixie) container, either unmodified
+# (baseline reproduction) or with the Portal 0005 input patch (candidate).
+#
+# Safety properties (do not weaken without review):
+# - permissions: contents:read; no secrets, no releases, no ref updates,
+#   no commits, no ADB/Android, no runtime artifacts.
+# - Only build outputs (.deb/.buildinfo/.changes + comparison report) are
+#   uploaded as run artifacts for inspection.
+# - Pinned inputs: lfdevs source SHA, debian:trixie image digest, canonical
+#   .deb URL+SHA. Any mismatch fails the run closed.
+#
+# Trigger design: while the candidate is developed on wip-splash-ab-save,
+# push builds run here (branch-scoped). After validation, narrow this to
+# workflow_dispatch + path filters (see comment on the push trigger below).
+
+name: XWayland ARM64 build (Phase B)
+
+on:
+  # Branch-scoped WIP trigger. TODO(post-validation): replace with
+  # workflow_dispatch + paths filters on patches/xwayland/** and this file.
+  push:
+    branches:
+      - wip-splash-ab-save
+    paths:
+      - .github/workflows/xwayland-arm64.yml
+      - patches/xwayland/**
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: Which tree to build
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - baseline
+          - candidate
+
+permissions:
+  contents: read
+
+env:
+  # Exact lfdevs 2:24.1.6-91 state. Never advance silently; the Portal patch
+  # must always be rebased onto this SHA explicitly.
+  LFDEVS_XWAYLAND_SHA: 461772ae63c8985fd5671ea85d38d5102590d760
+  # Canonical Portal-pinned binary package (mirrors
+  # scripts/build_debian_rootfs.py LFDEVS_XWAYLAND_DEB). Downloaded only to
+  # compare the reproduced baseline against it; never modified or republished.
+  CANONICAL_DEB_URL: https://github.com/lfdevs/anland-termux/releases/download/5.13.3/xwayland_24.1.6-91_arm64.deb
+  CANONICAL_DEB_SHA256: 59f9c7486d6a10ad50a13622bf1d1bbf5accd015d630e4b2b0152a80577dcc64
+  # Pinned Debian 13 (trixie) userspace. Manifest-list digest for tag
+  # `trixie` (last pushed 2026-08-25); the arm64 runner resolves it to the
+  # arm64 image (sha256:0aa0908407cce3da2a90c1d80acc6ca5ca57401ed63eecfa8149b7ba3cc40829).
+  # Never depend on the mutable tag alone.
+  TRIXIE_IMAGE: debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1
+  PORTAL_PATCH: patches/xwayland/0005-xwayland-preserve-finger-axis-source.patch
+
+jobs:
+  setup:
+    name: Select variants
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.pick.outputs.variants }}
+    steps:
+      - id: pick
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const input = context.eventName === 'workflow_dispatch'
+              ? context.payload.inputs.variant : 'both';
+            const variants = input === 'both' ? ['baseline', 'candidate'] : [input];
+            if (!variants.every((v) => v === 'baseline' || v === 'candidate')) {
+              core.setFailed(`unknown variant: ${input}`);
+              return;
+            }
+            core.setOutput('variants', JSON.stringify(variants));
+
+  build:
+    name: Build ${{ matrix.variant }} (ARM64 trixie)
+    needs: setup
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.setup.outputs.variants) }}
+    container:
+      image: ${{ env.TRIXIE_IMAGE }}
+
+    steps:
+      - name: Install git (trixie base has none)
+        run: |
+          set -eu
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+          git --version
+
+      - name: Check out Portal (patch + pins source)
+        uses: actions/checkout@v4
+        with:
+          path: portal
+          ref: ${{ github.sha }}
+
+      - name: Check out pinned lfdevs xwayland source
+        uses: actions/checkout@v4
+        with:
+          repository: lfdevs/xwayland
+          ref: ${{ env.LFDEVS_XWAYLAND_SHA }}
+          path: xwayland-src
+
+      - name: Verify pinned source SHA (fail closed)
+        run: |
+          set -eu
+          actual="$(git -C xwayland-src rev-parse HEAD)"
+          test "$actual" = "$LFDEVS_XWAYLAND_SHA"
+          echo "lfdevs source: $actual"
+          head -n 3 xwayland-src/debian/changelog
+          cat xwayland-src/debian/patches/series
+
+      - name: Assert unmodified -91 input path (baseline invariant)
+        run: |
+          set -eu
+          cd xwayland-src
+          # The pinned -91 input file must still discard the axis source;
+          # any Portal modification is applied only by the candidate step.
+          grep -A3 '^pointer_handle_axis_source' hw/xwayland/xwayland-input.c | grep -q '^{$'
+          test "$(git status --porcelain | wc -l)" = "0"
+
+      - name: Apply Portal 0005 patch (candidate only)
+        if: matrix.variant == 'candidate'
+        run: |
+          set -eu
+          test -f "portal/$PORTAL_PATCH"
+          cp "portal/$PORTAL_PATCH" xwayland-src/debian/patches/0005-xwayland-preserve-finger-axis-source.patch
+          printf '%s\n' '0005-xwayland-preserve-finger-axis-source.patch' >> xwayland-src/debian/patches/series
+          # Distinct Portal revision: never -92 (reserved for lfdevs).
+          sed -i '1s/xwayland (2:24.1.6-91)/xwayland (2:24.1.6-91portal1)/' xwayland-src/debian/changelog
+          head -n 3 xwayland-src/debian/changelog
+          tail -n 2 xwayland-src/debian/patches/series
+
+      - name: Assert patch scope (candidate only)
+        if: matrix.variant == 'candidate'
+        run: |
+          set -eu
+          cd xwayland-src
+          # The ONLY source delta vs pinned -91 must be the input-path patch
+          # plus its series/changelog registration. Graphics files must be
+          # untouched.
+          git status --porcelain
+          test "$(git status --porcelain | wc -l)" = "3"
+          git diff --stat
+          git diff --name-only | grep -Eq '^hw/xwayland/xwayland-input\.[ch]$'
+          git diff --name-only | grep -Eq '^debian/patches/series$'
+          git diff --name-only | grep -Eq '^debian/changelog$'
+          if git diff --name-only | grep -Ev 'xwayland-input\.[ch]$|debian/(patches/series|changelog)$'; then
+            echo "unexpected files modified"; exit 1
+          fi
+          test -z "$(git status --porcelain -- hw/xwayland/xwayland-glamor-gbm.c hw/xwayland/xwayland-dri3.c hw/xwayland/xwayland-present.c hw/xwayland/xwayland-glamor.c)"
+          grep -q 'xwayland-touchpad' hw/xwayland/xwayland-input.c
+          grep -q 'libinput Tapping Enabled' hw/xwayland/xwayland-input.c
+
+      - name: Install build dependencies
+        run: |
+          set -eu
+          apt-get update
+          apt-get install -y --no-install-recommends devscripts equivs dpkg-dev curl ca-certificates
+          cd xwayland-src
+          mk-build-deps -i -t 'apt-get -y --no-install-recommends' debian/control
+
+      - name: Build binary package
+        run: |
+          set -eu
+          cd xwayland-src
+          export DEB_BUILD_OPTIONS="parallel=$(nproc)"
+          dpkg-buildpackage -b -us -uc
+          ls -la ../*.deb ../*.buildinfo ../*.changes
+
+      - name: Download canonical -91 package (comparison only)
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/canonical.deb "$CANONICAL_DEB_URL"
+          echo "$CANONICAL_DEB_SHA256  /tmp/canonical.deb" | sha256sum -c -
+
+      - name: Compare against canonical package
+        run: |
+          set -eu
+          built="xwayland_24*.deb"
+          # shellcheck disable=SC2012
+          built="$(ls $built | grep -v dbgsym | head -n 1)"
+          echo "built=$built"
+          {
+            echo "## Package comparison (${{ matrix.variant }})"
+            echo
+            echo "| field | canonical -91 | reproduced |"
+            echo "|---|---|---|"
+            echo "| Version | $(dpkg-deb -f /tmp/canonical.deb Version) | $(dpkg-deb -f "$built" Version) |"
+            echo "| Architecture | $(dpkg-deb -f /tmp/canonical.deb Architecture) | $(dpkg-deb -f "$built" Architecture) |"
+            echo "| Xwayland SHA256 | $(dpkg-deb --fsys-tarfile /tmp/canonical.deb | tar -xO ./usr/bin/Xwayland | sha256sum | cut -d' ' -f1) | $(dpkg-deb --fsys-tarfile "$built" | tar -xO ./usr/bin/Xwayland | sha256sum | cut -d' ' -f1) |"
+            echo
+            echo "### ELF identity (reproduced Xwayland)"
+            dpkg-deb --fsys-tarfile "$built" | tar -xO ./usr/bin/Xwayland > /tmp/xwl-built
+            chmod +x /tmp/xwl-built
+            readelf -h /tmp/xwl-built | grep -E 'Machine|Class'
+            readelf -d /tmp/xwl-built | grep NEEDED
+            echo
+            echo "### File-list delta (canonical vs reproduced, .deb payload)"
+            diff <(dpkg-deb -c /tmp/canonical.deb | awk '{print $6}' | sort) \
+                 <(dpkg-deb -c "$built" | awk '{print $6}' | sort) \
+              && echo "identical file layout" || echo "LAYOUT DIFFERS (see above)"
+          } | tee "/tmp/compare-${{ matrix.variant }}.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: xwayland-${{ matrix.variant }}-arm64
+          retention-days: 14
+          path: |
+            xwayland_*.deb
+            xwayland_*.buildinfo
+            xwayland_*.changes
+            /tmp/compare-${{ matrix.variant }}.md
