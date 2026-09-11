@@ -23,22 +23,9 @@ import android.os.Build
 import android.util.Log
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.material3.Button
-import androidx.compose.material3.Text
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import app.polarbear.setup.PortalSetupScreen
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -236,7 +223,7 @@ object ComposeOverlay {
             // the ComposeView and its container.
             ComposeOwnerHost.attach(frame, lifecycleOwner, lifecycleOwner, lifecycleOwner)
             ComposeOwnerHost.attach(view, lifecycleOwner, lifecycleOwner, lifecycleOwner)
-            view.setContent { SpikeScreen() }
+            view.setContent { PortalSetupScreen() }
             val content = activity.findViewById<ViewGroup>(android.R.id.content)
             val window = android.widget.PopupWindow(
                 frame,
@@ -338,39 +325,6 @@ object ComposeOverlay {
             } catch (_: UnsatisfiedLinkError) {
             } catch (_: Exception) {
             }
-        }
-    }
-
-    @Composable
-    private fun SpikeScreen() {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF10131A)),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Text(
-                text = "Portal Compose integration test",
-                color = Color.White,
-                fontSize = 20.sp,
-            )
-            Spacer(modifier = Modifier.height(24.dp))
-            Button(onClick = {
-                try {
-                    nativeOnStartPlasma()
-                } catch (e: Exception) {
-                    Log.e(TAG, "start callback failed", e)
-                }
-            }) {
-                Text(text = "Start Plasma")
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = state.value,
-                color = Color(0xFF9AA0AA),
-                fontSize = 14.sp,
-            )
         }
     }
 }
