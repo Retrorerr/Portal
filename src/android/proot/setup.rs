@@ -1754,6 +1754,12 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     // IBus packages pre-session (detached, non-blocking); the autostart
     // launcher only starts an installed daemon, never package-manages.
     provision_ibus_packages(fs_root);
+    // Mesa KGSL layer (blocking, Anland only): the kgsl winsys lives here
+    // and stock Mesa has none, so without it KWin exits at GBM setup. Runs
+    // at most once per install (marker-gated); QPainter sessions skip it.
+    if crate::android::anland::is_anland_requested() {
+        super::mesa_layer::provision();
+    }
 
     // All builds need the socket fstat fix in this existing library. A
     // nested gdb frequently dies before it can attach under Android's PRoot;

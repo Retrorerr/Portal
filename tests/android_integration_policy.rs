@@ -27,6 +27,7 @@ const STARTPLASMA_SOURCE: &str = include_str!("../assets/localdesktop-startplasm
 const PORTAL_IME_BRIDGE_SOURCE: &str = include_str!("../assets/portal-ime-bridge.py");
 const PORTAL_IBUS_LAZY_SOURCE: &str = include_str!("../assets/portal-ibus-lazy.sh");
 const ANLAND_ENV_SOURCE: &str = include_str!("../src/android/anland/mod.rs");
+const MESA_LAYER_SOURCE: &str = include_str!("../src/android/proot/mesa_layer.rs");
 
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
@@ -354,6 +355,41 @@ fn anland_hardware_acceleration_is_default_with_explicit_software_fallback() {
         !ANLAND_ENV_SOURCE[env_fn..next_item].contains("ANLAND_NO_DRM_DEVICE"),
         "hardware must be the default session environment"
     );
+}
+
+#[test]
+fn mesa_kgsl_layer_is_pinned_and_matches_session_binds() {
+    // The kgsl winsys lives only in the lfdevs Mesa layer (stock Mesa has
+    // no kgsl winsys at all), so the layer is downloaded once, verified
+    // (size + SHA-256, fail closed), and subset-extracted. The extraction
+    // set must stay identical to what session_binds mounts, or the layer
+    // silently stops engaging.
+    for pin in [
+        "mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz",
+        "11648933",
+        "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf",
+        "mesa-kgsl-layer.complete",
+        "libgallium-26.3.0-devel.so",
+        "libgbm.so.1",
+        "libEGL_mesa.so.0",
+        "is_provisioned",
+    ] {
+        assert!(
+            MESA_LAYER_SOURCE.contains(pin),
+            "mesa layer source of truth missing: {pin}"
+        );
+    }
+    for path in [
+        "libgallium-26.3.0-devel.so",
+        "libgbm.so.1",
+        "libEGL_mesa.so.0",
+        "libGLX_mesa.so.0",
+    ] {
+        assert!(
+            ANLAND_ENV_SOURCE.contains(path),
+            "session binds must mount the pinned layer file: {path}"
+        );
+    }
 }
 
 #[test]

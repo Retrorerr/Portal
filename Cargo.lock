@@ -2356,6 +2356,7 @@ dependencies = [
  "byteorder",
  "cc",
  "dunce",
+ "flate2",
  "image 0.24.9",
  "jni",
  "khronos-egl",

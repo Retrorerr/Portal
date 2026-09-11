@@ -39,6 +39,7 @@ pub mod android {
     }
     pub mod proot {
         pub mod launch;
+        pub mod mesa_layer;
         pub mod process;
         pub mod setup;
     }
