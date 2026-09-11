@@ -1,0 +1,392 @@
+Description: xwayland: preserve WL_POINTER_AXIS_SOURCE_FINGER into XI2
+ XWayland 24.1.6 discards the Wayland pointer axis source
+ (pointer_handle_axis_source is an empty function), so finger scrolling
+ from a touchpad and mouse-wheel scrolling arrive at X11 clients on the
+ same wheel-labelled virtual pointer. GTK therefore classifies every
+ scroll as GDK_SOURCE_MOUSE and Firefox never takes its touchpad
+ PanGesture/fling path (Mozilla bugs 1213601, 1564238, 1781209), even
+ though smooth deltas and axis-stop already work.
+ .
+ This patch preserves the source semantic without inventing any motion:
+ no velocity tracking, no timers, no synthetic post-lift deltas.
+ .
+ - The per-frame axis source is stored in the seat's pending pointer
+   event and expires at dispatch like the other pending-frame state.
+ - Each scroll axis tracks whether it is currently owned by an active
+   FINGER gesture. A nonzero FINGER axis starts/continues ownership;
+   axis_stop terminates it with a zero-delta frame on the owning device;
+   an explicitly non-finger source (WHEEL/CONTINUOUS/WHEEL_TILT) on a
+   framed axis ends ownership so a stale FINGER classification can never
+   leak into a later wheel event. Unknown/missing source keeps stock
+   routing.
+ - One additional XI2 slave pointer per seat ("xwayland-touchpad"),
+   created/released with the seat's pointer capability via the established
+   add_device/ActivateDevice/enable_device pattern, carries ONLY
+   finger-owned smooth scroll valuators (same labels/scroll flags as the
+   main pointer). Motion, buttons and wheel-source scroll never route
+   through it, and the existing pointer device is unmodified (real mouse
+   wheels stay mouse-classified).
+ - The touchpad device exposes ONLY the "libinput Tapping Enabled" XI
+   property (INTEGER, 8-bit, 1 item, value 0): GTK checks this property's
+   existence/shape for touchpad classification, while value 0 honestly
+   reports that tap-to-click is not implemented. No XI touch class and no
+   other libinput properties are added.
+Author: Portal Project
+Origin: Portal, patches/xwayland/0005-xwayland-preserve-finger-axis-source.patch
+Forwarded: no
+Last-Update: 2026-09-11
+
+diff --git "a/hw/xwayland/xwayland-input.c" "b/hw/xwayland/xwayland-input.c"
+index 53cc514..f30c323 100644
+--- "a/hw/xwayland/xwayland-input.c"
++++ "b/hw/xwayland/xwayland-input.c"
+@@ -38,6 +38,7 @@
+ #include <mipointer.h>
+ #include <mipointrst.h>
+ #include <misc.h>
++#include <X11/Xatom.h>
+ 
+ #include "xwayland-cursor.h"
+ #include "xwayland-input.h"
+@@ -58,6 +59,11 @@
+ #define SCROLL_AXIS_HORIZ 2
+ #define SCROLL_AXIS_VERT 3
+ 
++/* Portal (0005): valuator indices of the scroll axes on the dedicated
++   xwayland-touchpad device, which carries only scroll valuators. */
++#define TOUCHPAD_SCROLL_AXIS_HORIZ 0
++#define TOUCHPAD_SCROLL_AXIS_VERT 1
++
+ struct sync_pending {
+     struct xorg_list l;
+     DeviceIntPtr pending_dev;
+@@ -348,6 +354,78 @@ xwl_pointer_proc_pointer_gestures(DeviceIntPtr device, int what)
+ #undef NAXES
+ }
+ 
++/* Portal (0005): device procedure for the dedicated xwayland-touchpad
++   scroll device. Pointer skeleton (buttons + valuators) so the device
++   attaches to the master pointer like the other XWayland seat devices;
++   only FINGER-source scroll valuators are ever queued on it. Motion and
++   buttons are never routed through this device. */
++static int
++xwl_pointer_proc_touchpad_scroll(DeviceIntPtr device, int what)
++{
++#define NAXES 2
++    Atom axes_labels[NAXES] = { 0 };
++
++    switch (what) {
++    case DEVICE_INIT:
++        device->public.on = FALSE;
++
++        /* Keep the button class so clients see a normal pointer device
++           (same rationale as the gestures device above). */
++        if (!init_pointer_buttons(device))
++            return BadValue;
++
++        axes_labels[0] = XIGetKnownProperty(AXIS_LABEL_PROP_REL_HWHEEL);
++        axes_labels[1] = XIGetKnownProperty(AXIS_LABEL_PROP_REL_WHEEL);
++
++        if (!InitValuatorClassDeviceStruct(device, NAXES, axes_labels,
++                                           GetMotionHistorySize(), Relative))
++            return BadValue;
++
++        InitValuatorAxisStruct(device, TOUCHPAD_SCROLL_AXIS_HORIZ,
++                               axes_labels[0],
++                               NO_AXIS_LIMITS, NO_AXIS_LIMITS, 0, 0, 0, Relative);
++        InitValuatorAxisStruct(device, TOUCHPAD_SCROLL_AXIS_VERT,
++                               axes_labels[1],
++                               NO_AXIS_LIMITS, NO_AXIS_LIMITS, 0, 0, 0, Relative);
++
++        SetScrollValuator(device, TOUCHPAD_SCROLL_AXIS_HORIZ,
++                          SCROLL_TYPE_HORIZONTAL, 1.0, SCROLL_FLAG_NONE);
++        SetScrollValuator(device, TOUCHPAD_SCROLL_AXIS_VERT,
++                          SCROLL_TYPE_VERTICAL, 1.0, SCROLL_FLAG_PREFERRED);
++
++        /* GTK classifies an XI slave pointer as a touchpad iff it exposes
++           the "libinput Tapping Enabled" property (8-bit INTEGER, 1 item).
++           Advertise value 0: tapping is NOT implemented by this synthetic
++           device, and no other libinput properties are set, so no
++           unimplemented capability is faked. The property is server-owned
++           so clients cannot alter or delete the classification. */
++        {
++            static const unsigned char tapping_disabled = 0;
++            Atom tapping_prop =
++                MakeAtom("libinput Tapping Enabled",
++                         strlen("libinput Tapping Enabled"), TRUE);
++
++            XIChangeDeviceProperty(device, tapping_prop, XA_INTEGER, 8,
++                                   PropModeReplace, 1, &tapping_disabled, FALSE);
++            XISetDevicePropertyDeletable(device, tapping_prop, FALSE);
++        }
++        return Success;
++
++    case DEVICE_ON:
++        device->public.on = TRUE;
++        return Success;
++
++    case DEVICE_OFF:
++    case DEVICE_CLOSE:
++        device->public.on = FALSE;
++        return Success;
++    }
++
++    return BadMatch;
++
++#undef NAXES
++}
++
+ static void
+ xwl_keyboard_control(DeviceIntPtr device, KeybdCtrl *ctrl)
+ {
+@@ -720,33 +798,125 @@ dispatch_relative_motion(struct xwl_seat *xwl_seat)
+                        POINTER_RAWONLY, &mask);
+ }
+ 
++/* Portal (0005): choose the XI2 device for one scroll axis. An axis owned
++   by an active FINGER gesture goes to the dedicated touchpad-classified
++   device; everything else keeps stock routing on the seat pointer. Falls
++   back to the seat pointer if the touchpad device is unavailable. */
++static DeviceIntPtr
++scroll_axis_device(struct xwl_seat *xwl_seat, Bool vertical)
++{
++    Bool finger_active = vertical ?
++        xwl_seat->pending_pointer_event.finger_scroll_vert_active :
++        xwl_seat->pending_pointer_event.finger_scroll_horiz_active;
++
++    if (finger_active && xwl_seat->touchpad_scroll)
++        return xwl_seat->touchpad_scroll;
++    return get_pointer_device(xwl_seat);
++}
++
+ static void
+-dispatch_scroll_motion(struct xwl_seat *xwl_seat)
++queue_scroll_frame(DeviceIntPtr dev,
++                   Bool vert_present, double vert_value,
++                   Bool horiz_present, double horiz_value, Bool touchpad)
+ {
+     ValuatorMask mask;
++
++    valuator_mask_zero(&mask);
++    if (vert_present) {
++        valuator_mask_set_double(&mask,
++                                 touchpad ? TOUCHPAD_SCROLL_AXIS_VERT :
++                                            SCROLL_AXIS_VERT,
++                                 vert_value);
++    }
++    if (horiz_present) {
++        valuator_mask_set_double(&mask,
++                                 touchpad ? TOUCHPAD_SCROLL_AXIS_HORIZ :
++                                            SCROLL_AXIS_HORIZ,
++                                 horiz_value);
++    }
++    QueuePointerEvents(dev, MotionNotify, 0, POINTER_RELATIVE, &mask);
++}
++
++static void
++dispatch_scroll_motion(struct xwl_seat *xwl_seat)
++{
+     const int divisor = 10;
+     wl_fixed_t dy = xwl_seat->pending_pointer_event.scroll_dy;
+     wl_fixed_t dx = xwl_seat->pending_pointer_event.scroll_dx;
+     int32_t dy_v120 = xwl_seat->pending_pointer_event.scroll_dy_v120;
+     int32_t dx_v120 = xwl_seat->pending_pointer_event.scroll_dx_v120;
++    Bool vert_present =
++        xwl_seat->pending_pointer_event.has_vertical_scroll_v120 ||
++        xwl_seat->pending_pointer_event.has_vertical_scroll;
++    Bool horiz_present =
++        xwl_seat->pending_pointer_event.has_horizontal_scroll_v120 ||
++        xwl_seat->pending_pointer_event.has_horizontal_scroll;
++    /* Unchanged stock value computation: discrete detents win over smooth
++       deltas per axis, exactly as before. */
++    double vert_value =
++        xwl_seat->pending_pointer_event.has_vertical_scroll_v120 ?
++        dy_v120 / 120.0 : wl_fixed_to_double(dy) / divisor;
++    double horiz_value =
++        xwl_seat->pending_pointer_event.has_horizontal_scroll_v120 ?
++        dx_v120 / 120.0 : wl_fixed_to_double(dx) / divisor;
++    DeviceIntPtr vert_dev, horiz_dev;
++    Bool vert_touchpad, horiz_touchpad;
++
++    /* Fold this frame's explicit source into the per-axis FINGER ownership.
++       A nonzero FINGER axis starts/continues ownership; an explicitly
++       non-finger source (WHEEL/CONTINUOUS/WHEEL_TILT) on a framed axis ends
++       it, so a stale FINGER classification can never leak into a later
++       wheel event. Axes absent from this frame keep their ownership: their
++       axis_stop is still to come. Unknown source changes nothing. */
++    if (xwl_seat->pending_pointer_event.has_axis_source) {
++        if (xwl_seat->pending_pointer_event.axis_source ==
++            WL_POINTER_AXIS_SOURCE_FINGER) {
++            if (vert_present &&
++                (xwl_seat->pending_pointer_event.has_vertical_scroll_v120 ||
++                 dy != 0))
++                xwl_seat->pending_pointer_event.finger_scroll_vert_active =
++                    TRUE;
++            if (horiz_present &&
++                (xwl_seat->pending_pointer_event.has_horizontal_scroll_v120 ||
++                 dx != 0))
++                xwl_seat->pending_pointer_event.finger_scroll_horiz_active =
++                    TRUE;
++        } else {
++            if (vert_present)
++                xwl_seat->pending_pointer_event.finger_scroll_vert_active =
++                    FALSE;
++            if (horiz_present)
++                xwl_seat->pending_pointer_event.finger_scroll_horiz_active =
++                    FALSE;
++        }
++    }
+ 
+-    valuator_mask_zero(&mask);
+-    if (xwl_seat->pending_pointer_event.has_vertical_scroll_v120)
+-        valuator_mask_set_double(&mask, SCROLL_AXIS_VERT, dy_v120 / 120.0);
+-    else if (xwl_seat->pending_pointer_event.has_vertical_scroll)
+-        valuator_mask_set_double(&mask,
+-                                 SCROLL_AXIS_VERT,
+-                                 wl_fixed_to_double(dy) / divisor);
++    vert_dev = scroll_axis_device(xwl_seat, TRUE);
++    horiz_dev = scroll_axis_device(xwl_seat, FALSE);
++    vert_touchpad = vert_dev == xwl_seat->touchpad_scroll;
++    horiz_touchpad = horiz_dev == xwl_seat->touchpad_scroll;
+ 
+-    if (xwl_seat->pending_pointer_event.has_horizontal_scroll_v120)
+-        valuator_mask_set_double(&mask, SCROLL_AXIS_HORIZ, dx_v120 / 120.0);
+-    else if (xwl_seat->pending_pointer_event.has_horizontal_scroll)
+-        valuator_mask_set_double(&mask,
+-                                 SCROLL_AXIS_HORIZ,
+-                                 wl_fixed_to_double(dx) / divisor);
++    if (vert_present && horiz_present && vert_dev == horiz_dev) {
++        queue_scroll_frame(vert_dev, TRUE, vert_value,
++                           TRUE, horiz_value, vert_touchpad);
++    } else {
++        if (vert_present)
++            queue_scroll_frame(vert_dev, TRUE, vert_value,
++                               FALSE, 0.0, vert_touchpad);
++        if (horiz_present)
++            queue_scroll_frame(horiz_dev, FALSE, 0.0,
++                               TRUE, horiz_value, horiz_touchpad);
++    }
+ 
+-    QueuePointerEvents(get_pointer_device(xwl_seat),
+-                       MotionNotify, 0, POINTER_RELATIVE, &mask);
++    /* A zero-delta smooth frame with no discrete detents is the axis_stop
++       terminator: it has just been routed to the owning device above, so
++       that axis's FINGER ownership ends here. */
++    if (vert_present &&
++        !xwl_seat->pending_pointer_event.has_vertical_scroll_v120 && dy == 0)
++        xwl_seat->pending_pointer_event.finger_scroll_vert_active = FALSE;
++    if (horiz_present &&
++        !xwl_seat->pending_pointer_event.has_horizontal_scroll_v120 && dx == 0)
++        xwl_seat->pending_pointer_event.finger_scroll_horiz_active = FALSE;
+ }
+ 
+ 
+@@ -778,6 +948,11 @@ dispatch_pointer_motion_event(struct xwl_seat *xwl_seat)
+     xwl_seat->pending_pointer_event.has_horizontal_scroll = FALSE;
+     xwl_seat->pending_pointer_event.has_vertical_scroll_v120 = FALSE;
+     xwl_seat->pending_pointer_event.has_horizontal_scroll_v120 = FALSE;
++    /* Portal (0005): the per-frame axis source expires with the frame. The
++       finger-gesture ownership flags above survive until axis_stop (or an
++       explicit non-finger source) terminates them. */
++    xwl_seat->pending_pointer_event.has_axis_source = FALSE;
++    xwl_seat->pending_pointer_event.axis_source = WL_POINTER_AXIS_SOURCE_WHEEL;
+ }
+ 
+ static void
+@@ -861,6 +1036,13 @@ pointer_handle_frame(void *data, struct wl_pointer *wl_pointer)
+ static void
+ pointer_handle_axis_source(void *data, struct wl_pointer *wl_pointer, uint32_t axis_source)
+ {
++    struct xwl_seat *xwl_seat = data;
++
++    /* Portal (0005): preserve the source for this pointer frame instead of
++       discarding it. dispatch_scroll_motion() folds it into the per-axis
++       FINGER ownership; unknown sources keep stock behavior. */
++    xwl_seat->pending_pointer_event.axis_source = axis_source;
++    xwl_seat->pending_pointer_event.has_axis_source = TRUE;
+ }
+ 
+ static void
+@@ -1721,6 +1903,33 @@ release_pointer(struct xwl_seat *xwl_seat)
+         disable_device(xwl_seat->pointer);
+ }
+ 
++/* Portal (0005): lifecycle for the dedicated xwayland-touchpad scroll
++   device. Mirrors init/release_pointer: created once, enabled with the
++   pointer capability, disabled on release. */
++static void
++init_touchpad_scroll_device(struct xwl_seat *xwl_seat)
++{
++    if (xwl_seat->touchpad_scroll == NULL) {
++        xwl_seat->touchpad_scroll =
++            add_device(xwl_seat, "xwayland-touchpad",
++                       xwl_pointer_proc_touchpad_scroll);
++        ActivateDevice(xwl_seat->touchpad_scroll, TRUE);
++    }
++    enable_device(xwl_seat, xwl_seat->touchpad_scroll);
++}
++
++static void
++release_touchpad_scroll_device(struct xwl_seat *xwl_seat)
++{
++    if (xwl_seat->touchpad_scroll) {
++        /* Gesture ownership dies with the device; the next capability
++           cycle starts unowned, i.e. stock behavior. */
++        xwl_seat->pending_pointer_event.finger_scroll_vert_active = FALSE;
++        xwl_seat->pending_pointer_event.finger_scroll_horiz_active = FALSE;
++        disable_device(xwl_seat->touchpad_scroll);
++    }
++}
++
+ static void
+ init_relative_pointer(struct xwl_seat *xwl_seat)
+ {
+@@ -1890,12 +2099,14 @@ seat_handle_capabilities(void *data, struct wl_seat *seat,
+ 
+     if (caps & WL_SEAT_CAPABILITY_POINTER && xwl_seat->wl_pointer == NULL) {
+         init_pointer(xwl_seat);
++        init_touchpad_scroll_device(xwl_seat);
+         init_relative_pointer(xwl_seat);
+         init_relative_pointer_listener(xwl_seat);
+         init_pointer_gestures_device(xwl_seat);
+         init_pointer_gestures_listener(xwl_seat);
+     } else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && xwl_seat->wl_pointer) {
+         release_pointer(xwl_seat);
++        release_touchpad_scroll_device(xwl_seat);
+         release_relative_pointer(xwl_seat);
+         release_pointer_gestures_device(xwl_seat);
+     }
+diff --git "a/hw/xwayland/xwayland-input.h" "b/hw/xwayland/xwayland-input.h"
+index d40bca0..5c70044 100644
+--- "a/hw/xwayland/xwayland-input.h"
++++ "b/hw/xwayland/xwayland-input.h"
+@@ -57,6 +57,10 @@ struct xwl_seat {
+     DeviceIntPtr pointer;
+     DeviceIntPtr relative_pointer;
+     DeviceIntPtr pointer_gestures;
++    /* Portal (0005): dedicated slave pointer carrying FINGER-source smooth
++       scroll. Created/released with the seat's pointer capability; only
++       finger-scroll valuator events are ever queued on it. */
++    DeviceIntPtr touchpad_scroll;
+     DeviceIntPtr keyboard;
+     DeviceIntPtr touch;
+     DeviceIntPtr stylus;
+@@ -119,6 +123,18 @@ struct xwl_seat {
+         Bool has_horizontal_scroll;
+         Bool has_vertical_scroll_v120;
+         Bool has_horizontal_scroll_v120;
++        /* Portal (0005): per-frame Wayland axis source. Valid only while
++           has_axis_source; expires with the frame at dispatch. Unknown or
++           missing source keeps stock behavior. */
++        uint32_t axis_source;
++        Bool has_axis_source;
++        /* Portal (0005): whether the vertical/horizontal scroll axis is
++           currently owned by an active FINGER gesture. Set when a nonzero
++           FINGER-sourced axis is dispatched, cleared when axis_stop
++           terminates that axis or an explicitly non-finger source arrives
++           on it. Survives across pointer frames until then. */
++        Bool finger_scroll_vert_active;
++        Bool finger_scroll_horiz_active;
+     } pending_pointer_event;
+ 
+     struct xorg_list tablets;
