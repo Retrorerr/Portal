@@ -88,7 +88,9 @@ jobs:
       matrix:
         variant: ${{ fromJSON(needs.setup.outputs.variants) }}
     container:
-      image: ${{ env.TRIXIE_IMAGE }}
+      # NOTE: digest pinned via TRIXIE_IMAGE in env above and inlined here,
+      # because container.image accepts only a restricted context set.
+      image: debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1
 
     steps:
       - name: Install git (trixie base has none)
