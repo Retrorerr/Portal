@@ -179,16 +179,21 @@ run_real_kwin() {
         esac
     fi
     export QT_FORCE_STDERR_LOGGING=1
-    # Software-GL sessions (ANLAND_NO_DRM_DEVICE=1: no GBM device can exist
-    # in the sandbox) must not force the freedreno gallium driver on KWin:
-    # inside the software EGL stack it demands the KGSL winsys, whose loader
-    # device-info is SELinux-denied, so EGL display init dies (proven:
-    # surfaceless EGL init fails with GALLIUM_DRIVER=freedreno, succeeds
-    # without). Unset it for kwin_wayland only; XWayland/Firefox keep the
-    # KGSL path. MESA_LOADER_DRIVER_OVERRIDE=kgsl is harmless here (proven).
-    if [ "${ANLAND_NO_DRM_DEVICE:-0}" = "1" ]; then
+    # Renderer mode (default: hardware accelerated). The emergency software
+    # fallback is explicit: /var/lib/localdesktop/kwin-glmode containing
+    # "sw" forces KWin surfaceless software rendering (ANLAND_NO_DRM_DEVICE)
+    # and drops the freedreno gallium forcing (inside the software EGL stack
+    # it demands the KGSL winsys and kills EGL init; proven by matrix).
+    # Anything else (including absent) is the production GPU path: make sure
+    # no stale NO_DRM_DEVICE leaks in and keep GALLIUM_DRIVER=freedreno so
+    # Mesa selects the kgsl winsys for the KGSL-backed render node.
+    if [ "$(cat /var/lib/localdesktop/kwin-glmode 2>/dev/null || echo hw)" = "sw" ]; then
+        export ANLAND_NO_DRM_DEVICE=1
         unset GALLIUM_DRIVER
-        printf 'anland software GL: unset GALLIUM_DRIVER for kwin_wayland\n' >> "$log_file"
+        printf 'anland GL mode=sw (emergency software fallback): NO_DRM_DEVICE=1, GALLIUM_DRIVER unset\n' >> "$log_file"
+    else
+        unset ANLAND_NO_DRM_DEVICE
+        printf 'anland GL mode=hw (accelerated default): NO_DRM_DEVICE unset, GALLIUM_DRIVER=%s\n' "${GALLIUM_DRIVER:-unset}" >> "$log_file"
     fi
     if [ -n "$segfault_lib" ]; then
         export LD_PRELOAD="$segfault_lib${LD_PRELOAD:+:$LD_PRELOAD}"

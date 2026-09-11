@@ -26,6 +26,7 @@ const KWIN_WRAPPER_SOURCE: &str = include_str!("../assets/localdesktop-kwin-wrap
 const STARTPLASMA_SOURCE: &str = include_str!("../assets/localdesktop-startplasma.sh");
 const PORTAL_IME_BRIDGE_SOURCE: &str = include_str!("../assets/portal-ime-bridge.py");
 const PORTAL_IBUS_LAZY_SOURCE: &str = include_str!("../assets/portal-ibus-lazy.sh");
+const ANLAND_ENV_SOURCE: &str = include_str!("../src/android/anland/mod.rs");
 
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
@@ -330,6 +331,32 @@ fn ibus_autostart_never_blocks_session_startup() {
 }
 
 #[test]
+fn anland_hardware_acceleration_is_default_with_explicit_software_fallback() {
+    // The production Anland path is hardware-accelerated: the default
+    // session env must not force software rendering, the Mesa layer binds
+    // track the pinned 26.3 layer, and the emergency software fallback is
+    // an explicit guest flag file mirrored host-side (never silent).
+    assert!(ANLAND_ENV_SOURCE.contains("software_gl_fallback_requested"));
+    assert!(ANLAND_ENV_SOURCE.contains("kwin-glmode"));
+    assert!(ANLAND_ENV_SOURCE.contains("libgallium-26.3.0-devel.so"));
+    assert!(!ANLAND_ENV_SOURCE.contains("libgallium-26.2.0-devel.so"));
+    // No software-forcing default in the session environment: the env
+    // constructor body (up to the next item) must be free of it; docs and
+    // fallback plumbing elsewhere may still mention it.
+    let env_fn = ANLAND_ENV_SOURCE
+        .find("pub fn guest_mesa_env()")
+        .expect("guest_mesa_env must exist");
+    let next_item = ANLAND_ENV_SOURCE[env_fn..]
+        .find("\npub fn ")
+        .expect("item after guest_mesa_env")
+        + env_fn;
+    assert!(
+        !ANLAND_ENV_SOURCE[env_fn..next_item].contains("ANLAND_NO_DRM_DEVICE"),
+        "hardware must be the default session environment"
+    );
+}
+
+#[test]
 fn anland_session_forces_wayland_qpa_for_plasma_clients() {
     // On the Anland path, Plasma/KDE Qt clients must select the Wayland
     // backend explicitly; otherwise ksmserver/plasmashell can fall back to
@@ -505,11 +532,16 @@ fn input_method_bridge_and_fallback_policy() {
     // when the binary advertises it; env + unified libkwin otherwise.
     assert!(KWIN_WRAPPER_SOURCE.contains("grep -q"));
     assert!(KWIN_WRAPPER_SOURCE.contains("binary lacks --anland"));
-    // 2e. Software-GL sessions (ANLAND_NO_DRM_DEVICE=1) unset GALLIUM_DRIVER
-    // for kwin_wayland only: forcing freedreno inside the software EGL stack
-    // demands the KGSL winsys and kills EGL init (proven by matrix).
-    assert!(KWIN_WRAPPER_SOURCE.contains("ANLAND_NO_DRM_DEVICE"));
+    // 2e. Renderer mode defaults to hardware acceleration; the emergency
+    // software fallback is an explicit guest flag file (kwin-glmode == sw)
+    // that forces surfaceless software rendering for KWin only. Forcing
+    // freedreno inside the software EGL stack demands the KGSL winsys and
+    // kills EGL init (proven by matrix), so the fallback also drops
+    // GALLIUM_DRIVER for kwin_wayland.
+    assert!(KWIN_WRAPPER_SOURCE.contains("kwin-glmode"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("ANLAND_NO_DRM_DEVICE=1"));
     assert!(KWIN_WRAPPER_SOURCE.contains("unset GALLIUM_DRIVER"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("unset ANLAND_NO_DRM_DEVICE"));
 
     // 3. Startplasma sets kwinrc InputMethod and VirtualKeyboardMode
     assert!(STARTPLASMA_SOURCE.contains("InputMethod=/usr/share/applications/portal-ime.desktop"));

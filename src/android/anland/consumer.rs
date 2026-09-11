@@ -25,13 +25,12 @@ use super::protocol::*;
 use super::sys;
 
 const FENCE_WAIT_MS: i32 = 5000;
-/// Cold-start patience for the very first frame: software rendering
-/// (llvmpipe) plus cold shader-cache compilation can need minutes before
-/// anything is queued, while a session that was already presenting and then
-/// stalls is genuinely wedged within seconds. Until any frame has ever been
-/// queued, the fence wait below runs in interruptible quanta up to this
-/// budget so session stop still joins promptly; afterwards the tight 5s
-/// stall detector applies unchanged.
+/// Cold-start patience, software-fallback sessions ONLY (see
+/// `Inner::software_gl`): llvmpipe plus cold shader-cache compilation can
+/// need minutes before anything is queued. The production GPU path keeps
+/// the tight 5s detector unconditionally: a presenting session that stalls
+/// is genuinely wedged within seconds, and a cold GPU boot that cannot
+/// produce a frame in seconds is broken, not slow.
 const COLD_FIRST_FRAME_WAIT_MS: i64 = 150_000;
 /// Acquire-fence wait: blocking, generous. The dequeue only returns slots
 /// SurfaceFlinger considers free, and the fence is near-always signaled
@@ -116,6 +115,11 @@ struct Inner {
     fallback_count: AtomicU64,
     /// Whether the plasma-ready marker was written for this session.
     ready_marked: AtomicBool,
+    /// Emergency software-GL fallback active (guest kwin-glmode flag).
+    /// Hardware (default): tight 5s fence watchdog, fenced READY evidence.
+    /// Software: bare frames prove liveness honestly; the first frame gets
+    /// a long cold budget (llvmpipe + cold shader cache need minutes).
+    software_gl: bool,
     /// GUI-client CPU sampler state: (total watched jiffies, sample ns,
     /// consecutive busy windows). Updated only by the event thread.
     client_prev: Mutex<(u64, u64, u32)>,
@@ -280,6 +284,7 @@ impl AnlandSession {
             frames_bare: AtomicU64::new(0),
             fallback_count: AtomicU64::new(0),
             ready_marked: AtomicBool::new(false),
+            software_gl: super::software_gl_fallback_requested(),
             client_prev: Mutex::new((0, 0, 0)),
             client_cache: Mutex::new((Vec::new(), 0)),
             client_active: AtomicBool::new(false),
@@ -899,6 +904,29 @@ fn render_loop(inner: Arc<Inner>) {
             );
             continue;
         }
+        // Producer gate: only select once THIS generation completed its
+        // handshake (kwin picked up fds + received BUFS_READY, recorded in
+        // connected_gen). Selecting earlier signals eventfd into the void
+        // and then burns the fence stall budget waiting on a producer that
+        // is still booting — every cold boot paid exactly one fallback this
+        // way (generation 1 always died ~5s after deposit, long before kwin
+        // could render; the working generation was always 2). Generation 0
+        // (no producer by design) still flows to the idle path below.
+        if cur_gen != 0
+            && inner.connected_gen.lock().unwrap().as_ref() != Some(&cur_gen)
+        {
+            win_skips += 1;
+            log_fps_window(
+                &inner,
+                &mut win_start_ns,
+                &mut win_frames,
+                &mut win_comp_us,
+                &mut win_comp_max_us,
+                &mut win_skips,
+                &mut win_stalls,
+            );
+            continue;
+        }
         // Selected: this dequeue hands us the slot KWin will render into.
         // (BufferQueue backpressure still applies when all slots are live.)
         let (anb, acquire) = match unsafe { inner.anw.dequeue(inner.window) } {
@@ -1013,11 +1041,11 @@ fn render_loop(inner: Arc<Inner>) {
             // Readiness contract (mirrors the Smithay path's first-frame
             // marker): the producer connected, rendered into our dma-buf,
             // and we queued it to SurfaceFlinger. Evidence is labeled
-            // honestly: queue with fence (SF waits GPU-side), or queue bare
-            // (software rendering is CPU-synchronous, so pixels are final
-            // when signaled and no fence exists). A bare first frame still
-            // proves a live desktop; without it, software sessions can never
-            // mark ready and always hit the session watchdog.
+            // honestly. Production GPU mode requires a genuine fence (SF
+            // waits GPU-side); only the explicit software fallback accepts
+            // a bare frame (llvmpipe is CPU-synchronous, so pixels are final
+            // when signaled and no fence exists — without this, software
+            // sessions could never mark ready).
             let (evidence, ready_log) = if rfence >= 0 {
                 inner.frames_fenced.fetch_add(1, Ordering::Relaxed);
                 (
@@ -1031,7 +1059,9 @@ fn render_loop(inner: Arc<Inner>) {
                     "anland.session=ready first software frame queued bare (plasma-ready marked, no GPU fence)",
                 )
             };
-            if !inner.ready_marked.swap(true, Ordering::AcqRel) {
+            let ready_eligible =
+                rfence >= 0 || (inner.software_gl && !inner.ready_marked.load(Ordering::Acquire));
+            if ready_eligible && !inner.ready_marked.swap(true, Ordering::AcqRel) {
                 let bufs = inner.buffers.lock().map(|b| b.len()).unwrap_or(0);
                 crate::android::diagnostics::mark_plasma_frame_presented_for_generation_with_evidence(
                     bufs,
@@ -1129,12 +1159,13 @@ fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, selected: bool) -> 
         return -1;
     }
     let Some(fence) = fence else { return -1 };
-    // Cold sessions (nothing ever queued) get a long interruptible budget;
-    // flowing sessions keep the tight stall detector. Tearing down the
-    // generation mid-render (as the old unconditional 5s timeout did) rips
-    // the producer connection while llvmpipe is still compiling/rasterizing
-    // the first frame, wedging cold boot in a reconnect loop forever.
-    let cold = inner.frames_queued.load(Ordering::Relaxed) == 0;
+    // Emergency software fallback only: cold sessions (nothing ever queued)
+    // get a long interruptible budget, because tearing down the generation
+    // mid-render rips the producer connection while llvmpipe is still
+    // compiling/rasterizing the first frame, wedging cold boot in a
+    // reconnect loop forever. Production GPU path: always the tight 5s
+    // detector (a GPU session that cannot present in seconds is broken).
+    let cold = inner.software_gl && inner.frames_queued.load(Ordering::Relaxed) == 0;
     let budget_ms: i64 = if cold {
         COLD_FIRST_FRAME_WAIT_MS
     } else {
