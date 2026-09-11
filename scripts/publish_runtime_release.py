@@ -232,25 +232,38 @@ class ReleaseLookupError(RuntimeError):
     """GitHub release lookup failed (not a confirmed absence). Fail closed."""
 
 
-# Substrings (lowercased) identifying a confirmed "release does not exist"
-# outcome from `gh release view` on a missing tag. Anything else on a
-# nonzero exit (auth, network, rate limit, invalid repo, permissions,
-# outage) must abort, never be mistaken for absence.
-NOT_FOUND_MARKERS = (
-    "release not found",
-    "no release",
-    "not found",
-    "could not resolve",
-    "404",
-)
+# Exact `gh` stderr observed (2026-09-12, gh on Windows) for a missing tag in
+# an otherwise valid repository:
+#   rc=1, stdout='', stderr='release not found\n'
+# This message alone is NOT sufficient: `gh release view` prints the same
+# text for an invalid repository, and generic substrings ("not found",
+# "404", "could not resolve") also match repository/auth/network errors.
+# Decision rule: only this exact message AND a separately validated
+# repository may return None. Everything else raises ReleaseLookupError.
+MISSING_RELEASE_RE = re.compile(r"^release not found$")
+
+
+def validate_repo(repo: str) -> None:
+    """Confirm `repo` itself exists and is reachable; raise otherwise."""
+    result = subprocess.run(
+        ["gh", "repo", "view", repo, "--json", "name"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ReleaseLookupError(
+            f"Cannot confirm repository '{repo}' while interpreting a missing release "
+            f"(exit {result.returncode}): {(result.stderr or result.stdout or '').strip()}"
+        )
 
 
 def get_existing_release(repo: str, tag: str) -> dict | None:
     """Return the release JSON when it exists, None on confirmed absence.
 
-    Raises ReleaseLookupError on any other failure (auth, network, rate
-    limit, permissions, outage) and on malformed JSON. Only a confirmed
-    not-found result may lead to release creation.
+    Raises ReleaseLookupError on any other failure (invalid repository,
+    auth, network, rate limit, permissions, outage) and on malformed JSON.
+    Only a confirmed missing RELEASE in an otherwise valid repository may
+    lead to release creation.
     """
     result = subprocess.run(
         ["gh", "release", "view", tag, "--repo", repo, "--json", "tagName,assets,isDraft"],
@@ -265,8 +278,12 @@ def get_existing_release(repo: str, tag: str) -> dict | None:
                 f"GitHub release lookup for '{tag}' returned malformed JSON: {e}\n"
                 f"stdout={result.stdout!r} stderr={result.stderr!r}"
             )
-    combined = f"{result.stderr or ''}\n{result.stdout or ''}".lower()
-    if any(marker in combined for marker in NOT_FOUND_MARKERS):
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    if stdout == "" and MISSING_RELEASE_RE.fullmatch(stderr):
+        # Candidate "missing release": rule out a missing/invalid repo
+        # (which prints the same text) before believing absence.
+        validate_repo(repo)
         return None
     raise ReleaseLookupError(
         f"GitHub release lookup for '{tag}' failed (exit {result.returncode}): "

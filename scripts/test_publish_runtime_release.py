@@ -32,10 +32,51 @@ class LookupTests(unittest.TestCase):
         with mock.patch.object(pub.subprocess, "run", return_value=completed(0, json.dumps(payload))):
             self.assertEqual(pub.get_existing_release("o/r", "runtime-v1"), payload)
 
-    def test_release_not_found_returns_none(self):
-        for msg in ["release not found", "Release not found", "HTTP 404", "could not resolve to a Release"]:
+    def _missing_release(self):
+        # Genuine missing release: exact known `gh` stderr plus a repo
+        # validation that succeeds.
+        return [
+            completed(1, "", "release not found\n"),
+            completed(0, '{"name":"r"}'),
+        ]
+
+    def test_genuine_missing_release_returns_none(self):
+        with mock.patch.object(pub.subprocess, "run", side_effect=self._missing_release()):
+            self.assertIsNone(pub.get_existing_release("o/r", "runtime-missing"))
+
+    def test_exact_known_form_returns_none(self):
+        with mock.patch.object(pub.subprocess, "run", side_effect=self._missing_release()) as run:
+            self.assertIsNone(pub.get_existing_release("o/r", "runtime-missing"))
+            repo_cmd = str(run.call_args_list[1])
+            self.assertIn("repo", repo_cmd)
+            self.assertIn("view", repo_cmd)
+
+    def test_repository_not_found_raises(self):
+        with mock.patch.object(pub.subprocess, "run", side_effect=[
+            completed(1, "", "release not found\n"),
+            completed(1, "", "GraphQL: Could not resolve to a Repository with the name 'o/r'. (repository)\n"),
+        ]):
+            with self.assertRaises(pub.ReleaseLookupError):
+                pub.get_existing_release("o/r", "runtime-v1")
+
+    def test_could_not_resolve_repository_raises(self):
+        with mock.patch.object(pub.subprocess, "run", side_effect=[
+            completed(1, "", "release not found\n"),
+            completed(1, "", "could not resolve repository o/r: network is unreachable"),
+        ]):
+            with self.assertRaises(pub.ReleaseLookupError):
+                pub.get_existing_release("o/r", "runtime-v1")
+
+    def test_generic_http_404_raises(self):
+        for msg in [
+            "Not Found (HTTP 404)",
+            '{"message":"Not Found","status":"404"}gh: Not Found (HTTP 404)\n',
+            "HTTP 404",
+            "404 Not Found",
+        ]:
             with mock.patch.object(pub.subprocess, "run", return_value=completed(1, "", msg)):
-                self.assertIsNone(pub.get_existing_release("o/r", "runtime-missing"), msg)
+                with self.assertRaises(pub.ReleaseLookupError):
+                    pub.get_existing_release("o/r", "runtime-v1")
 
     def test_auth_failure_fails_closed(self):
         with mock.patch.object(pub.subprocess, "run", return_value=completed(1, "", "Bad credentials")):
@@ -50,6 +91,12 @@ class LookupTests(unittest.TestCase):
 
     def test_malformed_json_fails_closed(self):
         with mock.patch.object(pub.subprocess, "run", return_value=completed(0, "{not json")):
+            with self.assertRaises(pub.ReleaseLookupError):
+                pub.get_existing_release("o/r", "runtime-v1")
+
+    def test_capitalized_not_found_raises(self):
+        # Only the exact lowercase `gh` form counts; near-misses abort.
+        with mock.patch.object(pub.subprocess, "run", return_value=completed(1, "", "Release not found")):
             with self.assertRaises(pub.ReleaseLookupError):
                 pub.get_existing_release("o/r", "runtime-v1")
 
