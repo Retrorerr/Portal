@@ -42,6 +42,36 @@ FORBIDDEN_FILES = [
     "usr/bin/pacman",
 ]
 
+# Versions published before the lfdevs Anland overlay existed. Every other
+# version must prove Anland capability below; a future runtime that silently
+# falls back to stock non-Anland KWin fails validation and cannot publish.
+LEGACY_STOCK_VERSIONS = {
+    "debian13-arm64-2026.09.05.3",
+}
+
+# Exact identity of the pinned lfdevs Anland Termux 5.13.3 payloads. The -95
+# kwin_wayland advertises `--anland` ("Render to the anland display daemon")
+# and libkwin6 carries KWin::AnlandBackend; matching these bytes proves the
+# deployed files are the Anland-capable ones, not stock Debian rebuilds.
+ANLAND_KWIN_WAYLAND_SHA256 = "4ad23a5aefbde02dae70ec270423b75205906be8ef8b0fd473fd32a11424bdbf"
+ANLAND_KWIN_WAYLAND_OPTION_MARKER = b"Render to the anland display daemon"
+ANLAND_LIBKWIN_SHA256 = "ea784ec5ed66d2114e5bbd6813e9fef4f2a9baec67c695c2841762e57d0505c6"
+ANLAND_LIBKWIN_BACKEND_MARKER = b"AnlandBackend"
+ANLAND_XWAYLAND_SHA256 = "3a25266671b7615740a7da602bd6a645bc8966be04d1a69c3536f09e67df2f87"
+ANLAND_KWIN_VERSION = "4:6.3.6-95"
+ANLAND_XWAYLAND_VERSION = "2:24.1.6-91"
+ANLAND_OVERLAY_PACKAGES = ("kwin-common", "kwin-data", "kwin-wayland", "kwin-x11", "libkwin6")
+# Stock versions that must NOT appear for the overlaid packages. Their
+# presence means the builder silently fell back to Debian KWin/XWayland.
+STOCK_FALLBACK_VERSIONS = {
+    "kwin-common": {"4:6.3.6-1"},
+    "kwin-data": {"4:6.3.6-1"},
+    "kwin-wayland": {"4:6.3.6-1"},
+    "kwin-x11": {"4:6.3.6-1"},
+    "libkwin6": {"4:6.3.6-1"},
+    "xwayland": {"2:24.1.6-1"},
+}
+
 
 def compute_sha256_and_size(path: Path) -> tuple[str, int]:
     size = path.stat().st_size
@@ -99,7 +129,103 @@ def validate_archive(archive_path: Path, expected_version: str) -> None:
             if forb in found_members:
                 raise RuntimeError(f"Archive contains forbidden entry: {forb}")
 
+        # 5. Anland capability (every version after the legacy stock ones).
+        # This is the fail-closed gate: a runtime whose KWin silently fell
+        # back to stock Debian cannot be published as canonical.
+        if archived_version not in LEGACY_STOCK_VERSIONS:
+            validate_anland_capable(tar, found_members)
+
     print("Archive layout and required components successfully validated.")
+
+
+def parse_dpkg_status_versions(tar: tarfile.TarFile, found_members: dict) -> dict:
+    status_name = "var/lib/dpkg/status"
+    if status_name not in found_members:
+        raise RuntimeError("Archive is missing dpkg status for Anland validation")
+    status_file = tar.extractfile(found_members[status_name])
+    if status_file is None:
+        raise RuntimeError("Unable to read dpkg status for Anland validation")
+    versions = {}
+    package = None
+    for line in status_file.read().decode("utf-8", errors="replace").splitlines():
+        if line.startswith("Package: "):
+            package = line.split(":", 1)[1].strip()
+        elif line.startswith("Version: ") and package and package not in versions:
+            versions[package] = line.split(":", 1)[1].strip()
+            package = None
+    return versions
+
+
+def validate_anland_capable(tar: tarfile.TarFile, found_members: dict) -> None:
+    print("Validating Anland capability (lfdevs KWin/XWayland stack)...")
+    versions = parse_dpkg_status_versions(tar, found_members)
+
+    # 5a. Overlay packages must report the lfdevs revisions.
+    for package in ANLAND_OVERLAY_PACKAGES:
+        version = versions.get(package)
+        if version != ANLAND_KWIN_VERSION:
+            raise RuntimeError(
+                f"Anland validation failed: {package} version is '{version}', "
+                f"expected lfdevs '{ANLAND_KWIN_VERSION}' (stock fallback?)"
+            )
+    xwayland_version = versions.get("xwayland")
+    if xwayland_version != ANLAND_XWAYLAND_VERSION:
+        raise RuntimeError(
+            f"Anland validation failed: xwayland version is '{xwayland_version}', "
+            f"expected patched '{ANLAND_XWAYLAND_VERSION}' (stock fallback?)"
+        )
+
+    # 5b. Stock fallback versions must be absent for the overlaid packages.
+    for package, forbidden in STOCK_FALLBACK_VERSIONS.items():
+        if versions.get(package) in forbidden:
+            raise RuntimeError(
+                f"Anland validation failed: {package} carries stock version "
+                f"'{versions.get(package)}'; the lfdevs overlay did not apply"
+            )
+
+    # 5c. Exact binary identity plus capability markers. Hash equality with
+    # the pinned lfdevs payloads proves these are the Anland-capable files;
+    # the markers prove the capability itself (--anland option, backend).
+    def read_member(name: str) -> bytes:
+        if name not in found_members:
+            raise RuntimeError(f"Anland validation failed: archive missing {name}")
+        member_file = tar.extractfile(found_members[name])
+        if member_file is None:
+            raise RuntimeError(f"Anland validation failed: unable to read {name}")
+        return member_file.read()
+
+    kwin_bytes = read_member("usr/bin/kwin_wayland")
+    if hashlib.sha256(kwin_bytes).hexdigest() != ANLAND_KWIN_WAYLAND_SHA256:
+        raise RuntimeError(
+            "Anland validation failed: usr/bin/kwin_wayland bytes do not match "
+            "the pinned lfdevs -95 binary"
+        )
+    if ANLAND_KWIN_WAYLAND_OPTION_MARKER not in kwin_bytes:
+        raise RuntimeError(
+            "Anland validation failed: kwin_wayland does not advertise the "
+            "--anland option (stock binary?)"
+        )
+
+    libkwin_bytes = read_member("usr/lib/aarch64-linux-gnu/libkwin.so.6.3.6")
+    if hashlib.sha256(libkwin_bytes).hexdigest() != ANLAND_LIBKWIN_SHA256:
+        raise RuntimeError(
+            "Anland validation failed: libkwin.so.6.3.6 bytes do not match "
+            "the pinned lfdevs -95 library"
+        )
+    if ANLAND_LIBKWIN_BACKEND_MARKER not in libkwin_bytes:
+        raise RuntimeError(
+            "Anland validation failed: libkwin.so.6.3.6 lacks the AnlandBackend "
+            "implementation (stock library?)"
+        )
+
+    xwayland_bytes = read_member("usr/bin/Xwayland")
+    if hashlib.sha256(xwayland_bytes).hexdigest() != ANLAND_XWAYLAND_SHA256:
+        raise RuntimeError(
+            "Anland validation failed: usr/bin/Xwayland bytes do not match "
+            "the pinned patched 24.1.6-91 binary"
+        )
+
+    print("Anland capability validated: lfdevs -95 KWin + patched XWayland present.")
 
 
 def get_existing_release(repo: str, tag: str) -> dict | None:

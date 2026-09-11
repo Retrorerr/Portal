@@ -87,15 +87,25 @@ pub fn guest_socket_path() -> &'static str {
 ///
 /// This mirrors the upstream `anland-termux` session recipe
 /// (`MESA_LOADER_DRIVER_OVERRIDE=kgsl TURNIP_KMD=kgsl GALLIUM_DRIVER=freedreno
-/// FD_FORCE_KGSL=1 XWAYLAND_FORCE_KGSL_SURFACELESS=1`). Two upstream vars are
-/// deliberately NOT set: `EGL_PLATFORM=surfaceless` and
-/// `ANLAND_NO_DRM_DEVICE=1` switch KWin into "surfaceless EGL without a KWin
-/// DrmDevice" (QtQuick software fallback, OffscreenQuickView texture
-/// failures) and wedge its composites after a few frames (proven by bisect:
-/// 4 fenced frames, then KWin `consumer disconnected, entering fallback`
-/// with our acquire fences pending forever). KWin's render-node probe is
-/// already solved by the `drmshim.so` preload (thousands of fenced frames
-/// last milestone), so KWin keeps its proven init.
+/// FD_FORCE_KGSL=1 XWAYLAND_FORCE_KGSL_SURFACELESS=1`). `EGL_PLATFORM` is
+/// deliberately NOT set (it forces QtQuick software fallback with
+/// OffscreenQuickView texture failures).
+///
+/// `ANLAND_NO_DRM_DEVICE=1` switches KWin's Anland backend into surfaceless
+/// operation without a KWin DrmDevice (no GBM render node required). This is
+/// REQUIRED on sandboxes where no DRM render node can ever work: the node is
+/// SELinux-denied (EACCES) so the shim can only fake open()+version, while
+/// libdrm's mandatory sysfs device-info lookup is likewise SELinux-denied
+/// (EACCES) and every real GPU ioctl (MSM GEM/params) fails on the fake fd.
+/// Both failure stages were proven on-device with stock Mesa 25 and the
+/// lfdevs 26.3 Mesa alike, so no Mesa version can satisfy the GBM path here.
+///
+/// An older bisect blamed this mode for wedging composites after 4 fenced
+/// frames (`consumer disconnected` with acquire fences pending forever), but
+/// that predates the demand-driven vsync pacing, eventfd write, and fence
+/// fixes, so the verdict is re-tested rather than assumed. KWin's own
+/// render-node probe stays solved by the `drmshim.so` preload for paths
+/// that still probe it.
 /// - `XWAYLAND_FORCE_KGSL_SURFACELESS=1`: the `-91` XWayland's KGSL glamor
 ///   backend instead of GBM (which cannot work without a render node).
 ///   Proven: `Xwayland glamor: using KGSL surfaceless EGL backend`.
@@ -129,6 +139,9 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         ("GTK_IM_MODULE".into(), "ibus".into()),
         ("ANLAND_SOCKET".into(), guest_socket_path().into()),
         ("ANLAND".into(), "1".into()),
+        // No DRM render node is obtainable in the sandbox (see above): run
+        // KWin's Anland backend surfaceless instead of exiting on GBM setup.
+        ("ANLAND_NO_DRM_DEVICE".into(), "1".into()),
         ("ANLAND_SKIP_IMPLICIT_SYNC_WAIT".into(), "1".into()),
         // The audio engine has no host counterpart yet; skip it entirely.
         ("ANLAND_DISABLE_AUDIO".into(), "1".into()),

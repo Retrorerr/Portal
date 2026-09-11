@@ -25,6 +25,14 @@ use super::protocol::*;
 use super::sys;
 
 const FENCE_WAIT_MS: i32 = 5000;
+/// Cold-start patience for the very first frame: software rendering
+/// (llvmpipe) plus cold shader-cache compilation can need minutes before
+/// anything is queued, while a session that was already presenting and then
+/// stalls is genuinely wedged within seconds. Until any frame has ever been
+/// queued, the fence wait below runs in interruptible quanta up to this
+/// budget so session stop still joins promptly; afterwards the tight 5s
+/// stall detector applies unchanged.
+const COLD_FIRST_FRAME_WAIT_MS: i64 = 150_000;
 /// Acquire-fence wait: blocking, generous. The dequeue only returns slots
 /// SurfaceFlinger considers free, and the fence is near-always signaled
 /// already; the wait sleeps in the fence ioctl on this dedicated thread
@@ -1002,26 +1010,37 @@ fn render_loop(inner: Arc<Inner>) {
             close_silently(rfence);
         } else {
             inner.frames_queued.fetch_add(1, Ordering::Relaxed);
-            if rfence >= 0 {
+            // Readiness contract (mirrors the Smithay path's first-frame
+            // marker): the producer connected, rendered into our dma-buf,
+            // and we queued it to SurfaceFlinger. Evidence is labeled
+            // honestly: queue with fence (SF waits GPU-side), or queue bare
+            // (software rendering is CPU-synchronous, so pixels are final
+            // when signaled and no fence exists). A bare first frame still
+            // proves a live desktop; without it, software sessions can never
+            // mark ready and always hit the session watchdog.
+            let (evidence, ready_log) = if rfence >= 0 {
                 inner.frames_fenced.fetch_add(1, Ordering::Relaxed);
-                // Readiness contract (mirrors the Smithay path's first-frame
-                // marker): the producer connected, GPU-rendered into our
-                // dma-buf, and we queued it to SurfaceFlinger with a real
-                // sync-file fence. Evidence is labeled honestly: queue with
-                // fence (SF waits GPU-side), not a display-present timestamp.
-                if !inner.ready_marked.swap(true, Ordering::AcqRel) {
-                    let bufs = inner.buffers.lock().map(|b| b.len()).unwrap_or(0);
-                    crate::android::diagnostics::mark_plasma_frame_presented_for_generation_with_evidence(
-                        bufs,
-                        1,
-                        cur_gen,
-                        "anland-queue-fenced",
-                        None,
-                    );
-                    log::info!("anland.session=ready first fenced frame queued (plasma-ready marked)");
-                }
+                (
+                    "anland-queue-fenced",
+                    "anland.session=ready first fenced frame queued (plasma-ready marked)",
+                )
             } else {
                 inner.frames_bare.fetch_add(1, Ordering::Relaxed);
+                (
+                    "anland-queue-bare-software",
+                    "anland.session=ready first software frame queued bare (plasma-ready marked, no GPU fence)",
+                )
+            };
+            if !inner.ready_marked.swap(true, Ordering::AcqRel) {
+                let bufs = inner.buffers.lock().map(|b| b.len()).unwrap_or(0);
+                crate::android::diagnostics::mark_plasma_frame_presented_for_generation_with_evidence(
+                    bufs,
+                    1,
+                    cur_gen,
+                    evidence,
+                    None,
+                );
+                log::info!("{ready_log}");
             }
             let n = inner.frames_queued.load(Ordering::Relaxed);
             if n == 1 || n % 120 == 0 {
@@ -1110,11 +1129,34 @@ fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, selected: bool) -> 
         return -1;
     }
     let Some(fence) = fence else { return -1 };
-    match sys::poll_readable(fence, FENCE_WAIT_MS) {
-        Ok(true) => {}
-        _ => {
-            enter_fallback(inner, "refresh_done timeout (producer stalled)");
-            return FENCE_LOST;
+    // Cold sessions (nothing ever queued) get a long interruptible budget;
+    // flowing sessions keep the tight stall detector. Tearing down the
+    // generation mid-render (as the old unconditional 5s timeout did) rips
+    // the producer connection while llvmpipe is still compiling/rasterizing
+    // the first frame, wedging cold boot in a reconnect loop forever.
+    let cold = inner.frames_queued.load(Ordering::Relaxed) == 0;
+    let budget_ms: i64 = if cold {
+        COLD_FIRST_FRAME_WAIT_MS
+    } else {
+        FENCE_WAIT_MS as i64
+    };
+    let mut waited_ms: i64 = 0;
+    loop {
+        let quantum_ms = FENCE_WAIT_MS.min((budget_ms - waited_ms).max(1) as i32);
+        match sys::poll_readable(fence, quantum_ms) {
+            Ok(true) => break,
+            _ => {
+                waited_ms += quantum_ms as i64;
+                if !inner.running.load(Ordering::Acquire) {
+                    // Session is stopping: bail without fallback churn so
+                    // the render thread still joins promptly.
+                    return FENCE_LOST;
+                }
+                if waited_ms >= budget_ms {
+                    enter_fallback(inner, "refresh_done timeout (producer stalled)");
+                    return FENCE_LOST;
+                }
+            }
         }
     }
     // Non-blocking recvmsg: 1 byte + optional SCM_RIGHTS fence.

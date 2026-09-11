@@ -13,11 +13,20 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from build_debian_rootfs import build_rootfs, fetch_package_index, resolve_dependencies, SEED_PACKAGES
+from build_debian_rootfs import (
+    build_rootfs,
+    fetch_package_index,
+    prepare_locked_packages_with_anland,
+    resolve_dependencies,
+    SEED_PACKAGES,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 LOCK = REPO / "assets/debian-runtime-packages.json"
-VERSION = "debian13-arm64-2026.09.05.3"
+# New canonical runtime: Debian base plus the pinned lfdevs Anland KWin/XWayland
+# stack. Older versions (e.g. debian13-arm64-2026.09.05.3) are never rebuilt or
+# replaced; pass --version explicitly to target a different image.
+VERSION = "debian13-arm64-2026.09.10.1"
 
 
 def add_bytes(archive, name, data, mode=0o644):
@@ -27,7 +36,7 @@ def add_bytes(archive, name, data, mode=0o644):
     archive.addfile(info, io.BytesIO(data))
 
 
-def build(output, refresh_lock=False):
+def build(output, refresh_lock=False, version=VERSION, with_anland=True):
     cache = REPO / "target/deb_cache"
     if refresh_lock:
         packages = fetch_package_index(cache / "Packages.txt")
@@ -38,6 +47,12 @@ def build(output, refresh_lock=False):
         LOCK.write_text(json.dumps({name: {key: packages[name][key] for key in
             ("Version", "Filename", "SHA256", "Size")} for name in names}, indent=2) + "\n")
     packages = json.loads(LOCK.read_text())
+    if with_anland:
+        # Deterministic overlay: stock KWin/XWayland entries are replaced by
+        # the verified lfdevs bundle (plus kwin-x11). The shipped
+        # runtime-packages.json below records the effective set, so the
+        # archive always describes exactly what was installed.
+        packages = prepare_locked_packages_with_anland(packages, cache)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="portal-runtime-") as temporary:
         config = Path(temporary)
@@ -79,19 +94,27 @@ def build(output, refresh_lock=False):
                 member.mode = 0o777
                 archive.addfile(member)
             # The APK synchronizes the authoritative session scripts before launching.
-            add_bytes(archive, "etc/portal-runtime-version", (VERSION + "\n").encode())
-            add_bytes(archive, "usr/share/portal/runtime-packages.json", LOCK.read_bytes())
+            add_bytes(archive, "etc/portal-runtime-version", (version + "\n").encode())
+            add_bytes(archive, "usr/share/portal/runtime-packages.json",
+                      (json.dumps(packages, indent=2) + "\n").encode())
     digest = hashlib.file_digest(output.open("rb"), "sha256").hexdigest()
-    manifest = {"version": VERSION,
-        "url": f"https://github.com/Retrorerr/Portal/releases/download/runtime-{VERSION}/{output.name}",
+    manifest = {"version": version,
+        "url": f"https://github.com/Retrorerr/Portal/releases/download/runtime-{version}/{output.name}",
         "sha256": digest, "compressed_bytes": output.stat().st_size}
-    (REPO / "assets/debian-runtime.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2), flush=True)
+    return manifest
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--refresh-lock", action="store_true", help="Explicitly select new package versions")
-    parser.add_argument("--output", type=Path, default=REPO / f"target/portal-{VERSION}.tar.xz")
+    parser.add_argument("--version", default=VERSION, help="Runtime version marker (never reuse a published version)")
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--no-anland", action="store_true", help="Build the pure Debian base without the lfdevs overlay")
     args = parser.parse_args()
-    build(args.output, args.refresh_lock)
+    output = args.output or (REPO / f"target/portal-{args.version}.tar.xz")
+    manifest = build(output, args.refresh_lock, args.version, not args.no_anland)
+    # NOTE: assets/debian-runtime.json is only rewritten by
+    # scripts/publish_runtime_release.py after the archive passes validation
+    # and the bytes are durably published. A local build never retargets the
+    # canonical manifest on its own.
