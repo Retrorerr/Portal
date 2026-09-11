@@ -95,8 +95,7 @@ const XWAYLAND_CANDIDATE_SHA256: &str =
     "b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d";
 /// Stock Debian trixie arm64 xinput (diagnostic tool for the XI2 proof;
 /// same overlay staging, never in the default loader path).
-const XWAYLAND_XINPUT_BINARY: &[u8] =
-    include_bytes!("../../../assets/xwayland-candidate/xinput");
+const XWAYLAND_XINPUT_BINARY: &[u8] = include_bytes!("../../../assets/xwayland-candidate/xinput");
 /// Project Anland load-time stub: satisfies the lfdevs kwin_wayland binary's
 /// AnlandBackend reference when QPainter sessions run the overlay libkwin
 /// (which has no Anland backend). Preloaded ONLY in QPainter mode; traps if
@@ -1791,6 +1790,30 @@ fn provision_ibus_packages(fs_root: &Path) {
     });
 }
 
+fn setup_mesa_layer(options: &SetupOptions) -> StageOutput {
+    // QPainter sessions must avoid Mesa provisioning entirely.
+    if !crate::android::anland::is_anland_requested() {
+        return None;
+    }
+    if super::mesa_layer::is_provisioned() {
+        return None;
+    }
+    // Heavy work belongs in the spawned thread so the setup UI stays live
+    // during the ~11 MB download/verify/extract/promote. The stage
+    // completes (success or clearly reported failure) before Plasma setup
+    // runs, so KWin can never launch while provisioning is unfinished.
+    let sender = options.mpsc_sender.clone();
+    Some(thread::spawn(move || {
+        super::mesa_layer::provision_with_progress(|message| {
+            diagnostics::host_event("mesa-provisioning", &message);
+            let _ = sender.send(SetupMessage::Progress(message));
+        });
+        // provision_with_progress logs + reports failure without panicking:
+        // the session fails closed at GBM setup with a diagnosable kwin
+        // log and retries on a later launch (preserved behavior).
+    }))
+}
+
 fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let username = get_application_context().local_config.user.username;
@@ -1803,11 +1826,12 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     // IBus packages pre-session (detached, non-blocking); the autostart
     // launcher only starts an installed daemon, never package-manages.
     provision_ibus_packages(fs_root);
-    // Mesa KGSL layer (blocking, Anland only): the kgsl winsys lives here
-    // and stock Mesa has none, so without it KWin exits at GBM setup. Runs
-    // at most once per install (marker-gated); QPainter sessions skip it.
-    if crate::android::anland::is_anland_requested() {
-        super::mesa_layer::provision();
+    // Mesa KGSL layer is provisioned by the dedicated `mesa-kgsl-layer`
+    // setup stage (spawned thread with progress). Never download inline
+    // here: Plasma setup only verifies presence and fails closed at GBM
+    // setup with a diagnosable log when the layer is absent.
+    if crate::android::anland::is_anland_requested() && !super::mesa_layer::is_provisioned() {
+        log::error!("mesa KGSL layer missing at Plasma setup; Anland GPU boot will fail at GBM setup (will retry on next launch)");
     }
 
     // All builds need the socket fstat fix in this existing library. A
@@ -2165,6 +2189,7 @@ pub fn setup_with_completion(
         ("bwrap-shim", Box::new(setup_fake_bwrap)),
         ("chromium-no-sandbox", Box::new(setup_chromium_no_sandbox)),
         ("onboard-signal-fix", Box::new(setup_onboard_signal_fix)),
+        ("mesa-kgsl-layer", Box::new(setup_mesa_layer)),
         ("plasma-wayland", Box::new(setup_plasma_wayland)),
         ("xkb-symlink", Box::new(fix_xkb_symlink)),
     ];
