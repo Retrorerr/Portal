@@ -75,6 +75,13 @@ pub fn take_setup_complete() -> bool {
     SETUP_COMPLETE.swap(false, Ordering::AcqRel)
 }
 
+/// Peek without consuming: is a setup completion waiting to be handled?
+/// SPIKE-ONLY (branch compose-setup-spike): lets the Compose overlay hold the
+/// handoff until the explicit Start Plasma action arrives.
+pub fn has_setup_complete() -> bool {
+    SETUP_COMPLETE.load(Ordering::Acquire)
+}
+
 /// Register the Looper and PopupWindow owned by the WebView thread.
 ///
 /// Replacing the old references is deliberate. Android may deliver `resumed` more than once;

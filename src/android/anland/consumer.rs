@@ -1071,6 +1071,8 @@ fn render_loop(inner: Arc<Inner>) {
                     None,
                 );
                 log::info!("{ready_log}");
+                // SPIKE compose-setup: first presented desktop frame dismisses the overlay.
+                crate::android::utils::compose_overlay::notify_desktop_ready_cached();
             }
             let n = inner.frames_queued.load(Ordering::Relaxed);
             if n == 1 || n % 120 == 0 {
