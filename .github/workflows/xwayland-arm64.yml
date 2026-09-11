@@ -153,21 +153,33 @@ jobs:
         run: |
           set -eu
           cd xwayland-src
-          # The ONLY source delta vs pinned -91 must be the input-path patch
-          # plus its series/changelog registration. Graphics files must be
-          # untouched.
+          # The ONLY tracked-tree delta vs pinned -91 must be the series and
+          # changelog registration (the source delta lives inside the 0005
+          # patch file until quilt applies it at build time).
           git status --porcelain
           test "$(git status --porcelain | wc -l)" = "3"
-          git diff --stat
-          git diff --name-only | grep -Eq '^hw/xwayland/xwayland-input\.[ch]$'
           git diff --name-only | grep -Eq '^debian/patches/series$'
           git diff --name-only | grep -Eq '^debian/changelog$'
-          if git diff --name-only | grep -Ev 'xwayland-input\.[ch]$|debian/(patches/series|changelog)$'; then
+          if git diff --name-only | grep -Ev 'debian/(patches/series|changelog)$'; then
             echo "unexpected files modified"; exit 1
           fi
-          test -z "$(git status --porcelain -- hw/xwayland/xwayland-glamor-gbm.c hw/xwayland/xwayland-dri3.c hw/xwayland/xwayland-present.c hw/xwayland/xwayland-glamor.c)"
-          grep -q 'xwayland-touchpad' hw/xwayland/xwayland-input.c
-          grep -q 'libinput Tapping Enabled' hw/xwayland/xwayland-input.c
+          patch="../portal/$PORTAL_PATCH"
+          # The 0005 patch itself must touch only the input path.
+          echo "--- files in 0005:"
+          grep -E '^(---|\+\+\+) [ab]/' "$patch" | sort -u
+          test "$(grep -cE '^--- a/' "$patch")" = "2"
+          grep -q '^--- a/hw/xwayland/xwayland-input\.c$' "$patch"
+          grep -q '^--- a/hw/xwayland/xwayland-input\.h$' "$patch"
+          if grep -E '^(---|\+\+\+) [ab]/' "$patch" | grep -Ev 'xwayland-input\.[ch]$'; then
+            echo "0005 touches files outside the input path"; exit 1
+          fi
+          grep -q 'xwayland-touchpad' "$patch"
+          grep -q 'libinput Tapping Enabled' "$patch"
+          # Prove the patch applies to the pristine pinned tree (quilt would
+          # also fail the build, but this gate names the cause precisely).
+          apt-get update
+          apt-get install -y --no-install-recommends patch
+          patch -p1 --dry-run < "$patch"
 
       - name: Install build dependencies
         run: |
