@@ -772,13 +772,38 @@ impl<T: 'static> EventLoop<T> {
                                     .iter()
                                     .any(|button| *button != MouseButton::Left);
                                 if !has_non_primary_button {
+                                    // A new contact ends an orphaned synthetic drag first: the
+                                    // previous contact died without a terminal event, so the
+                                    // fresh contact arms normally and cannot inherit the
+                                    // orphan's tap (ownership clearing drops its tap context).
+                                    if self.touchpad_gestures.finish_touchpad_drag_if_owned()
+                                        == Some(TouchpadGestureAction::DragEnd)
+                                    {
+                                        send_mouse_button(
+                                            callback,
+                                            self.window_target(),
+                                            window_id,
+                                            device_id,
+                                            event::ElementState::Released,
+                                            MouseButton::Left,
+                                        );
+                                    }
                                     self.touchpad_gestures.down(
                                         gesture_time,
                                         location.x,
                                         location.y,
                                     );
-                                } else {
-                                    self.touchpad_gestures.cancel();
+                                } else if self.touchpad_gestures.cancel()
+                                    == Some(TouchpadGestureAction::DragEnd)
+                                {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        MouseButton::Left,
+                                    );
                                 }
                             },
                             MotionAction::Up => {
@@ -866,6 +891,52 @@ impl<T: 'static> EventLoop<T> {
                                     );
                                 }
                                 if self.touchpad_gestures.cancel()
+                                    == Some(TouchpadGestureAction::DragEnd)
+                                {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        MouseButton::Left,
+                                    );
+                                }
+                            },
+                            MotionAction::HoverExit => {
+                                // Abnormal contact end (finger left the pad with no ACTION_UP):
+                                // finish an owned synthetic drag exactly once. Scroll ends
+                                // first so a concurrent scroll still terminates cleanly.
+                                if self.touchpad_gestures.end_scroll() {
+                                    send_mouse_wheel(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        0.0,
+                                        0.0,
+                                        event::TouchPhase::Ended,
+                                    );
+                                }
+                                if self.touchpad_gestures.hover_exit()
+                                    == Some(TouchpadGestureAction::DragEnd)
+                                {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        MouseButton::Left,
+                                    );
+                                }
+                            },
+                            MotionAction::HoverEnter => {
+                                // A fresh hover cursor while Portal still owns a synthetic
+                                // drag proves the drag contact died silently (no terminal
+                                // event arrived): reconcile the orphan exactly once. All
+                                // other states are left untouched.
+                                if self.touchpad_gestures.hover_enter()
                                     == Some(TouchpadGestureAction::DragEnd)
                                 {
                                     send_mouse_button(
