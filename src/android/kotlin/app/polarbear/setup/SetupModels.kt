@@ -55,9 +55,10 @@ fun formatStorageLine(ids: Set<String>): Triple<String, String, String> {
 
 fun formatExtrasDelta(ids: Set<String>): String {
     val mb = extrasDownloadMb(ids)
-    if (mb < 1000) {
-        val tenth = (mb * 10) / 1000
-        return "+0.$tenth GB"
+    if (mb < 100) {
+        return "+$mb MB"
     }
-    return "+${formatGb(mb)} GB"
+    val whole = mb / 1000
+    val tenth = (mb % 1000) / 100
+    return "+$whole.$tenth GB"
 }
