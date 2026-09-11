@@ -1,12 +1,7 @@
 # Phase B: XWayland touchpad-source diagnosis (Firefox momentum)
 
-Status: **diagnosis complete, hypothesis confirmed end-to-end. No candidate
-built.** There is no trustworthy ARM64-Debian build path in this environment
-(no WSL distribution, no aarch64-linux-gnu toolchain, no guest shell channel),
-and the task forbids live-guest mutation, runtime rebuilds, and overwriting
-the working XWayland binary before a candidate is independently validated.
-Per the task's own fallback rule, this file keeps the evidence/diagnostic
-work so a proper ARM64 environment can execute the candidate recipe below.
+Status: **diagnosis complete, hypothesis confirmed end-to-end; native ARM64
+build pipeline live; Portal 0005 candidate patch authored in-repo.**
 **No fake inertia was added anywhere. Stock XWayland remains canonical.**
 
 ## Provenance of the pinned binary (exact)
@@ -20,21 +15,46 @@ work so a proper ARM64 environment can execute the candidate recipe below.
   `xwayland_24.1.6.orig.tar.xz` from a Debian mirror and checking
   MD5 `78067c218323fe2a496ca5f2145fe7ab` (matches the published Ubuntu
   checksum for the same file).
-- lfdevs source: `github.com/lfdevs/xwayland`, branch `debian-unstable`
-  (full xserver tree + `debian/`). Packaging delta over Debian `-1` is
-  exactly 4 patches (`debian/patches/series`), all graphics-only:
+- lfdevs source, pinned EXACTLY (never the branch tip):
+  `github.com/lfdevs/xwayland` commit
+  `461772ae63c8985fd5671ea85d38d5102590d760`
+  (merge PR #1 "Support KGSL surfaceless glamor and DRI3 rendering",
+  2026-07-09; changelog head at this commit is `xwayland (2:24.1.6-91)`).
+  Packaging delta over Debian `-1` is exactly 4 patches
+  (`debian/patches/series` at the pinned commit), all graphics-only:
   - `0001-...-kgsl-dmabuf-v3-fallback-paths` (rev -90)
   - `0002-...-glamor-...-KGSL-surfaceless-backend-path` (rev -91)
   - `0003-...-dri3-...-KGSL-surfaceless-client-render` (rev -91)
   - `0004-...-KGSL-frame-callback-recovery-per-window` (rev -91)
-- Input-path identity: `hw/xwayland/xwayland-input.c` at lfdevs
-  `debian-unstable` tip is **byte-identical** to upstream 24.1.6
-  (2977 lines both; `git diff --no-index` empty). No lfdevs patch touches
+  The Portal patch is `0005` (see below); `-92` stays reserved for lfdevs.
+- Input-path identity: `hw/xwayland/xwayland-input.c` at the pinned commit
+  is **byte-identical** to upstream 24.1.6
+  (3621 lines both; `git diff --no-index` empty; also identical to the
+  `debian-unstable` tip file). No lfdevs patch touches
   input, axis handling, XI2 devices, or valuators.
 - Stock binary in the canonical runtime:
   `/usr/bin/Xwayland` SHA-256
   `3a25266671b7615740a7da602bd6a645bc8966be04d1a69c3536f09e67df2f87`
   (recorded 2026-09-11; keep as the immediate recovery reference).
+
+## Native ARM64 build pipeline (reproduces -91)
+
+- Workflow: `.github/workflows/xwayland-arm64.yml`, `runs-on:
+  ubuntu-24.04-arm`, container `debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1`
+  (manifest-list digest; arm64 image `sha256:0aa09084…`). Build-only,
+  `contents: read`, branch-scoped trigger; uploads .deb/.buildinfo/.changes
+  plus a canonical-vs-reproduced comparison. Pushes the pinned SHA checkout
+  and fails closed on any pin mismatch.
+- Baseline validation (unmodified pinned source, CI run 2026-09-11):
+  version `2:24.1.6-91`, arch arm64, **identical .deb file layout**,
+  **identical control metadata incl. Depends**, AArch64 ELF64 with the
+  expected NEEDED set, `/usr/bin/Xwayland` 2455888 bytes both.
+  Binary SHA differs (`3a25…` vs `97e4…`); byte-level analysis proves
+  metadata-only delta: 20-byte `.note.gnu.build-id`, `.dynsym`/`.dynstr`
+  entry *ordering* (same symbols, link-order nondeterminism), and the
+  `.gnu_debuglink` filename (embeds the build-id). Section headers
+  identical. Source/package configuration conclusively equivalent, so per
+  the task this does not block the candidate.
 
 ## Diagnosis: how FINGER source was handled before (now)
 
@@ -74,7 +94,7 @@ into `ScrollWheelInput` (no fling). XI2 valuator events demonstrably flow
 (pixel-smooth scrolling works), so classification — not transport — is the
 single broken link. The original hypothesis is **confirmed from both ends**.
 
-## Candidate design (UNVALIDATED — do not build blindly)
+## Candidate design (implemented as 0005, validation pending)
 
 Smallest patch consistent with the GTK rule above, against the exact
 `lfdevs/xwayland@debian-unstable` source:
@@ -103,20 +123,20 @@ Expected result: finger scroll arrives on a GTK-TOUCHPAD device (existing
 zero Firefox configuration change); wheel scroll stays mouse-classified on
 the original device with identical behavior.
 
-## Deterministic build recipe (for a proper ARM64 environment)
+## Deterministic build recipe (live)
 
-- Host: Debian 13 (trixie) ARM64, or x86_64 with qemu-user-static +
-  `sbuild`/`pbuilder` for `arm64`.
-- Source: `lfdevs/xwayland@debian-unstable` at the commit that built -91
-  (record the exact SHA when executing; changelog head at diagnosis time
-  was the 2026-07-09 `-91` entry), plus the candidate patch above as
-  `debian/patches/0005-...` with a `debian/changelog` `-92` entry.
-- Build: `dpkg-buildpackage -b -us -uc` with the same meson options as the
-  `-91` build (`debian/rules`); record the resulting `Xwayland` binary
-  SHA-256 next to the stock SHA above.
-- Provenance gate: input-file diff against upstream 24.1.6 must show ONLY
-  the candidate hunk; `debian/patches/series` must list exactly
+- Implemented as `.github/workflows/xwayland-arm64.yml` (see the pipeline
+  section above): checks out the pinned SHA, registers
+  `patches/xwayland/0005-xwayland-preserve-finger-axis-source.patch` as
+  `debian/patches/0005-...` with a `debian/changelog` entry for
+  `2:24.1.6-91portal1` (never `-92`), asserts the patch scope (only
+  `hw/xwayland/xwayland-input.{c,h}` + series/changelog; graphics files
+  untouched), then `dpkg-buildpackage -b -us -uc`.
+- Provenance gate (enforced in CI): input-file diff against upstream 24.1.6
+  shows ONLY the candidate hunk; `debian/patches/series` lists exactly
   0001-0005.
+- Record the resulting candidate package/binary SHA-256 values in the final
+  report next to the stock SHAs above.
 
 ## A/B staging design (implement when a candidate exists)
 
