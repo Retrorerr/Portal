@@ -97,6 +97,7 @@ fn fixture(directory: &Path, version: &str) -> (RuntimeArtifact, std::path::Path
             url: "http://127.0.0.1:1/not-used".into(),
             sha256: format!("{:x}", Sha256::digest(&bytes)),
             compressed_bytes: bytes.len() as u64,
+            source_commit: None,
         },
         archive,
     )
@@ -333,8 +334,7 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
 }
 
 #[test]
-fn production_runtime_artifact_matches_manifest_and_archive_verification() {
-    let artifact = RuntimeArtifact::production();
+fn production_runtime_artifact_matches_manifest_and_archive_verification() {    let artifact = RuntimeArtifact::production();
     assert_eq!(artifact.version, "debian13-arm64-2026.09.10.1");
     assert_eq!(
         artifact.sha256,
@@ -349,6 +349,26 @@ fn production_runtime_artifact_matches_manifest_and_archive_verification() {
             .verify(&archive_path)
             .expect("RuntimeArtifact::verify failed on target archive");
     }
+}
+
+#[test]
+fn runtime_manifest_provenance_is_optional_and_forward_compatible() {
+    // Older manifests without `source_commit` must still parse, newer ones
+    // with provenance (and unknown future fields) must be accepted: the
+    // serde model has no `deny_unknown_fields` and `source_commit` defaults.
+    let legacy: RuntimeArtifact = serde_json::from_str(
+        r#"{"version":"v","url":"u","sha256":"s","compressed_bytes":1}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.source_commit, None);
+    let modern: RuntimeArtifact = serde_json::from_str(
+        r#"{"version":"v","url":"u","sha256":"s","compressed_bytes":1,"source_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","future_field":42}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        modern.source_commit.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
 }
 
 #[test]

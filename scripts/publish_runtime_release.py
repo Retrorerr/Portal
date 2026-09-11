@@ -228,18 +228,169 @@ def validate_anland_capable(tar: tarfile.TarFile, found_members: dict) -> None:
     print("Anland capability validated: lfdevs -95 KWin + patched XWayland present.")
 
 
+class ReleaseLookupError(RuntimeError):
+    """GitHub release lookup failed (not a confirmed absence). Fail closed."""
+
+
+# Substrings (lowercased) identifying a confirmed "release does not exist"
+# outcome from `gh release view` on a missing tag. Anything else on a
+# nonzero exit (auth, network, rate limit, invalid repo, permissions,
+# outage) must abort, never be mistaken for absence.
+NOT_FOUND_MARKERS = (
+    "release not found",
+    "no release",
+    "not found",
+    "could not resolve",
+    "404",
+)
+
+
 def get_existing_release(repo: str, tag: str) -> dict | None:
+    """Return the release JSON when it exists, None on confirmed absence.
+
+    Raises ReleaseLookupError on any other failure (auth, network, rate
+    limit, permissions, outage) and on malformed JSON. Only a confirmed
+    not-found result may lead to release creation.
+    """
     result = subprocess.run(
         ["gh", "release", "view", tag, "--repo", repo, "--json", "tagName,assets,isDraft"],
         capture_output=True,
         text=True,
     )
+    if result.returncode == 0:
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise ReleaseLookupError(
+                f"GitHub release lookup for '{tag}' returned malformed JSON: {e}\n"
+                f"stdout={result.stdout!r} stderr={result.stderr!r}"
+            )
+    combined = f"{result.stderr or ''}\n{result.stdout or ''}".lower()
+    if any(marker in combined for marker in NOT_FOUND_MARKERS):
+        return None
+    raise ReleaseLookupError(
+        f"GitHub release lookup for '{tag}' failed (exit {result.returncode}): "
+        f"{(result.stderr or result.stdout or '').strip()}"
+    )
+
+
+def get_source_commit() -> str:
+    """Return the exact 40-char Portal source SHA for release provenance."""
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+    )
     if result.returncode != 0:
-        return None
+        raise RuntimeError(
+            f"Cannot determine source commit for release provenance: "
+            f"{(result.stderr or result.stdout or '').strip()}"
+        )
+    sha = (result.stdout or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise RuntimeError(
+            f"Source commit is not an exact 40-char SHA for release provenance: {sha!r}"
+        )
+    return sha
+
+
+def check_source_clean(allow_dirty: bool = False) -> None:
+    """Require a clean-enough tree for publication unless explicitly allowed."""
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Cannot verify source cleanliness for release provenance: "
+            f"{(result.stderr or result.stdout or '').strip()}"
+        )
+    dirty = (result.stdout or "").strip()
+    if dirty and not allow_dirty:
+        raise RuntimeError(
+            "Refusing to publish from a dirty working tree (use --allow-dirty "
+            f"to override explicitly):\n{dirty}"
+        )
+
+
+def get_release_target(repo: str, tag: str) -> str | None:
+    """Return the release's target commitish (SHA or branch) or None."""
+    result = subprocess.run(
+        ["gh", "release", "view", tag, "--repo", repo, "--json", "targetCommitish"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ReleaseLookupError(
+            f"Cannot verify tag target for '{tag}' (exit {result.returncode}): "
+            f"{(result.stderr or result.stdout or '').strip()}"
+        )
     try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise ReleaseLookupError(
+            f"Tag target lookup for '{tag}' returned malformed JSON: {e}"
+        )
+    return data.get("targetCommitish")
+
+
+def verify_tag_target(repo: str, tag: str, expected_sha: str) -> None:
+    """Verify an existing tag's provenance instead of assuming correctness.
+
+    A 40-char target must equal the current source SHA; anything else is a
+    mismatch and aborts (never silently retarget a published runtime tag).
+    A branch target (e.g. legacy releases pinned to `main`) is left alone
+    with a warning: bytes-immutability checks below still apply.
+    """
+    target = get_release_target(repo, tag)
+    if target is None:
+        raise ReleaseLookupError(
+            f"Existing release '{tag}' exposes no target commitish; refusing to assume provenance"
+        )
+    if re.fullmatch(r"[0-9a-f]{40}", target or ""):
+        if target != expected_sha:
+            raise RuntimeError(
+                f"Existing release tag '{tag}' targets {target}, not current source {expected_sha}; "
+                "refusing to retarget a published runtime tag"
+            )
+        return
+    print(
+        f"Note: existing release '{tag}' targets branch '{target}' (predates source-pinning); "
+        "leaving tag provenance untouched, enforcing byte immutability only."
+    )
+
+
+def check_existing_asset(remote_asset: dict, local_name: str, local_size: int, local_digest: str) -> None:
+    """Fail closed when a published asset differs; require digest proof.
+
+    Size equality alone never proves byte equality. When GitHub exposes a
+    SHA-256 digest it must match exactly; when digest metadata is absent,
+    reuse is refused instead of assumed identical.
+    """
+    remote_size = remote_asset.get("size")
+    remote_digest = remote_asset.get("digest")
+    expected_digest = f"sha256:{local_digest}"
+    if remote_size != local_size:
+        raise RuntimeError(
+            f"Refusing to overwrite existing GitHub release asset '{local_name}' with different bytes!\n"
+            f"  Remote: {remote_size} bytes, digest={remote_digest}\n"
+            f"  Local:  {local_size} bytes, sha256={local_digest}"
+        )
+    if remote_digest:
+        if remote_digest != expected_digest:
+            raise RuntimeError(
+                f"Refusing to overwrite existing GitHub release asset '{local_name}' with different bytes!\n"
+                f"  Remote: {remote_size} bytes, digest={remote_digest}\n"
+                f"  Local:  {local_size} bytes, sha256={local_digest}"
+            )
+        return
+    raise RuntimeError(
+        f"Existing asset '{local_name}' exposes no SHA-256 digest; size equality "
+        "does not prove byte equality, refusing to reuse"
+    )
 
 
 def verify_public_url(url: str, expected_size: int) -> None:
@@ -257,7 +408,8 @@ def verify_public_url(url: str, expected_size: int) -> None:
 
 
 def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | None = None,
-            tag: str | None = None, skip_validation: bool = False, dry_run: bool = False) -> None:
+            tag: str | None = None, skip_validation: bool = False, dry_run: bool = False,
+            allow_dirty: bool = False) -> None:
     if not archive_path.exists():
         raise FileNotFoundError(f"Archive not found: {archive_path}")
 
@@ -287,6 +439,11 @@ def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | N
     if not skip_validation:
         validate_archive(archive_path, version)
 
+    # Provenance: pin the exact source commit; never float on `main`.
+    check_source_clean(allow_dirty=allow_dirty)
+    source_sha = get_source_commit()
+    print(f"Source commit:     {source_sha}")
+
     # Safety check: never overwrite an existing version with different bytes!
     if MANIFEST_PATH.exists():
         manifest = json.loads(MANIFEST_PATH.read_text())
@@ -303,26 +460,19 @@ def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | N
 
     if existing_release:
         print(f"GitHub release '{tag}' exists.")
+        verify_tag_target(repo, tag, source_sha)
         assets = existing_release.get("assets", [])
         for a in assets:
             if a.get("name") == archive_path.name:
-                remote_size = a.get("size")
-                remote_digest = a.get("digest")
-                expected_digest = f"sha256:{digest}"
-                if remote_size != size or (remote_digest and remote_digest != expected_digest):
-                    raise RuntimeError(
-                        f"Refusing to overwrite existing GitHub release asset '{archive_path.name}' with different bytes!\n"
-                        f"  Remote: {remote_size} bytes, digest={remote_digest}\n"
-                        f"  Local:  {size} bytes, sha256={digest}"
-                    )
-                print(f"Asset '{archive_path.name}' is already published with identical size ({size} bytes).")
+                check_existing_asset(a, archive_path.name, size, digest)
+                print(f"Asset '{archive_path.name}' is already published with identical digest ({size} bytes, sha256={digest}).")
                 asset_needs_upload = False
                 break
     else:
-        print(f"GitHub release '{tag}' does not exist yet.")
+        print(f"GitHub release '{tag}' does not exist yet (confirmed not-found).")
 
     if dry_run:
-        print("Dry-run mode: skipping GitHub release creation and upload.")
+        print(f"Dry-run mode: source {source_sha}; skipping GitHub release creation, upload, and manifest write (zero mutation).")
         return
 
     # Create or upload release
@@ -333,6 +483,7 @@ def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | N
             str(archive_path),
             "--repo", repo,
             "--title", tag,
+            "--target", source_sha,
             "--notes", f"Canonical Debian 13 ARM64 runtime {version} for Portal.",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -351,13 +502,16 @@ def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | N
             raise RuntimeError(f"Failed to upload asset: {result.stderr or result.stdout}")
         print("Asset uploaded.")
 
-    # Update or verify assets/debian-runtime.json
+    # Update or verify assets/debian-runtime.json (backwards-compatible:
+    # Rust's serde model ignores unknown fields, so `source_commit` is
+    # safe for older APKs while new tooling can audit provenance).
     expected_url = f"https://github.com/{repo}/releases/download/{tag}/{archive_path.name}"
     manifest_data = {
         "version": version,
         "url": expected_url,
         "sha256": digest,
         "compressed_bytes": size,
+        "source_commit": source_sha,
     }
     MANIFEST_PATH.write_text(json.dumps(manifest_data, indent=2) + "\n")
     print(f"Updated {MANIFEST_PATH.name} with release details.")
@@ -380,6 +534,7 @@ def main():
     parser.add_argument("--tag", help="Release tag (default: runtime-<version>)")
     parser.add_argument("--skip-validation", action="store_true", help="Skip inspecting archive internals")
     parser.add_argument("--dry-run", action="store_true", help="Validate and check status without publishing")
+    parser.add_argument("--allow-dirty", action="store_true", help="Allow publishing from a dirty tree (explicit override)")
     args = parser.parse_args()
 
     archive_path = args.archive
@@ -405,6 +560,7 @@ def main():
         tag=args.tag,
         skip_validation=args.skip_validation,
         dry_run=args.dry_run,
+        allow_dirty=args.allow_dirty,
     )
 
 
