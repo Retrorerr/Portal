@@ -563,6 +563,13 @@ fn input_method_bridge_and_fallback_policy() {
     assert!(KWIN_WRAPPER_SOURCE.contains("kwin-variant"));
     assert!(KWIN_WRAPPER_SOURCE.contains("sha256sum"));
     assert!(KWIN_WRAPPER_SOURCE.contains("falling back to stock"));
+    // 2c-ii. Canonical default is stock lfdevs (exact backend parity);
+    // unified stays available for A/B but must never be the silent default.
+    // Pinned as the exact default-assignment block (fallbacks elsewhere
+    // reuse the same words, so a bare substring would prove nothing).
+    assert!(KWIN_WRAPPER_SOURCE.contains(
+        "kwin_variant=stock\n    if [ -r /var/lib/localdesktop/kwin-variant ]"
+    ));
     // 2d. --anland is probe-gated: stock distro kwin_wayland exits(1) on
     // unknown options (compositor restart loop), so the flag is only passed
     // when the binary advertises it; env + unified libkwin otherwise.
