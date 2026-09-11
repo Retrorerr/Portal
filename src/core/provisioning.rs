@@ -17,6 +17,13 @@ pub struct RuntimeArtifact {
     pub url: String,
     pub sha256: String,
     pub compressed_bytes: u64,
+    /// Exact Portal source commit the runtime was published from (newer
+    /// manifests). Optional with a default so older manifests without
+    /// provenance still parse; unknown future fields are likewise ignored
+    /// (no `deny_unknown_fields`), keeping `debian-runtime.json`
+    /// backwards-compatible.
+    #[serde(default)]
+    pub source_commit: Option<String>,
 }
 
 impl RuntimeArtifact {
