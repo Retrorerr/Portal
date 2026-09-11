@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -48,6 +49,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -128,13 +130,17 @@ fun PortalSetupScreen() {
                     .widthIn(max = PortalDimens.SurfaceMaxWidth)
                     .fillMaxWidth(0.94f)
                     .shadow(
-                        28.dp,
+                        44.dp,
                         RoundedCornerShape(PortalDimens.SurfaceCorner),
                         ambientColor = palette.surfaceShadow,
                         spotColor = palette.surfaceShadow,
                     )
                     .clip(RoundedCornerShape(PortalDimens.SurfaceCorner))
-                    .background(palette.surfaceFill)
+                    .background(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(palette.surfaceTop, palette.surfaceBottom),
+                        ),
+                    )
                     .border(1.dp, palette.surfaceBorder, RoundedCornerShape(PortalDimens.SurfaceCorner))
                     .padding(
                         horizontal = PortalDimens.SurfacePaddingH,
@@ -144,7 +150,7 @@ fun PortalSetupScreen() {
                 SetupHeader(palette = palette)
                 Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
                 SectionLabel(text = "Appearance", palette = palette)
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
                 SlidingSegmentedControl(
                     options = AppearanceMode.entries,
                     selected = appearance,
@@ -154,7 +160,7 @@ fun PortalSetupScreen() {
                 )
                 Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
                 SectionLabel(text = "Interface size", palette = palette)
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
                 SlidingSegmentedControl(
                     options = InterfaceSize.entries,
                     selected = interfaceSize,
@@ -175,13 +181,6 @@ fun PortalSetupScreen() {
                     palette = palette,
                 )
                 Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(1.dp)
-                        .background(palette.surfaceBorder),
-                )
-                Spacer(modifier = Modifier.height(18.dp))
                 Text(
                     text = "$downloadGb GB download · $installedGb GB installed · $freeGb GB free",
                     fontSize = 13.sp,
@@ -209,55 +208,75 @@ private fun SetupBackground(palette: PortalPalette) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val w = maxWidth
         val h = maxHeight
-        Canvas(modifier = Modifier.fillMaxSize()) {
+        // Dedicated static backdrop layer: a few large aperture fragments,
+        // heavily softened once. Never animated, never blurred per-frame.
+        Canvas(modifier = Modifier.fillMaxSize().softBackdropBlur()) {
             val widthPx = w.toPx()
             val heightPx = h.toPx()
-            // Soft orange threshold glow, upper right, mostly off-canvas.
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        palette.arcOrange.copy(alpha = 0.30f),
-                        palette.arcOrange.copy(alpha = 0.0f),
-                    ),
-                    center = Offset(widthPx * 0.96f, -heightPx * 0.12f),
-                    radius = widthPx * 0.34f,
-                ),
-                radius = widthPx * 0.34f,
-                center = Offset(widthPx * 0.96f, -heightPx * 0.12f),
-            )
-            // Oversized partial ivory aperture, bleeding in from the left.
             drawArc(
                 color = palette.arcIvory,
                 startAngle = 130f,
                 sweepAngle = 200f,
                 useCenter = false,
-                topLeft = Offset(-widthPx * 0.62f, heightPx * 0.02f),
-                size = androidx.compose.ui.geometry.Size(widthPx * 1.1f, widthPx * 1.1f),
-                style = Stroke(width = 10.dp.toPx(), cap = StrokeCap.Round),
+                topLeft = Offset(-widthPx * 0.72f, -heightPx * 0.10f),
+                size = androidx.compose.ui.geometry.Size(widthPx * 1.35f, widthPx * 1.35f),
+                style = Stroke(width = 26.dp.toPx(), cap = StrokeCap.Round),
             )
-            // Second aperture echo, lower right.
             drawArc(
                 color = palette.arcIvory,
                 startAngle = 300f,
                 sweepAngle = 150f,
                 useCenter = false,
-                topLeft = Offset(widthPx * 0.62f, heightPx * 0.52f),
-                size = androidx.compose.ui.geometry.Size(widthPx * 0.85f, widthPx * 0.85f),
-                style = Stroke(width = 8.dp.toPx(), cap = StrokeCap.Round),
+                topLeft = Offset(widthPx * 0.55f, heightPx * 0.45f),
+                size = androidx.compose.ui.geometry.Size(widthPx * 1.05f, widthPx * 1.05f),
+                style = Stroke(width = 22.dp.toPx(), cap = StrokeCap.Round),
             )
-            // Restrained orange threshold arc near the glow.
-            drawArc(
-                color = palette.arcOrange,
-                startAngle = 205f,
-                sweepAngle = 62f,
-                useCenter = false,
-                topLeft = Offset(widthPx * 0.52f, -heightPx * 0.30f),
-                size = androidx.compose.ui.geometry.Size(widthPx * 0.62f, widthPx * 0.62f),
-                style = Stroke(width = 9.dp.toPx(), cap = StrokeCap.Round),
+        }
+        // Warm emitted light: soft radial falloff only, no painted arc.
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val widthPx = w.toPx()
+            val heightPx = h.toPx()
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        palette.arcOrange.copy(alpha = 0.5f),
+                        palette.arcOrange.copy(alpha = 0.0f),
+                    ),
+                    center = Offset(widthPx * 0.94f, -heightPx * 0.10f),
+                    radius = widthPx * 0.30f,
+                ),
+                radius = widthPx * 0.30f,
+                center = Offset(widthPx * 0.94f, -heightPx * 0.10f),
+            )
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        palette.arcOrange.copy(alpha = 0.16f),
+                        palette.arcOrange.copy(alpha = 0.0f),
+                    ),
+                    center = Offset(widthPx * 0.86f, -heightPx * 0.02f),
+                    radius = widthPx * 0.55f,
+                ),
+                radius = widthPx * 0.55f,
+                center = Offset(widthPx * 0.86f, -heightPx * 0.02f),
             )
         }
     }
 }
+
+private fun Modifier.softBackdropBlur(): Modifier =
+    if (android.os.Build.VERSION.SDK_INT >= 31) {
+        this.then(Modifier.blur(64.dp))
+    } else {
+        this
+    }
+
+private fun Modifier.softHaloBlur(): Modifier =
+    if (android.os.Build.VERSION.SDK_INT >= 31) {
+        this.then(Modifier.blur(10.dp))
+    } else {
+        this
+    }
 
 @Composable
 private fun SetupHeader(palette: PortalPalette) {
@@ -287,19 +306,24 @@ private fun SetupHeader(palette: PortalPalette) {
 private fun SectionLabel(text: String, palette: PortalPalette) {
     Text(
         text = text,
-        fontSize = 13.sp,
+        fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
-        color = palette.textSecondary,
+        color = palette.textMuted,
     )
 }
 
 @Composable
 private fun MinimalInstallRow(expanded: Boolean, onToggle: () -> Unit, palette: PortalPalette) {
     val tap = remember { MutableInteractionSource() }
+    val pressed by tap.collectIsPressedAsState()
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
+            .background(
+                if (pressed) palette.trackFill else Color.Transparent,
+                RoundedCornerShape(16.dp),
+            )
             .clickable(
                 interactionSource = tap,
                 indication = null,
@@ -308,7 +332,10 @@ private fun MinimalInstallRow(expanded: Boolean, onToggle: () -> Unit, palette: 
             )
             .padding(vertical = 6.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.heightIn(min = 54.dp),
+        ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "Minimal install",
@@ -335,7 +362,7 @@ private fun MinimalInstallRow(expanded: Boolean, onToggle: () -> Unit, palette: 
                 fontSize = 13.sp,
                 lineHeight = 20.sp,
                 color = palette.textSecondary,
-                modifier = Modifier.padding(top = 10.dp, end = 28.dp),
+                modifier = Modifier.padding(top = 10.dp, start = 8.dp, end = 28.dp),
             )
         }
     }
@@ -344,17 +371,23 @@ private fun MinimalInstallRow(expanded: Boolean, onToggle: () -> Unit, palette: 
 @Composable
 private fun EssentialsRow(selectedIds: Set<String>, onOpen: () -> Unit, palette: PortalPalette) {
     val tap = remember { MutableInteractionSource() }
+    val pressed by tap.collectIsPressedAsState()
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
+            .background(
+                if (pressed) palette.trackFill else Color.Transparent,
+                RoundedCornerShape(16.dp),
+            )
             .clickable(
                 interactionSource = tap,
                 indication = null,
                 role = Role.Button,
                 onClick = onOpen,
             )
-            .padding(vertical = 6.dp),
+            .padding(vertical = 6.dp)
+            .heightIn(min = 54.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -414,16 +447,18 @@ private fun BeginInstallButton(palette: PortalPalette) {
     val tap = remember { MutableInteractionSource() }
     val pressed by tap.collectIsPressedAsState()
     val pressScale by animateFloatAsState(
-        targetValue = if (pressed) 0.97f else 1f,
+        targetValue = if (pressed) 0.98f else 1f,
         animationSpec = tween(120),
         label = "press",
     )
-    // Stationary glow: fixed soft shape, opacity breathes gently. This is the
-    // only deliberately attention-seeking element on the screen.
+    // Stationary glow shaped like the button itself: a tight halo near the
+    // outline plus a broader faint falloff. Fixed shapes, only opacity
+    // breathes gently. This is the only deliberately attention-seeking
+    // element on the screen.
     val glowBreath = rememberInfiniteTransition(label = "glow")
     val glowAlpha by glowBreath.animateFloat(
-        initialValue = 0.45f,
-        targetValue = 0.75f,
+        initialValue = 0.5f,
+        targetValue = 0.8f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 2800, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
@@ -436,19 +471,36 @@ private fun BeginInstallButton(palette: PortalPalette) {
     ) {
         Box(
             modifier = Modifier
-                .widthIn(max = PortalDimens.BeginMaxWidth + 72.dp)
-                .fillMaxWidth(0.9f)
-                .height(PortalDimens.BeginHeight + 36.dp)
-                .graphicsLayer { alpha = glowAlpha }
-                .background(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            palette.glow.copy(alpha = 0.30f),
-                            palette.glow.copy(alpha = 0.0f),
+                .widthIn(max = PortalDimens.BeginMaxWidth + 40.dp)
+                .fillMaxWidth(0.85f)
+                .height(PortalDimens.BeginHeight + 28.dp)
+                .graphicsLayer { alpha = glowAlpha },
+            contentAlignment = Alignment.Center,
+        ) {
+            // Broad secondary falloff.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                palette.glow.copy(alpha = 0.10f),
+                                palette.glow.copy(alpha = 0.0f),
+                            ),
                         ),
                     ),
-                ),
-        )
+            )
+            // Tight halo hugging the button outline.
+            Box(
+                modifier = Modifier
+                    .widthIn(max = PortalDimens.BeginMaxWidth + 14.dp)
+                    .fillMaxWidth(0.84f)
+                    .height(PortalDimens.BeginHeight + 12.dp)
+                    .clip(RoundedCornerShape(30.dp))
+                    .background(palette.buttonOutline.copy(alpha = 0.55f))
+                    .softHaloBlur(),
+            )
+        }
         Box(
             modifier = Modifier
                 .widthIn(max = PortalDimens.BeginMaxWidth)
