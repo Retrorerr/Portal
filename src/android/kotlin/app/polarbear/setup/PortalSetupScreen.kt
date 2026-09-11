@@ -6,13 +6,8 @@ package app.polarbear.setup
 
 import android.util.Log
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -530,18 +525,9 @@ private fun BeginInstallButton(palette: PortalPalette, centered: Boolean) {
         label = "press",
     )
     // Persistent bloom: fixed MaskFilter light passes shaped like the button
-    // outline; only the drawn intensity breathes (0.72→1.0, ~3s), dipping
-    // slightly while pressed. This is the only continuously animated element.
-    val glowBreath = rememberInfiniteTransition(label = "glow")
-    val breath by glowBreath.animateFloat(
-        initialValue = 0.72f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 3000, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "glowAlpha",
-    )
+    // outline plus two slow caustic lobes travelling its perimeter. Only the
+    // drawn intensity responds to press; blur, geometry and circulation never
+    // change. This is the only continuously animated element.
     val dip by animateFloatAsState(
         targetValue = if (pressed) 0.8f else 1f,
         animationSpec = tween(110),
@@ -566,7 +552,7 @@ private fun BeginInstallButton(palette: PortalPalette, centered: Boolean) {
                 .portalBloom(
                     glow = palette.glow,
                     cornerRadius = 26.dp,
-                    intensity = breath * dip,
+                    intensity = dip,
                 )
                 .clip(RoundedCornerShape(26.dp))
                 .background(palette.buttonInterior)
