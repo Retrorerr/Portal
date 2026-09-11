@@ -127,6 +127,67 @@ else
             sha256sum /usr/lib/aarch64-linux-gnu/libkwin.so.6 >> "$log_file" 2>/dev/null || true
         fi
     fi
+    # Project Anland XWayland variant selection (Phase B A/B without APK
+    # rebuilds): explicit selection only. files/xwayland-variant arrives as
+    # LOCALDESKTOP_XWAYLAND_VARIANT ("candidate" or "stock");
+    # /var/lib/localdesktop/xwayland-variant is the out-of-band test
+    # override (same pattern as kwin-variant above). Default MUST remain
+    # stock: anything unrecognized, and any failed staging check, falls back
+    # to stock and is logged. Stock keeps today's exact PATH/environment:
+    # no wrapper binary, no extra processes, no behavior change.
+    xwayland_variant=stock
+    case "${LOCALDESKTOP_XWAYLAND_VARIANT:-}" in
+        candidate|stock) xwayland_variant="$LOCALDESKTOP_XWAYLAND_VARIANT" ;;
+    esac
+    if [ -r /var/lib/localdesktop/xwayland-variant ]; then
+        read -r xwayland_override < /var/lib/localdesktop/xwayland-variant
+        case "$xwayland_override" in
+            candidate|stock) xwayland_variant="$xwayland_override" ;;
+            *)
+                printf 'xwayland_variant override=%q rejected (want candidate|stock), keeping %s\n' \
+                    "$xwayland_override" "$xwayland_variant" >> "$log_file"
+                ;;
+        esac
+    fi
+    xwayland_bin=/usr/bin/Xwayland
+    if [ "$xwayland_variant" = "candidate" ]; then
+        # Staging gate (single decision per launch, no retry loop): readable
+        # + plausible size + exact pinned SHA. SHA equality also pins ELF
+        # architecture and every staged byte. Any failure selects stock.
+        xwayland_cand_dir=/usr/local/lib/portal-xwayland
+        xwayland_cand_bin="$xwayland_cand_dir/Xwayland"
+        xwayland_cand_sha_expected="b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d"
+        if [ -x "$xwayland_cand_bin" ] \
+            && [ "$(wc -c < "$xwayland_cand_bin" 2>/dev/null || echo 0)" -ge 1000000 ]; then
+            xwayland_cand_sha=$(sha256sum "$xwayland_cand_bin" 2>/dev/null | cut -d' ' -f1)
+            if [ "$xwayland_cand_sha" = "$xwayland_cand_sha_expected" ]; then
+                # KWin locates Xwayland via PATH: prepending the Portal dir
+                # selects the candidate with no wrapper and no stock impact
+                # (stock never touches PATH here).
+                PATH="$xwayland_cand_dir:$PATH"
+                export PATH
+                xwayland_bin="$xwayland_cand_bin"
+                printf 'xwayland_variant=candidate status=active sha=%s\n' \
+                    "$xwayland_cand_sha" >> "$log_file"
+            else
+                printf 'xwayland_variant=candidate status=rejected-bad-sha falling back to stock\n' \
+                    >> "$log_file"
+                xwayland_variant=stock
+            fi
+        else
+            printf 'xwayland_variant=candidate status=incomplete-staging falling back to stock\n' \
+                >> "$log_file"
+            xwayland_variant=stock
+        fi
+    fi
+    printf 'xwayland_variant=%s bin=%s resolved=%s\n' \
+        "$xwayland_variant" "$xwayland_bin" "$(command -v Xwayland)" >> "$log_file"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum /usr/bin/Xwayland >> "$log_file" 2>/dev/null || true
+        if [ "$xwayland_variant" = "candidate" ]; then
+            sha256sum "$xwayland_cand_bin" >> "$log_file" 2>/dev/null || true
+        fi
+    fi
     # Project Anland unified libkwin (Anland backend + Portal Touchpad) is
     # served from its own dir so the QPainter overlay and distro libkwin are
     # never shadowed. It provides the AnlandBackend symbol itself, so the
@@ -170,6 +231,119 @@ if [ -n "$segfault_lib" ]; then
     fi
 fi
 printf 'stack_capture=%s path=%s\n' "$stack_capture" "${segfault_lib:-unavailable}" >> "$log_file"
+
+# Phase B XI2 proof harness (inert unless explicitly flagged): when
+# /var/lib/localdesktop/xwayland-xinput-probe exists, a bounded background
+# job enumerates the XWayland XI2 devices (list + per-device properties)
+# into xwayland-xinput.log, and with content "capture:<seconds>" also dumps
+# raw XI2 events from the touchpad-classified device while the physical
+# touchpad is exercised. Stock sessions without the flag file behave
+# exactly as before (no extra processes, no environment change).
+portal_xinput_probe() {
+    local mode="$1"
+    shift
+    local xinput_bin=/usr/local/lib/portal-xwayland/xinput
+    local out="$state_dir/xwayland-xinput.log"
+    printf 'xinput probe start mode=%s time=%s variant=%s\n' \
+        "$mode" "$(date +%s)" "${xwayland_variant:-stock}" >> "$out"
+    if [ ! -x "$xinput_bin" ]; then
+        printf 'xinput probe: tool missing at %s\n' "$xinput_bin" >> "$out"
+        return 0
+    fi
+    # KWin launches its Xwayland with --xwayland-display/--xwayland-xauthority
+    # in our own argv: prefer those over scanning (the cookie suffix is
+    # random per launch). Fall back to the socket scan when absent.
+    local display=":0" xauth_file="" prev=""
+    for arg in "$@"; do
+        case "$arg" in
+            --xwayland-xauthority=*) xauth_file=${arg#*=} ;;
+            --xwayland-display=*) display=${arg#*=} ;;
+            *)
+                if [ "$prev" = "--xwayland-xauthority" ]; then xauth_file="$arg"; fi
+                if [ "$prev" = "--xwayland-display" ]; then display="$arg"; fi
+                ;;
+        esac
+        prev="$arg"
+    done
+    if [ -n "$xauth_file" ] && [ -r "$xauth_file" ]; then
+        export XAUTHORITY="$xauth_file"
+        printf 'xinput probe: using xauthority from argv\n' >> "$out"
+    else
+        printf 'xinput probe: no readable xauthority in argv (file=%s)\n' \
+            "${xauth_file:-none}" >> "$out"
+    fi
+    export DISPLAY="$display"
+    if ! "$xinput_bin" list >> "$out" 2>&1; then
+        printf 'xinput probe: argv display %s failed, falling back to socket scan\n' \
+            "$display" >> "$out"
+        display=""
+    fi
+    # Bounded fallback wait for an XWayland socket that answers XI2 queries.
+    local attempt=0
+    while [ -z "$display" ] && [ "$attempt" -lt 45 ]; do
+        for sock in /tmp/.X11-unix/X[0-9]; do
+            [ -S "$sock" ] || continue
+            dnum=${sock##*X}
+            if DISPLAY=":$dnum" "$xinput_bin" list >> "$out" 2>&1; then
+                display=":$dnum"
+                break 2
+            fi
+            printf 'xinput probe: display :%s not answering (%s)\n' \
+                "$dnum" "$(DISPLAY=":$dnum" "$xinput_bin" list 2>&1 | head -n 1)" >> "$out"
+        done
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+    if [ -z "$display" ]; then
+        printf 'xinput probe: no X display answered within bounds\n' >> "$out"
+        return 0
+    fi
+    printf 'xinput probe: display=%s\n' "$display" >> "$out"
+    export DISPLAY="$display"
+    "$xinput_bin" list --long >> "$out" 2>&1
+    # Per-device properties: the classification proof (which device, if any,
+    # exposes libinput Tapping Enabled, and with what value).
+    for id in $("$xinput_bin" list --id-only 2>/dev/null); do
+        printf -- '--- props for id %s ---\n' "$id" >> "$out"
+        "$xinput_bin" list-props "$id" >> "$out" 2>&1
+    done
+    case "$mode" in
+        capture:*)
+            secs=${mode#capture:}
+            case "$secs" in
+                ''|*[!0-9]*) secs=30 ;;
+            esac
+            [ "$secs" -ge 5 ] || secs=5
+            [ "$secs" -le 120 ] || secs=120
+            # Resolve the touchpad-classified device by its property, not by
+            # name: the device whose props carry libinput Tapping Enabled.
+            touch_id=""
+            for id in $("$xinput_bin" list --id-only 2>/dev/null); do
+                if "$xinput_bin" list-props "$id" 2>/dev/null | grep -q 'libinput Tapping Enabled'; then
+                    touch_id="$id"
+                    break
+                fi
+            done
+            if [ -z "$touch_id" ]; then
+                printf 'xinput probe: no touchpad-classified device for capture\n' >> "$out"
+                return 0
+            fi
+            printf 'xinput probe: capturing XI2 events from id %s for %ss (exercise the touchpad now)\n' \
+                "$touch_id" "$secs" >> "$out"
+            if command -v timeout >/dev/null 2>&1; then
+                timeout "$secs" "$xinput_bin" test-xi2 --root "$touch_id" >> "$out" 2>&1 || true
+            else
+                "$xinput_bin" test-xi2 --root "$touch_id" >> "$out" 2>&1 &
+                cap_pid=$!
+                sleep "$secs"
+                kill "$cap_pid" 2>/dev/null || true
+                wait "$cap_pid" 2>/dev/null || true
+            fi
+            printf 'xinput probe: capture done\n' >> "$out"
+            ;;
+    esac
+    return 0
+}
 
 run_real_kwin() {
     if [ "$anland_mode" -eq 0 ]; then
@@ -276,6 +450,19 @@ if [ "${LOCALDESKTOP_GDB_BACKTRACE:-0}" = "1" ] && command -v gdb >/dev/null 2>&
 fi
 
 if [ "$run_normally" -eq 1 ]; then
+    # Phase B probe trigger (flag-gated only; stock without the flag file is
+    # untouched). Runs concurrently with KWin; bounded waits guarantee it
+    # can never wedge session startup or shutdown.
+    if [ -r /var/lib/localdesktop/xwayland-xinput-probe ]; then
+        read -r xinput_probe_mode < /var/lib/localdesktop/xwayland-xinput-probe
+        case "$xinput_probe_mode" in
+            list|capture:*) portal_xinput_probe "$xinput_probe_mode" "$@" & ;;
+            *)
+                printf 'xinput probe mode=%q rejected (want list|capture:<secs>)\n' \
+                    "$xinput_probe_mode" >> "$log_file"
+                ;;
+        esac
+    fi
     run_real_kwin "$@"
     status=$?
 fi

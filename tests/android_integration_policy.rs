@@ -28,6 +28,8 @@ const PORTAL_IME_BRIDGE_SOURCE: &str = include_str!("../assets/portal-ime-bridge
 const PORTAL_IBUS_LAZY_SOURCE: &str = include_str!("../assets/portal-ibus-lazy.sh");
 const ANLAND_ENV_SOURCE: &str = include_str!("../src/android/anland/mod.rs");
 const MESA_LAYER_SOURCE: &str = include_str!("../src/android/proot/mesa_layer.rs");
+const XWAYLAND_SHA256SUMS_SOURCE: &str =
+    include_str!("../assets/xwayland-candidate/SHA256SUMS");
 
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
@@ -617,4 +619,45 @@ fn input_method_bridge_and_fallback_policy() {
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("nativeOnTextCommit"));
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("commitText"));
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("deleteSurroundingText"));
+}
+
+#[test]
+fn xwayland_variant_selection_policy() {
+    // 1. Setup stages the Phase B candidate + xinput into their own dir
+    // (never /usr/bin, never the loader path) on every launch.
+    assert!(ANDROID_SETUP_SOURCE.contains("usr/local/lib/portal-xwayland"));
+    assert!(ANDROID_SETUP_SOURCE.contains("sync_xwayland_candidate_overlay"));
+    // 2. The staged candidate SHA is pinned identically in setup.rs, the
+    // guest-side selection gate, and the asset manifest (transcription
+    // slips fail closed here, not on the tablet).
+    for pinned in [
+        "b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d",
+    ] {
+        assert!(ANDROID_SETUP_SOURCE.contains(pinned));
+        assert!(KWIN_WRAPPER_SOURCE.contains(pinned));
+        assert!(XWAYLAND_SHA256SUMS_SOURCE.contains(pinned));
+    }
+    // 3. files/xwayland-variant reaches the guest as an explicit env var.
+    assert!(ANLAND_ENV_SOURCE.contains("LOCALDESKTOP_XWAYLAND_VARIANT"));
+    assert!(ANLAND_ENV_SOURCE.contains("xwayland-variant"));
+    // 4. Wrapper default is stock, pinned as the exact assignment block so a
+    // bare substring (also used by fallback lines) proves nothing.
+    assert!(KWIN_WRAPPER_SOURCE.contains(
+        "xwayland_variant=stock\n    case \"${LOCALDESKTOP_XWAYLAND_VARIANT:-}\" in"
+    ));
+    // 5. Every staging failure falls back to stock; stock never touches PATH.
+    assert!(KWIN_WRAPPER_SOURCE.contains("status=rejected-bad-sha falling back to stock"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("status=incomplete-staging falling back to stock"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("PATH=\"$xwayland_cand_dir:$PATH\""));
+    // 6. Runs are attributed (which binary KWin actually resolved + SHAs).
+    assert!(KWIN_WRAPPER_SOURCE.contains("resolved="));
+    // 7. The XI2 proof harness is inert without its explicit flag file and
+    // resolves the touchpad device by property, never by name alone.
+    assert!(KWIN_WRAPPER_SOURCE.contains("xwayland-xinput-probe"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("xwayland-xinput.log"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("libinput Tapping Enabled"));
+    // 7b. The probe authenticates like KWin's own X clients: display and
+    // cookie come from our argv (--xwayland-display/--xwayland-xauthority),
+    // with a bounded socket scan only as fallback.
+    assert!(KWIN_WRAPPER_SOURCE.contains("--xwayland-xauthority"));
 }

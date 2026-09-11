@@ -127,6 +127,16 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         // via xinput). Without this Firefox X11 only sees KWin's pointer
         // emulation (tap works, drag/scroll/pinch don't).
         ("MOZ_USE_XINPUT2".into(), "1".into()),
+        // Phase B XWayland A/B: explicit per-launch selection consumed by the
+        // KWin wrapper (stock default; candidate only with SHA-validated
+        // staging, otherwise deterministic stock fallback before Plasma).
+        (
+            "LOCALDESKTOP_XWAYLAND_VARIANT".into(),
+            match xwayland_variant() {
+                XwaylandVariant::Candidate => "candidate".to_string(),
+                XwaylandVariant::Stock => "stock".to_string(),
+            },
+        ),
         // GTK input method: IBus. The Portal IBus engine bridges X11/GTK
         // editable focus to the Android IME (real FocusIn/FocusOut, commit,
         // delete, enter). Qt/Wayland clients are unaffected (QT_IM_MODULE
@@ -159,6 +169,51 @@ pub fn software_gl_fallback_requested() -> bool {
     std::fs::read_to_string(kwin_glmode_flag_path())
         .map(|s| s.trim().to_ascii_lowercase() == "sw")
         .unwrap_or(false)
+}
+
+/// Phase B XWayland A/B selection. `Candidate` serves the 0005
+/// touchpad-source build from `/usr/local/lib/portal-xwayland`; `Stock` is
+/// the untouched `/usr/bin/Xwayland` and MUST remain the default until a
+/// real mouse validates the candidate (no mouse is available in this task).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XwaylandVariant {
+    Stock,
+    Candidate,
+}
+
+/// Parse an xwayland-variant flag value. Only the exact word `candidate`
+/// (case-insensitive, trimmed) selects the candidate; anything else —
+/// including absent/unreadable — is stock. Pure function for unit tests.
+pub fn parse_xwayland_variant(raw: &str) -> XwaylandVariant {
+    if raw.trim().to_ascii_lowercase() == "candidate" {
+        XwaylandVariant::Candidate
+    } else {
+        XwaylandVariant::Stock
+    }
+}
+
+/// App-private flag file selecting the XWayland variant (content
+/// `candidate`; absent or anything else means stock).
+pub fn xwayland_variant_flag_path() -> std::path::PathBuf {
+    std::path::Path::new(crate::core::config::APP_FILES_ROOT).join("xwayland-variant")
+}
+
+/// Resolve the active XWayland variant, logging the decision. The guest
+/// session receives it as `LOCALDESKTOP_XWAYLAND_VARIANT`; the KWin wrapper
+/// enforces stock-on-any-doubt (missing/corrupt/wrong-SHA staging).
+pub fn xwayland_variant() -> XwaylandVariant {
+    let variant = std::fs::read_to_string(xwayland_variant_flag_path())
+        .map(|s| parse_xwayland_variant(&s))
+        .unwrap_or(XwaylandVariant::Stock);
+    match variant {
+        XwaylandVariant::Candidate => {
+            log::info!("anland.xwayland=candidate selected via xwayland-variant flag (stock remains default; wrapper SHA-gates staging)");
+        }
+        XwaylandVariant::Stock => {
+            log::info!("anland.xwayland=stock (default; write 'candidate' to xwayland-variant to try the 0005 build)");
+        }
+    }
+    variant
 }
 
 /// Bind mounts for the Anland guest session: broker socket dir + Mesa overlay.

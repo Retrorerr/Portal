@@ -1,0 +1,12 @@
+# Portal XWayland touchpad-source candidate staging pins.
+#
+# Xwayland: CI-built from pinned lfdevs 461772ae63c8985fd5671ea85d38d5102590d760
+# (2:24.1.6-91) plus patches/xwayland/0005-... via
+# .github/workflows/xwayland-arm64.yml. Package version 2:24.1.6-91portal1
+# (run 34615737714, 2026-09-11). Staged to /usr/local/lib/portal-xwayland/
+# (never /usr/bin) and selected only via files/xwayland-variant=candidate.
+# Recovery reference (stock): 3a25266671b7615740a7da602bd6a645bc8966be04d1a69c3536f09e67df2f87.
+b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d  Xwayland
+# xinput: stock Debian trixie arm64 xinput_1.6.4-1+b3_arm64.deb, usr/bin/xinput
+# only (diagnostic tool for the XI2 proof; same overlay staging).
+e135bede216ce4a54af321f0c5f5acf42a710dd311bd7a9263edce3e97eb78d0  xinput
