@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -69,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.setup.components.EssentialsPicker
 import app.polarbear.setup.components.SlidingSegmentedControl
+import app.polarbear.setup.components.portalBloom
 
 private const val PREVIEW_TAG = "PortalComposeSetup"
 
@@ -148,47 +150,96 @@ fun PortalSetupScreen() {
                     ),
             ) {
                 SetupHeader(palette = palette)
-                Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
-                SectionLabel(text = "Appearance", palette = palette)
-                Spacer(modifier = Modifier.height(12.dp))
-                SlidingSegmentedControl(
-                    options = AppearanceMode.entries,
-                    selected = appearance,
-                    onSelect = { appearance = it },
-                    label = { it.name.lowercase().replaceFirstChar(Char::uppercase) },
-                    palette = palette,
-                )
-                Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
-                SectionLabel(text = "Interface size", palette = palette)
-                Spacer(modifier = Modifier.height(12.dp))
-                SlidingSegmentedControl(
-                    options = InterfaceSize.entries,
-                    selected = interfaceSize,
-                    onSelect = { interfaceSize = it },
-                    label = { it.name },
-                    palette = palette,
-                )
-                Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
-                MinimalInstallRow(
-                    expanded = minimalExpanded,
-                    onToggle = { minimalExpanded = !minimalExpanded },
-                    palette = palette,
-                )
-                Spacer(modifier = Modifier.height(18.dp))
-                EssentialsRow(
-                    selectedIds = essentials,
-                    onOpen = { pickerVisible = true },
-                    palette = palette,
-                )
-                Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
-                Text(
-                    text = "$downloadGb GB download · $installedGb GB installed · $freeGb GB free",
-                    fontSize = 13.sp,
-                    color = palette.textMuted,
-                    modifier = Modifier.align(Alignment.CenterHorizontally),
-                )
-                Spacer(modifier = Modifier.height(24.dp))
-                BeginInstallButton(palette = palette)
+                Spacer(modifier = Modifier.height(20.dp))
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    if (maxWidth >= PortalDimens.TwoColumnBreakpoint) {
+                        Column {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(
+                                    PortalDimens.ColumnGutter,
+                                ),
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    AppearanceSection(
+                                        appearance = appearance,
+                                        onSelect = { appearance = it },
+                                        palette = palette,
+                                    )
+                                    Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
+                                    InterfaceSizeSection(
+                                        size = interfaceSize,
+                                        onSelect = { interfaceSize = it },
+                                        palette = palette,
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    MinimalInstallRow(
+                                        expanded = minimalExpanded,
+                                        onToggle = { minimalExpanded = !minimalExpanded },
+                                        palette = palette,
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    EssentialsRow(
+                                        selectedIds = essentials,
+                                        onOpen = { pickerVisible = true },
+                                        palette = palette,
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(22.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "$downloadGb GB download · $installedGb GB installed · $freeGb GB free",
+                                    fontSize = 13.sp,
+                                    color = palette.textMuted,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                BeginInstallButton(palette = palette, centered = false)
+                            }
+                        }
+                    } else {
+                        AppearanceSection(
+                            appearance = appearance,
+                            onSelect = { appearance = it },
+                            palette = palette,
+                        )
+                        Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
+                        InterfaceSizeSection(
+                            size = interfaceSize,
+                            onSelect = { interfaceSize = it },
+                            palette = palette,
+                        )
+                        Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
+                        MinimalInstallRow(
+                            expanded = minimalExpanded,
+                            onToggle = { minimalExpanded = !minimalExpanded },
+                            palette = palette,
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        EssentialsRow(
+                            selectedIds = essentials,
+                            onOpen = { pickerVisible = true },
+                            palette = palette,
+                        )
+                        Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
+                        Box(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "$downloadGb GB download · $installedGb GB installed · $freeGb GB free",
+                                fontSize = 13.sp,
+                                color = palette.textMuted,
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(20.dp))
+                        BeginInstallButton(palette = palette, centered = true)
+                    }
+                }
             }
         }
         EssentialsPicker(
@@ -271,13 +322,6 @@ private fun Modifier.softBackdropBlur(): Modifier =
         this
     }
 
-private fun Modifier.softHaloBlur(): Modifier =
-    if (android.os.Build.VERSION.SDK_INT >= 31) {
-        this.then(Modifier.blur(10.dp))
-    } else {
-        this
-    }
-
 @Composable
 private fun SetupHeader(palette: PortalPalette) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -309,6 +353,40 @@ private fun SectionLabel(text: String, palette: PortalPalette) {
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
         color = palette.textMuted,
+    )
+}
+
+@Composable
+private fun AppearanceSection(
+    appearance: AppearanceMode,
+    onSelect: (AppearanceMode) -> Unit,
+    palette: PortalPalette,
+) {
+    SectionLabel(text = "Appearance", palette = palette)
+    Spacer(modifier = Modifier.height(9.dp))
+    SlidingSegmentedControl(
+        options = AppearanceMode.entries,
+        selected = appearance,
+        onSelect = onSelect,
+        label = { it.name.lowercase().replaceFirstChar(Char::uppercase) },
+        palette = palette,
+    )
+}
+
+@Composable
+private fun InterfaceSizeSection(
+    size: InterfaceSize,
+    onSelect: (InterfaceSize) -> Unit,
+    palette: PortalPalette,
+) {
+    SectionLabel(text = "Interface size", palette = palette)
+    Spacer(modifier = Modifier.height(9.dp))
+    SlidingSegmentedControl(
+        options = InterfaceSize.entries,
+        selected = size,
+        onSelect = onSelect,
+        label = { it.name },
+        palette = palette,
     )
 }
 
@@ -443,74 +521,53 @@ private fun ForwardChevron(palette: PortalPalette) {
 }
 
 @Composable
-private fun BeginInstallButton(palette: PortalPalette) {
+private fun BeginInstallButton(palette: PortalPalette, centered: Boolean) {
     val tap = remember { MutableInteractionSource() }
     val pressed by tap.collectIsPressedAsState()
     val pressScale by animateFloatAsState(
-        targetValue = if (pressed) 0.98f else 1f,
-        animationSpec = tween(120),
+        targetValue = if (pressed) 0.985f else 1f,
+        animationSpec = tween(110),
         label = "press",
     )
-    // Stationary glow shaped like the button itself: a tight halo near the
-    // outline plus a broader faint falloff. Fixed shapes, only opacity
-    // breathes gently. This is the only deliberately attention-seeking
-    // element on the screen.
+    // Persistent bloom: fixed MaskFilter light passes shaped like the button
+    // outline; only the drawn intensity breathes (0.72→1.0, ~3s), dipping
+    // slightly while pressed. This is the only continuously animated element.
     val glowBreath = rememberInfiniteTransition(label = "glow")
-    val glowAlpha by glowBreath.animateFloat(
-        initialValue = 0.5f,
-        targetValue = 0.8f,
+    val breath by glowBreath.animateFloat(
+        initialValue = 0.72f,
+        targetValue = 1.0f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2800, easing = FastOutSlowInEasing),
+            animation = tween(durationMillis = 3000, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
         ),
         label = "glowAlpha",
     )
+    val dip by animateFloatAsState(
+        targetValue = if (pressed) 0.8f else 1f,
+        animationSpec = tween(110),
+        label = "pressDip",
+    )
     Box(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = if (centered) Modifier.fillMaxWidth() else Modifier,
         contentAlignment = Alignment.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .widthIn(max = PortalDimens.BeginMaxWidth + 40.dp)
-                .fillMaxWidth(0.85f)
-                .height(PortalDimens.BeginHeight + 28.dp)
-                .graphicsLayer { alpha = glowAlpha },
-            contentAlignment = Alignment.Center,
-        ) {
-            // Broad secondary falloff.
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        brush = Brush.radialGradient(
-                            colors = listOf(
-                                palette.glow.copy(alpha = 0.10f),
-                                palette.glow.copy(alpha = 0.0f),
-                            ),
-                        ),
-                    ),
-            )
-            // Tight halo hugging the button outline.
-            Box(
-                modifier = Modifier
-                    .widthIn(max = PortalDimens.BeginMaxWidth + 14.dp)
-                    .fillMaxWidth(0.84f)
-                    .height(PortalDimens.BeginHeight + 12.dp)
-                    .clip(RoundedCornerShape(30.dp))
-                    .background(palette.buttonOutline.copy(alpha = 0.55f))
-                    .softHaloBlur(),
-            )
+        val buttonWidth = if (centered) {
+            Modifier.widthIn(max = PortalDimens.BeginMaxWidth).fillMaxWidth(0.8f)
+        } else {
+            Modifier.width(PortalDimens.BeginMaxWidth)
         }
         Box(
-            modifier = Modifier
-                .widthIn(max = PortalDimens.BeginMaxWidth)
-                .fillMaxWidth(0.8f)
+            modifier = buttonWidth
                 .height(PortalDimens.BeginHeight)
                 .graphicsLayer {
                     scaleX = pressScale
                     scaleY = pressScale
-                    alpha = if (pressed) 0.92f else 1f
                 }
+                .portalBloom(
+                    glow = palette.glow,
+                    cornerRadius = 26.dp,
+                    intensity = breath * dip,
+                )
                 .clip(RoundedCornerShape(26.dp))
                 .background(palette.buttonInterior)
                 .border(1.dp, palette.buttonOutline, RoundedCornerShape(26.dp))

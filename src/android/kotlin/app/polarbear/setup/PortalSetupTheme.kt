@@ -117,11 +117,13 @@ fun resolvePalette(mode: AppearanceMode): PortalPalette {
 }
 
 object PortalDimens {
-    val SurfaceMaxWidth: Dp = 760.dp
+    val SurfaceMaxWidth: Dp = 980.dp
     val SurfaceCorner: Dp = 32.dp
-    val SurfacePaddingH: Dp = 44.dp
-    val SurfacePaddingV: Dp = 40.dp
-    val SectionSpacing: Dp = 26.dp
+    val SurfacePaddingH: Dp = 34.dp
+    val SurfacePaddingV: Dp = 32.dp
+    val SectionSpacing: Dp = 20.dp
+    val ColumnGutter: Dp = 32.dp
+    val TwoColumnBreakpoint: Dp = 600.dp
     val LogoSize: Dp = 46.dp
     val TitleSize = 30.sp
     val PickerMaxWidth: Dp = 560.dp
