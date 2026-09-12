@@ -58,7 +58,7 @@ object PortalColors {
         surfaceShadow = Color(0x55000000),
         textPrimary = Ivory,
         textSecondary = Color(0xBFF1EBDD),
-        textMuted = Color(0xA3A7A29C),
+        textMuted = Color(0xC4BDB7AA),
         trackFill = Color(0x08F1EBDD),
         selectionPill = Color(0xA8F07949),
         selectionHighlight = Color(0x14FFFFFF),
