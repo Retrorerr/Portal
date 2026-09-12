@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -38,7 +39,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -63,6 +63,8 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
@@ -121,9 +123,23 @@ fun PortalSetupScreen(
     var rootOrigin by remember { mutableStateOf(Offset.Zero) }
     var pickerVisible by remember { mutableStateOf(false) }
     var essentials by remember { mutableStateOf(DEFAULT_ESSENTIALS) }
+    var settingsHeightPx by remember { mutableStateOf(0) }
+    var appearanceControlTopPx by remember { mutableStateOf(0f) }
+    var interfaceControlBottomPx by remember { mutableStateOf(0f) }
 
     val palette = resolvePalette(appearance)
     val capacity = rememberStorageCapacity()
+    val density = LocalDensity.current
+    val settingsHeight = with(density) {
+        if (settingsHeightPx > 0) settingsHeightPx.toDp() else 161.dp
+    }
+    val addAppsTopInset = with(density) {
+        if (appearanceControlTopPx > 0f) appearanceControlTopPx.toDp() else 24.dp
+    }
+    val addAppsCollapsedHeight = with(density) {
+        val measured = interfaceControlBottomPx - appearanceControlTopPx
+        if (measured >= 48f) measured.toDp() else settingsHeight - addAppsTopInset
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(palette.background)
         .onGloballyPositioned { rootOrigin = it.positionInRoot() }
@@ -161,12 +177,6 @@ fun PortalSetupScreen(
                     }
                     .widthIn(max = PortalDimens.SurfaceMaxWidth)
                     .fillMaxWidth(0.94f)
-                    .shadow(
-                        44.dp,
-                        RoundedCornerShape(PortalDimens.SurfaceCorner),
-                        ambientColor = palette.surfaceShadow,
-                        spotColor = palette.surfaceShadow,
-                    )
                     .clip(RoundedCornerShape(PortalDimens.SurfaceCorner))
                     .background(
                         brush = Brush.verticalGradient(
@@ -190,22 +200,37 @@ fun PortalSetupScreen(
                                     PortalDimens.ColumnGutter,
                                 ),
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .onSizeChanged { settingsHeightPx = it.height },
+                                ) {
                                     AppearanceSection(
                                         appearance = appearance,
                                         onSelect = { appearance = it },
                                         palette = palette,
+                                        controlModifier = Modifier.onGloballyPositioned {
+                                            appearanceControlTopPx = it.positionInParent().y
+                                        },
                                     )
                                     Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
                                     InterfaceSizeSection(
                                         size = interfaceSize,
                                         onSelect = { interfaceSize = it },
                                         palette = palette,
+                                        controlModifier = Modifier.onGloballyPositioned {
+                                            interfaceControlBottomPx =
+                                                it.positionInParent().y + it.size.height
+                                        },
                                     )
                                 }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    MinimalInstallRow(palette = palette)
-                                    Spacer(modifier = Modifier.height(11.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = settingsHeight)
+                                        .padding(top = addAppsTopInset),
+                                    contentAlignment = Alignment.TopCenter,
+                                ) {
                                     AddAppsPicker(
                                         expanded = pickerVisible,
                                         selectedIds = essentials,
@@ -213,13 +238,23 @@ fun PortalSetupScreen(
                                         onToggle = { id -> essentials = if (id in essentials) essentials - id else essentials + id },
                                         onBounds = { pickerBounds = it },
                                         palette = palette,
+                                        collapsedHeight = addAppsCollapsedHeight,
                                     )
                                 }
                             }
                             Spacer(Modifier.height(28.dp))
-                            Row(Modifier.fillMaxWidth().padding(bottom = 26.dp, end = 22.dp),
-                                horizontalArrangement = Arrangement.spacedBy(24.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp)
+                                    .padding(bottom = 26.dp),
+                                // Card padding is 34dp; adding this 12dp inset
+                                // makes both outer gaps and the centre gap 46dp.
+                                horizontalArrangement = Arrangement.spacedBy(
+                                    PortalDimens.SurfacePaddingH + 12.dp,
+                                ),
+                                verticalAlignment = Alignment.Top,
+                            ) {
                                 StorageCapacityBar(capacity, essentials, palette, Modifier.weight(1f))
                                 // Reserve the button, let its unchanged 56dp glow
                                 // overlap the footer breathing room instead of
@@ -290,7 +325,29 @@ private fun SetupBackground(palette: PortalPalette, cardBounds: () -> Rect) {
 
 @Composable
 private fun SetupHeader(palette: PortalPalette, launchMarkModifier: Modifier) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth >= PortalDimens.TwoColumnBreakpoint) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(PortalDimens.ColumnGutter),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SetupHeaderIdentity(palette, launchMarkModifier, Modifier.weight(1f))
+                MinimalInstallRow(palette, Modifier.weight(1f))
+            }
+        } else {
+            SetupHeaderIdentity(palette, launchMarkModifier)
+        }
+    }
+}
+
+@Composable
+private fun SetupHeaderIdentity(
+    palette: PortalPalette,
+    launchMarkModifier: Modifier,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
         Image(
             painter = portalMarkPainter(main = palette.logoMain, threshold = palette.logoThreshold),
             contentDescription = "Portal logo",
@@ -327,6 +384,7 @@ private fun AppearanceSection(
     appearance: AppearanceMode,
     onSelect: (AppearanceMode) -> Unit,
     palette: PortalPalette,
+    controlModifier: Modifier = Modifier,
 ) {
     SectionLabel(text = "Appearance", palette = palette)
     Spacer(modifier = Modifier.height(9.dp))
@@ -336,6 +394,7 @@ private fun AppearanceSection(
         onSelect = onSelect,
         label = { it.name.lowercase().replaceFirstChar(Char::uppercase) },
         palette = palette,
+        modifier = controlModifier,
     )
 }
 
@@ -344,6 +403,7 @@ private fun InterfaceSizeSection(
     size: InterfaceSize,
     onSelect: (InterfaceSize) -> Unit,
     palette: PortalPalette,
+    controlModifier: Modifier = Modifier,
 ) {
     SectionLabel(text = "Interface size", palette = palette)
     Spacer(modifier = Modifier.height(9.dp))
@@ -353,19 +413,44 @@ private fun InterfaceSizeSection(
         onSelect = onSelect,
         label = { it.name },
         palette = palette,
+        modifier = controlModifier,
     )
 }
 
 @Composable
-private fun MinimalInstallRow(palette: PortalPalette) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(17.dp))
-        .background(palette.trackFill)
-        .border(1.dp, palette.surfaceBorder, RoundedCornerShape(17.dp))
-        .padding(horizontal = 18.dp, vertical = 12.dp)) {
-        Text("Minimal install", color = palette.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-        Text("Firefox · Dolphin · Konsole · media codecs · Portal tools",
-            color = palette.textSecondary, fontSize = 13.sp, lineHeight = 18.sp,
-            modifier = Modifier.padding(top = 2.dp))
+private fun MinimalInstallRow(
+    palette: PortalPalette,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(24.dp)
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .clip(shape)
+            .background(palette.trackFill)
+            .border(1.dp, palette.surfaceBorder, shape),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 18.dp),
+        ) {
+            Text(
+                "Minimal install",
+                color = palette.textPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                "Firefox · Dolphin · Konsole · codecs · Portal tools",
+                color = palette.textSecondary,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                maxLines = 1,
+            )
+        }
     }
 }
 @Composable
