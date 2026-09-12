@@ -49,6 +49,7 @@ fun <T> SlidingSegmentedControl(
     palette: PortalPalette,
     modifier: Modifier = Modifier,
     height: Dp = 48.dp,
+    enabled: Boolean = true,
 ) {
     val trackShape = RoundedCornerShape(24.dp)
     val pillShape = RoundedCornerShape(20.dp)
@@ -105,6 +106,7 @@ fun <T> SlidingSegmentedControl(
                         .fillMaxHeight()
                         .clip(trackShape)
                         .clickable(
+                            enabled = enabled,
                             interactionSource = interaction,
                             indication = null,
                             role = Role.RadioButton,

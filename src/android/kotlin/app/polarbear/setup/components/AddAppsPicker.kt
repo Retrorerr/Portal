@@ -38,7 +38,7 @@ import app.polarbear.setup.*
 @Composable
 fun AddAppsPicker(expanded: Boolean, selectedIds: Set<String>, onExpandedChange: (Boolean) -> Unit,
     onToggle: (String) -> Unit, onBounds: (Rect) -> Unit, palette: PortalPalette,
-    modifier: Modifier = Modifier, collapsedHeight: Dp = 48.dp) {
+    modifier: Modifier = Modifier, collapsedHeight: Dp = 48.dp, enabled: Boolean = true) {
     val transition = updateTransition(expanded, label = "Add apps container")
     val corner by transition.animateDp({ spring(dampingRatio = 1f, stiffness = 260f) }, label = "glass corner") { 24.dp }
     val inset by transition.animateDp({ spring(dampingRatio = 1f, stiffness = 260f) }, label = "glass inset") { if (it) 16.dp else 18.dp }
@@ -64,6 +64,7 @@ fun AddAppsPicker(expanded: Boolean, selectedIds: Set<String>, onExpandedChange:
                 .then(
                     if (!open) {
                         Modifier.clickable(
+                            enabled = enabled,
                             interactionSource = collapsedTap,
                             indication = null,
                             role = Role.Button,
@@ -89,6 +90,7 @@ fun AddAppsPicker(expanded: Boolean, selectedIds: Set<String>, onExpandedChange:
                     .then(
                         if (open) {
                             Modifier.clickable(
+                                enabled = enabled,
                                 interactionSource = headerTap,
                                 indication = null,
                                 role = Role.Button,
@@ -167,7 +169,7 @@ fun AddAppsPicker(expanded: Boolean, selectedIds: Set<String>, onExpandedChange:
                     // Eight compact custom rows; the growing container clips and
                     // progressively reveals them while the subtitle dissolves.
                     ESSENTIAL_APPS.forEach { app ->
-                        AppSelectionRow(app, app.id in selectedIds, { onToggle(app.id) }, palette)
+                        AppSelectionRow(app, app.id in selectedIds, { onToggle(app.id) }, palette, enabled)
                     }
                 }
             }
@@ -176,12 +178,19 @@ fun AddAppsPicker(expanded: Boolean, selectedIds: Set<String>, onExpandedChange:
 }
 
 @Composable
-private fun AppSelectionRow(app: EssentialApp, checked: Boolean, onToggle: () -> Unit, palette: PortalPalette) {
+private fun AppSelectionRow(
+    app: EssentialApp,
+    checked: Boolean,
+    onToggle: () -> Unit,
+    palette: PortalPalette,
+    enabled: Boolean,
+) {
     val fill by animateColorAsState(if (checked) palette.accent.copy(alpha = 0.11f) else palette.accent.copy(alpha = 0f), tween(180), label = "selected row")
     val check by animateFloatAsState(if (checked) 1f else 0f, tween(180), label = "check")
     val tap = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(fill)
         .clickable(
+            enabled = enabled,
             interactionSource = tap,
             indication = null,
             role = Role.Checkbox,
