@@ -540,7 +540,21 @@ private fun BeginInstallButton(palette: PortalPalette, centered: Boolean) {
             .coerceAtMost(PortalDimens.BeginMaxWidth)
         val buttonHeight = PortalDimens.BeginHeight
         val glowMargin = 56.dp
+        // Explicit visual stack, bottom to top: faint static bloom, animated
+        // upstream shader, opaque button. The static layer never paints over
+        // the animation.
         Box(contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier
+                    .size(buttonWidth, buttonHeight)
+                    .portalBloom(
+                        glow = palette.glow,
+                        cornerRadius = 26.dp,
+                        intensity = dip,
+                        tightAlpha = 0.22f,
+                        broadAlpha = 0.06f,
+                    ),
+            )
             PortalAgslGlow(
                 modifier = Modifier.size(
                     buttonWidth + glowMargin * 2,
@@ -558,11 +572,6 @@ private fun BeginInstallButton(palette: PortalPalette, centered: Boolean) {
                         scaleX = pressScale
                         scaleY = pressScale
                     }
-                    .portalBloom(
-                        glow = palette.glow,
-                        cornerRadius = 26.dp,
-                        intensity = dip,
-                    )
                     .clip(RoundedCornerShape(26.dp))
                     .background(palette.buttonInterior)
                     .border(1.dp, palette.buttonOutline, RoundedCornerShape(26.dp))
