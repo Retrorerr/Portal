@@ -5,16 +5,26 @@ package app.polarbear
 // A minimal android.app.NativeActivity subclass. It preserves the exact
 // native-activity/native-library semantics Portal relies on (no
 // ComponentActivity, no GameActivity, no rendering moved into Kotlin) and
-// owns only window/splash integration: it installs the AndroidX system
-// splash before super.onCreate() and holds it until Portal draws its first
-// app-owned frame (see ComposeOverlay.isFirstFrameReady).
-//
-// The splash is released by a real readiness signal, never by a timer.
+// owns window integration:
+//   - installs the AndroidX system splash before super.onCreate() and holds
+//     it until Portal draws its first app-owned frame (see
+//     ComposeOverlay.isFirstFrameReady). The splash is released by a real
+//     readiness signal, never by a timer.
+//   - owns fullscreen/immersive geometry via the modern window/insets path
+//     (edge-to-edge + WindowInsetsController, transient bars by swipe) so
+//     the splash, first frame, popup and Plasma surface all share one
+//     stable fullscreen coordinate space from the beginning. No legacy
+//     SYSTEM_UI_FLAG_* calls anywhere in this path.
 
 import android.app.NativeActivity
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.WindowManager
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 open class PortalActivity : NativeActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -26,6 +36,40 @@ open class PortalActivity : NativeActivity() {
             Log.e(TAG, "splash install failed; continuing with theme fallback", e)
         }
         super.onCreate(savedInstanceState)
+        applyImmersive("onCreate")
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // Android legitimately clears bar visibility on focus changes;
+        // reapply without touching geometry.
+        if (hasFocus) {
+            applyImmersive("focus")
+        }
+    }
+
+    private fun applyImmersive(reason: String) {
+        try {
+            // Content always lays out in the full display space; transient
+            // system bars overlay it instead of resizing it.
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                window.attributes = window.attributes.apply {
+                    layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
+            }
+            WindowInsetsControllerCompat(window, window.decorView).apply {
+                hide(
+                    WindowInsetsCompat.Type.statusBars() or
+                        WindowInsetsCompat.Type.navigationBars(),
+                )
+                systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "immersive apply failed ($reason)", e)
+        }
     }
 
     companion object {

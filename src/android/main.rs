@@ -5,7 +5,7 @@ use crate::{
         diagnostics, ime,
         utils::{
             application_context::ApplicationContext,
-            fullscreen_immersive::{enable_fullscreen_immersive_mode, keep_screen_on},
+            fullscreen_immersive::keep_screen_on,
             ndk::run_in_jvm,
             webview_handoff,
         },
@@ -58,7 +58,6 @@ fn android_main(android_app: AndroidApp) {
         android_logger::init_once(android_logger::Config::default().with_max_level(log_level));
     }
 
-    run_in_jvm(enable_fullscreen_immersive_mode, android_app.clone());
     run_in_jvm(keep_screen_on, android_app.clone());
 
     // Resolve the bundled bridge once from the NativeActivity-attached thread.  Calling `hide`
