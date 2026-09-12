@@ -108,3 +108,7 @@ cc = "1.2"
 [patch.crates-io]
 smithay = { path = "patches/smithay" }
 winit = { path = "patches/winit" }
+# SPIKE-ONLY (spike/game-activity-host): vendored android-activity 0.6.1
+# with the GameActivity motion-axis representation extended 48 -> 53 so the
+# API 34 touchpad gesture axes 50/51 arrive. Version/API otherwise identical.
+android-activity = { path = "patches/android-activity" }
