@@ -30,7 +30,6 @@ import app.polarbear.setup.PortalColors
 import app.polarbear.setup.PortalDimens
 import kotlin.math.PI
 import kotlin.math.ceil
-import kotlin.math.cos
 import kotlin.math.sin
 
 private const val SCENE_SCALE = 0.25f
@@ -39,20 +38,24 @@ private const val TAU = (PI * 2).toFloat()
 private data class Drift(
     val start: Float, val end: Float, val orange: Boolean,
     val extent: Float, val opacity: Float, val angle: Float,
-    val x: Float, val y: Float, val ax: Float, val ay: Float,
-    val period: Int, val phase: Float,
+    val cx: Float, val cy: Float, val ax: Float, val ay: Float,
+    val periodASec: Int, val periodBSec: Int, val seed: Float,
 )
 
-// Five ivory aperture sections and two orange thresholds. The middle three
-// trajectories cross the installer; the outer two keep the scene open at its edges.
+// Five ivory aperture sections and two orange thresholds. Every piece roams
+// a broad overlapping region (no card-centred anchors), so crossings behind
+// the installer happen naturally. Motion is quasiperiodic, never a loop:
+// each axis sums two very-low-frequency oscillations whose periods are
+// pairwise incommensurate (prime seconds), with independent phases derived
+// from the per-piece seed. Bounded sums of sines only — no random walk.
 private val DRIFTS = listOf(
-    Drift(0.00f, 0.46f, false, 1.32f, 0.042f, -28f, .08f, .16f, .23f, .25f, 15000, .4f),
-    Drift(0.49f, 0.96f, false, 1.18f, 0.032f,  38f, .91f, .75f, .22f, .24f, 14200, 2.1f),
-    Drift(0.12f, 0.58f, false, 0.93f, 0.054f, -64f, .48f, .48f, .32f, .28f, 12100, 1.3f),
-    Drift(0.43f, 0.83f, false, 0.78f, 0.064f,  74f, .52f, .51f, .29f, .32f, 10900, 3.8f),
-    Drift(0.68f, 1.00f, false, 1.04f, 0.037f, 148f, .43f, .57f, .34f, .24f, 13300, 5.2f),
-    Drift(0.00f, 1.00f, true,  1.75f, 0.055f, -42f, .62f, .43f, .26f, .30f,  9500, 2.8f),
-    Drift(0.00f, 0.76f, true,  1.40f, 0.037f, 112f, .23f, .71f, .27f, .21f, 10400, 5.7f),
+    Drift(0.00f, 0.46f, false, 1.32f, 0.042f, -28f, .18f, .28f, .24f, .22f, 23, 37, 0.7f),
+    Drift(0.49f, 0.96f, false, 1.18f, 0.032f,  38f, .82f, .30f, .22f, .24f, 19, 43, 2.3f),
+    Drift(0.12f, 0.58f, false, 0.93f, 0.054f, -64f, .35f, .55f, .26f, .25f, 29, 31, 4.1f),
+    Drift(0.43f, 0.83f, false, 0.78f, 0.064f,  74f, .62f, .48f, .25f, .27f, 25, 41, 1.9f),
+    Drift(0.68f, 1.00f, false, 1.04f, 0.037f, 148f, .48f, .72f, .27f, .23f, 31, 35, 3.3f),
+    Drift(0.00f, 1.00f, true,  1.75f, 0.055f, -42f, .68f, .62f, .24f, .22f, 21, 29, 5.6f),
+    Drift(0.00f, 0.76f, true,  1.40f, 0.037f, 112f, .28f, .68f, .23f, .25f, 27, 39, 0.3f),
 )
 
 /** Two whole-scene GPU blur passes, blended by the measured card's spatial field.
@@ -81,10 +84,17 @@ private fun AmbientScene(background: Color, cardBounds: () -> Rect) {
     val stroke = remember { Stroke(54f) }
     val colors = remember { DRIFTS.map { (if (it.orange) PortalColors.Orange else PortalColors.Ivory).copy(alpha = it.opacity) } }
     val motion = rememberInfiniteTransition(label = "Portal environment")
-    val phases = DRIFTS.mapIndexed { index, drift ->
+    // Two independent slow clocks per fragment; every period pair is
+    // incommensurate, so the combined wander never visibly repeats.
+    val phasesA = DRIFTS.mapIndexed { index, drift ->
         motion.animateFloat(0f, TAU,
-            infiniteRepeatable(tween(drift.period, easing = LinearEasing), RepeatMode.Restart),
-            label = "Portal drift $index")
+            infiniteRepeatable(tween(drift.periodASec * 1000, easing = LinearEasing), RepeatMode.Restart),
+            label = "Portal drift A $index")
+    }
+    val phasesB = DRIFTS.mapIndexed { index, drift ->
+        motion.animateFloat(0f, TAU,
+            infiniteRepeatable(tween(drift.periodBSec * 1000, easing = LinearEasing), RepeatMode.Restart),
+            label = "Portal drift B $index")
     }
     val source = rememberGraphicsLayer()
     val surrounding = rememberGraphicsLayer()
@@ -93,7 +103,7 @@ private fun AmbientScene(background: Color, cardBounds: () -> Rect) {
     val radius = with(LocalDensity.current) { PortalDimens.SurfaceCorner.toPx() } * SCENE_SCALE
     val shader = remember { RuntimeShader(FROST_FIELD) }
     val softBlur = remember(unit) { RenderEffect.createBlurEffect(16f * unit, 16f * unit, Shader.TileMode.CLAMP).asComposeRenderEffect() }
-    val strongBlur = remember(unit) { RenderEffect.createBlurEffect(68f * unit, 68f * unit, Shader.TileMode.CLAMP) }
+    val strongBlur = remember(unit) { RenderEffect.createBlurEffect(100f * unit, 100f * unit, Shader.TileMode.CLAMP) }
     // Only layout/palette changes rebuild the mask effect. Moving fragments
     // invalidate the display list, not the compiled shader or its uniform snapshot.
     var lastBounds = remember { Rect.Zero }
@@ -108,15 +118,24 @@ private fun AmbientScene(background: Color, cardBounds: () -> Rect) {
             drawRect(background)
             val base = minOf(sceneWidth, sceneHeight)
             DRIFTS.forEachIndexed { index, drift ->
-                val phase = phases[index].value + drift.phase
-                // Integer harmonics close position AND velocity at 2π. Different
-                // anchors and asymmetric crossing paths avoid a common orbit or
-                // ping-pong reversal. Travel spans substantial screen fractions.
-                val x = sceneWidth * (drift.x + drift.ax * (sin(phase) + .20f * sin(2f * phase + .7f)))
-                val y = sceneHeight * (drift.y + drift.ay * (sin(2f * phase + 1.1f) + .16f * cos(3f * phase + .4f)))
-                val magnification = base * drift.extent / 514f * (1f + .022f * sin(2f * phase + 1.4f))
+                val a = phasesA[index].value
+                val b = phasesB[index].value
+                val s = drift.seed
+                // Aimless bounded wander: per axis, a dominant slow component
+                // plus a weaker incommensurate one, cross-coupled between the
+                // two clocks with irrationally related seed phases. No single
+                // trajectory, no ellipse/figure-eight, no endpoint or
+                // reversal, no synchronized direction changes. Weights sum to
+                // <= 1 so travel stays inside cx +/- ax, cy +/- ay.
+                val x = sceneWidth * (drift.cx + drift.ax *
+                    (0.72f * sin(a + s) + 0.28f * sin(b + s * 2.39996f)))
+                val y = sceneHeight * (drift.cy + drift.ay *
+                    (0.72f * sin(b + s * 1.61803f) + 0.28f * sin(a + s * 3.14159f)))
+                // Extremely subtle, independently slow breathing: rotation on
+                // clock B, scale on clock A, neither synced with position.
+                val magnification = base * drift.extent / 514f * (1f + .010f * sin(a + s * 2.71828f))
                 translate(x, y) {
-                    rotate(drift.angle + 3.5f * sin(phase + 2f), Offset.Zero) {
+                    rotate(drift.angle + 1.5f * sin(b + s * 1.41421f), Offset.Zero) {
                         scale(magnification, magnification, Offset.Zero) {
                             translate(-centers[index].x, -centers[index].y) {
                                 drawPath(paths[index], colors[index], style = stroke)
@@ -136,7 +155,7 @@ private fun AmbientScene(background: Color, cardBounds: () -> Rect) {
                 shader.setFloatUniform("card", bounds.left * SCENE_SCALE, bounds.top * SCENE_SCALE,
                     bounds.right * SCENE_SCALE, bounds.bottom * SCENE_SCALE)
                 shader.setFloatUniform("corner", radius)
-                shader.setFloatUniform("feather", 130f * unit)
+                shader.setFloatUniform("feather", 190f * unit)
                 shader.setFloatUniform("backdrop", background.red, background.green, background.blue)
                 frosted.renderEffect = RenderEffect.createChainEffect(
                     RenderEffect.createRuntimeShaderEffect(shader, "scene"), strongBlur,
@@ -167,8 +186,10 @@ half4 main(float2 p) {
     float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
     float influence = 1.0 - smoothstep(0.0, feather, distance);
     half3 color = scene.eval(p).rgb;
-    // Slightly quieter beneath glass, without increasing card opacity.
-    color = mix(half3(backdrop), color, half(1.0 - 0.18 * influence));
+    // Dissolve beneath glass: fragments become broad indistinct light and
+    // shadow, without increasing card opacity. The wide feather above keeps
+    // the transition boundary-free.
+    color = mix(half3(backdrop), color, half(1.0 - 0.50 * influence));
     return half4(color * half(influence), half(influence));
 }
 """
