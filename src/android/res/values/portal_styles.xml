@@ -12,12 +12,16 @@
     </style>
 
     <!-- Stable fullscreen host theme: charcoal from the first pixel so no
-         white/black flash can appear before, during or after the splash. -->
-    <style name="PortalMainTheme" parent="android:Theme.NoTitleBar.Fullscreen">
+         white/black flash can appear before, during or after the splash.
+         Fullscreen geometry itself is owned at runtime by PortalActivity via
+         the modern edge-to-edge/insets path (no legacy windowFullscreen flag,
+         which would conflict with it); bars use transient-swipe behaviour so
+         they overlay rather than resize the content. -->
+    <style name="PortalMainTheme" parent="android:Theme.NoTitleBar">
         <item name="android:windowBackground">@color/portal_charcoal</item>
-        <item name="android:windowFullscreen">true</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:statusBarColor">@color/portal_charcoal</item>
         <item name="android:navigationBarColor">@color/portal_charcoal</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
 </resources>
