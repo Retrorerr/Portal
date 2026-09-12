@@ -74,6 +74,9 @@ wayland-csd-adwaita-crossfont = ["sctk-adwaita", "sctk-adwaita/crossfont"]
 wayland-csd-adwaita-notitle = ["sctk-adwaita"]
 android-native-activity = ["android-activity/native-activity"]
 android-game-activity = ["android-activity/game-activity"]
+# SPIKE-ONLY opt-in: capped live logging of touchpad gesture axes 50/51 for
+# physical validation. Off by default so normal debug/release usage is quiet.
+gesture-axis-debug-log = []
 serde = ["dep:serde", "cursor-icon/serde", "smol_str/serde", "dpi/serde"]
 mint = ["dpi/mint"]
 rwh_04 = ["dep:rwh_04", "ndk/rwh_04"]

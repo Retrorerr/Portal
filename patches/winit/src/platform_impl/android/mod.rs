@@ -178,10 +178,10 @@ fn touchpad_gesture_samples(pointer: &input::Pointer<'_>) -> Vec<(f64, f64)> {
         pointer.axis_value(y_axis) as f64,
     );
     let samples = collect_gesture_samples(history, current);
-    // SPIKE-ONLY physical proof (debug builds): log a bounded sample of live
-    // 50/51 values while two-finger scrolling so the GameActivity delivery
-    // can be confirmed in logcat. Capped, nonzero-only, never in release.
-    #[cfg(debug_assertions)]
+    // Physical-proof logging for two-finger-scroll validation: opt-in via
+    // the `gesture-axis-debug-log` feature (plus debug builds). Capped,
+    // nonzero-only, never in normal debug/release usage.
+    #[cfg(all(debug_assertions, feature = "gesture-axis-debug-log"))]
     {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static LOGGED_GESTURE_SAMPLES: AtomicUsize = AtomicUsize::new(0);
