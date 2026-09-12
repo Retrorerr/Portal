@@ -2,11 +2,20 @@ package app.polarbear.setup
 
 // SPIKE-ONLY (branch compose-setup-spike): Portal first-run CONFIGURE
 // screen. Local setup selections and storage projection only — no
-// provisioning, no JNI/Rust references; the Begin Install action is a plain
-// callback supplied by the host (ComposeOverlay owns the native signal).
+// provisioning, no JNI/Rust references. Compose owns the fake install phase;
+// only the final Enter Portal action reaches the host callback.
 
+import android.animation.ValueAnimator
 import android.util.Log
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -32,6 +41,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,6 +54,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -73,6 +86,9 @@ import app.polarbear.setup.components.SlidingSegmentedControl
 import app.polarbear.setup.components.portalBloom
 
 private const val PREVIEW_TAG = "PortalComposeSetup"
+private const val FAKE_INSTALL_DURATION_MS = 13_500
+
+internal enum class SetupPhase { Configure, Installing, Ready }
 
 // Official Portal aperture geometry (assets/portal-icon-foreground.svg),
 // translated into the tight visible artwork bounds: the mark occupies
@@ -126,6 +142,47 @@ fun PortalSetupScreen(
     var settingsHeightPx by remember { mutableStateOf(0) }
     var appearanceControlTopPx by remember { mutableStateOf(0f) }
     var interfaceControlBottomPx by remember { mutableStateOf(0f) }
+    var phase by remember { mutableStateOf(SetupPhase.Configure) }
+    var beginAccepted by remember { mutableStateOf(false) }
+    var enterAccepted by remember { mutableStateOf(false) }
+    var frozenEssentials by remember { mutableStateOf(DEFAULT_ESSENTIALS) }
+    val installProgress = remember { Animatable(0f) }
+    val installProgressState: State<Float> = remember(installProgress) {
+        derivedStateOf { installProgress.value }
+    }
+
+    LaunchedEffect(phase) {
+        if (phase == SetupPhase.Installing) {
+            installProgress.snapTo(0f)
+            if (ValueAnimator.areAnimatorsEnabled()) {
+                installProgress.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(
+                        durationMillis = FAKE_INSTALL_DURATION_MS,
+                        easing = LinearEasing,
+                    ),
+                )
+            } else {
+                installProgress.snapTo(1f)
+            }
+            phase = SetupPhase.Ready
+        }
+    }
+
+    val beginLocalInstall: () -> Unit = {
+        if (phase == SetupPhase.Configure && !beginAccepted) {
+            beginAccepted = true
+            frozenEssentials = essentials.toSet()
+            pickerVisible = false
+            phase = SetupPhase.Installing
+        }
+    }
+    val enterPortal: () -> Unit = {
+        if (phase == SetupPhase.Ready && !enterAccepted) {
+            enterAccepted = true
+            onBeginInstall()
+        }
+    }
 
     val palette = resolvePalette(appearance)
     val capacity = rememberStorageCapacity()
@@ -140,6 +197,35 @@ fun PortalSetupScreen(
         val measured = interfaceControlBottomPx - appearanceControlTopPx
         if (measured >= 48f) measured.toDp() else settingsHeight - addAppsTopInset
     }
+    val configurationInactive = phase != SetupPhase.Configure
+    val configurationTransition = updateTransition(
+        targetState = configurationInactive,
+        label = "configuration layer",
+    )
+    val configurationAlpha by configurationTransition.animateFloat(
+        transitionSpec = { tween(320) },
+        label = "configuration opacity",
+    ) { inactive -> if (inactive) 0.32f else 1f }
+    val configurationScale by configurationTransition.animateFloat(
+        transitionSpec = { tween(360) },
+        label = "configuration compression",
+    ) { inactive -> if (inactive) 0.978f else 1f }
+    val configurationLift by configurationTransition.animateDp(
+        transitionSpec = { tween(360) },
+        label = "configuration lift",
+    ) { inactive -> if (inactive) (-3).dp else 0.dp }
+    val configurationVisual = if (configurationInactive || configurationTransition.isRunning) {
+        Modifier.graphicsLayer {
+            alpha = configurationAlpha
+            scaleX = configurationScale
+            scaleY = configurationScale
+            translationY = configurationLift.toPx()
+            compositingStrategy = CompositingStrategy.ModulateAlpha
+        }
+    } else {
+        Modifier
+    }
+    val configurationRegion = configurationVisual.blockInput(configurationInactive)
 
     Box(modifier = Modifier.fillMaxSize().background(palette.background)
         .onGloballyPositioned { rootOrigin = it.positionInRoot() }
@@ -189,13 +275,20 @@ fun PortalSetupScreen(
                         vertical = PortalDimens.SurfacePaddingV,
                     ),
             ) {
-                SetupHeader(palette = palette, launchMarkModifier = launchMarkModifier)
+                SetupHeader(
+                    palette = palette,
+                    launchMarkModifier = launchMarkModifier,
+                    phase = phase,
+                    inactiveConfigurationModifier = configurationVisual,
+                )
                 Spacer(modifier = Modifier.height(16.dp))
                 BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                     if (maxWidth >= PortalDimens.TwoColumnBreakpoint) {
                         Column {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .then(configurationRegion),
                                 horizontalArrangement = Arrangement.spacedBy(
                                     PortalDimens.ColumnGutter,
                                 ),
@@ -209,6 +302,7 @@ fun PortalSetupScreen(
                                         appearance = appearance,
                                         onSelect = { appearance = it },
                                         palette = palette,
+                                        enabled = phase == SetupPhase.Configure,
                                         controlModifier = Modifier.onGloballyPositioned {
                                             appearanceControlTopPx = it.positionInParent().y
                                         },
@@ -218,6 +312,7 @@ fun PortalSetupScreen(
                                         size = interfaceSize,
                                         onSelect = { interfaceSize = it },
                                         palette = palette,
+                                        enabled = phase == SetupPhase.Configure,
                                         controlModifier = Modifier.onGloballyPositioned {
                                             interfaceControlBottomPx =
                                                 it.positionInParent().y + it.size.height
@@ -239,6 +334,7 @@ fun PortalSetupScreen(
                                         onBounds = { pickerBounds = it },
                                         palette = palette,
                                         collapsedHeight = addAppsCollapsedHeight,
+                                        enabled = phase == SetupPhase.Configure,
                                     )
                                 }
                             }
@@ -255,46 +351,79 @@ fun PortalSetupScreen(
                                 ),
                                 verticalAlignment = Alignment.Top,
                             ) {
-                                StorageCapacityBar(capacity, essentials, palette, Modifier.weight(1f))
+                                StorageCapacityBar(
+                                    capacity = capacity,
+                                    selectedIds = if (phase == SetupPhase.Configure) essentials else frozenEssentials,
+                                    palette = palette,
+                                    modifier = Modifier.weight(1f),
+                                    phase = phase,
+                                    installProgress = installProgressState,
+                                    hasSelectedApps = frozenEssentials.isNotEmpty(),
+                                )
                                 // Reserve the button, let its unchanged 56dp glow
                                 // overlap the footer breathing room instead of
                                 // making a separate 164dp-tall layout island.
-                                Box(Modifier.size(PortalDimens.BeginMaxWidth, PortalDimens.BeginHeight)
-                                    .wrapContentSize(unbounded = true)) {
-                                    BeginInstallButton(palette, centered = false, onBeginInstall)
-                                }
+                                InstallActionArea(
+                                    phase = phase,
+                                    enterAccepted = enterAccepted,
+                                    palette = palette,
+                                    inactiveConfigurationModifier = configurationVisual,
+                                    onBeginInstall = beginLocalInstall,
+                                    onEnterPortal = enterPortal,
+                                )
                             }
                         }
                     } else {
-                        AppearanceSection(
-                            appearance = appearance,
-                            onSelect = { appearance = it },
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(configurationRegion),
+                        ) {
+                            AppearanceSection(
+                                appearance = appearance,
+                                onSelect = { appearance = it },
+                                palette = palette,
+                                enabled = phase == SetupPhase.Configure,
+                            )
+                            Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
+                            InterfaceSizeSection(
+                                size = interfaceSize,
+                                onSelect = { interfaceSize = it },
+                                palette = palette,
+                                enabled = phase == SetupPhase.Configure,
+                            )
+                            Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
+                            MinimalInstallRow(palette = palette)
+                            Spacer(modifier = Modifier.height(11.dp))
+                            AddAppsPicker(
+                                expanded = pickerVisible,
+                                selectedIds = essentials,
+                                onExpandedChange = { pickerVisible = it },
+                                onToggle = { id -> essentials = if (id in essentials) essentials - id else essentials + id },
+                                onBounds = { pickerBounds = it },
+                                palette = palette,
+                                enabled = phase == SetupPhase.Configure,
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
+                        StorageCapacityBar(
+                            capacity = capacity,
+                            selectedIds = if (phase == SetupPhase.Configure) essentials else frozenEssentials,
                             palette = palette,
+                            phase = phase,
+                            installProgress = installProgressState,
+                            hasSelectedApps = frozenEssentials.isNotEmpty(),
                         )
-                        Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
-                        InterfaceSizeSection(
-                            size = interfaceSize,
-                            onSelect = { interfaceSize = it },
-                            palette = palette,
-                        )
-                        Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
-                        MinimalInstallRow(palette = palette)
-                        Spacer(modifier = Modifier.height(11.dp))
-                        AddAppsPicker(
-                                        expanded = pickerVisible,
-                                        selectedIds = essentials,
-                                        onExpandedChange = { pickerVisible = it },
-                                        onToggle = { id -> essentials = if (id in essentials) essentials - id else essentials + id },
-                                        onBounds = { pickerBounds = it },
-                                        palette = palette,
-                                    )
-                        Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
-                        StorageCapacityBar(capacity, essentials, palette)
                         Spacer(Modifier.height(28.dp))
                         Box(Modifier.fillMaxWidth().padding(bottom = 26.dp), contentAlignment = Alignment.Center) {
-                            Box(Modifier.size(PortalDimens.BeginMaxWidth, PortalDimens.BeginHeight).wrapContentSize(unbounded = true)) {
-                                BeginInstallButton(palette, centered = false, onBeginInstall)
-                            }
+                            InstallActionArea(
+                                phase = phase,
+                                enterAccepted = enterAccepted,
+                                palette = palette,
+                                inactiveConfigurationModifier = configurationVisual,
+                                onBeginInstall = beginLocalInstall,
+                                onEnterPortal = enterPortal,
+                            )
                         }
                     }
                 }
@@ -324,7 +453,12 @@ private fun SetupBackground(palette: PortalPalette, cardBounds: () -> Rect) {
 }
 
 @Composable
-private fun SetupHeader(palette: PortalPalette, launchMarkModifier: Modifier) {
+private fun SetupHeader(
+    palette: PortalPalette,
+    launchMarkModifier: Modifier,
+    phase: SetupPhase,
+    inactiveConfigurationModifier: Modifier,
+) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         if (maxWidth >= PortalDimens.TwoColumnBreakpoint) {
             Row(
@@ -332,11 +466,25 @@ private fun SetupHeader(palette: PortalPalette, launchMarkModifier: Modifier) {
                 horizontalArrangement = Arrangement.spacedBy(PortalDimens.ColumnGutter),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                SetupHeaderIdentity(palette, launchMarkModifier, Modifier.weight(1f))
-                MinimalInstallRow(palette, Modifier.weight(1f))
+                SetupHeaderIdentity(
+                    palette = palette,
+                    launchMarkModifier = launchMarkModifier,
+                    title = phase.title,
+                    modifier = Modifier.weight(1f),
+                )
+                MinimalInstallRow(
+                    palette = palette,
+                    modifier = Modifier
+                        .weight(1f)
+                        .then(inactiveConfigurationModifier),
+                )
             }
         } else {
-            SetupHeaderIdentity(palette, launchMarkModifier)
+            SetupHeaderIdentity(
+                palette = palette,
+                launchMarkModifier = launchMarkModifier,
+                title = phase.title,
+            )
         }
     }
 }
@@ -345,6 +493,7 @@ private fun SetupHeader(palette: PortalPalette, launchMarkModifier: Modifier) {
 private fun SetupHeaderIdentity(
     palette: PortalPalette,
     launchMarkModifier: Modifier,
+    title: String,
     modifier: Modifier = Modifier,
 ) {
     Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
@@ -355,7 +504,7 @@ private fun SetupHeaderIdentity(
         )
         Column(modifier = Modifier.padding(start = 20.dp)) {
             Text(
-                text = "Install Portal Desktop",
+                text = title,
                 fontSize = PortalDimens.TitleSize,
                 fontWeight = FontWeight.SemiBold,
                 color = palette.textPrimary,
@@ -368,6 +517,13 @@ private fun SetupHeaderIdentity(
         }
     }
 }
+
+private val SetupPhase.title: String
+    get() = when (this) {
+        SetupPhase.Configure -> "Install Portal Desktop"
+        SetupPhase.Installing -> "Installing Portal Desktop"
+        SetupPhase.Ready -> "Portal is ready"
+    }
 
 @Composable
 private fun SectionLabel(text: String, palette: PortalPalette) {
@@ -384,6 +540,7 @@ private fun AppearanceSection(
     appearance: AppearanceMode,
     onSelect: (AppearanceMode) -> Unit,
     palette: PortalPalette,
+    enabled: Boolean = true,
     controlModifier: Modifier = Modifier,
 ) {
     SectionLabel(text = "Appearance", palette = palette)
@@ -395,6 +552,7 @@ private fun AppearanceSection(
         label = { it.name.lowercase().replaceFirstChar(Char::uppercase) },
         palette = palette,
         modifier = controlModifier,
+        enabled = enabled,
     )
 }
 
@@ -403,6 +561,7 @@ private fun InterfaceSizeSection(
     size: InterfaceSize,
     onSelect: (InterfaceSize) -> Unit,
     palette: PortalPalette,
+    enabled: Boolean = true,
     controlModifier: Modifier = Modifier,
 ) {
     SectionLabel(text = "Interface size", palette = palette)
@@ -414,6 +573,7 @@ private fun InterfaceSizeSection(
         label = { it.name },
         palette = palette,
         modifier = controlModifier,
+        enabled = enabled,
     )
 }
 
@@ -454,21 +614,65 @@ private fun MinimalInstallRow(
     }
 }
 @Composable
-private fun BeginInstallButton(palette: PortalPalette, centered: Boolean, onBeginInstall: () -> Unit) {
+private fun InstallActionArea(
+    phase: SetupPhase,
+    enterAccepted: Boolean,
+    palette: PortalPalette,
+    inactiveConfigurationModifier: Modifier,
+    onBeginInstall: () -> Unit,
+    onEnterPortal: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(PortalDimens.BeginMaxWidth, PortalDimens.BeginHeight)
+            .wrapContentSize(unbounded = true),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (phase != SetupPhase.Ready) {
+            BeginInstallButton(
+                palette = palette,
+                centered = false,
+                onBeginInstall = onBeginInstall,
+                enabled = phase == SetupPhase.Configure,
+                modifier = inactiveConfigurationModifier,
+            )
+        }
+        AnimatedVisibility(
+            visible = phase == SetupPhase.Ready,
+            enter = fadeIn(tween(durationMillis = 280, delayMillis = 80)),
+            exit = fadeOut(tween(160)),
+        ) {
+            EnterPortalButton(
+                palette = palette,
+                enabled = !enterAccepted,
+                onEnterPortal = onEnterPortal,
+            )
+        }
+    }
+}
+
+@Composable
+private fun BeginInstallButton(
+    palette: PortalPalette,
+    centered: Boolean,
+    onBeginInstall: () -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
     val tap = remember { MutableInteractionSource() }
     val pressed by tap.collectIsPressedAsState()
     val pressScale by animateFloatAsState(
-        targetValue = if (pressed) 0.985f else 1f,
+        targetValue = if (enabled && pressed) 0.985f else 1f,
         animationSpec = tween(110),
         label = "press",
     )
     // Light dips slightly while pressed; quick and restrained, no bounce.
     val dip by animateFloatAsState(
-        targetValue = if (pressed) 0.8f else 1f,
+        targetValue = if (enabled && pressed) 0.8f else 1f,
         animationSpec = tween(110),
         label = "pressDip",
     )
-    val outer = if (centered) Modifier.fillMaxWidth() else Modifier
+    val outer = (if (centered) Modifier.fillMaxWidth() else Modifier).then(modifier)
     BoxWithConstraints(
         modifier = outer,
         contentAlignment = Alignment.Center,
@@ -512,13 +716,19 @@ private fun BeginInstallButton(palette: PortalPalette, centered: Boolean, onBegi
                     .clip(RoundedCornerShape(26.dp))
                     .background(palette.buttonInterior)
                     .border(1.dp, palette.buttonOutline, RoundedCornerShape(26.dp))
-                    .clickable(
-                        interactionSource = tap,
-                        indication = null,
-                        role = Role.Button,
-                        onClick = {
-                            Log.d(PREVIEW_TAG, "compose-setup-preview: Begin Install pressed")
-                            onBeginInstall()
+                    .then(
+                        if (enabled) {
+                            Modifier.clickable(
+                                interactionSource = tap,
+                                indication = null,
+                                role = Role.Button,
+                                onClick = {
+                                    Log.d(PREVIEW_TAG, "compose-setup-preview: Begin Install pressed")
+                                    onBeginInstall()
+                                },
+                            )
+                        } else {
+                            Modifier
                         },
                     ),
                 contentAlignment = Alignment.Center,
@@ -529,6 +739,67 @@ private fun BeginInstallButton(palette: PortalPalette, centered: Boolean, onBegi
                     fontWeight = FontWeight.SemiBold,
                     color = PortalColors.Ivory,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EnterPortalButton(
+    palette: PortalPalette,
+    enabled: Boolean,
+    onEnterPortal: () -> Unit,
+) {
+    val tap = remember { MutableInteractionSource() }
+    val pressed by tap.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (enabled && pressed) 0.985f else 1f,
+        animationSpec = tween(110),
+        label = "enter press",
+    )
+    Box(
+        modifier = Modifier
+            .size(PortalDimens.BeginMaxWidth, PortalDimens.BeginHeight)
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
+            .clip(RoundedCornerShape(26.dp))
+            .background(PortalColors.Orange)
+            .border(1.dp, palette.buttonOutline, RoundedCornerShape(26.dp))
+            .then(
+                if (enabled) {
+                    Modifier.clickable(
+                        interactionSource = tap,
+                        indication = null,
+                        role = Role.Button,
+                        onClick = {
+                            Log.d(PREVIEW_TAG, "compose-setup-preview: Enter Portal pressed")
+                            onEnterPortal()
+                        },
+                    )
+                } else {
+                    Modifier
+                },
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "Enter Portal",
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = PortalColors.Charcoal,
+        )
+    }
+}
+
+private fun Modifier.blockInput(blocked: Boolean): Modifier = if (!blocked) {
+    this
+} else {
+    pointerInput(Unit) {
+        awaitPointerEventScope {
+            while (true) {
+                awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
             }
         }
     }
