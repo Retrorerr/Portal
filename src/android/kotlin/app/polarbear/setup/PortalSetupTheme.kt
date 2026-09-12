@@ -58,15 +58,15 @@ object PortalColors {
         surfaceShadow = Color(0x55000000),
         textPrimary = Ivory,
         textSecondary = Color(0xBFF1EBDD),
-        textMuted = Color(0x8AA7A29C),
+        textMuted = Color(0xA3A7A29C),
         trackFill = Color(0x08F1EBDD),
-        selectionPill = Color(0x4DC97B57),
+        selectionPill = Color(0x4DF07949),
         selectionHighlight = Color(0x14FFFFFF),
         selectionText = Ivory,
         optionText = Color(0x99CFC6B8),
         accent = Orange,
         accentSoft = Color(0xFFF0A37E),
-        buttonInterior = Color(0xFF232627),
+        buttonInterior = Color(0xFF191B1C),
         buttonOutline = Color(0x66F07949),
         glow = Orange,
         scrim = Color(0x73000000),
@@ -85,9 +85,9 @@ object PortalColors {
         surfaceShadow = Color(0x14191B1C),
         textPrimary = Color(0xFF222425),
         textSecondary = Color(0xFF4C4E4E),
-        textMuted = Color(0xFF8A8681),
+        textMuted = Color(0xFF76716B),
         trackFill = Color(0x0A191B1C),
-        selectionPill = Color(0x40D9734F),
+        selectionPill = Color(0x40F07949),
         selectionHighlight = Color(0x1EFFFFFF),
         // Charcoal on the light tint: white text would fail contrast here.
         selectionText = Color(0xFF222425),
@@ -100,8 +100,9 @@ object PortalColors {
         scrim = Color(0x4D191B1C),
         arcIvory = Color(0x0A191B1C),
         arcOrange = Color(0x16D96A3C),
-        logoMain = Color(0xFF232627),
-        logoThreshold = Color(0xFFD96A3C),
+        // Exact official mark colours in both modes: no badge, no container.
+        logoMain = Ivory,
+        logoThreshold = Orange,
         isDark = false,
     )
 }
@@ -120,11 +121,11 @@ object PortalDimens {
     val SurfaceMaxWidth: Dp = 980.dp
     val SurfaceCorner: Dp = 32.dp
     val SurfacePaddingH: Dp = 34.dp
-    val SurfacePaddingV: Dp = 32.dp
-    val SectionSpacing: Dp = 20.dp
+    val SurfacePaddingV: Dp = 30.dp
+    val SectionSpacing: Dp = 18.dp
     val ColumnGutter: Dp = 32.dp
     val TwoColumnBreakpoint: Dp = 600.dp
-    val LogoSize: Dp = 46.dp
+    val LogoSize: Dp = 66.dp
     val TitleSize = 30.sp
     val PickerMaxWidth: Dp = 560.dp
     val BeginMaxWidth: Dp = 310.dp
