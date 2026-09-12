@@ -8,6 +8,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
@@ -57,7 +58,8 @@ fun <T> SlidingSegmentedControl(
             .fillMaxWidth()
             .height(height)
             .clip(trackShape)
-            .background(palette.trackFill),
+            .background(palette.trackFill)
+            .border(1.dp, palette.surfaceBorder, trackShape),
     ) {
         val segmentWidth = (maxWidth - inset * 2) / options.size
         val selectedIndex = options.indexOf(selected).coerceAtLeast(0)

@@ -5,16 +5,14 @@ import android.util.Log
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -73,21 +71,56 @@ fun StorageCapacityBar(capacity: StorageCapacity?, selectedIds: Set<String>, pal
     val freeGb = (totalGb - usedGb - portalGb).coerceAtLeast(0.0)
     fun format(value: Double) = String.format(Locale.getDefault(), "%.1f", value)
     val line = "${format(usedGb)} GB used · ${format(portalGb.toDouble())} GB Portal · ${format(freeGb)} GB free after"
-    Column(modifier.semantics(mergeDescendants = true) { contentDescription = "$line. Portal footprint is estimated." }) {
-        Canvas(Modifier.fillMaxWidth().height(9.dp).clip(RoundedCornerShape(5.dp)).background(palette.trackFill)) {
-            val usedWidth = size.width * (usedGb / totalGb).toFloat()
-            val portalWidth = size.width * (portalGb / totalGb).toFloat()
-            drawRect(palette.textSecondary.copy(alpha = 0.28f), size = Size(usedWidth, size.height))
-            // No minimum width: the segment remains proportional on large volumes.
-            // Its saturated fill and fine ivory top glint give it contrast instead.
-            drawRect(PortalColors.Orange, topLeft = Offset(usedWidth, 0f), size = Size(portalWidth, size.height))
-            drawLine(PortalColors.Ivory.copy(alpha = 0.65f), Offset(usedWidth, 0.7.dp.toPx()),
-                Offset(usedWidth + portalWidth, 0.7.dp.toPx()), strokeWidth = 1.dp.toPx(), cap = StrokeCap.Butt)
+    Box(
+        modifier
+            .height(58.dp)
+            .semantics(mergeDescendants = true) {
+                contentDescription = "$line. Portal footprint is estimated."
+            },
+    ) {
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .height(12.dp)
+                .align(Alignment.TopStart)
+                .offset(y = 20.dp),
+        ) {
+            val gap = 2.dp.toPx()
+            val drawableWidth = (size.width - gap * 2f).coerceAtLeast(0f)
+            val usedWidth = drawableWidth * (usedGb / totalGb).toFloat()
+            val portalWidth = drawableWidth * (portalGb / totalGb).toFloat()
+            val freeWidth = (drawableWidth - usedWidth - portalWidth).coerceAtLeast(0f)
+            val radius = androidx.compose.ui.geometry.CornerRadius(size.height / 2f)
+            if (usedWidth > 0f) {
+                drawRoundRect(
+                    palette.textSecondary.copy(alpha = 0.28f),
+                    size = Size(usedWidth, size.height),
+                    cornerRadius = radius,
+                )
+            }
+            if (portalWidth > 0f) {
+                drawRoundRect(
+                    PortalColors.Orange,
+                    topLeft = Offset(usedWidth + gap, 0f),
+                    size = Size(portalWidth, size.height),
+                    cornerRadius = radius,
+                )
+            }
+            if (freeWidth > 0f) {
+                drawRoundRect(
+                    palette.textPrimary.copy(alpha = 0.055f),
+                    topLeft = Offset(usedWidth + portalWidth + gap * 2f, 0f),
+                    size = Size(freeWidth, size.height),
+                    cornerRadius = radius,
+                )
+            }
         }
-        Spacer(Modifier.height(10.dp))
-        Text(line, color = palette.textSecondary, fontSize = 12.sp, lineHeight = 18.sp)
-        Text(if (projected.shortfallBytes > 0) "Not enough space for this selection" else "Portal footprint estimated",
+        Text(
+            line,
             color = if (projected.shortfallBytes > 0) palette.accent else palette.textMuted,
-            fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp))
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+            modifier = Modifier.align(Alignment.BottomStart),
+        )
     }
 }
