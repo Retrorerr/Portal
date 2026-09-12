@@ -506,8 +506,9 @@ private fun SetupHeader(
                     visible = phase == SetupPhase.Configure,
                     enter = fadeIn(tween(300)),
                     exit = fadeOut(tween(250)) + shrinkVertically(tween(300)),
+                    modifier = Modifier.weight(1f),
                 ) {
-                    MinimalInstallRow(palette, Modifier.weight(1f))
+                    MinimalInstallRow(palette, Modifier.fillMaxWidth())
                 }
             }
         } else {
