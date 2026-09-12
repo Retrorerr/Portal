@@ -82,46 +82,189 @@ fn send_mouse_wheel<T: 'static, F>(
     );
 }
 
-/// Android-activity 0.6 intentionally hides history for API parity with its
-/// GameActivity backend, while the pinned `ndk` API exposes the same native
-/// event history. NativeActivity's MotionEvent is `repr(transparent)` over
-/// `ndk::event::MotionEvent`, so this view preserves the original lifetime and
-/// does not take ownership of the AInputEvent.
-#[cfg(feature = "android-native-activity")]
-fn touchpad_gesture_samples(
-    motion_event: &android_activity::input::MotionEvent<'_>,
-    pointer_index: usize,
-) -> Vec<(f64, f64)> {
-    let ndk_event = unsafe {
-        &*(motion_event as *const android_activity::input::MotionEvent<'_>
-            as *const ndk::event::MotionEvent)
-    };
-    let x_axis = ndk::event::Axis::from(50);
-    let y_axis = ndk::event::Axis::from(51);
-    let mut samples = Vec::with_capacity(ndk_event.history_size() + 1);
-    for historical in ndk_event.history() {
-        if let Some(pointer) = historical.pointers().nth(pointer_index) {
-            samples.push((pointer.axis_value(x_axis) as f64, pointer.axis_value(y_axis) as f64));
-        }
+/// Which pointer a motion action refers to, decided from the action alone.
+///
+/// The action pointer index is only meaningful for Down/PointerDown/Up/
+/// PointerUp. Every other pointer-class event (HoverEnter/HoverMove/
+/// HoverExit, Move, Scroll, ButtonPress/ButtonRelease, captured-pointer
+/// motion, ...) must use the first actual pointer instead: under GameActivity
+/// the action index is not valid for those actions, and `pointer_at_index`
+/// explicitly panics when the index is out of range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointerRule {
+    ActionIndex,
+    FirstPointer,
+}
+
+fn pointer_rule(action: MotionAction) -> PointerRule {
+    match action {
+        MotionAction::Down
+        | MotionAction::PointerDown
+        | MotionAction::Up
+        | MotionAction::PointerUp => PointerRule::ActionIndex,
+        _ => PointerRule::FirstPointer,
     }
-    let pointer = motion_event.pointer_at_index(pointer_index);
+}
+
+/// Pure index resolution for [`pointer_rule`]: `None` means the event has no
+/// usable pointer — skip pointer-dependent processing instead of panicking.
+fn resolve_pointer_index(
+    rule: PointerRule,
+    action_index: usize,
+    pointer_count: usize,
+) -> Option<usize> {
+    match rule {
+        PointerRule::ActionIndex => (action_index < pointer_count).then_some(action_index),
+        PointerRule::FirstPointer => (pointer_count > 0).then_some(0),
+    }
+}
+
+/// Select the pointer a motion event refers to without ever indexing out of
+/// range. Returns `None` for zero-pointer events and out-of-range action
+/// indices; callers skip pointer-dependent processing in that case instead
+/// of fabricating a pointer or panicking.
+fn action_pointer<'a>(motion_event: &'a input::MotionEvent<'a>) -> Option<input::Pointer<'a>> {
+    let rule = pointer_rule(motion_event.action());
+    let index = resolve_pointer_index(
+        rule,
+        motion_event.pointer_index(),
+        motion_event.pointer_count(),
+    )?;
+    Some(motion_event.pointer_at_index(index))
+}
+
+/// Number of per-pointer axes GameActivity marshals
+/// (`GameActivityPointerAxes::axisValues` in the 4.4.0 ABI, indexed by raw
+/// axis id). Axes at id 48 and above never arrive through this backend.
+const GAME_ACTIVITY_AXIS_COUNT: u32 = 48;
+
+/// Android 14 touchpad gesture axes (per-sample relative deltas).
+const GESTURE_X_AXIS: u32 = 50;
+const GESTURE_Y_AXIS: u32 = 51;
+
+/// Whether a raw axis id can arrive through the GameActivity ABI.
+fn game_activity_carries_axis(axis: u32) -> bool {
+    axis < GAME_ACTIVITY_AXIS_COUNT
+}
+
+/// Whether the gesture axes are readable on the active backend.
+/// NativeActivity carries the full NDK event; GameActivity structurally
+/// cannot (proven on-device: `axisValues[50]` panics with len 48), so the
+/// gesture path stays empty there and absolute x/y movement plus H/VSCROLL
+/// (axes 9/10, valid) carry the behaviour unchanged.
+#[cfg(feature = "android-native-activity")]
+fn gesture_axes_available() -> bool {
+    true
+}
+
+#[cfg(not(feature = "android-native-activity"))]
+fn gesture_axes_available() -> bool {
+    game_activity_carries_axis(GESTURE_X_AXIS) && game_activity_carries_axis(GESTURE_Y_AXIS)
+}
+
+/// Android 14+ gesture axes are per-sample relative deltas. Preserve every
+/// batched historical sample, oldest first, then the current sample.
+///
+/// Backend-independent history via `Pointer::history()` (no NDK cast), but
+/// the axes themselves are backend-gated: under GameActivity the samples
+/// stay empty by ABI necessity (see above), never panicking.
+fn touchpad_gesture_samples(pointer: &input::Pointer<'_>) -> Vec<(f64, f64)> {
+    if !gesture_axes_available() {
+        return Vec::new();
+    }
+    let x_axis = input::Axis::from(GESTURE_X_AXIS);
+    let y_axis = input::Axis::from(GESTURE_Y_AXIS);
+    let history = pointer.history();
+    let mut samples = Vec::with_capacity(history.size_hint().0 + 1);
+    for historical in history {
+        samples.push((
+            historical.axis_value(x_axis) as f64,
+            historical.axis_value(y_axis) as f64,
+        ));
+    }
     samples.push((
-        pointer.axis_value(input::Axis::from(50)) as f64,
-        pointer.axis_value(input::Axis::from(51)) as f64,
+        pointer.axis_value(x_axis) as f64,
+        pointer.axis_value(y_axis) as f64,
     ));
     samples
 }
 
-#[cfg(not(feature = "android-native-activity"))]
-fn touchpad_gesture_samples(
-    motion_event: &android_activity::input::MotionEvent<'_>,
-    pointer_index: usize,
-) -> Vec<(f64, f64)> {
-    let pointer = motion_event.pointer_at_index(pointer_index);
-    vec![(
-        pointer.axis_value(input::Axis::from(50)) as f64,
-        pointer.axis_value(input::Axis::from(51)) as f64,
-    )]
+#[cfg(test)]
+mod pointer_selection_tests {
+    use super::{pointer_rule, resolve_pointer_index, PointerRule};
+    use android_activity::input::MotionAction;
+
+    #[test]
+    fn hover_move_selects_first_pointer() {
+        assert_eq!(pointer_rule(MotionAction::HoverMove), PointerRule::FirstPointer);
+        assert_eq!(
+            resolve_pointer_index(PointerRule::FirstPointer, usize::MAX, 1),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn scroll_selects_first_pointer() {
+        assert_eq!(pointer_rule(MotionAction::Scroll), PointerRule::FirstPointer);
+        assert_eq!(
+            resolve_pointer_index(PointerRule::FirstPointer, usize::MAX, 1),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn button_press_selects_first_pointer() {
+        assert_eq!(
+            pointer_rule(MotionAction::ButtonPress),
+            PointerRule::FirstPointer
+        );
+        assert_eq!(
+            resolve_pointer_index(PointerRule::FirstPointer, usize::MAX, 1),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn down_uses_valid_action_index() {
+        assert_eq!(pointer_rule(MotionAction::Down), PointerRule::ActionIndex);
+        assert_eq!(resolve_pointer_index(PointerRule::ActionIndex, 0, 1), Some(0));
+    }
+
+    #[test]
+    fn pointer_down_uses_valid_nonzero_index() {
+        assert_eq!(
+            pointer_rule(MotionAction::PointerDown),
+            PointerRule::ActionIndex
+        );
+        assert_eq!(resolve_pointer_index(PointerRule::ActionIndex, 1, 2), Some(1));
+    }
+
+    #[test]
+    fn out_of_range_action_index_selects_nothing() {
+        assert_eq!(pointer_rule(MotionAction::Up), PointerRule::ActionIndex);
+        assert_eq!(resolve_pointer_index(PointerRule::ActionIndex, 3, 2), None);
+    }
+
+    #[test]
+    fn zero_pointer_event_selects_nothing() {
+        assert_eq!(pointer_rule(MotionAction::HoverMove), PointerRule::FirstPointer);
+        assert_eq!(resolve_pointer_index(PointerRule::FirstPointer, 0, 0), None);
+        assert_eq!(pointer_rule(MotionAction::Down), PointerRule::ActionIndex);
+        assert_eq!(resolve_pointer_index(PointerRule::ActionIndex, 0, 0), None);
+    }
+
+    #[test]
+    fn game_activity_axis_ceiling_excludes_gesture_axes() {
+        // Axes the backend paths below rely on: X/Y plus H/VSCROLL.
+        assert!(super::game_activity_carries_axis(0));
+        assert!(super::game_activity_carries_axis(1));
+        assert!(super::game_activity_carries_axis(9));
+        assert!(super::game_activity_carries_axis(10));
+        // Android 14 gesture axes: unreadable through the 48-slot
+        // GameActivity ABI (on-device panic at axisValues[50], len 48).
+        assert!(!super::game_activity_carries_axis(50));
+        assert!(!super::game_activity_carries_axis(51));
+    }
 }
 
 /// Returns the minimum `Option<Duration>`, taking into account that `None`
@@ -522,14 +665,20 @@ impl<T: 'static> EventLoop<T> {
         let mut input_status = InputStatus::Handled;
         match event {
             InputEvent::MotionEvent(motion_event) => {
-                // Get the tool type of the primary pointer
-                let pointer = motion_event.pointer_at_index(motion_event.pointer_index());
                 let action = motion_event.action();
+                let source = motion_event.source();
+                // The action pointer index is only valid for Down/PointerDown/
+                // Up/PointerUp (and even then must be range-checked); every
+                // other pointer-class event uses the first actual pointer.
+                // Zero-pointer events carry nothing to classify or forward:
+                // consume them quietly instead of panicking.
+                let Some(pointer) = action_pointer(motion_event) else {
+                    return input_status;
+                };
 
                 let tool_type = pointer.tool_type();
                 // On Samsung Dex, `tool_type()` still reports `Finger` when using built-in trackpad
                 // So we also check for `source()`, as it correctly reports `Mouse` (although other devices such as Desktop AVDs report `Unknown``)
-                let source = motion_event.source();
 
                 if tool_type != ToolType::Finger
                     || source == Source::Mouse
@@ -549,9 +698,7 @@ impl<T: 'static> EventLoop<T> {
                     // deltas. Preserve every batched historical sample, oldest
                     // first, then the current sample.
                     let gesture_samples = is_touchpad
-                        .then(|| {
-                            touchpad_gesture_samples(motion_event, motion_event.pointer_index())
-                        })
+                        .then(|| touchpad_gesture_samples(&pointer))
                         .unwrap_or_default();
                     let has_gesture_scroll =
                         gesture_samples.iter().any(|(x, y)| *x != 0.0 || *y != 0.0);
@@ -1051,9 +1198,11 @@ impl<T: 'static> EventLoop<T> {
                     if let Some(phase) = phase {
                         let pointers: Box<dyn Iterator<Item = input::Pointer<'_>>> = match phase {
                             event::TouchPhase::Started | event::TouchPhase::Ended => {
-                                Box::new(std::iter::once(
-                                    motion_event.pointer_at_index(motion_event.pointer_index()),
-                                ))
+                                // Validated action pointer (Down/PointerDown/
+                                // Up/PointerUp); empty only if the event
+                                // somehow carries no pointer, which the
+                                // entry guard above already excluded.
+                                Box::new(action_pointer(motion_event).into_iter())
                             },
                             event::TouchPhase::Moved | event::TouchPhase::Cancelled => {
                                 Box::new(motion_event.pointers())
