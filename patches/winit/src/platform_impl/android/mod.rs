@@ -133,65 +133,73 @@ fn action_pointer<'a>(motion_event: &'a input::MotionEvent<'a>) -> Option<input:
     Some(motion_event.pointer_at_index(index))
 }
 
-/// Number of per-pointer axes GameActivity marshals
-/// (`GameActivityPointerAxes::axisValues` in the 4.4.0 ABI, indexed by raw
-/// axis id). Axes at id 48 and above never arrive through this backend.
-const GAME_ACTIVITY_AXIS_COUNT: u32 = 48;
-
-/// Android 14 touchpad gesture axes (per-sample relative deltas).
+/// Android 14 touchpad gesture axes (per-sample relative deltas, display
+/// px). GameActivity only copies explicitly enabled axes into the native
+/// event, so these are enabled once at event-loop init (see below); X/Y are
+/// on by default.
 const GESTURE_X_AXIS: u32 = 50;
 const GESTURE_Y_AXIS: u32 = 51;
 
-/// Whether a raw axis id can arrive through the GameActivity ABI.
-fn game_activity_carries_axis(axis: u32) -> bool {
-    axis < GAME_ACTIVITY_AXIS_COUNT
-}
+/// The exact gesture-axis set Portal requires from GameActivity. Single
+/// source for both enablement and coverage: enabling anything else is a
+/// conscious decision, not drift.
+const TOUCHPAD_GESTURE_AXIS_IDS: [u32; 2] = [GESTURE_X_AXIS, GESTURE_Y_AXIS];
 
-/// Whether the gesture axes are readable on the active backend.
-/// NativeActivity carries the full NDK event; GameActivity structurally
-/// cannot (proven on-device: `axisValues[50]` panics with len 48), so the
-/// gesture path stays empty there and absolute x/y movement plus H/VSCROLL
-/// (axes 9/10, valid) carry the behaviour unchanged.
-#[cfg(feature = "android-native-activity")]
-fn gesture_axes_available() -> bool {
-    true
-}
-
-#[cfg(not(feature = "android-native-activity"))]
-fn gesture_axes_available() -> bool {
-    game_activity_carries_axis(GESTURE_X_AXIS) && game_activity_carries_axis(GESTURE_Y_AXIS)
+/// Pure fold for gesture samples: historical samples oldest-first, then the
+/// current sample. Separated from `Pointer::history()` for unit coverage.
+fn collect_gesture_samples<I>(history: I, current: (f64, f64)) -> Vec<(f64, f64)>
+where
+    I: Iterator<Item = (f64, f64)>,
+{
+    let (lower, upper) = history.size_hint();
+    let mut samples = Vec::with_capacity(upper.unwrap_or(lower) + 1);
+    samples.extend(history);
+    samples.push(current);
+    samples
 }
 
 /// Android 14+ gesture axes are per-sample relative deltas. Preserve every
 /// batched historical sample, oldest first, then the current sample.
 ///
-/// Backend-independent history via `Pointer::history()` (no NDK cast), but
-/// the axes themselves are backend-gated: under GameActivity the samples
-/// stay empty by ABI necessity (see above), never panicking.
+/// Backend-independent: `Pointer::history()` serves both NativeActivity and
+/// GameActivity (the patched android-activity carries 53 axes, so 50/51 are
+/// readable on both; no NDK cast anywhere).
 fn touchpad_gesture_samples(pointer: &input::Pointer<'_>) -> Vec<(f64, f64)> {
-    if !gesture_axes_available() {
-        return Vec::new();
-    }
     let x_axis = input::Axis::from(GESTURE_X_AXIS);
     let y_axis = input::Axis::from(GESTURE_Y_AXIS);
-    let history = pointer.history();
-    let mut samples = Vec::with_capacity(history.size_hint().0 + 1);
-    for historical in history {
-        samples.push((
+    let history = pointer.history().map(|historical| {
+        (
             historical.axis_value(x_axis) as f64,
             historical.axis_value(y_axis) as f64,
-        ));
-    }
-    samples.push((
+        )
+    });
+    let current = (
         pointer.axis_value(x_axis) as f64,
         pointer.axis_value(y_axis) as f64,
-    ));
+    );
+    let samples = collect_gesture_samples(history, current);
+    // SPIKE-ONLY physical proof (debug builds): log a bounded sample of live
+    // 50/51 values while two-finger scrolling so the GameActivity delivery
+    // can be confirmed in logcat. Capped, nonzero-only, never in release.
+    #[cfg(debug_assertions)]
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static LOGGED_GESTURE_SAMPLES: AtomicUsize = AtomicUsize::new(0);
+        if samples.iter().any(|(x, y)| *x != 0.0 || *y != 0.0)
+            && LOGGED_GESTURE_SAMPLES.fetch_add(1, Ordering::Relaxed) < 25
+        {
+            tracing::info!("touchpad gesture axes 50/51 live samples: {samples:?}");
+        }
+    }
     samples
 }
 
 #[cfg(test)]
 mod pointer_selection_tests {
-    use super::{pointer_rule, resolve_pointer_index, PointerRule};
+    use super::{
+        collect_gesture_samples, pointer_rule, resolve_pointer_index, PointerRule,
+        TOUCHPAD_GESTURE_AXIS_IDS,
+    };
     use android_activity::input::MotionAction;
 
     #[test]
@@ -254,16 +262,25 @@ mod pointer_selection_tests {
     }
 
     #[test]
-    fn game_activity_axis_ceiling_excludes_gesture_axes() {
-        // Axes the backend paths below rely on: X/Y plus H/VSCROLL.
-        assert!(super::game_activity_carries_axis(0));
-        assert!(super::game_activity_carries_axis(1));
-        assert!(super::game_activity_carries_axis(9));
-        assert!(super::game_activity_carries_axis(10));
-        // Android 14 gesture axes: unreadable through the 48-slot
-        // GameActivity ABI (on-device panic at axisValues[50], len 48).
-        assert!(!super::game_activity_carries_axis(50));
-        assert!(!super::game_activity_carries_axis(51));
+    fn game_activity_enables_exactly_gesture_axes_50_51() {
+        // The init path iterates this exact set: no more, no fewer. Axis
+        // 48/49/52 stay disabled until Portal needs them.
+        assert_eq!(TOUCHPAD_GESTURE_AXIS_IDS, [50, 51]);
+    }
+
+    #[test]
+    fn gesture_samples_order_oldest_history_then_current() {
+        let history = vec![(1.0, -1.0), (2.0, -2.5)].into_iter();
+        assert_eq!(
+            collect_gesture_samples(history, (3.0, -3.0)),
+            vec![(1.0, -1.0), (2.0, -2.5), (3.0, -3.0)]
+        );
+    }
+
+    #[test]
+    fn gesture_samples_empty_history_yields_current_only() {
+        let history = Vec::new().into_iter();
+        assert_eq!(collect_gesture_samples(history, (0.5, 0.0)), vec![(0.5, 0.0)]);
     }
 }
 
@@ -408,6 +425,16 @@ impl<T: 'static> EventLoop<T> {
         );
         let density = android_app.config().density().map(|dpi| dpi as f64 / 160.0).unwrap_or(1.0);
         let redraw_flag = SharedFlag::new();
+
+        // Portal touchpad scrolling: GameActivity only copies explicitly
+        // enabled axes into the native event, so enable the Android 14
+        // gesture axes once here. NativeActivity carries the full event
+        // regardless (its enable call is a no-op) and is cfg-excluded so its
+        // behaviour is byte-for-byte unaffected.
+        #[cfg(not(feature = "android-native-activity"))]
+        for axis_id in TOUCHPAD_GESTURE_AXIS_IDS {
+            android_app.enable_motion_axis(input::Axis::from(axis_id));
+        }
 
         Ok(Self {
             android_app: android_app.clone(),
