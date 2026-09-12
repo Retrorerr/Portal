@@ -1,12 +1,19 @@
-//! SPIKE-ONLY (branch `compose-setup-spike`): Rust side of the native Kotlin +
+//! SPIKE-ONLY (branch `spike/game-activity-host`): Rust side of the Kotlin +
 //! Jetpack Compose fullscreen setup overlay.
 //!
-//! The overlay is a `ComposeView` in a fullscreen `PopupWindow` owned by the
-//! existing NativeActivity (same Activity, never recreated). The winit event
-//! loop is never recreated and the native Wayland surface underneath is never
-//! touched: showing the overlay defers the first resume behind an explicit
-//! `Start Plasma` action, and the first actually-presented desktop frame
-//! dismisses it with a fade.
+//! The overlay is a `ComposeView` in a fullscreen sibling `FrameLayout` added
+//! to GameActivity's own root (directly above the native
+//! `InputEnabledSurfaceView`). Same window, same Activity: no `PopupWindow`,
+//! no second window. The winit event loop is never recreated and the native
+//! surface underneath is never touched: showing the overlay defers the first
+//! resume behind an explicit `Start Plasma` action, and the first
+//! actually-presented desktop frame dismisses it with a fade.
+//!
+//! Lifecycle/SavedState/ViewModel ownership comes from the real
+//! AppCompatActivity owners, so Compose follows the Activity lifecycle
+//! automatically; there is no manual owner and no host resume/suspend
+//! forwarding. Input needs no custom routing: the overlay is the topmost
+//! View while visible and normal Android hit-testing applies.
 //!
 //! Visibility is an explicit [`OverlayState`] machine driven by Kotlin
 //! acknowledgements: Rust marks `Showing` when construction is requested and
@@ -265,52 +272,6 @@ pub fn set_compose_state(android_app: &AndroidApp, state: &str) {
     );
 }
 
-/// Forward a NativeActivity lifecycle transition to the manual Compose owner.
-///
-/// These are no-ops while the overlay is `Hidden`; they never touch the
-/// Wayland suspend/resume behaviour, which stays entirely in `run.rs`.
-pub fn host_resumed(android_app: &AndroidApp) {
-    if is_hidden() {
-        return;
-    }
-    lifecycle_host_event(android_app, "onHostResumed");
-}
-
-/// Forward a NativeActivity suspend/background transition to the manual
-/// Compose owner (pauses recomposition; teardown happens only on removal).
-pub fn host_suspended(android_app: &AndroidApp) {
-    if is_hidden() {
-        return;
-    }
-    lifecycle_host_event(android_app, "onHostSuspended");
-}
-
-fn lifecycle_host_event(android_app: &AndroidApp, method: &'static str) {
-    super::ndk::run_in_jvm(
-        |env, app| {
-            let activity = activity_object(app);
-            match overlay_class(env, &activity) {
-                Ok(class) => {
-                    if let Err(error) = env.call_static_method(
-                        class,
-                        method,
-                        "(Landroid/app/Activity;)V",
-                        &[JValue::Object(&activity)],
-                    ) {
-                        log::error!("Compose overlay {method} failed: {error}");
-                        clear_exception(env, method);
-                    }
-                }
-                Err(error) => {
-                    log::error!("Compose overlay class is unavailable: {error}");
-                    clear_exception(env, "find ComposeOverlay");
-                }
-            }
-        },
-        android_app.clone(),
-    );
-}
-
 /// Smallest reliable desktop-ready signal consumer: the compositor calls this
 /// exactly when Portal has produced AND presented a valid KWin desktop frame
 /// (generation-safe readiness + Android EGL present). The overlay updates to
@@ -401,8 +362,8 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnStartPlasma(
     super::webview_handoff::wake_event_loop();
 }
 
-/// JNI acknowledgement: Kotlin successfully created, tagged and showed the
-/// popup. Only this transitions `Showing` to `Visible`.
+/// JNI acknowledgement: Kotlin successfully created and showed the sibling
+/// overlay. Only this transitions `Showing` to `Visible`.
 #[no_mangle]
 pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayShown(
     _env: JNIEnv,
@@ -424,7 +385,7 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayShown(
     }
 }
 
-/// JNI acknowledgement: Kotlin failed to show the popup. Returns to `Hidden`
+/// JNI acknowledgement: Kotlin failed to show the sibling overlay. Returns to `Hidden`
 /// (without consuming anything else) so startup proceeds via the normal
 /// fallback paths, and wakes the loop so it proceeds immediately.
 #[no_mangle]

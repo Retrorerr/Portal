@@ -300,7 +300,15 @@ pub fn create_window(
         .map(|h| h.as_raw())
         .map_err(|e| format!("Anland window handle failed: {e}"))?;
     match handle {
-        RawWindowHandle::AndroidNdk(h) => Ok((window, h.a_native_window.as_ptr())),
+        RawWindowHandle::AndroidNdk(h) => {
+            // Lifecycle evidence (spike/game-activity-host): the GameActivity
+            // SurfaceView ANativeWindow backing this Winit window. Anland
+            // acquires and owns it for the session; it must stay valid until
+            // the Winit suspend/terminate path stops the session.
+            let ptr = h.a_native_window.as_ptr();
+            log::info!("Anland create_window: AndroidNdk a_native_window={ptr:p}");
+            Ok((window, ptr))
+        }
         other => Err(format!("Anland requires AndroidNdk window, got {other:?}")),
     }
 }

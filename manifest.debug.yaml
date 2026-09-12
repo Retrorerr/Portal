@@ -26,6 +26,11 @@ android:
     - "androidx.savedstate:savedstate:1.2.1"
     - "androidx.core:core:1.13.1"
     - "androidx.core:core-splashscreen:1.0.1"
+    # SPIKE-ONLY (branch spike/game-activity-host): GameActivity host. The
+    # version is pinned to 4.4.0 because android-activity 0.6.1 explicitly
+    # targets that GameActivity ABI; appcompat follows as its base class.
+    - "androidx.games:games-activity:4.4.0"
+    - "androidx.appcompat:appcompat:1.7.0"
   manifest:
     package: app.polarbear
     sdk:
@@ -38,6 +43,11 @@ android:
       theme: "@style/PortalSplashTheme"
       activities:
         - name: app.polarbear.PortalActivity
+          # The KDE desktop coordinate space must never resize when Android
+          # IME appears; the IME overlays instead. GameActivity's own
+          # onSetUpWindow default (ADJUST_RESIZE) is overridden at runtime in
+          # PortalActivity as well — this manifest value is defense in depth.
+          window_soft_input_mode: adjustNothing
       services:
         - name: app.polarbear.KeyboardAccessibilityService
           permission: android.permission.BIND_ACCESSIBILITY_SERVICE

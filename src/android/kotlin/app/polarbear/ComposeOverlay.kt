@@ -1,21 +1,29 @@
 package app.polarbear
 
-// SPIKE-ONLY (branch compose-setup-spike): minimal Jetpack Compose fullscreen
-// overlay hosted in a PopupWindow owned by Portal's existing winit
-// android-native-activity.
+// SPIKE-ONLY (branch spike/game-activity-host): minimal Jetpack Compose
+// fullscreen setup UI hosted as a normal sibling View in the GameActivity
+// window.
 //
-// Architecture: the ComposeView lives in a fullscreen PopupWindow attached to
-// the Activity decor (same window token family, same Activity). No
-// ComponentActivity, GameActivity, or second Activity is involved, and the
-// native SurfaceView underneath is never touched. (v1 attached the view to
-// the Activity content root, but motion events never enter in-window views
-// of a NativeActivity, so buttons were untappable; a separate window gets
-// its own input channel — the proven WebView setup/recovery pattern.)
-// Lifecycle/SavedState/ViewModel ownership is supplied manually because
-// NativeActivity does not provide it.
+// Architecture: the ComposeView lives in a MATCH_PARENT FrameLayout added to
+// GameActivity's own root FrameLayout (see PortalActivity.overlayHost),
+// directly above the native InputEnabledSurfaceView. Same window, same
+// Activity, no PopupWindow, no Dialog, no second Activity, no second window,
+// no Window.takeSurface(). The native SurfaceView is never reparented,
+// detached or recreated: showing and removing the overlay only adds/removes
+// the sibling frame.
 //
-// Removal dismisses the popup and disposes the composition on the UI thread,
-// leaving the native Wayland surface visible and operating normally.
+// Lifecycle/SavedState/ViewModel ownership comes from the real
+// AppCompatActivity owners: GameActivity derives from AppCompatActivity, so
+// the window decor already carries them and the ComposeView resolves them by
+// walking up the tree. There is no manual owner and no ViewTree tagging.
+//
+// Input needs no custom routing: the overlay frame is the topmost View while
+// visible, so normal Android hit-testing delivers touch, mouse, hover,
+// scroll and generic motion to Compose; once removed,
+// GameActivity/android-activity/Winit receive native input normally.
+//
+// Removal removes the frame and disposes the composition on the UI thread,
+// leaving the native surface visible and operating normally.
 
 import android.app.Activity
 import android.content.Context
@@ -26,72 +34,7 @@ import android.widget.FrameLayout
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
 import app.polarbear.setup.PortalSetupScreen
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.LifecycleRegistry
-import androidx.lifecycle.ViewModelStore
-import androidx.lifecycle.ViewModelStoreOwner
-import androidx.savedstate.SavedStateRegistry
-import androidx.savedstate.SavedStateRegistryController
-import androidx.savedstate.SavedStateRegistryOwner
 import java.util.concurrent.atomic.AtomicBoolean
-
-/**
- * Manually supplied owners for the Compose hierarchy. The NativeActivity
- * never leaves RESUMED behind: [resume] follows the Activity's resumed
- * callback and [pause] follows suspend, so recomposition pauses while the
- * app is backgrounded. [destroy] runs once on overlay removal and clears
- * the ViewModelStore.
- */
-
-private class SpikeLifecycleOwner : LifecycleOwner, ViewModelStoreOwner, SavedStateRegistryOwner {
-    private val registry = LifecycleRegistry(this)
-    private val savedState = SavedStateRegistryController.create(this)
-    private val store = ViewModelStore()
-
-    override val lifecycle: Lifecycle get() = registry
-    override val savedStateRegistry: SavedStateRegistry get() = savedState.savedStateRegistry
-    override val viewModelStore: ViewModelStore get() = store
-
-    fun create() {
-        savedState.performAttach()
-        savedState.performRestore(null)
-        registry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
-        registry.handleLifecycleEvent(Lifecycle.Event.ON_START)
-        registry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
-    }
-
-    fun resume() {
-        try {
-            if (registry.currentState == Lifecycle.State.STARTED) {
-                registry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
-            }
-        } catch (_: Exception) {
-        }
-    }
-
-    fun pause() {
-        try {
-            if (registry.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                registry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
-            }
-        } catch (_: Exception) {
-        }
-    }
-
-    fun destroy() {
-        try {
-            registry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
-            registry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
-            registry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
-        } catch (_: Exception) {
-        }
-        try {
-            store.clear()
-        } catch (_: Exception) {
-        }
-    }
-}
 
 object ComposeOverlay {
     private const val TAG = "PortalComposeSpike"
@@ -104,7 +47,7 @@ object ComposeOverlay {
         try {
             System.loadLibrary("localdesktop")
         } catch (_: UnsatisfiedLinkError) {
-            // Already loaded by NativeActivity; harmless.
+            // Already loaded by GameActivity; harmless.
         }
     }
 
@@ -115,20 +58,13 @@ object ComposeOverlay {
 
     private val state = mutableStateOf(STATE_IDLE)
     // First app-owned frame handshake for the system splash: set on the
-    // popup's first pre-draw (measured and laid out), or when showing fails
-    // so the fallback screen can draw instead. PortalActivity holds the
-    // system splash until this flips; there is no timed wait anywhere.
+    // sibling frame's first pre-draw (measured and laid out), or when
+    // showing fails so the fallback screen can draw instead. PortalActivity
+    // holds the system splash until this flips; there is no timed wait
+    // anywhere.
     private val firstFrameReady = AtomicBoolean(false)
     private var container: FrameLayout? = null
     private var composeView: ComposeView? = null
-    private var owner: SpikeLifecycleOwner? = null
-    // PopupWindow owned by the same NativeActivity: v1 attached the
-    // ComposeView to the Activity content root, but motion events never enter
-    // in-window views of a NativeActivity (they go to the native input queue
-    // only), so no button was tappable. A separate window gets its own input
-    // channel — the same proven pattern as Portal's WebView setup/recovery
-    // popup — while the Activity is never recreated.
-    private var popup: android.widget.PopupWindow? = null
 
     /**
      * Show the fullscreen overlay. Fire-and-forget: success or failure is
@@ -163,22 +99,6 @@ object ComposeOverlay {
         }
     }
 
-    /** Follow the NativeActivity into the foreground. Safe from any thread. */
-    @JvmStatic fun onHostResumed(activity: Activity) {
-        activity.runOnUiThread {
-            owner?.resume()
-            Log.i(TAG, "host resumed")
-        }
-    }
-
-    /** Follow the NativeActivity into the background. Safe from any thread. */
-    @JvmStatic fun onHostSuspended(activity: Activity) {
-        activity.runOnUiThread {
-            owner?.pause()
-            Log.i(TAG, "host suspended")
-        }
-    }
-
     /**
      * Android 12+ cross-window blur probe for the future final transition.
      * Investigative only: the spike never depends on the result.
@@ -205,7 +125,7 @@ object ComposeOverlay {
     }
 
     private fun doShow(activity: Activity) {
-        if (popup != null) {
+        if (container != null) {
             // Re-show during a fade (e.g. recovery racing dismissal):
             // cancel teardown, restore opacity, re-acknowledge.
             container?.animate()?.cancel()
@@ -213,8 +133,13 @@ object ComposeOverlay {
             ackShown()
             return
         }
+        val host = (activity as? PortalActivity)?.overlayHost()
+        if (host == null) {
+            Log.e(TAG, "overlay show failed: host Activity is not a PortalActivity")
+            ackShowFailed("GameActivity root unavailable")
+            return
+        }
         try {
-            val lifecycleOwner = SpikeLifecycleOwner().also { it.create() }
             val frame = FrameLayout(activity).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -250,36 +175,18 @@ object ComposeOverlay {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
             }
-            // The ViewTree* owner setters are metadata-less Java facades in the
-            // KMP-published lifecycle/savedstate artifacts: visible to javac but
-            // not to kotlinc. Route them through the tiny Java bridge below.
-            // Compose resolves owners from the composition PARENT, so tag both
-            // the ComposeView and its container.
-            ComposeOwnerHost.attach(frame, lifecycleOwner, lifecycleOwner, lifecycleOwner)
-            ComposeOwnerHost.attach(view, lifecycleOwner, lifecycleOwner, lifecycleOwner)
+            // Lifecycle/SavedState/ViewModel owners resolve from the window
+            // decor (real AppCompatActivity owners); nothing is tagged here.
             view.setContent { PortalSetupScreen() }
-            val content = activity.findViewById<ViewGroup>(android.R.id.content)
-            val window = android.widget.PopupWindow(
+            // Sibling above the native SurfaceView in the SAME window: no
+            // second window is created and the SurfaceView is untouched.
+            host.addView(
                 frame,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ).apply {
-                isFocusable = true
-                isOutsideTouchable = false
-                // Born at final fullscreen geometry with no transition: the
-                // empty base animation style disables any default popup
-                // enter/exit animation that would read as a resize glitch.
-                animationStyle = android.R.style.Animation
-            }
-            // Show first with only the launch mark attached: the
-            // PopupDecorView does not exist before this call, and Compose
-            // installs the window recomposer on the window root (which only
-            // sees its own tags), so the decor must be tagged before any
-            // ComposeView attaches.
-            window.showAtLocation(content, android.view.Gravity.CENTER, 0, 0)
-            (frame.parent as? android.view.View)?.let {
-                ComposeOwnerHost.attach(it, lifecycleOwner, lifecycleOwner, lifecycleOwner)
-            }
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
             // First-draw handshake: the system splash is released only once
             // this measured, laid-out frame is about to render. No timers.
             frame.viewTreeObserver.addOnPreDrawListener(
@@ -292,13 +199,11 @@ object ComposeOverlay {
                 },
             )
             frame.addView(view)
-            popup = window
             container = frame
             composeView = view
-            owner = lifecycleOwner
             frame.alpha = 1f
             val blur = queryBlurSupport(activity)
-            Log.i(TAG, "overlay shown; crossWindowBlur=$blur")
+            Log.i(TAG, "overlay shown as GameActivity sibling; crossWindowBlur=$blur")
             ackShown()
         } catch (e: Exception) {
             Log.e(TAG, "overlay show failed", e)
@@ -319,19 +224,11 @@ object ComposeOverlay {
         markFirstFrameReady()
         try {
             // Best effort: also tear down any half-constructed hierarchy so a
-            // later fallback screen is never covered by a stale popup.
-            try {
-                popup?.dismiss()
-            } catch (_: Exception) {
-            }
-            popup = null
+            // later fallback screen is never covered by a stale frame.
+            val frame = container
+            (frame?.parent as? ViewGroup)?.removeView(frame)
             container = null
             composeView = null
-            try {
-                owner?.destroy()
-            } catch (_: Exception) {
-            }
-            owner = null
             nativeOnOverlayShowFailed(reason)
         } catch (_: UnsatisfiedLinkError) {
         } catch (_: Exception) {
@@ -350,11 +247,6 @@ object ComposeOverlay {
 
     private fun removeNow() {
         try {
-            try {
-                popup?.dismiss()
-            } catch (_: Exception) {
-            }
-            popup = null
             val frame = container
             (frame?.parent as? ViewGroup)?.removeView(frame)
             try {
@@ -366,11 +258,6 @@ object ComposeOverlay {
         } finally {
             container = null
             composeView = null
-            try {
-                owner?.destroy()
-            } catch (_: Exception) {
-            }
-            owner = null
             Log.i(TAG, "overlay removed; native surface undisturbed")
             try {
                 nativeOnOverlayRemoved()
