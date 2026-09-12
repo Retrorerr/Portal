@@ -1,21 +1,21 @@
 package app.polarbear
 
 // SPIKE-ONLY (branch compose-setup-spike): minimal Jetpack Compose fullscreen
-// overlay hosted in a PopupWindow owned by Portal's existing winit
-// android-native-activity.
+// overlay hosted inside Portal's own NativeActivity window.
 //
-// Architecture: the ComposeView lives in a fullscreen PopupWindow attached to
-// the Activity decor (same window token family, same Activity). No
-// ComponentActivity, GameActivity, or second Activity is involved, and the
-// native SurfaceView underneath is never touched. (v1 attached the view to
-// the Activity content root, but motion events never enter in-window views
-// of a NativeActivity, so buttons were untappable; a separate window gets
-// its own input channel — the proven WebView setup/recovery pattern.)
+// Architecture: the ComposeView lives in a MATCH_PARENT container added on
+// top of the Activity content (same window, same Activity, no PopupWindow,
+// no Dialog, no second Activity). The native SurfaceView underneath is never
+// touched. Because NativeActivity routes MotionEvents to its native input
+// queue instead of in-window views, PortalActivity explicitly forwards
+// events to the overlay first (see dispatchTouchEventToOverlay /
+// dispatchGenericMotionEventToOverlay); anything the overlay declines falls
+// through to super, preserving native input semantics exactly.
 // Lifecycle/SavedState/ViewModel ownership is supplied manually because
 // NativeActivity does not provide it.
 //
-// Removal dismisses the popup and disposes the composition on the UI thread,
-// leaving the native Wayland surface visible and operating normally.
+// Removal detaches the container and disposes the composition on the UI
+// thread, leaving the native Wayland surface visible and operating normally.
 
 import android.app.Activity
 import android.content.Context
@@ -115,20 +115,45 @@ object ComposeOverlay {
 
     private val state = mutableStateOf(STATE_IDLE)
     // First app-owned frame handshake for the system splash: set on the
-    // popup's first pre-draw (measured and laid out), or when showing fails
-    // so the fallback screen can draw instead. PortalActivity holds the
-    // system splash until this flips; there is no timed wait anywhere.
+    // overlay frame's first pre-draw (measured and laid out), or when
+    // showing fails so the fallback screen can draw instead. PortalActivity
+    // holds the system splash until this flips; there is no timed wait
+    // anywhere.
     private val firstFrameReady = AtomicBoolean(false)
     private var container: FrameLayout? = null
     private var composeView: ComposeView? = null
     private var owner: SpikeLifecycleOwner? = null
-    // PopupWindow owned by the same NativeActivity: v1 attached the
-    // ComposeView to the Activity content root, but motion events never enter
-    // in-window views of a NativeActivity (they go to the native input queue
-    // only), so no button was tappable. A separate window gets its own input
-    // channel — the same proven pattern as Portal's WebView setup/recovery
-    // popup — while the Activity is never recreated.
-    private var popup: android.widget.PopupWindow? = null
+
+    /**
+     * Route one MotionEvent to the overlay. Called by PortalActivity before
+     * NativeActivity sees the event. Returns true iff the overlay is present
+     * and consumed it; otherwise PortalActivity falls through to super, so
+     * native Portal input is bit-for-bit unchanged. All Activity dispatch
+     * callbacks run on the UI thread, same as every other method here, and
+     * the event object itself is forwarded untouched (never re-synthesized).
+     */
+    fun dispatchTouchEventToOverlay(event: android.view.MotionEvent): Boolean {
+        val frame = container ?: return false
+        return try {
+            frame.dispatchTouchEvent(event)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Same routing contract for non-touch motion: hover, mouse/trackpad
+     * pointer movement and scroll axes all arrive through the generic-motion
+     * dispatch path.
+     */
+    fun dispatchGenericMotionEventToOverlay(event: android.view.MotionEvent): Boolean {
+        val frame = container ?: return false
+        return try {
+            frame.dispatchGenericMotionEvent(event)
+        } catch (_: Exception) {
+            false
+        }
+    }
 
     /**
      * Show the fullscreen overlay. Fire-and-forget: success or failure is
@@ -205,7 +230,7 @@ object ComposeOverlay {
     }
 
     private fun doShow(activity: Activity) {
-        if (popup != null) {
+        if (container != null) {
             // Re-show during a fade (e.g. recovery racing dismissal):
             // cancel teardown, restore opacity, re-acknowledge.
             container?.animate()?.cancel()
@@ -259,27 +284,28 @@ object ComposeOverlay {
             ComposeOwnerHost.attach(view, lifecycleOwner, lifecycleOwner, lifecycleOwner)
             view.setContent { PortalSetupScreen() }
             val content = activity.findViewById<ViewGroup>(android.R.id.content)
-            val window = android.widget.PopupWindow(
+            // Tag the Activity window root as well: Compose installs the
+            // window recomposer on the root, which only sees its own tags.
+            // (The root already exists, unlike a popup decor, so this runs
+            // before anything attaches.)
+            try {
+                val decor = activity.window?.decorView
+                if (decor != null) {
+                    ComposeOwnerHost.attach(decor, lifecycleOwner, lifecycleOwner, lifecycleOwner)
+                }
+            } catch (_: Exception) {
+            }
+            ComposeOwnerHost.attach(content, lifecycleOwner, lifecycleOwner, lifecycleOwner)
+            // Attach the overlay container on top of the native surface view.
+            // MATCH_PARENT in the already-edge-to-edge window: same geometry
+            // as everything else, no second window, no resize.
+            content.addView(
                 frame,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ).apply {
-                isFocusable = true
-                isOutsideTouchable = false
-                // Born at final fullscreen geometry with no transition: the
-                // empty base animation style disables any default popup
-                // enter/exit animation that would read as a resize glitch.
-                animationStyle = android.R.style.Animation
-            }
-            // Show first with only the launch mark attached: the
-            // PopupDecorView does not exist before this call, and Compose
-            // installs the window recomposer on the window root (which only
-            // sees its own tags), so the decor must be tagged before any
-            // ComposeView attaches.
-            window.showAtLocation(content, android.view.Gravity.CENTER, 0, 0)
-            (frame.parent as? android.view.View)?.let {
-                ComposeOwnerHost.attach(it, lifecycleOwner, lifecycleOwner, lifecycleOwner)
-            }
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
             // First-draw handshake: the system splash is released only once
             // this measured, laid-out frame is about to render. No timers.
             frame.viewTreeObserver.addOnPreDrawListener(
@@ -292,7 +318,6 @@ object ComposeOverlay {
                 },
             )
             frame.addView(view)
-            popup = window
             container = frame
             composeView = view
             owner = lifecycleOwner
@@ -319,12 +344,13 @@ object ComposeOverlay {
         markFirstFrameReady()
         try {
             // Best effort: also tear down any half-constructed hierarchy so a
-            // later fallback screen is never covered by a stale popup.
+            // later fallback screen is never covered by a stale overlay.
+            val frame = container
+            (frame?.parent as? ViewGroup)?.removeView(frame)
             try {
-                popup?.dismiss()
+                composeView?.disposeComposition()
             } catch (_: Exception) {
             }
-            popup = null
             container = null
             composeView = null
             try {
@@ -350,11 +376,6 @@ object ComposeOverlay {
 
     private fun removeNow() {
         try {
-            try {
-                popup?.dismiss()
-            } catch (_: Exception) {
-            }
-            popup = null
             val frame = container
             (frame?.parent as? ViewGroup)?.removeView(frame)
             try {

@@ -12,14 +12,18 @@ package app.polarbear
 //     readiness signal, never by a timer.
 //   - owns fullscreen/immersive geometry via the modern window/insets path
 //     (edge-to-edge + WindowInsetsController, transient bars by swipe) so
-//     the splash, first frame, popup and Plasma surface all share one
+//     the splash, first frame, overlay and Plasma surface all share one
 //     stable fullscreen coordinate space from the beginning. No legacy
 //     SYSTEM_UI_FLAG_* calls anywhere in this path.
+//   - routes MotionEvents to the Compose overlay while one is visible (see
+//     dispatchTouchEvent/dispatchGenericMotionEvent); everything else falls
+//     through to ordinary NativeActivity behaviour.
 
 import android.app.NativeActivity
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.MotionEvent
 import android.view.WindowManager
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
@@ -37,6 +41,33 @@ open class PortalActivity : NativeActivity() {
         }
         super.onCreate(savedInstanceState)
         applyImmersive("onCreate")
+    }
+
+    /**
+     * Explicit input routing for the setup overlay. NativeActivity delivers
+     * MotionEvents to its native input queue, bypassing in-window views, so
+     * while the Compose overlay is present it gets first refusal here.
+     * Anything it declines falls through to super, preserving native Portal
+     * input semantics bit-for-bit. With no overlay this is a straight
+     * pass-through to ordinary NativeActivity behaviour.
+     */
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (ComposeOverlay.dispatchTouchEventToOverlay(event)) {
+            return true
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    /**
+     * Same contract for hover, mouse/trackpad pointer movement and scroll
+     * axes, which Android delivers through the generic-motion path rather
+     * than the touch path.
+     */
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (ComposeOverlay.dispatchGenericMotionEventToOverlay(event)) {
+            return true
+        }
+        return super.dispatchGenericMotionEvent(event)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
