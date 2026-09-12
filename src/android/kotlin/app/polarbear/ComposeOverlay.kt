@@ -34,6 +34,7 @@ import androidx.lifecycle.ViewModelStoreOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Manually supplied owners for the Compose hierarchy. The NativeActivity
@@ -113,6 +114,11 @@ object ComposeOverlay {
     @JvmStatic external fun nativeOnOverlayShowFailed(reason: String)
 
     private val state = mutableStateOf(STATE_IDLE)
+    // First app-owned frame handshake for the system splash: set on the
+    // popup's first pre-draw (measured and laid out), or when showing fails
+    // so the fallback screen can draw instead. PortalActivity holds the
+    // system splash until this flips; there is no timed wait anywhere.
+    private val firstFrameReady = AtomicBoolean(false)
     private var container: FrameLayout? = null
     private var composeView: ComposeView? = null
     private var owner: SpikeLifecycleOwner? = null
@@ -131,6 +137,15 @@ object ComposeOverlay {
      */
     @JvmStatic fun show(activity: Activity) {
         activity.runOnUiThread { doShow(activity) }
+    }
+
+    /** System-splash gate: true once an app-owned frame (or the fallback path) exists. */
+    @JvmStatic fun isFirstFrameReady(): Boolean = firstFrameReady.get()
+
+    private fun markFirstFrameReady() {
+        if (firstFrameReady.compareAndSet(false, true)) {
+            Log.i(TAG, "first app frame drawn; releasing system splash")
+        }
     }
 
     /** Update the small state text. "Desktop ready" fades the overlay out. */
@@ -205,11 +220,30 @@ object ComposeOverlay {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
-                setBackgroundColor(0xFF10131A.toInt())
+                // Same charcoal as the splash and the setup UI from pixel one.
+                setBackgroundColor(0xFF191B1C.toInt())
                 isClickable = true
                 isFocusable = true
                 isFocusableInTouchMode = true
             }
+            // Static launch mark: the first app-owned frame is charcoal plus
+            // this centred mark, continuing the system splash seamlessly.
+            // Compose attaches afterwards (see below).
+            val markSizePx = (144f * activity.resources.displayMetrics.density).toInt()
+            val mark = android.widget.ImageView(activity).apply {
+                layoutParams = FrameLayout.LayoutParams(markSizePx, markSizePx).apply {
+                    gravity = android.view.Gravity.CENTER
+                }
+                val markId = activity.resources.getIdentifier(
+                    "portal_mark", "drawable", activity.packageName,
+                )
+                if (markId != 0) {
+                    setImageResource(markId)
+                } else {
+                    Log.e(TAG, "launch mark drawable missing")
+                }
+            }
+            frame.addView(mark)
             val view = ComposeView(activity).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -232,15 +266,31 @@ object ComposeOverlay {
             ).apply {
                 isFocusable = true
                 isOutsideTouchable = false
+                // Born at final fullscreen geometry with no transition: the
+                // empty base animation style disables any default popup
+                // enter/exit animation that would read as a resize glitch.
+                animationStyle = android.R.style.Animation
             }
-            // Show first with an empty frame: the PopupDecorView does not exist
-            // before this call, and Compose installs the window recomposer on
-            // the window root (which only sees its own tags), so the decor
-            // must be tagged before any ComposeView attaches.
+            // Show first with only the launch mark attached: the
+            // PopupDecorView does not exist before this call, and Compose
+            // installs the window recomposer on the window root (which only
+            // sees its own tags), so the decor must be tagged before any
+            // ComposeView attaches.
             window.showAtLocation(content, android.view.Gravity.CENTER, 0, 0)
             (frame.parent as? android.view.View)?.let {
                 ComposeOwnerHost.attach(it, lifecycleOwner, lifecycleOwner, lifecycleOwner)
             }
+            // First-draw handshake: the system splash is released only once
+            // this measured, laid-out frame is about to render. No timers.
+            frame.viewTreeObserver.addOnPreDrawListener(
+                object : android.view.ViewTreeObserver.OnPreDrawListener {
+                    override fun onPreDraw(): Boolean {
+                        frame.viewTreeObserver.removeOnPreDrawListener(this)
+                        markFirstFrameReady()
+                        return true
+                    }
+                },
+            )
             frame.addView(view)
             popup = window
             container = frame
@@ -265,6 +315,8 @@ object ComposeOverlay {
     }
 
     private fun ackShowFailed(reason: String) {
+        // Release the system splash too: the fallback screen owns the next frame.
+        markFirstFrameReady()
         try {
             // Best effort: also tear down any half-constructed hierarchy so a
             // later fallback screen is never covered by a stale popup.

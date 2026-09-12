@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Portal charcoal: launch background, kept identical across the system
+         splash, the app theme and the first app-owned frame. -->
+    <color name="portal_charcoal">#191B1C</color>
+</resources>

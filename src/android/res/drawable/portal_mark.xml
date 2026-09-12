@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Tight-crop Portal mark for the app-owned launch frame. Same exact SVG
+     path geometry as assets/portal-icon-foreground.svg, translated by
+     (-336,-245) into the 345x514 visible-artwork bounds (relative geometry
+     and 54-unit stroke widths untouched), so the mark fills its allocation
+     with a transparent background. Rendered at 97x144dp to match the
+     perceived splash-mark size. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="97dp"
+    android:height="144dp"
+    android:viewportWidth="345"
+    android:viewportHeight="514">
+    <path
+        android:pathData="M188 473 C149 487 112 473 85 438 C27 364 38 221 87 126 C124 54 186 27 236 57 C302 97 318 208 287 308"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#F1EBDD"
+        android:strokeWidth="54" />
+    <path
+        android:pathData="M281 353 C267 390 249 419 225 438"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#F07949"
+        android:strokeWidth="54" />
+</vector>

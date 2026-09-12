@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- System splash (Android 12+; older releases fall back to the charcoal
+         windowBackground starting window). The splash shows only the Portal
+         mark on flat charcoal: no launcher squircle, no contrasting shape.
+         The mark artwork carries enough transparent padding that the
+         platform's circular splash mask never clips ink. -->
+    <style name="PortalSplashTheme" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/portal_charcoal</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/portal_splash_mark</item>
+        <item name="postSplashScreenTheme">@style/PortalMainTheme</item>
+    </style>
+
+    <!-- Stable fullscreen host theme: charcoal from the first pixel so no
+         white/black flash can appear before, during or after the splash. -->
+    <style name="PortalMainTheme" parent="android:Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowBackground">@color/portal_charcoal</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:statusBarColor">@color/portal_charcoal</item>
+        <item name="android:navigationBarColor">@color/portal_charcoal</item>
+    </style>
+</resources>
