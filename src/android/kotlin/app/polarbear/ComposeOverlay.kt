@@ -63,6 +63,14 @@ object ComposeOverlay {
     // holds the system splash until this flips; there is no timed wait
     // anywhere.
     private val firstFrameReady = AtomicBoolean(false)
+    // System-splash layer signal: set once by PortalActivity's splash exit
+    // listener when the platform splash view is actually removed (or
+    // immediately if splash install failed and there is nothing to wait
+    // for). The launch intro stays frozen at t=0 until this AND the
+    // CONFIGURE/header pre-draw gate both hold. Observed by composition via
+    // systemSplashRemovedState; the exit callback runs on the main thread.
+    private val systemSplashRemoved = AtomicBoolean(false)
+    private val systemSplashRemovedState = mutableStateOf(false)
     // Begin Install guard: the Start signal is accepted exactly once per
     // overlay session so a double-tap cannot double-start the runtime.
     private val startRequested = AtomicBoolean(false)
@@ -81,6 +89,14 @@ object ComposeOverlay {
 
     /** System-splash gate: true once an app-owned frame (or the fallback path) exists. */
     @JvmStatic fun isFirstFrameReady(): Boolean = firstFrameReady.get()
+
+    /** Called by PortalActivity when the system splash view is actually removed. */
+    fun markSystemSplashRemoved() {
+        if (systemSplashRemoved.compareAndSet(false, true)) {
+            systemSplashRemovedState.value = true
+            Log.i(TAG, "system splash removal confirmed; launch intro may leave t=0")
+        }
+    }
 
     private fun markFirstFrameReady() {
         if (firstFrameReady.compareAndSet(false, true)) {
@@ -188,6 +204,7 @@ object ComposeOverlay {
             view.setContent {
                 PortalLaunchTransition(
                     playIntro = !launchIntroResolved,
+                    splashRemoved = systemSplashRemovedState.value,
                     onContentPreDraw = { markFirstFrameReady() },
                     onIntroResolved = { launchIntroResolved = true },
                     onBeginInstall = { onBeginInstallPressed() },

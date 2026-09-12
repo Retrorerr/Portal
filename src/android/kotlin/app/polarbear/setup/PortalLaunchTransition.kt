@@ -66,6 +66,7 @@ private val ApertureEase = CubicBezierEasing(0.58f, 0f, 0.30f, 1f)
 @Composable
 fun PortalLaunchTransition(
     playIntro: Boolean,
+    splashRemoved: Boolean,
     onContentPreDraw: () -> Unit,
     onIntroResolved: () -> Unit,
     onBeginInstall: () -> Unit,
@@ -111,21 +112,27 @@ fun PortalLaunchTransition(
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
-    LaunchedEffect(ready, resolved) {
+    LaunchedEffect(ready, resolved, splashRemoved) {
         if (resolved) {
             currentResolved()
             Log.i(TAG, "CONFIGURE interactive; launch capture/effects released")
-        } else if (ready) {
+        } else if (ready && splashRemoved) {
             if (!ValueAnimator.areAnimatorsEnabled() ||
                 !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                 resolved = true
             } else {
-                Log.i(TAG, "Compose pre-draw ready; aperture intro started")
+                Log.i(TAG, "Compose pre-draw ready and system splash removed; aperture intro started")
                 // Compose's animation clock honors MotionDurationScale, including
                 // a scale change to zero during playback. No wall-clock delay.
                 clock.animateTo(DURATION_MS.toFloat(), tween(DURATION_MS, easing = LinearEasing))
                 resolved = true
             }
+        } else if (ready) {
+            // CONFIGURE/header layout is done but the platform splash layer
+            // is still up: hold the intro at t=0 (centred canonical mark
+            // over initial charcoal/frost) so no animation progress hides
+            // behind the exiting splash and no frame lacks a mark.
+            Log.i(TAG, "Compose pre-draw ready; holding intro at t=0 until system splash removed")
         }
     }
 

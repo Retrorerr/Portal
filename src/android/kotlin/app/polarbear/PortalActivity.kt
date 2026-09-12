@@ -12,10 +12,13 @@ package app.polarbear
 //     to load the native library; android-activity 0.6.1 supplies the
 //     matching Rust JNI glue, so no Games SDK C++ Prefab code is linked.
 //     Rust android_main() is unchanged.
-//   - installs the AndroidX system splash before super.onCreate() and holds
+//   - installs the AndroidX system splash before super.onCreate(), holds
 //     it until Portal draws its first app-owned frame (see
-//     ComposeOverlay.isFirstFrameReady). The splash is released by a real
-//     readiness signal, never by a timer. (GameActivity.onCreate runs its
+//     ComposeOverlay.isFirstFrameReady), and owns the exit boundary via
+//     setOnExitAnimationListener: the splash view is removed atomically
+//     with no platform exit animation, and Compose is told the layer is
+//     actually gone before the launch intro leaves t=0. The splash is
+//     released by a real readiness signal, never by a timer. (GameActivity.onCreate runs its
 //     surface/lib/native setup before delegating to AppCompatActivity, so
 //     the install still precedes the effective super init.)
 //   - owns fullscreen/immersive geometry via the modern window/insets path
@@ -67,11 +70,36 @@ open class PortalActivity : GameActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         try {
-            installSplashScreen().setKeepOnScreenCondition {
-                !ComposeOverlay.isFirstFrameReady()
+            installSplashScreen().apply {
+                setKeepOnScreenCondition {
+                    !ComposeOverlay.isFirstFrameReady()
+                }
+                // Own the splash boundary explicitly: no platform exit
+                // animation. The moment Android is ready to dismiss the
+                // splash, remove its view atomically (suppressing the
+                // icon-fade/radial-reveal transition) and tell Compose the
+                // layer is actually gone, so the launch intro starts from
+                // its t=0 mark with no blink and no progress hidden behind
+                // the exiting splash.
+                setOnExitAnimationListener { provider ->
+                    try {
+                        provider.remove()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "splash exit removal failed", e)
+                    }
+                    try {
+                        val icon = provider.iconView
+                        Log.i(TAG, "system splash removed; iconView=${icon.width}x${icon.height} at (${icon.x},${icon.y})")
+                    } catch (e: Exception) {
+                        Log.i(TAG, "system splash removed; icon bounds unreadable", e)
+                    }
+                    ComposeOverlay.markSystemSplashRemoved()
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "splash install failed; continuing with theme fallback", e)
+            // No splash to wait for: never freeze the Compose intro on it.
+            ComposeOverlay.markSystemSplashRemoved()
         }
         super.onCreate(savedInstanceState)
         applyImmersive("onCreate")
