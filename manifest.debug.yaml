@@ -24,6 +24,7 @@ android:
     - "androidx.lifecycle:lifecycle-runtime:2.8.7"
     - "androidx.lifecycle:lifecycle-viewmodel:2.8.7"
     - "androidx.savedstate:savedstate:1.2.1"
+    - "androidx.core:core-splashscreen:1.0.1"
   manifest:
     package: app.polarbear
     sdk:
@@ -33,6 +34,9 @@ android:
       label: "Portal Debug"
       extract_native_libs: true
       use_cleartext_traffic: true
+      theme: "@style/PortalSplashTheme"
+      activities:
+        - name: app.polarbear.PortalActivity
       services:
         - name: app.polarbear.KeyboardAccessibilityService
           permission: android.permission.BIND_ACCESSIBILITY_SERVICE
