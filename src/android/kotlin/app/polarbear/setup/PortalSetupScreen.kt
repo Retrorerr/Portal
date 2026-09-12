@@ -111,7 +111,10 @@ fun portalMarkPainter(main: Color, threshold: Color) = rememberVectorPainter(
 )
 
 @Composable
-fun PortalSetupScreen(onBeginInstall: () -> Unit = {}) {
+fun PortalSetupScreen(
+    onBeginInstall: () -> Unit = {},
+    launchMarkModifier: Modifier = Modifier,
+) {
     var appearance by remember { mutableStateOf(AppearanceMode.System) }
     var interfaceSize by remember { mutableStateOf(InterfaceSize.Balanced) }
     var minimalExpanded by remember { mutableStateOf(false) }
@@ -153,7 +156,7 @@ fun PortalSetupScreen(onBeginInstall: () -> Unit = {}) {
                         vertical = PortalDimens.SurfacePaddingV,
                     ),
             ) {
-                SetupHeader(palette = palette)
+                SetupHeader(palette = palette, launchMarkModifier = launchMarkModifier)
                 Spacer(modifier = Modifier.height(16.dp))
                 BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                     if (maxWidth >= PortalDimens.TwoColumnBreakpoint) {
@@ -327,12 +330,12 @@ private fun Modifier.softBackdropBlur(): Modifier =
     }
 
 @Composable
-private fun SetupHeader(palette: PortalPalette) {
+private fun SetupHeader(palette: PortalPalette, launchMarkModifier: Modifier) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Image(
             painter = portalMarkPainter(main = palette.logoMain, threshold = palette.logoThreshold),
             contentDescription = "Portal logo",
-            modifier = Modifier.size(PortalDimens.LogoSize),
+            modifier = Modifier.size(PortalDimens.LogoSize).then(launchMarkModifier),
         )
         Column(modifier = Modifier.padding(start = 20.dp)) {
             Text(
