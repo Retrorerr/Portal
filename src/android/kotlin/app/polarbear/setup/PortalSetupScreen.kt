@@ -6,7 +6,12 @@ package app.polarbear.setup
 // callback supplied by the host (ComposeOverlay owns the native signal).
 
 import android.util.Log
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -68,8 +73,12 @@ import androidx.compose.ui.layout.positionInRoot
 import app.polarbear.setup.components.PortalAgslGlow
 import app.polarbear.setup.components.SlidingSegmentedControl
 import app.polarbear.setup.components.portalBloom
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 private const val PREVIEW_TAG = "PortalComposeSetup"
+private const val AMBIENT_TAU = (PI * 2).toFloat()
 
 // Official Portal aperture geometry (assets/portal-icon-foreground.svg),
 // translated into the tight visible artwork bounds: the mark occupies
@@ -274,33 +283,57 @@ private fun SetupBackground(palette: PortalPalette, cardBounds: () -> Rect) {
         val w = maxWidth
         val h = maxHeight
         PortalAmbientFragments(background = palette.background, cardBounds = cardBounds)
-        // Warm emitted light: soft radial falloff only, no painted arc.
+        // Warm emitted light: soft radial falloff only, no painted arc. The
+        // blob itself drifts slowly around the upper-right region (same
+        // non-repeating low-frequency concept as the fragments), with an
+        // extremely subtle radius breath so it feels alive without pulsing.
+        // Clock values are read inside draw only, so the screen does not
+        // recompose with the ambience.
+        val ambience = rememberInfiniteTransition(label = "Portal ambience")
+        val blobA = ambience.animateFloat(0f, AMBIENT_TAU,
+            infiniteRepeatable(tween(37000, easing = LinearEasing), RepeatMode.Restart),
+            label = "blob A")
+        val blobB = ambience.animateFloat(0f, AMBIENT_TAU,
+            infiniteRepeatable(tween(53000, easing = LinearEasing), RepeatMode.Restart),
+            label = "blob B")
         Canvas(modifier = Modifier.fillMaxSize()) {
             val widthPx = w.toPx()
             val heightPx = h.toPx()
+            val a = blobA.value
+            val b = blobB.value
+            val coreCenter = Offset(
+                widthPx * (0.94f + 0.020f * sin(a + 0.6f) + 0.012f * sin(b + 2.1f)),
+                heightPx * (-0.10f + 0.020f * sin(b + 1.2f) + 0.012f * cos(a + 0.3f)),
+            )
+            val coreRadius = widthPx * 0.30f * (1f + 0.04f * sin(b + 4.0f))
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
                         palette.arcOrange.copy(alpha = 0.5f),
                         palette.arcOrange.copy(alpha = 0.0f),
                     ),
-                    center = Offset(widthPx * 0.94f, -heightPx * 0.10f),
-                    radius = widthPx * 0.30f,
+                    center = coreCenter,
+                    radius = coreRadius,
                 ),
-                radius = widthPx * 0.30f,
-                center = Offset(widthPx * 0.94f, -heightPx * 0.10f),
+                radius = coreRadius,
+                center = coreCenter,
             )
+            val haloCenter = Offset(
+                widthPx * (0.86f + 0.025f * sin(b + 3.3f) + 0.012f * cos(a + 1.7f)),
+                heightPx * (-0.02f + 0.022f * sin(a + 5.1f) + 0.010f * sin(b + 0.8f)),
+            )
+            val haloRadius = widthPx * 0.55f * (1f + 0.03f * sin(a + 2.4f))
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
                         palette.arcOrange.copy(alpha = 0.16f),
                         palette.arcOrange.copy(alpha = 0.0f),
                     ),
-                    center = Offset(widthPx * 0.86f, -heightPx * 0.02f),
-                    radius = widthPx * 0.55f,
+                    center = haloCenter,
+                    radius = haloRadius,
                 ),
-                radius = widthPx * 0.55f,
-                center = Offset(widthPx * 0.86f, -heightPx * 0.02f),
+                radius = haloRadius,
+                center = haloCenter,
             )
         }
     }
