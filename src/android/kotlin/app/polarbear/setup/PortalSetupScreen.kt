@@ -64,6 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.setup.components.EssentialsPicker
+import app.polarbear.setup.components.PortalAgslGlow
 import app.polarbear.setup.components.SlidingSegmentedControl
 import app.polarbear.setup.components.portalBloom
 
@@ -524,55 +525,64 @@ private fun BeginInstallButton(palette: PortalPalette, centered: Boolean) {
         animationSpec = tween(110),
         label = "press",
     )
-    // Persistent bloom: fixed MaskFilter light passes shaped like the button
-    // outline plus two slow caustic lobes travelling its perimeter. Only the
-    // drawn intensity responds to press; blur, geometry and circulation never
-    // change. This is the only continuously animated element.
+    // Light dips slightly while pressed; quick and restrained, no bounce.
     val dip by animateFloatAsState(
         targetValue = if (pressed) 0.8f else 1f,
         animationSpec = tween(110),
         label = "pressDip",
     )
-    Box(
-        modifier = if (centered) Modifier.fillMaxWidth() else Modifier,
+    val outer = if (centered) Modifier.fillMaxWidth() else Modifier
+    BoxWithConstraints(
+        modifier = outer,
         contentAlignment = Alignment.Center,
     ) {
-        val buttonWidth = if (centered) {
-            Modifier.widthIn(max = PortalDimens.BeginMaxWidth).fillMaxWidth(0.8f)
-        } else {
-            Modifier.width(PortalDimens.BeginMaxWidth)
-        }
-        Box(
-            modifier = buttonWidth
-                .height(PortalDimens.BeginHeight)
-                .graphicsLayer {
-                    scaleX = pressScale
-                    scaleY = pressScale
-                }
-                .portalBloom(
-                    glow = palette.glow,
-                    cornerRadius = 26.dp,
-                    intensity = dip,
-                )
-                .clip(RoundedCornerShape(26.dp))
-                .background(palette.buttonInterior)
-                .border(1.dp, palette.buttonOutline, RoundedCornerShape(26.dp))
-                .clickable(
-                    interactionSource = tap,
-                    indication = null,
-                    role = Role.Button,
-                    onClick = {
-                        Log.d(PREVIEW_TAG, "compose-setup-preview: Begin Install pressed")
-                    },
+        val buttonWidth = (if (centered) maxWidth * 0.8f else maxWidth)
+            .coerceAtMost(PortalDimens.BeginMaxWidth)
+        val buttonHeight = PortalDimens.BeginHeight
+        val glowMargin = 56.dp
+        Box(contentAlignment = Alignment.Center) {
+            PortalAgslGlow(
+                modifier = Modifier.size(
+                    buttonWidth + glowMargin * 2,
+                    buttonHeight + glowMargin * 2,
                 ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "Begin Install",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = PortalColors.Ivory,
+                buttonWidth = buttonWidth,
+                buttonHeight = buttonHeight,
+                margin = glowMargin,
+                glowAlpha = dip,
             )
+            Box(
+                modifier = Modifier
+                    .size(buttonWidth, buttonHeight)
+                    .graphicsLayer {
+                        scaleX = pressScale
+                        scaleY = pressScale
+                    }
+                    .portalBloom(
+                        glow = palette.glow,
+                        cornerRadius = 26.dp,
+                        intensity = dip,
+                    )
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(palette.buttonInterior)
+                    .border(1.dp, palette.buttonOutline, RoundedCornerShape(26.dp))
+                    .clickable(
+                        interactionSource = tap,
+                        indication = null,
+                        role = Role.Button,
+                        onClick = {
+                            Log.d(PREVIEW_TAG, "compose-setup-preview: Begin Install pressed")
+                        },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "Begin Install",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = PortalColors.Ivory,
+                )
+            }
         }
     }
 }
