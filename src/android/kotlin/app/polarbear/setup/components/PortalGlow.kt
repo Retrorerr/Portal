@@ -129,7 +129,7 @@ fun Modifier.portalBloom(
     intensity: Float,
     tightBlur: Dp = 12.dp,
     broadBlur: Dp = 28.dp,
-    tightAlpha: Float = 0.38f,
+    tightAlpha: Float = 0.5f,
     broadAlpha: Float = 0.14f,
 ): Modifier {
     val density = LocalDensity.current
@@ -236,7 +236,7 @@ private fun DrawScope.drawLobe(
     val morph = 1f + 0.22f * sin(2f * PI.toFloat() * (phase * 2f) + wobblePhase)
     val radius = baseRadius * morph
     val head = perimeterPoint(phase, w, h, r)
-    drawCausticLobe(head, radius, glow, 0.34f * intensity)
+    drawCausticLobe(head, radius, glow, 0.38f * intensity)
     val trailer = perimeterPoint(phase - 0.045f, w, h, r)
-    drawCausticLobe(trailer, radius * 0.8f, glow, 0.20f * intensity)
+    drawCausticLobe(trailer, radius * 0.8f, glow, 0.22f * intensity)
 }

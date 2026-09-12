@@ -89,13 +89,13 @@ fun portalMarkPainter(main: Color, threshold: Color) = rememberVectorPainter(
                 pathData = addPathNodes(APERTURE_PATH),
                 stroke = SolidColor(main),
                 strokeLineWidth = 54f,
-                strokeLineCap = StrokeCap.Round,
+                strokeLineCap = StrokeCap.Butt,
             )
             .addPath(
                 pathData = addPathNodes(THRESHOLD_PATH),
                 stroke = SolidColor(threshold),
                 strokeLineWidth = 54f,
-                strokeLineCap = StrokeCap.Round,
+                strokeLineCap = StrokeCap.Butt,
             )
             .build()
     },
@@ -145,7 +145,7 @@ fun PortalSetupScreen() {
                     ),
             ) {
                 SetupHeader(palette = palette)
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(16.dp))
                 BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                     if (maxWidth >= PortalDimens.TwoColumnBreakpoint) {
                         Column {
@@ -174,7 +174,7 @@ fun PortalSetupScreen() {
                                         onToggle = { minimalExpanded = !minimalExpanded },
                                         palette = palette,
                                     )
-                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Spacer(modifier = Modifier.height(8.dp))
                                     EssentialsRow(
                                         selectedIds = essentials,
                                         onOpen = { pickerVisible = true },
@@ -182,7 +182,7 @@ fun PortalSetupScreen() {
                                     )
                                 }
                             }
-                            Spacer(modifier = Modifier.height(22.dp))
+                            Spacer(modifier = Modifier.height(18.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -214,7 +214,7 @@ fun PortalSetupScreen() {
                             onToggle = { minimalExpanded = !minimalExpanded },
                             palette = palette,
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
                         EssentialsRow(
                             selectedIds = essentials,
                             onOpen = { pickerVisible = true },
@@ -231,7 +231,7 @@ fun PortalSetupScreen() {
                                 color = palette.textMuted,
                             )
                         }
-                        Spacer(modifier = Modifier.height(20.dp))
+                        Spacer(modifier = Modifier.height(18.dp))
                         BeginInstallButton(palette = palette, centered = true)
                     }
                 }
@@ -325,7 +325,7 @@ private fun SetupHeader(palette: PortalPalette) {
             contentDescription = "Portal logo",
             modifier = Modifier.size(PortalDimens.LogoSize),
         )
-        Column(modifier = Modifier.padding(start = 16.dp)) {
+        Column(modifier = Modifier.padding(start = 20.dp)) {
             Text(
                 text = "Install Portal",
                 fontSize = PortalDimens.TitleSize,
@@ -571,7 +571,7 @@ private fun BeginInstallButton(palette: PortalPalette, centered: Boolean) {
                 text = "Begin Install",
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = if (palette.isDark) palette.textPrimary else Color.White,
+                color = PortalColors.Ivory,
             )
         }
     }
