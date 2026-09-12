@@ -139,11 +139,11 @@ private class LoopPath private constructor(
     }
 }
 
-/** Two GPU blur passes over transparent fragment imagery, blended by the
- * measured card's spatial field. The base charcoal is drawn once, full
- * screen, and never touched by the frost: with no fragment present both
- * passes contribute nothing, so the mask is perfectly invisible.
- * All motion state is read in draw; CONFIGURE does not recompose with the clock.
+/** Two GPU blur passes over one opaque full scene, crossfaded by the
+ * measured card's spatial field. The source holds the exact background
+ * colour plus the seven fragments, so uniform charcoal stays exactly
+ * charcoal under any influence. All motion state is read in draw;
+ * CONFIGURE does not recompose with the clock.
  */
 @Composable
 fun PortalAmbientFragments(background: Color, cardBounds: () -> Rect, scenePx: IntSize) {
@@ -190,29 +190,26 @@ private fun AmbientScene(background: Color, cardBounds: () -> Rect, scenePx: Int
     val frosted = rememberGraphicsLayer()
     val unit = LocalDensity.current.density * SCENE_SCALE
     val radius = with(LocalDensity.current) { PortalDimens.SurfaceCorner.toPx() } * SCENE_SCALE
-    // One AGSL source, two lightweight instances: the soft surroundings fade
-    // OUT under the card while the dissolved ghosts fade IN, so fragment
-    // light crossfades spatially instead of stacking. Each instance keeps
-    // its own uniform snapshot; neither is rebuilt by moving fragments.
-    val softShader = remember { RuntimeShader(FROST_FIELD) }
-    val ghostShader = remember { RuntimeShader(FROST_FIELD) }
-    val softBlurPlatform = remember(unit) { RenderEffect.createBlurEffect(16f * unit, 16f * unit, Shader.TileMode.CLAMP) }
-    val softBlur = remember(softBlurPlatform) { softBlurPlatform.asComposeRenderEffect() }
+    // One AGSL crossfade mask shared by the frosted pass. It carries no
+    // colour of its own: it only outputs the strong scene scaled by the
+    // rounded-card influence, leaving the soft scene underneath to show
+    // through everywhere else.
+    val shader = remember { RuntimeShader(FROST_FIELD) }
+    val softBlur = remember(unit) { RenderEffect.createBlurEffect(16f * unit, 16f * unit, Shader.TileMode.CLAMP).asComposeRenderEffect() }
     val strongBlur = remember(unit) { RenderEffect.createBlurEffect(100f * unit, 100f * unit, Shader.TileMode.CLAMP) }
-    // Only layout changes rebuild the mask effects. Moving fragments
-    // invalidate the display list, not the compiled shaders or their uniform snapshots.
+    // Only layout changes rebuild the mask effect. Moving fragments
+    // invalidate the display list, not the compiled shader or its uniform snapshot.
     var lastBounds = remember { Rect.Zero }
     var lastUnit = remember { 0f }
     Canvas(Modifier.fillMaxSize()) {
         val sceneWidth = size.width * SCENE_SCALE
         val sceneHeight = size.height * SCENE_SCALE
-        // Single unchanged base layer: exact palette charcoal everywhere.
-        // Every pass below only ever ADDS fragment light over it.
-        drawRect(background)
         source.record(size = androidx.compose.ui.unit.IntSize(ceil(sceneWidth).toInt(), ceil(sceneHeight).toInt())) {
-            // Transparent fragment imagery only — no background fill. Blur
-            // passes therefore carry light, never a second backdrop that
-            // could darken or seam against the base.
+            // Complete opaque source scene: exact background colour first,
+            // then the seven fragments. Both blur passes operate on this
+            // same full scene, so a fragment-free region is identical
+            // charcoal no matter which pass dominates it.
+            drawRect(background)
             val base = minOf(sceneWidth, sceneHeight)
             DRIFTS.forEachIndexed { index, drift ->
                 // Uniform forward glide along the loop: constant speed, so
@@ -247,18 +244,12 @@ private fun AmbientScene(background: Color, cardBounds: () -> Rect, scenePx: Int
         val bounds = cardBounds()
         if (!bounds.isEmpty) {
             if (bounds != lastBounds || unit != lastUnit) {
-                for ((instance, hide) in listOf(softShader to 1f, ghostShader to 0f)) {
-                    instance.setFloatUniform("card", bounds.left * SCENE_SCALE, bounds.top * SCENE_SCALE,
-                        bounds.right * SCENE_SCALE, bounds.bottom * SCENE_SCALE)
-                    instance.setFloatUniform("corner", radius)
-                    instance.setFloatUniform("feather", 190f * unit)
-                    instance.setFloatUniform("hideUnderCard", hide)
-                }
-                surrounding.renderEffect = RenderEffect.createChainEffect(
-                    RenderEffect.createRuntimeShaderEffect(softShader, "scene"), softBlurPlatform,
-                ).asComposeRenderEffect()
+                shader.setFloatUniform("card", bounds.left * SCENE_SCALE, bounds.top * SCENE_SCALE,
+                    bounds.right * SCENE_SCALE, bounds.bottom * SCENE_SCALE)
+                shader.setFloatUniform("corner", radius)
+                shader.setFloatUniform("feather", 190f * unit)
                 frosted.renderEffect = RenderEffect.createChainEffect(
-                    RenderEffect.createRuntimeShaderEffect(ghostShader, "scene"), strongBlur,
+                    RenderEffect.createRuntimeShaderEffect(shader, "scene"), strongBlur,
                 ).asComposeRenderEffect()
                 lastBounds = bounds
                 lastUnit = unit
@@ -269,32 +260,27 @@ private fun AmbientScene(background: Color, cardBounds: () -> Rect, scenePx: Int
     }
 }
 
-// Frost field over TRANSPARENT blurred fragments: fades fragment light
-// spatially around the measured card, never touching the base background.
-// The blurred scene is sampled BEFORE masking, so no rectangular clipping
-// seam can reveal the two passes. With no fragment present the shader
-// outputs zero alpha everywhere and the mask is perfectly invisible.
-// Premultiplied alpha is preserved (rgb and alpha fade together, so hue
-// never shifts). One source serves both passes via hideUnderCard: the soft
-// surroundings fade OUT under the card while the dissolved ghosts fade IN,
-// so fragment light crossfades instead of stacking.
+// Frost crossfade mask over the strong-blurred full scene. The blurred
+// scene is sampled BEFORE masking, so no rectangular clipping seam can
+// reveal the two passes. This shader carries no colour of its own: it
+// outputs the strong scene premultiplied by the rounded-card influence, so
+// compositing over the opaque soft scene yields exactly
+// soft * (1 - influence) + strong * influence. Both layers contain the same
+// opaque base colour, so uniform charcoal stays exactly charcoal regardless
+// of influence — the field cannot tint, darken, brighten, desaturate, or
+// otherwise modify the scene. Premultiplied alpha is preserved.
 private const val FROST_FIELD = """
 uniform shader scene;
 uniform float4 card;
 uniform float corner;
 uniform float feather;
-uniform float hideUnderCard;
 half4 main(float2 p) {
     float2 halfSize = (card.zw - card.xy) * 0.5;
     float r = min(corner, min(halfSize.x, halfSize.y));
     float2 q = abs(p - (card.xy + card.zw) * 0.5) - halfSize + r;
     float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
     float influence = 1.0 - smoothstep(0.0, feather, distance);
-    half4 frag = scene.eval(p);
-    // Dissolve beneath glass: keep a little under half of the blurred light
-    // directly under the card, full light outside, with the wide feather
-    // keeping the transition boundary-free.
-    float keep = mix(influence * (1.0 - 0.55 * influence), 1.0 - influence, hideUnderCard);
-    return half4(frag.rgb * keep, frag.a * keep);
+    half4 color = scene.eval(p);
+    return half4(color.rgb * influence, influence);
 }
 """
