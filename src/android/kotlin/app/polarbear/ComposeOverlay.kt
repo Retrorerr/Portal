@@ -63,6 +63,9 @@ object ComposeOverlay {
     // holds the system splash until this flips; there is no timed wait
     // anywhere.
     private val firstFrameReady = AtomicBoolean(false)
+    // Begin Install guard: the Start signal is accepted exactly once per
+    // overlay session so a double-tap cannot double-start the runtime.
+    private val startRequested = AtomicBoolean(false)
     private var container: FrameLayout? = null
     private var composeView: ComposeView? = null
 
@@ -96,6 +99,28 @@ object ComposeOverlay {
             }
         } else {
             state.value = value
+        }
+    }
+
+    /**
+     * SPIKE-ONLY host-validation entry: the CONFIGURE Begin Install button
+     * calls this (via PortalSetupScreen) to start Portal/Plasma beneath the
+     * overlay, bypassing provisioning. Accepted once; the overlay itself is
+     * NOT removed here — removal still happens only on the existing
+     * STATE_READY / "Desktop ready" signal.
+     */
+    private fun onBeginInstallPressed() {
+        if (!startRequested.compareAndSet(false, true)) {
+            Log.i(TAG, "Begin Install ignored: start already requested")
+            return
+        }
+        Log.i(TAG, "spike host validation: Begin Install bypasses provisioning; starting Portal beneath overlay")
+        try {
+            nativeOnStartPlasma()
+        } catch (_: UnsatisfiedLinkError) {
+            Log.e(TAG, "nativeOnStartPlasma unavailable")
+        } catch (e: Exception) {
+            Log.e(TAG, "nativeOnStartPlasma failed", e)
         }
     }
 
@@ -177,7 +202,7 @@ object ComposeOverlay {
             }
             // Lifecycle/SavedState/ViewModel owners resolve from the window
             // decor (real AppCompatActivity owners); nothing is tagged here.
-            view.setContent { PortalSetupScreen() }
+            view.setContent { PortalSetupScreen(onBeginInstall = { onBeginInstallPressed() }) }
             // Sibling above the native SurfaceView in the SAME window: no
             // second window is created and the SurfaceView is untouched.
             host.addView(

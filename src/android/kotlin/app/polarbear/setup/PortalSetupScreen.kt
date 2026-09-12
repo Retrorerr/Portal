@@ -2,7 +2,8 @@ package app.polarbear.setup
 
 // SPIKE-ONLY (branch compose-setup-spike): Portal first-run CONFIGURE
 // screen. Visual/interaction prototype with local fake state only — no
-// provisioning, no Rust calls except the Begin Install debug log.
+// provisioning, no JNI/Rust references; the Begin Install action is a plain
+// callback supplied by the host (ComposeOverlay owns the native signal).
 
 import android.util.Log
 import androidx.compose.animation.AnimatedVisibility
@@ -110,7 +111,7 @@ fun portalMarkPainter(main: Color, threshold: Color) = rememberVectorPainter(
 )
 
 @Composable
-fun PortalSetupScreen() {
+fun PortalSetupScreen(onBeginInstall: () -> Unit = {}) {
     var appearance by remember { mutableStateOf(AppearanceMode.System) }
     var interfaceSize by remember { mutableStateOf(InterfaceSize.Balanced) }
     var minimalExpanded by remember { mutableStateOf(false) }
@@ -201,7 +202,7 @@ fun PortalSetupScreen() {
                                     color = palette.textMuted,
                                     modifier = Modifier.weight(1f),
                                 )
-                                BeginInstallButton(palette = palette, centered = false)
+                                BeginInstallButton(palette = palette, centered = false, onBeginInstall = onBeginInstall)
                             }
                         }
                     } else {
@@ -240,7 +241,7 @@ fun PortalSetupScreen() {
                             )
                         }
                         Spacer(modifier = Modifier.height(18.dp))
-                        BeginInstallButton(palette = palette, centered = true)
+                        BeginInstallButton(palette = palette, centered = true, onBeginInstall = onBeginInstall)
                     }
                 }
             }
@@ -527,7 +528,7 @@ private fun ForwardChevron(palette: PortalPalette) {
 }
 
 @Composable
-private fun BeginInstallButton(palette: PortalPalette, centered: Boolean) {
+private fun BeginInstallButton(palette: PortalPalette, centered: Boolean, onBeginInstall: () -> Unit) {
     val tap = remember { MutableInteractionSource() }
     val pressed by tap.collectIsPressedAsState()
     val pressScale by animateFloatAsState(
@@ -591,6 +592,7 @@ private fun BeginInstallButton(palette: PortalPalette, centered: Boolean) {
                         role = Role.Button,
                         onClick = {
                             Log.d(PREVIEW_TAG, "compose-setup-preview: Begin Install pressed")
+                            onBeginInstall()
                         },
                     ),
                 contentAlignment = Alignment.Center,
