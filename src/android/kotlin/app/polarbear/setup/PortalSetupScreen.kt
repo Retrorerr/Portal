@@ -115,6 +115,7 @@ fun PortalSetupScreen(
 ) {
     var appearance by remember { mutableStateOf(AppearanceMode.System) }
     var interfaceSize by remember { mutableStateOf(InterfaceSize.Balanced) }
+    val ambientCardBounds = remember { mutableStateOf(Rect.Zero) }
     var pickerBounds by remember { mutableStateOf(Rect.Zero) }
     var rootOrigin by remember { mutableStateOf(Offset.Zero) }
     var pickerVisible by remember { mutableStateOf(false) }
@@ -140,7 +141,7 @@ fun PortalSetupScreen(
                 }
             }
         }) {
-        SetupBackground(palette = palette)
+        SetupBackground(palette = palette, cardBounds = { ambientCardBounds.value.translate(-rootOrigin) })
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -151,6 +152,12 @@ fun PortalSetupScreen(
         ) {
             Column(
                 modifier = Modifier
+                    .onGloballyPositioned {
+                        // Unclipped bounds in the ambient root coordinate space;
+                        // scrolling/expansion must not invent new rounded corners.
+                        ambientCardBounds.value = Rect(it.positionInRoot(),
+                            androidx.compose.ui.geometry.Size(it.size.width.toFloat(), it.size.height.toFloat()))
+                    }
                     .widthIn(max = PortalDimens.SurfaceMaxWidth)
                     .fillMaxWidth(0.94f)
                     .shadow(
@@ -262,11 +269,11 @@ fun PortalSetupScreen(
 }
 
 @Composable
-private fun SetupBackground(palette: PortalPalette) {
+private fun SetupBackground(palette: PortalPalette, cardBounds: () -> Rect) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val w = maxWidth
         val h = maxHeight
-        PortalAmbientFragments()
+        PortalAmbientFragments(background = palette.background, cardBounds = cardBounds)
         // Warm emitted light: soft radial falloff only, no painted arc.
         Canvas(modifier = Modifier.fillMaxSize()) {
             val widthPx = w.toPx()
