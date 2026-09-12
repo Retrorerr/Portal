@@ -4,9 +4,7 @@ package app.polarbear.setup.components
 // that glides between options (~220ms, position-based, no bounce). Text
 // colour cross-fades with the movement.
 
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
