@@ -754,10 +754,6 @@ impl PolarBearApp {
 
 impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // SPIKE compose-setup: keep the manual Compose lifecycle in step with
-        // the NativeActivity. No-op while the overlay is Hidden and never
-        // touches the Wayland suspend/resume behaviour below.
-        compose_overlay::host_resumed(&self.frontend.android_app);
         // SPIKE compose-setup: on the first process resume, show the Compose overlay
         // and defer the normal resume until the explicit Start Plasma action arrives.
         // The Activity is never recreated; later resumes use the normal paths below.
@@ -1031,9 +1027,6 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     }
 
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {
-        // SPIKE compose-setup: pause the manual Compose owner while the
-        // Activity is backgrounded. Teardown still happens only on removal.
-        compose_overlay::host_suspended(&self.frontend.android_app);
         accessibility::set_runtime_active(false);
         ime::reset();
         event_loop.set_control_flow(ControlFlow::Wait);
