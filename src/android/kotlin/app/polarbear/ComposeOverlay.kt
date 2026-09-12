@@ -33,7 +33,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
-import app.polarbear.setup.PortalSetupScreen
+import app.polarbear.setup.PortalLaunchTransition
 import java.util.concurrent.atomic.AtomicBoolean
 
 object ComposeOverlay {
@@ -58,7 +58,7 @@ object ComposeOverlay {
 
     private val state = mutableStateOf(STATE_IDLE)
     // First app-owned frame handshake for the system splash: set on the
-    // sibling frame's first pre-draw (measured and laid out), or when
+    // Compose content pre-draw (CONFIGURE and header measured), or when
     // showing fails so the fallback screen can draw instead. PortalActivity
     // holds the system splash until this flips; there is no timed wait
     // anywhere.
@@ -68,6 +68,7 @@ object ComposeOverlay {
     private val startRequested = AtomicBoolean(false)
     private var container: FrameLayout? = null
     private var composeView: ComposeView? = null
+    private var launchIntroResolved = false
 
     /**
      * Show the fullscreen overlay. Fire-and-forget: success or failure is
@@ -176,24 +177,6 @@ object ComposeOverlay {
                 isFocusable = true
                 isFocusableInTouchMode = true
             }
-            // Static launch mark: the first app-owned frame is charcoal plus
-            // this centred mark, continuing the system splash seamlessly.
-            // Compose attaches afterwards (see below).
-            val markSizePx = (144f * activity.resources.displayMetrics.density).toInt()
-            val mark = android.widget.ImageView(activity).apply {
-                layoutParams = FrameLayout.LayoutParams(markSizePx, markSizePx).apply {
-                    gravity = android.view.Gravity.CENTER
-                }
-                val markId = activity.resources.getIdentifier(
-                    "portal_mark", "drawable", activity.packageName,
-                )
-                if (markId != 0) {
-                    setImageResource(markId)
-                } else {
-                    Log.e(TAG, "launch mark drawable missing")
-                }
-            }
-            frame.addView(mark)
             val view = ComposeView(activity).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -202,7 +185,14 @@ object ComposeOverlay {
             }
             // Lifecycle/SavedState/ViewModel owners resolve from the window
             // decor (real AppCompatActivity owners); nothing is tagged here.
-            view.setContent { PortalSetupScreen(onBeginInstall = { onBeginInstallPressed() }) }
+            view.setContent {
+                PortalLaunchTransition(
+                    playIntro = !launchIntroResolved,
+                    onContentPreDraw = { markFirstFrameReady() },
+                    onIntroResolved = { launchIntroResolved = true },
+                    onBeginInstall = { onBeginInstallPressed() },
+                )
+            }
             // Sibling above the native SurfaceView in the SAME window: no
             // second window is created and the SurfaceView is untouched.
             host.addView(
@@ -212,23 +202,11 @@ object ComposeOverlay {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 ),
             )
-            // First-draw handshake: the system splash is released only once
-            // this measured, laid-out frame is about to render. No timers.
-            frame.viewTreeObserver.addOnPreDrawListener(
-                object : android.view.ViewTreeObserver.OnPreDrawListener {
-                    override fun onPreDraw(): Boolean {
-                        frame.viewTreeObserver.removeOnPreDrawListener(this)
-                        markFirstFrameReady()
-                        return true
-                    }
-                },
-            )
             frame.addView(view)
             container = frame
             composeView = view
             frame.alpha = 1f
-            val blur = queryBlurSupport(activity)
-            Log.i(TAG, "overlay shown as GameActivity sibling; crossWindowBlur=$blur")
+            Log.i(TAG, "overlay shown as GameActivity sibling; Compose-local launch treatment")
             ackShown()
         } catch (e: Exception) {
             Log.e(TAG, "overlay show failed", e)
