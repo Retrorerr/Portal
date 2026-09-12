@@ -60,12 +60,12 @@ object PortalColors {
         textSecondary = Color(0xBFF1EBDD),
         textMuted = Color(0xA3A7A29C),
         trackFill = Color(0x08F1EBDD),
-        selectionPill = Color(0x4DF07949),
+        selectionPill = Color(0xA8F07949),
         selectionHighlight = Color(0x14FFFFFF),
         selectionText = Ivory,
         optionText = Color(0x99CFC6B8),
         accent = Orange,
-        accentSoft = Color(0xFFF0A37E),
+        accentSoft = Orange,
         buttonInterior = Color(0xFF191B1C),
         buttonOutline = Color(0x66F07949),
         glow = Orange,
@@ -92,14 +92,14 @@ object PortalColors {
         // Charcoal on the light tint: white text would fail contrast here.
         selectionText = Color(0xFF222425),
         optionText = Color(0xFF7C766E),
-        accent = Color(0xFFD96A3C),
-        accentSoft = Color(0xFFB85A33),
+        accent = Orange,
+        accentSoft = Orange,
         buttonInterior = Color(0xFF1E2021),
-        buttonOutline = Color(0x99D96A3C),
+        buttonOutline = Color(0x99F07949),
         glow = Color(0xFFF07949),
         scrim = Color(0x4D191B1C),
         arcIvory = Color(0x0A191B1C),
-        arcOrange = Color(0x16D96A3C),
+        arcOrange = Color(0x16F07949),
         // Exact official mark colours in both modes: no badge, no container.
         logoMain = Ivory,
         logoThreshold = Orange,
@@ -125,7 +125,7 @@ object PortalDimens {
     val SectionSpacing: Dp = 18.dp
     val ColumnGutter: Dp = 32.dp
     val TwoColumnBreakpoint: Dp = 600.dp
-    val LogoSize: Dp = 66.dp
+    val LogoSize: Dp = 84.dp
     val TitleSize = 30.sp
     val PickerMaxWidth: Dp = 560.dp
     val BeginMaxWidth: Dp = 310.dp

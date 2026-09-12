@@ -24,7 +24,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -70,21 +72,26 @@ import app.polarbear.setup.components.portalBloom
 
 private const val PREVIEW_TAG = "PortalComposeSetup"
 
-// Official Portal aperture geometry (assets/portal-icon-foreground.svg).
+// Official Portal aperture geometry (assets/portal-icon-foreground.svg),
+// translated into the tight visible artwork bounds: the mark occupies
+// x[336,681] y[245,759] at 54-unit stroke, i.e. a 345x514 box once the
+// stroke is included. Coordinates below are exactly the SVG values shifted
+// by (-336,-245); relative geometry and stroke widths are untouched, so the
+// mark fills its allocation instead of floating in empty viewport.
 private const val APERTURE_PATH =
-    "M524,718 C485,732 448,718 421,683 C363,609 374,466 423,371 " +
-        "C460,299 522,272 572,302 C638,342 654,453 623,553"
-private const val THRESHOLD_PATH = "M617,598 C603,635 585,664 561,683"
+    "M188,473 C149,487 112,473 85,438 C27,364 38,221 87,126 " +
+        "C124,54 186,27 236,57 C302,97 318,208 287,308"
+private const val THRESHOLD_PATH = "M281,353 C267,390 249,419 225,438"
 
 @Composable
 fun portalMarkPainter(main: Color, threshold: Color) = rememberVectorPainter(
     image = remember(main, threshold) {
         ImageVector.Builder(
             name = "portal",
-            defaultWidth = 108.dp,
-            defaultHeight = 108.dp,
-            viewportWidth = 1024f,
-            viewportHeight = 1024f,
+            defaultWidth = 56.dp,
+            defaultHeight = 84.dp,
+            viewportWidth = 345f,
+            viewportHeight = 514f,
         )
             .addPath(
                 pathData = addPathNodes(APERTURE_PATH),
@@ -175,7 +182,7 @@ fun PortalSetupScreen() {
                                         onToggle = { minimalExpanded = !minimalExpanded },
                                         palette = palette,
                                     )
-                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Spacer(modifier = Modifier.height(11.dp))
                                     EssentialsRow(
                                         selectedIds = essentials,
                                         onOpen = { pickerVisible = true },
@@ -215,7 +222,7 @@ fun PortalSetupScreen() {
                             onToggle = { minimalExpanded = !minimalExpanded },
                             palette = palette,
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(11.dp))
                         EssentialsRow(
                             selectedIds = essentials,
                             onOpen = { pickerVisible = true },
@@ -388,96 +395,99 @@ private fun InterfaceSizeSection(
 
 @Composable
 private fun MinimalInstallRow(expanded: Boolean, onToggle: () -> Unit, palette: PortalPalette) {
-    val tap = remember { MutableInteractionSource() }
-    val pressed by tap.collectIsPressedAsState()
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(
-                if (pressed) palette.trackFill else Color.Transparent,
-                RoundedCornerShape(16.dp),
-            )
-            .clickable(
-                interactionSource = tap,
-                indication = null,
-                role = Role.Button,
-                onClick = onToggle,
-            )
-            .padding(vertical = 6.dp),
+    OptionButton(
+        onClick = onToggle,
+        title = "Minimal install",
+        secondary = "Everything needed for a complete Portal desktop",
+        palette = palette,
+        trailing = { DisclosureChevron(expanded = expanded, palette = palette) },
+        expanded = expanded,
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.heightIn(min = 54.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Minimal install",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.textPrimary,
-                )
-                Text(
-                    text = "Everything needed for a complete Portal desktop",
-                    fontSize = 13.sp,
-                    color = palette.textMuted,
-                )
-            }
-            DisclosureChevron(expanded = expanded, palette = palette)
-        }
-        AnimatedVisibility(
-            visible = expanded,
-            enter = expandVertically(animationSpec = tween(260)) + fadeIn(tween(260)),
-            exit = shrinkVertically(animationSpec = tween(240)) + fadeOut(tween(240)),
-        ) {
-            Text(
-                text = "Debian 13 · KDE Plasma + KWin · Portal integration · " +
-                    "Firefox · media codecs · Dolphin · Konsole · core system tools",
-                fontSize = 13.sp,
-                lineHeight = 20.sp,
-                color = palette.textSecondary,
-                modifier = Modifier.padding(top = 10.dp, start = 8.dp, end = 28.dp),
-            )
-        }
+        Text(
+            text = "Debian 13 · KDE Plasma + KWin · Portal integration · " +
+                "Firefox · media codecs · Dolphin · Konsole · core system tools",
+            fontSize = 13.sp,
+            lineHeight = 20.sp,
+            color = palette.textSecondary,
+            modifier = Modifier.padding(top = 8.dp, bottom = 4.dp, end = 8.dp),
+        )
     }
 }
 
 @Composable
 private fun EssentialsRow(selectedIds: Set<String>, onOpen: () -> Unit, palette: PortalPalette) {
+    OptionButton(
+        onClick = onOpen,
+        title = "Essentials",
+        secondary = "${selectedIds.size} selected · ${formatExtrasDelta(selectedIds)}",
+        palette = palette,
+        trailing = { ForwardChevron(palette = palette) },
+    )
+}
+
+/**
+ * Shared secondary-option button family: identical width, collapsed height,
+ * radius, padding, glass fill, border and press behaviour. The collapsed
+ * header stays visually intact when [expandedContent] opens beneath it.
+ */
+@Composable
+private fun OptionButton(
+    onClick: () -> Unit,
+    title: String,
+    secondary: String,
+    palette: PortalPalette,
+    trailing: @Composable RowScope.() -> Unit,
+    expanded: Boolean = false,
+    expandedContent: (@Composable ColumnScope.() -> Unit)? = null,
+) {
     val tap = remember { MutableInteractionSource() }
     val pressed by tap.collectIsPressedAsState()
-    Row(
+    val shape = RoundedCornerShape(17.dp)
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
+            .clip(shape)
             .background(
-                if (pressed) palette.trackFill else Color.Transparent,
-                RoundedCornerShape(16.dp),
+                if (pressed) palette.trackFill.copy(alpha = 0.10f) else palette.trackFill,
+                shape,
             )
+            .border(1.dp, palette.surfaceBorder, shape)
             .clickable(
                 interactionSource = tap,
                 indication = null,
                 role = Role.Button,
-                onClick = onOpen,
+                onClick = onClick,
             )
-            .padding(vertical = 6.dp)
-            .heightIn(min = 54.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(horizontal = 18.dp, vertical = 10.dp),
     ) {
-        Text(
-            text = "Essentials",
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Medium,
-            color = palette.textPrimary,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = "${selectedIds.size} selected · ${formatExtrasDelta(selectedIds)}",
-            fontSize = 13.sp,
-            color = palette.textSecondary,
-        )
-        Spacer(modifier = Modifier.size(8.dp))
-        ForwardChevron(palette = palette)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.heightIn(min = 42.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.textPrimary,
+                )
+                Text(
+                    text = secondary,
+                    fontSize = 13.sp,
+                    color = palette.textMuted,
+                )
+            }
+            trailing()
+        }
+        if (expandedContent != null) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(animationSpec = tween(260)) + fadeIn(tween(260)),
+                exit = shrinkVertically(animationSpec = tween(240)) + fadeOut(tween(240)),
+            ) {
+                Column { expandedContent() }
+            }
+        }
     }
 }
 
