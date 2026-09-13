@@ -1071,7 +1071,8 @@ fn render_loop(inner: Arc<Inner>) {
                     None,
                 );
                 log::info!("{ready_log}");
-                // SPIKE compose-setup: first presented desktop frame dismisses the overlay.
+                // Latch native readiness for Compose. The live Anland surface
+                // keeps running beneath the setup veil until the final swipe.
                 crate::android::utils::compose_overlay::notify_desktop_ready_cached();
             }
             let n = inner.frames_queued.load(Ordering::Relaxed);

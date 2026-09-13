@@ -676,87 +676,13 @@ impl PolarBearApp {
         true
     }
 
-    /// SPIKE compose-setup: explicit `Start Plasma` action from the Compose overlay.
-    ///
-    /// The overlay stays fully visible while the existing setup/Wayland path constructs
-    /// and resumes the backend in the SAME Activity; dismissal happens only on the
-    /// desktop-ready signal (first presented KWin frame), never on process launch.
-    fn on_compose_start(&mut self, event_loop: &ActiveEventLoop) {
-        let app = self.frontend.android_app.clone();
-        if compose_overlay::is_up() {
-            compose_overlay::set_compose_state(&app, compose_overlay::STATE_STARTING);
-        }
-        enum StartTarget {
-            ResumeWayland,
-            WaylandAlreadyActive,
-            RetryRuntime,
-            BuildSetup,
-            Unsupported,
-        }
-        let target = match &self.backend {
-            PolarBearBackend::Wayland(backend)
-                if backend.graphic_renderer.is_none() && backend.anland.is_none() =>
-            {
-                StartTarget::ResumeWayland
-            }
-            PolarBearBackend::Wayland(_) => StartTarget::WaylandAlreadyActive,
-            PolarBearBackend::WebView(backend) => match &backend.error {
-                ErrorVariant::Runtime(_) => StartTarget::RetryRuntime,
-                ErrorVariant::Unsupported => StartTarget::Unsupported,
-                ErrorVariant::None => StartTarget::BuildSetup,
-            },
-        };
-        match target {
-            StartTarget::ResumeWayland => {
-                let failed = if let PolarBearBackend::Wayland(backend) = &mut self.backend {
-                    let failed = !resume_wayland(backend, event_loop, &self.frontend.android_app);
-                    if !failed {
-                        ime::refresh_visibility();
-                        crate::android::tablet_mode_manager::apply_kwin_tablet_mode(
-                            ime::is_desktop_input_present(),
-                        );
-                    }
-                    failed
-                } else {
-                    false
-                };
-                if failed {
-                    self.enter_runtime_error(
-                        "Wayland could not be initialized after Compose Start Plasma",
-                    );
-                }
-            }
-            StartTarget::WaylandAlreadyActive => {
-                log::info!(
-                    "compose-spike: Start pressed while renderer is already active; awaiting desktop-ready"
-                );
-            }
-            StartTarget::RetryRuntime => {
-                self.pending_runtime_retry = true;
-                if !webview_handoff::request_close(app) {
-                    self.finish_runtime_retry(event_loop);
-                }
-            }
-            StartTarget::BuildSetup => {
-                if self.handle_setup_complete(event_loop) {
-                    return;
-                }
-                log::info!(
-                    "compose-spike: setup worker still provisioning; overlay stays until completion"
-                );
-            }
-            StartTarget::Unsupported => {
-                compose_overlay::set_compose_state(&app, compose_overlay::STATE_ERROR);
-            }
-        }
-    }
 }
 
 impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // SPIKE compose-setup: on the first process resume, show the Compose overlay
-        // and defer the normal resume until the explicit Start Plasma action arrives.
-        // The Activity is never recreated; later resumes use the normal paths below.
+        // SPIKE compose-setup: on the first process resume, show the Compose veil,
+        // then immediately continue the normal native resume path underneath it.
+        // The Activity is never recreated; later resumes use the same paths below.
         // Presentation is acknowledged asynchronously: a reported show failure
         // returns the host to Hidden so the fallback paths run instead.
         {
@@ -767,7 +693,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 ),
                 PolarBearBackend::WebView(_) => (false, true),
             };
-            if compose_overlay::spike_should_gate(renderer_active, is_webview) {
+            if compose_overlay::spike_should_show(renderer_active, is_webview) {
                 let app = self.frontend.android_app.clone();
                 compose_overlay::show_compose_overlay(&app);
                 let initial = match &self.backend {
@@ -779,18 +705,15 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                     _ => compose_overlay::STATE_IDLE,
                 };
                 compose_overlay::set_compose_state(&app, initial);
-                return;
+                let target = if is_webview { "setup-pending" } else { "wayland" };
+                log::info!(
+                    "compose-spike: eager native startup requested exactly once target={target}; overlay retained"
+                );
+                crate::android::diagnostics::host_event(
+                    "compose-spike",
+                    &format!("eager-native-start target={target}"),
+                );
             }
-        }
-        // SPIKE: while the overlay owns the screen and waits for the explicit
-        // Start action, never auto-bind the renderer on resume (e.g. suspend
-        // before Start pressed). A fade in progress (Dismissing) intentionally
-        // falls through so the renderer rebinds immediately underneath it.
-        if compose_overlay::is_up()
-            && !compose_overlay::has_start_requested()
-            && matches!(&self.backend, PolarBearBackend::Wayland(backend) if backend.graphic_renderer.is_none() && backend.anland.is_none())
-        {
-            return;
         }
         if let Some(reason) = take_failure() {
             if matches!(&self.backend, PolarBearBackend::Wayland(_)) {
@@ -799,15 +722,6 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             }
         }
         if matches!(&self.backend, PolarBearBackend::WebView(_)) {
-            // SPIKE: hold auto-completion while the overlay owns the screen and
-            // waits for Start Plasma.
-            if compose_overlay::is_up()
-                && !compose_overlay::has_start_requested()
-                && webview_handoff::has_setup_complete()
-            {
-                log::info!("compose-spike: holding setup completion until Start Plasma");
-                return;
-            }
             if self.handle_setup_complete(event_loop) {
                 return;
             }
@@ -845,10 +759,6 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 return;
             }
         }
-        // SPIKE compose-setup: explicit Start Plasma action from the overlay button.
-        if compose_overlay::take_start_requested() {
-            self.on_compose_start(event_loop);
-        }
         if matches!(&self.backend, PolarBearBackend::WebView(_)) {
             accessibility::drain_pending_events();
             // Setup owns RetrySetup while provisioning is active. Runtime error pages are
@@ -857,14 +767,6 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             ime::reset();
             if self.pending_runtime_retry {
                 self.finish_runtime_retry(event_loop);
-                return;
-            }
-            // SPIKE: hold setup auto-completion while the overlay owns the screen
-            // and waits for Start Plasma.
-            if compose_overlay::is_up()
-                && !compose_overlay::has_start_requested()
-                && webview_handoff::has_setup_complete()
-            {
                 return;
             }
             self.handle_webview_actions(event_loop);
@@ -1030,6 +932,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         accessibility::set_runtime_active(false);
         ime::reset();
         event_loop.set_control_flow(ControlFlow::Wait);
+        compose_overlay::notify_desktop_suspended(&self.frontend.android_app);
 
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             if let Err(error) = ime::hide(&backend.android_app) {
