@@ -5,7 +5,8 @@
 //! created only after a complete size/hash check, and a staged tree is only
 //! an image candidate until it carries `IMAGE_READY_MARKER`.  The final
 //! `READY_MARKER` is written by the setup owner after all required guest
-//! configuration (including the pinned Mesa layer) has succeeded.
+//! configuration (including the pinned Mesa layer and durable renderer
+//! selection) has succeeded.
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -1297,7 +1298,14 @@ fn quarantine_path(base: &Path, source: &Path, prefix: &str) -> anyhow::Result<(
     rename_synced(source, &destination)
 }
 
-fn write_atomic(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+/// Shared durable file replacement for Portal-owned native state.
+///
+/// Renderer selection lives beside the app files rather than inside the
+/// Debian tree, but it has the same crash-safety requirements as the runtime
+/// markers. Keep both callers on this one implementation so Android/Linux
+/// always get same-directory temp creation, atomic rename-over-existing, and
+/// parent-directory durability.
+pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     write_atomic_with(path, contents, replace_atomic)
 }
 

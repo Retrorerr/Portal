@@ -8,12 +8,13 @@
 //!   -> GPU sync-file fence -> queueBuffer -> SurfaceFlinger
 //! ```
 //!
-//! Selection is explicit and file-gated (mirroring the `presenter-mode` /
-//! `touch-mode` patterns): `<APP_FILES>/renderer-mode` containing `anland`
-//! selects this path; anything else (or a missing file) keeps the
-//! known-good QPainter renderer. There is deliberately **no silent
-//! fallback**: a failed GPU bring-up logs a clear diagnostic and stops,
-//! never corrupting the stable path.
+//! Selection is explicit and durable: `<APP_FILES>/renderer-mode` containing
+//! `anland` selects this path, while an explicit QPainter/Smithay value keeps
+//! the known-good fallback. A missing flag is initialized by the native setup
+//! owner: fresh/image-only installs select Anland, while a completed legacy
+//! or older v1 Portal marker without this flag stays on QPainter compatibility
+//! and is recorded explicitly. There is deliberately **no silent renderer
+//! migration** after a choice exists.
 //!
 //! Upstream reference: `third_party/anland/` (protocol, broker/consumer
 //! design, hidden window ABI) + `docs/anland-*.md` as added.
@@ -38,31 +39,56 @@ pub enum RendererKind {
 
 /// App-private flag file selecting the renderer (content `anland`).
 pub fn mode_flag_path() -> std::path::PathBuf {
-    std::path::Path::new(crate::core::config::APP_FILES_ROOT).join("renderer-mode")
+    std::path::Path::new(crate::core::config::APP_FILES_ROOT)
+        .join(crate::core::renderer_policy::RENDERER_MODE_FILE)
 }
 
-/// Resolve the active renderer. Logs exactly which path is selected so
-/// performance validation can never mistake one for the other.
+/// Resolve the active renderer. Missing state defaults to Anland only for
+/// fresh/uninitialised state; a completed Portal runtime without the flag
+/// keeps the historical QPainter compatibility path. Installation setup calls
+/// [`ensure_renderer_mode`] to make that choice durable before the completion
+/// marker is committed.
 pub fn active_renderer() -> RendererKind {
-    let kind = std::fs::read_to_string(mode_flag_path())
-        .map(|s| s.trim().to_ascii_lowercase())
-        .map(|s| {
-            if s == "anland" {
-                RendererKind::Anland
-            } else {
-                RendererKind::Smithay
-            }
-        })
-        .unwrap_or(RendererKind::Smithay);
+    let artifact = crate::core::provisioning::RuntimeArtifact::production();
+    let runtime = artifact.classify_runtime(std::path::Path::new(
+        crate::core::config::PRODUCTION_FS_ROOT,
+    ));
+    let kind = match crate::core::renderer_policy::resolve_renderer_mode(&mode_flag_path(), runtime)
+    {
+        Ok(crate::core::renderer_policy::RendererSelection::Anland) => RendererKind::Anland,
+        Ok(crate::core::renderer_policy::RendererSelection::QPainter) => RendererKind::Smithay,
+        Err(error) => {
+            log::error!(
+                "renderer-mode could not be read (using safe QPainter recovery): {error:#}"
+            );
+            RendererKind::Smithay
+        }
+    };
     match kind {
         RendererKind::Anland => {
-            log::info!("anland.renderer=anland-gpu selected via renderer-mode flag (QPainter fallback preserved on main)");
+            log::info!("anland.renderer=anland-gpu selected (durable renderer-mode policy)");
         }
         RendererKind::Smithay => {
-            log::info!("anland.renderer=smithay-qpainter (stable fallback; write 'anland' to renderer-mode to try the GPU path)");
+            log::info!("anland.renderer=smithay-qpainter (explicit/legacy-safe fallback)");
         }
     }
     kind
+}
+
+/// Initialize or validate the durable renderer selection used by setup and
+/// committed-install handoff. Existing values, including explicit fallback
+/// values and malformed legacy values, are preserved; only missing state is
+/// initialized according to the runtime's Portal classification.
+pub fn ensure_renderer_mode() -> anyhow::Result<RendererKind> {
+    let artifact = crate::core::provisioning::RuntimeArtifact::production();
+    let runtime = artifact.classify_runtime(std::path::Path::new(
+        crate::core::config::PRODUCTION_FS_ROOT,
+    ));
+    let selection = crate::core::renderer_policy::ensure_renderer_mode(&mode_flag_path(), runtime)?;
+    Ok(match selection {
+        crate::core::renderer_policy::RendererSelection::Anland => RendererKind::Anland,
+        crate::core::renderer_policy::RendererSelection::QPainter => RendererKind::Smithay,
+    })
 }
 
 pub fn is_anland_requested() -> bool {

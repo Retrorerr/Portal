@@ -11,6 +11,7 @@ pub mod core {
     pub mod pointer_buttons;
     pub mod presentation;
     pub mod provisioning;
+    pub mod renderer_policy;
     pub mod runtime;
     pub mod shm_damage;
     pub mod startup;

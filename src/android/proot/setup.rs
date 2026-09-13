@@ -354,6 +354,21 @@ fn setup_debian_runtime(options: &SetupOptions) -> StageOutput {
     }))
 }
 
+/// Establish renderer selection before Mesa and Plasma stages inspect it.
+/// This is a small durable config transaction, not a renderer probe: fresh
+/// and image-only installs get Anland, while a completed legacy/older v1
+/// Portal marker gets an explicit QPainter compatibility value. A write
+/// failure is a retryable setup error and therefore cannot be hidden by the
+/// final marker.
+fn setup_renderer_mode(_options: &SetupOptions) -> StageOutput {
+    match crate::android::anland::ensure_renderer_mode() {
+        Ok(_) => None,
+        Err(error) => Some(thread::spawn(move || -> anyhow::Result<()> {
+            Err(error)
+        })),
+    }
+}
+
 fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let report = options.progress.clone();
@@ -2390,6 +2405,7 @@ fn join_stage(
 fn stages() -> Vec<NamedSetupStage> {
     vec![
         ("debian-runtime", Box::new(setup_debian_runtime)),
+        ("renderer-mode", Box::new(setup_renderer_mode)),
         ("linux-sysdata", Box::new(simulate_linux_sysdata_stage)),
         ("machine-id", Box::new(setup_machine_id)),
         ("firefox-config", Box::new(setup_firefox_config)),
@@ -2443,7 +2459,12 @@ fn finalise_installation(registration: &SetupRegistration) -> Result<(), SetupFa
             "Finalising Portal installation…",
         ),
     );
-    if crate::android::anland::is_anland_requested() && !super::mesa_layer::is_provisioned() {
+    let renderer = crate::android::anland::ensure_renderer_mode().map_err(|error| {
+        SetupFailure::from_detail(2, "renderer-mode", format!("{error:#}"))
+    })?;
+    if matches!(renderer, crate::android::anland::RendererKind::Anland)
+        && !super::mesa_layer::is_provisioned()
+    {
         return Err(SetupFailure::from_detail(
             8,
             "mesa-kgsl-layer",
@@ -2710,6 +2731,13 @@ pub fn build_committed_wayland_backend(
         artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)),
         "Committed Portal runtime is no longer bootable"
     );
+    // The completion marker is not enough to choose a renderer: a process
+    // could have died after an older install committed but before this config
+    // was initialized. Repair/validate the durable choice at the handoff
+    // boundary so a fresh Anland-capable install can never silently take the
+    // QPainter path because the flag is absent.
+    crate::android::anland::ensure_renderer_mode()
+        .map_err(|error| anyhow::anyhow!("renderer-mode is not durable: {error:#}"))?;
     build_wayland_backend(android_app)
 }
 

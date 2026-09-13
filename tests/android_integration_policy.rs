@@ -27,6 +27,7 @@ const STARTPLASMA_SOURCE: &str = include_str!("../assets/localdesktop-startplasm
 const PORTAL_IME_BRIDGE_SOURCE: &str = include_str!("../assets/portal-ime-bridge.py");
 const PORTAL_IBUS_LAZY_SOURCE: &str = include_str!("../assets/portal-ibus-lazy.sh");
 const ANLAND_ENV_SOURCE: &str = include_str!("../src/android/anland/mod.rs");
+const RENDERER_POLICY_SOURCE: &str = include_str!("../src/core/renderer_policy.rs");
 const MESA_LAYER_SOURCE: &str = include_str!("../src/android/proot/mesa_layer.rs");
 const XWAYLAND_SHA256SUMS_SOURCE: &str =
     include_str!("../assets/xwayland-candidate/SHA256SUMS");
@@ -660,4 +661,50 @@ fn xwayland_variant_selection_policy() {
     // cookie come from our argv (--xwayland-display/--xwayland-xauthority),
     // with a bounded socket scan only as fallback.
     assert!(KWIN_WRAPPER_SOURCE.contains("--xwayland-xauthority"));
+}
+
+#[test]
+fn fresh_renderer_selection_is_initialized_before_mesa_and_handoff() {
+    let run = include_str!("../src/android/app/run.rs");
+
+    // The policy is shared with the production provisioning writer, so the
+    // renderer flag gets the same atomic replacement and parent durability as
+    // the runtime markers. Only uninitialised/image-only state selects
+    // Anland; completed legacy state keeps the QPainter compatibility path.
+    assert!(RENDERER_POLICY_SOURCE.contains("provisioning::write_atomic"));
+    assert!(RENDERER_POLICY_SOURCE.contains("RuntimeClassification::LegacyPortal"));
+    assert!(RENDERER_POLICY_SOURCE.contains("RendererSelection::Anland"));
+    assert!(RENDERER_POLICY_SOURCE.contains("RendererSelection::QPainter"));
+
+    // Setup establishes the mode after the image stage and before Mesa reads
+    // it. Finalisation revalidates the same durable choice before writing the
+    // completion marker, so a fresh install cannot finish while its Anland
+    // selection is only an in-memory default.
+    let renderer_stage = ANDROID_SETUP_SOURCE
+        .find("(\"renderer-mode\", Box::new(setup_renderer_mode))")
+        .expect("renderer mode setup stage must exist");
+    let mesa_stage = ANDROID_SETUP_SOURCE
+        .find("(\"mesa-kgsl-layer\", Box::new(setup_mesa_layer))")
+        .expect("Mesa setup stage must exist");
+    assert!(renderer_stage < mesa_stage);
+    assert!(ANDROID_SETUP_SOURCE.contains("ensure_renderer_mode()"));
+    assert!(ANDROID_SETUP_SOURCE.contains("RendererKind::Anland"));
+    let finalise = ANDROID_SETUP_SOURCE
+        .split("fn finalise_installation")
+        .nth(1)
+        .expect("installation finalisation must exist");
+    assert!(finalise.contains("ensure_renderer_mode()"));
+    assert!(finalise.contains("mark_installation_complete"));
+    assert!(
+        finalise.find("ensure_renderer_mode()").unwrap()
+            < finalise.find("mark_installation_complete").unwrap()
+    );
+
+    // The committed first-install path validates the renderer state before
+    // constructing Wayland, and the normal resume path consumes the same
+    // persisted selection for Anland vs QPainter.
+    assert!(ANDROID_SETUP_SOURCE.contains("build_committed_wayland_backend"));
+    assert!(run.contains("is_anland_requested()"));
+    assert!(ANLAND_ENV_SOURCE.contains("resolve_renderer_mode"));
+    assert!(!ANLAND_ENV_SOURCE.contains("unwrap_or(RendererKind::Smithay)"));
 }
