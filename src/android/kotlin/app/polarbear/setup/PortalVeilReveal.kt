@@ -83,6 +83,7 @@ internal fun PortalRevealVeil(
     modifier: Modifier = Modifier,
     onCommitted: () -> Unit,
     onFinished: () -> Unit,
+    onProgressChanged: (Float) -> Unit,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val density = LocalDensity.current
@@ -90,11 +91,17 @@ internal fun PortalRevealVeil(
     val lifecycle = (LocalContext.current as LifecycleOwner).lifecycle
     var displacement by remember { mutableFloatStateOf(0f) }
     var effectStrength by remember { mutableFloatStateOf(0f) }
+    var viewportHeight by remember { mutableFloatStateOf(1f) }
     val animationScope = rememberCoroutineScope()
     val settleJob = remember { arrayOfNulls<Job>(1) }
     val commitInFlight = remember { booleanArrayOf(false) }
     val currentCommitted by rememberUpdatedState(onCommitted)
     val currentFinished by rememberUpdatedState(onFinished)
+    val currentProgressChanged by rememberUpdatedState(onProgressChanged)
+
+    LaunchedEffect(displacement, viewportHeight) {
+        currentProgressChanged((displacement / viewportHeight.coerceAtLeast(1f)).coerceIn(0f, 1f))
+    }
 
     LaunchedEffect(eligible) {
         if (eligible) {
@@ -137,6 +144,7 @@ internal fun PortalRevealVeil(
         if (!eligible) return@pointerInput
         val velocityThresholdPx = COMMIT_VELOCITY_DP_PER_SECOND * densityScale
         val fullHeight = size.height.toFloat().coerceAtLeast(1f)
+        viewportHeight = fullHeight
         awaitEachGesture {
             val down = awaitFirstDown(
                 requireUnconsumed = false,
@@ -204,6 +212,15 @@ internal fun PortalRevealVeil(
                 upwardVelocity = upwardVelocity,
                 velocityThreshold = velocityThresholdPx,
             )
+            val releaseStrength = effectStrengthFor(upwardVelocity, densityScale)
+            Log.i(
+                TAG,
+                "reveal release velocityPx=${upwardVelocity.toInt()} " +
+                    "velocityDp=${(upwardVelocity / densityScale).toInt()} " +
+                    "effectStrength=${"%.3f".format(releaseStrength)} " +
+                    "maxChromaPx=${"%.1f".format(MAX_CHROMA.value * densityScale)} " +
+                    "maxSmearPx=${"%.1f".format(MAX_SMEAR.value * densityScale)} commit=$commit",
+            )
 
             if (!ValueAnimator.areAnimatorsEnabled()) {
                 effectStrength = 0f
@@ -224,7 +241,7 @@ internal fun PortalRevealVeil(
                 )
                 effectStrength = maxOf(
                     effectStrength,
-                    effectStrengthFor(upwardVelocity, densityScale),
+                    releaseStrength,
                 )
                 val peakEffectStrength = effectStrength
                 val releaseDisplacement = displacement
@@ -387,21 +404,31 @@ private fun rememberPortalVeilMotionLayer(
     val maxSmearPx = with(density) { MAX_SMEAR.toPx() }
     val maxChromaPx = with(density) { MAX_CHROMA.toPx() }
     val shader = if (Build.VERSION.SDK_INT >= 33) remember { RuntimeShader(VEIL_MOTION_SHADER) } else null
-    val effect = if (Build.VERSION.SDK_INT >= 33 && shader != null) {
-        remember(shader) { createVeilMotionEffect(shader) }
-    } else null
+    val effectActive = remember { booleanArrayOf(false) }
 
     return Modifier.graphicsLayer {
         translationY = -displacement().coerceAtLeast(0f)
         val amount = strength().coerceIn(0f, 1f)
-        if (shader != null && effect != null && amount > 0.001f) {
+        if (shader != null && amount > 0.001f) {
             shader.setFloatUniform("size", size.width, size.height)
             shader.setFloatUniform("strength", amount)
             shader.setFloatUniform("maxSmear", maxSmearPx)
             shader.setFloatUniform("maxChroma", maxChromaPx)
-            renderEffect = effect
+            // Runtime RenderEffects snapshot uniform state. Keep the compiled
+            // RuntimeShader, then create only the lightweight wrapper after
+            // applying this frame's current uniforms (same proven aperture
+            // treatment pattern used by PortalLaunchTransition).
+            renderEffect = createVeilMotionEffect(shader)
+            if (!effectActive[0]) {
+                effectActive[0] = true
+                Log.i(TAG, "veil motion RenderEffect active; fresh wrapper follows current uniforms")
+            }
         } else {
             renderEffect = null
+            if (effectActive[0]) {
+                effectActive[0] = false
+                Log.i(TAG, "veil motion RenderEffect inactive strength=0")
+            }
         }
     }
 }
@@ -417,21 +444,26 @@ private fun rememberPortalAffordanceSweepLayer(progress: () -> Float): Modifier 
     val shader = if (Build.VERSION.SDK_INT >= 33) {
         remember { RuntimeShader(AFFORDANCE_SWEEP_SHADER) }
     } else null
-    val effect = if (Build.VERSION.SDK_INT >= 33 && shader != null) {
-        remember(shader) {
-            RenderEffect.createRuntimeShaderEffect(shader, "inputShader").asComposeRenderEffect()
-        }
-    } else null
+    val effectActive = remember { booleanArrayOf(false) }
 
     return Modifier.graphicsLayer {
         val phase = progress().coerceIn(0f, 1f)
-        if (shader != null && effect != null && phase > 0.001f && phase < 0.999f) {
+        if (shader != null && phase > 0.001f && phase < 0.999f) {
             shader.setFloatUniform("size", size.width, size.height)
             shader.setFloatUniform("progress", phase)
             shader.setFloatUniform("maxShift", maxShiftPx)
-            renderEffect = effect
+            renderEffect = RenderEffect.createRuntimeShaderEffect(shader, "inputShader")
+                .asComposeRenderEffect()
+            if (!effectActive[0]) {
+                effectActive[0] = true
+                Log.i(TAG, "affordance sweep RenderEffect active; fresh wrapper follows current uniforms")
+            }
         } else {
             renderEffect = null
+            if (effectActive[0]) {
+                effectActive[0] = false
+                Log.i(TAG, "affordance sweep RenderEffect inactive; one-shot complete")
+            }
         }
     }
 }
