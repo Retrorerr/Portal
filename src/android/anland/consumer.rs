@@ -23,6 +23,7 @@ use super::anw::{self, ANativeWindowBuffer, AnwApi};
 use super::broker::{Broker, Deposit};
 use super::protocol::*;
 use super::sys;
+use crate::core::surface_geometry;
 
 const FENCE_WAIT_MS: i32 = 5000;
 /// Cold-start patience, software-fallback sessions ONLY (see
@@ -101,9 +102,26 @@ struct Inner {
     next_gen: Mutex<u64>,
     buffers: Mutex<Vec<SlotInfo>>,
     spare: Mutex<Option<*mut ANativeWindowBuffer>>,
-    screen_w: u32,
-    screen_h: u32,
+    screen: Mutex<(u32, u32)>,
     refresh_mhz: u32,
+    /// Native-window epoch minted at session start (see
+    /// [`surface_geometry::mint_surface_epoch`]). Delayed resize events from
+    /// a destroyed surface carry the old epoch and are rejected as stale.
+    surface_epoch: u64,
+    /// Converged presentation surface generation. 1 = session start; each
+    /// rotation rebind mints exactly one more. Input anchors and readiness
+    /// are tagged against this: nothing from an older generation may mutate
+    /// newer state or present into the new BufferQueue.
+    surface_gen: Mutex<u64>,
+    /// True while the event-loop thread performs a surface rebind. The
+    /// render loop selects nothing (SurfaceFlinger holds its last frame),
+    /// input is dropped, and fallback re-deposits are skipped: the rebind
+    /// owns the next generation.
+    rebind_active: AtomicBool,
+    /// Buffers owned by the render thread between dequeue and queue/cancel.
+    /// The rebind drains this (bounded) before touching BufferQueue
+    /// ownership so no stale-dimension buffer is ever presented.
+    inflight: AtomicU64,
     /// Generation that completed its BUFS_READY push. Input events are only
     /// sent for this generation: anything earlier would land in the data
     /// channel ahead of BUFS_READY and desync the producer's handshake.
@@ -113,8 +131,11 @@ struct Inner {
     frames_fenced: AtomicU64,
     frames_bare: AtomicU64,
     fallback_count: AtomicU64,
-    /// Whether the plasma-ready marker was written for this session.
-    ready_marked: AtomicBool,
+    /// Surface generation the plasma-ready marker + Compose latch were
+    /// recorded for. Reset on every rebind: readiness re-latches only after
+    /// a valid frame from the new generation is actually presented (an old
+    /// generation's completion can never mark the new surface ready).
+    ready_surface_gen: Mutex<Option<u64>>,
     /// Emergency software-GL fallback active (guest kwin-glmode flag).
     /// Hardware (default): tight 5s fence watchdog, fenced READY evidence.
     /// Software: bare frames prove liveness honestly; the first frame gets
@@ -138,16 +159,22 @@ struct Inner {
     /// selects every vsync tick. Past it, only the 1Hz heartbeat selects.
     demand_until_ns: AtomicU64,
     /// Last forwarded pointer position (buffer pixels) for relative-delta
-    /// synthesis. The KWin backend emits both absolute and relative motion
-    /// from each POINTER_MOTION (`pointerMotion(pos, delta, delta)`), and
-    /// relative clients (games, kinetic velocity) need real dx/dy — winit
-    /// only carries absolute positions, so the session tracks them.
-    last_pointer: Mutex<Option<(f32, f32)>>,
+    /// synthesis, tagged with the observing surface generation. The KWin
+    /// backend emits both absolute and relative motion from each
+    /// POINTER_MOTION (`pointerMotion(pos, delta, delta)`), and relative
+    /// clients (games, kinetic velocity) need real dx/dy — winit only
+    /// carries absolute positions, so the session tracks them. The anchor
+    /// never crosses a geometry boundary: a rebind clears it and any
+    /// generation change re-anchors with zero delta (no first-motion jump).
+    last_pointer: Mutex<Option<surface_geometry::PointerAnchor>>,
     /// Active touchpad finger-scroll axes as a bitmask (bit 0 = vertical,
     /// bit 1 = horizontal). Scroll-stop events go only to live streams.
     finger_axes: Mutex<u8>,
     /// Display-VSYNC tick source (Choreographer, timer fallback).
     vsync: Mutex<Option<sys::VsyncPump>>,
+    /// Surface generation the once-per-generation first-motion diagnostic
+    /// ran for (first pointer event after convergence + expected bounds).
+    motion_logged_gen: Mutex<u64>,
 }
 
 /// Extend the full-rate presentation deadline and wake the render loop for
@@ -263,6 +290,10 @@ impl AnlandSession {
         let wake = sys::make_eventfd().map_err(|e| format!("wake eventfd: {e}"))?;
         let vsync =
             sys::VsyncPump::start(cfg.refresh_mhz).map_err(|e| format!("vsync pump: {e}"))?;
+        // Surface epoch for rotation convergence: delayed resize events from
+        // a previous native window carry the old epoch and are rejected.
+        // This session converges as surface generation 1; rotations mint 2+.
+        let surface_epoch = surface_geometry::mint_surface_epoch();
         let inner = Arc::new(Inner {
             window,
             anw,
@@ -275,15 +306,18 @@ impl AnlandSession {
             next_gen: Mutex::new(1),
             buffers: Mutex::new(Vec::new()),
             spare: Mutex::new(None),
-            screen_w: w,
-            screen_h: h,
+            screen: Mutex::new((w, h)),
             refresh_mhz: cfg.refresh_mhz,
+            surface_epoch,
+            surface_gen: Mutex::new(1),
+            rebind_active: AtomicBool::new(false),
+            inflight: AtomicU64::new(0),
             connected_gen: Mutex::new(None),
             frames_queued: AtomicU64::new(0),
             frames_fenced: AtomicU64::new(0),
             frames_bare: AtomicU64::new(0),
             fallback_count: AtomicU64::new(0),
-            ready_marked: AtomicBool::new(false),
+            ready_surface_gen: Mutex::new(None),
             software_gl: super::software_gl_fallback_requested(),
             client_prev: Mutex::new((0, 0, 0)),
             client_cache: Mutex::new((Vec::new(), 0)),
@@ -293,6 +327,7 @@ impl AnlandSession {
             last_pointer: Mutex::new(None),
             finger_axes: Mutex::new(0),
             vsync: Mutex::new(Some(vsync)),
+            motion_logged_gen: Mutex::new(0),
         });
         // Collect window slots (dup dma-buf fds, hold one spare back).
         collect_buffers(&inner, total)?;
@@ -327,7 +362,7 @@ impl AnlandSession {
         };
         // Stash shutdown flag inside inner for stop(); broker thread owns its clone.
         log::info!(
-            "anland.session=start screen={}x{} fmt=RGBA_8888 refresh_mhz={} bufs={} socket={}",
+            "anland.session=start screen={}x{} fmt=RGBA_8888 refresh_mhz={} bufs={} socket={} epoch={surface_epoch} sgen=1",
             w,
             h,
             cfg.refresh_mhz,
@@ -363,6 +398,12 @@ impl AnlandSession {
         if !inner.running.load(Ordering::Acquire) {
             return;
         }
+        if inner.rebind_active.load(Ordering::Acquire) {
+            // A rotation rebind owns the surface right now: events observed
+            // against the obsolete geometry must not mutate the new state.
+            log::debug!("anland.input dropped during surface rebind");
+            return;
+        }
         // Input means the user is active: full-rate presentation window plus
         // an immediate wake (the select bypasses the vsync gate once, then
         // subsequent frames lock to ticks — low latency without free-spin).
@@ -392,15 +433,38 @@ impl AnlandSession {
     /// left the touchpad cursor frozen. First motion after session start (or
     /// a jump) reports zero delta, never a spike.
     pub fn send_pointer_motion(&self, x: f32, y: f32) {
-        let (dx, dy) = {
-            let mut last = self.inner.last_pointer.lock().unwrap();
-            let d = match *last {
-                Some((lx, ly)) => (x - lx, y - ly),
-                None => (0.0, 0.0),
-            };
-            *last = Some((x, y));
-            d
+        let inner = &self.inner;
+        if !inner.running.load(Ordering::Acquire) {
+            return;
+        }
+        if inner.rebind_active.load(Ordering::Acquire) {
+            log::debug!("anland.input motion dropped during surface rebind");
+            return;
+        }
+        // Single event-loop thread: every event processed between rebinds
+        // belongs to the converged generation, and each rebind clears the
+        // anchor — so the pure anchor fold below only ever re-anchors on a
+        // genuine generation change (session restart or missed clear),
+        // reporting zero delta instead of a cross-boundary jump.
+        let cur = self.surface_gen();
+        let (next, decision) = {
+            let prev = *inner.last_pointer.lock().unwrap();
+            surface_geometry::anchor_motion(prev, x, y, cur, cur)
         };
+        *inner.last_pointer.lock().unwrap() = next;
+        let surface_geometry::MotionDecision::Send { dx, dy } = decision else {
+            return;
+        };
+        {
+            let mut logged = inner.motion_logged_gen.lock().unwrap();
+            if *logged != cur {
+                *logged = cur;
+                let (sw, sh) = *inner.screen.lock().unwrap();
+                log::info!(
+                    "anland.rotate sgen={cur} first-motion x={x:.1} y={y:.1} bounds=0,0-{sw}x{sh}"
+                );
+            }
+        }
         self.send_input(&InputEvent::pointer_motion(x, y, dx, dy));
     }
 
@@ -415,6 +479,9 @@ impl AnlandSession {
         }
         let inner = &self.inner;
         if !inner.running.load(Ordering::Acquire) {
+            return false;
+        }
+        if inner.rebind_active.load(Ordering::Acquire) {
             return false;
         }
         kick(inner, INPUT_BURST_MS);
@@ -481,7 +548,182 @@ impl AnlandSession {
     }
 
     pub fn screen_size(&self) -> (u32, u32) {
-        (self.inner.screen_w, self.inner.screen_h)
+        *self.inner.screen.lock().unwrap()
+    }
+
+    /// Native-window epoch minted at session start (stale-event rejection).
+    pub fn surface_epoch(&self) -> u64 {
+        self.inner.surface_epoch
+    }
+
+    /// Currently converged presentation surface generation.
+    pub fn surface_gen(&self) -> u64 {
+        *self.inner.surface_gen.lock().unwrap()
+    }
+
+    /// Raw `ANativeWindow*` this session owns (stable for the session
+    /// lifetime; a surface destroy/recreate stops the session instead).
+    pub fn native_window_ptr(&self) -> *mut c_void {
+        self.inner.window
+    }
+
+    /// Live `ANativeWindow` size. Read on every rotation transaction: the
+    /// winit event size and this must agree before the new geometry is
+    /// treated as authoritative.
+    pub fn native_window_size(&self) -> (i32, i32) {
+        unsafe {
+            (
+                anw::get_width(self.inner.window, &self.inner.anw),
+                anw::get_height(self.inner.window, &self.inner.anw),
+            )
+        }
+    }
+
+    /// winit's view of the window size, if the holder is still alive.
+    pub fn window_inner_size(&self) -> Option<(u32, u32)> {
+        self._window_holder.as_ref().map(|w| {
+            let s = w.inner_size();
+            (s.width, s.height)
+        })
+    }
+
+    /// Screen size currently published to producers via the broker.
+    pub fn broker_screen(&self) -> ScreenInfo {
+        self.inner.broker.screen()
+    }
+
+    /// Rebind the live surface to a new physical size: exactly one coherent
+    /// transition affecting presentation buffers, broker ScreenInfo, KWin
+    /// output (via producer reconnect) and input mapping together.
+    ///
+    /// `gen` is the surface generation minted by the convergence machine
+    /// for this transition (session start was 1); on success the session
+    /// converges to it, so input anchors, readiness and frame ownership
+    /// all share one generation domain with the transaction log.
+    ///
+    /// Runs synchronously on the event-loop thread (like session start).
+    /// Steps, in order: stop accepting the old generation (the producer
+    /// sees consumer loss and enters its fallback loop), drain in-flight
+    /// render-thread buffers (bounded), return every collected slot to the
+    /// queue, publish the new ScreenInfo first (any fresh hello observes
+    /// current geometry), resize the BufferQueue, collect fresh slots,
+    /// reset input anchors + readiness, deposit the new generation. Only
+    /// after the producer attaches and the first valid frame of the new
+    /// generation is presented is the geometry fully converged.
+    ///
+    /// The PRoot/Debian runtime, Plasma and KWin are untouched: the
+    /// producer reconnects through its existing fallback loop. No
+    /// framebuffer processing, no copies, no readback anywhere here.
+    pub fn rebind_surface(&self, w: u32, h: u32, gen: u64) -> Result<u64, String> {
+        let inner = &self.inner;
+        if !inner.running.load(Ordering::Acquire) {
+            return Err("session stopping".into());
+        }
+        if inner.rebind_active.swap(true, Ordering::AcqRel) {
+            return Err("rebind already in progress".into());
+        }
+        let result = self.rebind_surface_inner(w, h, gen);
+        inner.rebind_active.store(false, Ordering::Release);
+        result
+    }
+
+    fn rebind_surface_inner(&self, w: u32, h: u32, gen: u64) -> Result<u64, String> {
+        let inner = &self.inner;
+        let (old_w, old_h) = *inner.screen.lock().unwrap();
+        let cur_sgen = *inner.surface_gen.lock().unwrap();
+        if gen <= cur_sgen {
+            // Obsolete attempt (a newer transition already converged or is
+            // being attempted): never rewind the generation.
+            return Err(format!("stale rebind gen={gen} current={cur_sgen}"));
+        }
+        let (win_w, win_h) = self.window_inner_size().unwrap_or((0, 0));
+        let (nat_w, nat_h) = self.native_window_size();
+        // Packed struct: copy fields to locals before use (no field borrows).
+        let (bw, bh) = {
+            let p = inner.broker.screen();
+            (p.width, p.height)
+        };
+        log::info!(
+            "anland.rotate sgen={gen} begin old={old_w}x{old_h} new={w}x{h} winit={win_w}x{win_h} native={nat_w}x{nat_h} ptr={:p} epoch={} broker={bw}x{bh}",
+            inner.window,
+            inner.surface_epoch,
+        );
+        // Drain render-thread buffers in flight (bounded): refresh_done
+        // aborts promptly while rebind_active is set, so this resolves in
+        // milliseconds unless the producer is wedged — in which case the
+        // leftovers cancel-back below instead of presenting stale geometry.
+        let drain_start = std::time::Instant::now();
+        while inner.inflight.load(Ordering::Acquire) != 0 {
+            if drain_start.elapsed() > Duration::from_millis(2000) {
+                log::warn!(
+                    "anland.rotate sgen={gen} drain timed out; stale buffers will cancel-back, never present"
+                );
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Stop accepting the old generation first: withdraw the deposit and
+        // close its masters (the producer observes consumer loss and enters
+        // its fallback loop; the render loop cancel-backs on the mismatch).
+        teardown_generation(inner);
+        // Return every collected slot and the stop-time spare before the
+        // geometry change so no old-dimension handle survives it. Never two
+        // live consumers own this window: the render loop selects nothing
+        // while rebind_active is set.
+        if let Ok(mut spare) = inner.spare.lock() {
+            if let Some(anb) = spare.take() {
+                unsafe { inner.anw.cancel(inner.window, anb, -1) };
+            }
+        }
+        if let Ok(buffers) = inner.buffers.lock() {
+            for slot in buffers.iter() {
+                unsafe { inner.anw.cancel(inner.window, slot.anb, -1) };
+            }
+        }
+        inner.buffers.lock().unwrap().clear();
+        // Publish the new size before touching the queue: any producer hello
+        // from here on (reconnect, fresh KWin, wrapper relaunch) observes
+        // the current geometry. Plasma scale is untouched (still governed
+        // by kwinoutputconfig, synced on the resize path as before).
+        inner.broker.set_screen(ScreenInfo {
+            width: w,
+            height: h,
+            format: PIXEL_FORMAT_RGBA_8888,
+            refresh: inner.refresh_mhz,
+        });
+        let r = unsafe {
+            anw::set_buffers_geometry(inner.window, &inner.anw, w as i32, h as i32, anw::FORMAT_RGBA_8888)
+        };
+        if r != 0 {
+            return Err(format!("ANativeWindow_setBuffersGeometry({w}x{h}) failed: {r}"));
+        }
+        let min_undequeued =
+            unsafe { inner.anw.query_min_undequeued(inner.window) }.map_err(|e| {
+                format!("ANativeWindow query min-undequeued after resize: {e}")
+            })?;
+        let total = (min_undequeued + 2).clamp(3, MAX_BUFS as i32) as usize;
+        let r = unsafe { inner.anw.set_buffer_count(inner.window, total) };
+        if r != 0 {
+            return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
+        }
+        // Fresh slots for the new geometry (old handles are all returned
+        // above; a failed collect leaves the failure pending so the next
+        // event retries with the producer waiting in fallback).
+        collect_buffers(inner, total)
+            .map_err(|e| format!("collect after resize to {w}x{h}: {e}"))?;
+        *inner.screen.lock().unwrap() = (w, h);
+        *inner.surface_gen.lock().unwrap() = gen;
+        *inner.last_pointer.lock().unwrap() = None;
+        *inner.finger_axes.lock().unwrap() = 0;
+        *inner.ready_surface_gen.lock().unwrap() = None;
+        *inner.motion_logged_gen.lock().unwrap() = 0;
+        deposit_generation(inner).map_err(|e| format!("re-deposit generation: {e}"))?;
+        kick(inner, CONNECT_BURST_MS);
+        let bufs = inner.buffers.lock().map(|b| b.len()).unwrap_or(0);
+        log::info!(
+            "anland.rotate sgen={gen} bound bufs={bufs} screen={w}x{h}; awaiting producer attach + first frame"
+        );
+        Ok(gen)
     }
 
     /// Stop the session while the window is still valid. Bounded joins;
@@ -540,8 +782,7 @@ impl AnlandSession {
     }
 }
 
-fn join_bounded(handle: JoinHandle<()>, timeout: Duration, what: &str) {
-    let (tx, rx) = mpsc::channel();
+fn join_bounded(handle: JoinHandle<()>, timeout: Duration, what: &str) {    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let _ = handle.join();
         let _ = tx.send(());
@@ -701,6 +942,12 @@ fn teardown_generation(inner: &Arc<Inner>) {
 
 /// Drop to fallback and immediately re-deposit (reference `enter_fallback`).
 fn enter_fallback(inner: &Arc<Inner>, reason: &str) {
+    if inner.rebind_active.load(Ordering::Acquire) {
+        // A rotation rebind owns the next generation (teardown + deposit):
+        // a concurrent fallback must not withdraw it or deposit a spare.
+        log::info!("anland.fallback suppressed during surface rebind reason={reason}");
+        return;
+    }
     inner.fallback_count.fetch_add(1, Ordering::Relaxed);
     log::warn!("anland.fallback reason={reason}");
     teardown_generation(inner);
@@ -776,6 +1023,8 @@ fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receive
     // Connect burst: the producer's first frames (window mapping) present at
     // full rate even before any input arrives.
     kick(&inner, CONNECT_BURST_MS);
+    let sgen = *inner.surface_gen.lock().unwrap();
+    log::info!("anland.session=connected generation={generation} sgen={sgen} bufs={count}");
     // Seed the producer's render-loop pacing with the live display rate.
     let refresh = inner.refresh_mhz;
     let mut wire = [0u8; 8 + 20];
@@ -784,12 +1033,23 @@ fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receive
     wire[8..12].copy_from_slice(&INPUT_TYPE_DISPLAY_REFRESH.to_ne_bytes());
     wire[12..16].copy_from_slice(&refresh.to_ne_bytes());
     let _ = sys::send_all(&gen.data, &wire);
-    log::info!("anland.session=connected generation={generation} bufs={count}");
+}
+
+/// RAII release of one render-thread buffer ownership (see `inflight`): a
+/// rotation rebind drains these before touching BufferQueue ownership, so
+/// every dequeue..queue/cancel path must hold one.
+struct InFlight<'a> {
+    inner: &'a Arc<Inner>,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.inner.inflight.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 fn render_loop(inner: Arc<Inner>) {
-    log::info!("anland.render thread started");
-    // Per-generation dups owned by this thread (immune to teardown close).
+    log::info!("anland.render thread started");    // Per-generation dups owned by this thread (immune to teardown close).
     let mut cur_gen: u64 = 0;
     let mut cur_fence: Option<OwnedFd> = None;
     let mut pending: Option<u64> = None; // generation a select was issued on
@@ -848,6 +1108,14 @@ fn render_loop(inner: Arc<Inner>) {
         // all: KWin stays idle, no GPU work is submitted, no frame is queued.
         if !inner.window_live.load(Ordering::Acquire) {
             break;
+        }
+        if inner.rebind_active.load(Ordering::Acquire) {
+            // A rotation rebind owns the BufferQueue right now: select
+            // nothing so no stale-dimension buffer can be presented.
+            // SurfaceFlinger holds its last frame until the new
+            // generation's first queue lands.
+            thread::sleep(Duration::from_millis(5));
+            continue;
         }
         let now = sys::now_ns();
         let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
@@ -939,6 +1207,14 @@ fn render_loop(inner: Arc<Inner>) {
                 continue;
             }
         };
+        // Owned from here to queue/cancel: the rebind drains this before
+        // touching BufferQueue ownership (RAII so every path releases).
+        inner.inflight.fetch_add(1, Ordering::AcqRel);
+        let _inflight = InFlight { inner: &inner };
+        // The surface generation this frame belongs to. A rotation that
+        // lands between here and queueBuffer must cancel, never present,
+        // a buffer produced for the old dimensions.
+        let frame_sgen = *inner.surface_gen.lock().unwrap();
         if acquire >= 0 {
             // Blocking acquire wait (see ACQUIRE_WAIT_MS). Never queue-back:
             // presenting a buffer SF hasn't released invites KWin to render
@@ -1032,6 +1308,17 @@ fn render_loop(inner: Arc<Inner>) {
         }
         pending = None;
         selects += 1;
+        // Generation fence: a rotation that landed after this frame's
+        // dequeue must cancel, never present, a buffer produced for the old
+        // dimensions into the newly sized BufferQueue.
+        let cur_sgen = *inner.surface_gen.lock().unwrap();
+        if !surface_geometry::generation_completion_allowed(frame_sgen, cur_sgen) {
+            log::info!(
+                "anland.render stale-generation cancel-back frame_sgen={frame_sgen} sgen={cur_sgen}"
+            );
+            unsafe { inner.anw.cancel(inner.window, anb, -1) };
+            continue;
+        }
         let q = unsafe { inner.anw.queue(inner.window, anb, rfence) };
         if q != 0 {
             log::warn!("anland.render queueBuffer failed: {q}");
@@ -1059,9 +1346,23 @@ fn render_loop(inner: Arc<Inner>) {
                     "anland.session=ready first software frame queued bare (plasma-ready marked, no GPU fence)",
                 )
             };
-            let ready_eligible =
-                rfence >= 0 || (inner.software_gl && !inner.ready_marked.load(Ordering::Acquire));
-            if ready_eligible && !inner.ready_marked.swap(true, Ordering::AcqRel) {
+            // Readiness re-latches per surface generation: only a valid
+            // frame from the CURRENT generation marks ready (an old
+            // generation's completion can never mark the new surface).
+            // Production GPU mode requires a genuine fence; only the
+            // explicit software fallback accepts a bare frame.
+            let should_mark = {
+                let mut ready_gen = inner.ready_surface_gen.lock().unwrap();
+                let eligible =
+                    rfence >= 0 || (inner.software_gl && ready_gen.is_none());
+                if eligible && ready_gen.is_none() {
+                    *ready_gen = Some(cur_sgen);
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_mark {
                 let bufs = inner.buffers.lock().map(|b| b.len()).unwrap_or(0);
                 crate::android::diagnostics::mark_plasma_frame_presented_for_generation_with_evidence(
                     bufs,
@@ -1071,6 +1372,16 @@ fn render_loop(inner: Arc<Inner>) {
                     None,
                 );
                 log::info!("{ready_log}");
+                // Converged: the first valid frame of the new surface
+                // generation is presented (buffer+fence zero-copy as ever).
+                // Absolute pointer range from here on is the new physical
+                // orientation; the anchor was reset at rebind, so there is
+                // no first-motion jump.
+                let (csw, csh) = *inner.screen.lock().unwrap();
+                log::info!(
+                    "anland.rotate sgen={cur_sgen} converged first_frame={} screen={csw}x{csh}",
+                    if rfence >= 0 { "fenced" } else { "bare" },
+                );
                 // Latch native readiness for Compose. The live Anland surface
                 // keeps running beneath the setup veil until the final swipe.
                 crate::android::utils::compose_overlay::notify_desktop_ready_cached();
@@ -1176,7 +1487,15 @@ fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, selected: bool) -> 
     };
     let mut waited_ms: i64 = 0;
     loop {
-        let quantum_ms = FENCE_WAIT_MS.min((budget_ms - waited_ms).max(1) as i32);
+        // While a rotation rebind is draining in-flight buffers, poll in
+        // short quanta so the drain resolves promptly instead of sitting
+        // out the full stall budget on an obsolete generation.
+        let quantum_cap = if inner.rebind_active.load(Ordering::Acquire) {
+            200
+        } else {
+            FENCE_WAIT_MS
+        };
+        let quantum_ms = quantum_cap.min((budget_ms - waited_ms).max(1) as i32);
         match sys::poll_readable(fence, quantum_ms) {
             Ok(true) => break,
             _ => {
@@ -1184,6 +1503,13 @@ fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, selected: bool) -> 
                 if !inner.running.load(Ordering::Acquire) {
                     // Session is stopping: bail without fallback churn so
                     // the render thread still joins promptly.
+                    return FENCE_LOST;
+                }
+                if inner.rebind_active.load(Ordering::Acquire) {
+                    // The surface is being rebound: this select belongs to
+                    // the old generation. Bail without fallback churn (the
+                    // rebind owns the next generation) so the buffer
+                    // cancel-backs instead of presenting stale geometry.
                     return FENCE_LOST;
                 }
                 if waited_ms >= budget_ms {

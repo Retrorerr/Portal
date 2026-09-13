@@ -336,6 +336,21 @@ fn resume_anland(
                 refresh_mhz
             );
             backend.anland = Some(session);
+            // Re-base rotation convergence onto this native window: delayed
+            // resize events from a previous window carry the old epoch and
+            // are rejected as stale. The start itself is surface gen 1.
+            if let Some(session) = backend.anland.as_ref() {
+                let (w, h) = session.screen_size();
+                backend.surface_convergence.begin_epoch(
+                    session.surface_epoch(),
+                    crate::core::surface_geometry::SurfaceSize { w, h },
+                );
+                log::info!(
+                    "anland.rotate session-start epoch={} sgen=1 screen={w}x{h} ptr={:p}",
+                    session.surface_epoch(),
+                    session.native_window_ptr(),
+                );
+            }
         }
         Err(error) => {
             log::error!("anland.session=start failed (stable QPainter path untouched): {error}");
@@ -964,6 +979,13 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
+            // Rotation convergence retry: if a resize left an un-emitted
+            // desire (winit and native disagreed mid-rotation), the native
+            // surface may have caught up silently without a new event.
+            // Event-driven (no sleeps): converges on the next loop turn.
+            if backend.anland.is_some() && backend.surface_convergence.has_pending() {
+                crate::android::backend::wayland::poll_anland_convergence(backend, None);
+            }
             if let Ok(dirty) = crate::android::backend::wayland::dispatch_wayland(backend) {
                 if dirty || backend.output_dirty {
                     backend.schedule_redraw();

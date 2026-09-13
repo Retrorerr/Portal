@@ -2139,6 +2139,7 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         surface_control_cursor: None,
         frame_in_flight: false,
         anland: None,
+        surface_convergence: crate::core::surface_geometry::SurfaceConvergence::new(),
         android_app,
     })
 }

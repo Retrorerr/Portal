@@ -6,6 +6,7 @@ use crate::android::{
         CentralizedEvent, PendingKwinPresentation, TouchMode, WaylandBackend,
     },
 };
+use crate::core::surface_geometry::ConvergenceAction;
 use crate::core::wayland_protocol::{FrameEvent, FrameTrace};
 use smithay::backend::input::ButtonState;
 use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -259,6 +260,82 @@ fn poll_long_press(backend: &mut WaylandBackend) {
         return;
     };
     emit_pointer_motion(&mut backend.compositor, lx, ly, now as u32);
+}
+
+/// Authoritative Anland rotation transaction driver.
+///
+/// `winit_size` is the resize-event size (`Some` on `Resized`, `None` when
+/// retrying a pending desire from the event loop turn). Both observations
+/// are fed to the convergence machine together with the live
+/// `ANativeWindow` size; only when the two agree on a new size for the
+/// current native-window epoch does exactly one surface rebind run,
+/// affecting presentation buffers, broker ScreenInfo, KWin output (via the
+/// producer reconnect) and input mapping together.
+///
+/// No-op without a live Anland session (Smithay mode, suspended, error
+/// page). Never touches READY blur/chromatic state (none exists), Plasma
+/// scale (still governed by kwinoutputconfig on this same resize path),
+/// provisioning visuals, or the Compose veil (which relayouts normally).
+pub fn poll_anland_convergence(
+    backend: &mut WaylandBackend,
+    winit_size: Option<(i32, i32)>,
+) {
+    let Some(session) = backend.anland.as_mut() else {
+        return;
+    };
+    let epoch = session.surface_epoch();
+    let mut emitted = None;
+    if let Some((w, h)) = winit_size {
+        if let ConvergenceAction::Rebind { gen, size } = backend
+            .surface_convergence
+            .note_winit_size(w.max(0) as u32, h.max(0) as u32, epoch)
+        {
+            emitted = Some((gen, size));
+        }
+    }
+    // Always feed the live native observation too: the winit event and the
+    // SurfaceView resize can arrive in either order during rotation.
+    if emitted.is_none() {
+        let (nw, nh) = session.native_window_size();
+        if let ConvergenceAction::Rebind { gen, size } = backend
+            .surface_convergence
+            .note_native_size(nw.max(0) as u32, nh.max(0) as u32, epoch)
+        {
+            emitted = Some((gen, size));
+        }
+    }
+    let Some((gen, size)) = emitted else {
+        return;
+    };
+    // Full transaction diagnostics (one line per genuine transition, never
+    // per frame): incoming sizes, live window view, session + broker state,
+    // host state, epoch/pointer identity for stale-event forensics.
+    let (nw, nh) = session.native_window_size();
+    let (ww, wh) = session.window_inner_size().unwrap_or((0, 0));
+    let (sw, sh) = session.screen_size();
+    // Packed struct: copy fields to locals before use (no field borrows).
+    let published = session.broker_screen();
+    let (bw, bh) = (published.width, published.height);
+    let (hw, hh) = backend
+        .compositor
+        .state
+        .authoritative_display_state
+        .physical_size;
+    log::info!(
+        "anland.rotate sgen={gen} transaction winit={ww}x{wh} native={nw}x{nh} session={sw}x{sh} broker={bw}x{bh} host={hw}x{hh} epoch={epoch} ptr={:p}",
+        session.native_window_ptr(),
+    );
+    match session.rebind_surface(size.w, size.h, gen) {
+        Ok(g) => {
+            backend.surface_convergence.confirm_converged(g);
+        }
+        Err(e) => {
+            backend.surface_convergence.abort_pending();
+            log::warn!(
+                "anland.rotate sgen={gen} rebind failed: {e}; producer waits in fallback, retry on next event"
+            );
+        }
+    }
 }
 
 pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop: &ActiveEventLoop) {
@@ -798,6 +875,16 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             }
             backend.output_dirty = true;
             backend.schedule_redraw();
+
+            // Project Anland rotation transaction (the single authoritative
+            // place): the updates above keep Smithay host state warm, but
+            // the LIVE presentation — BufferQueue geometry, broker
+            // ScreenInfo, KWin output, input mapping — belongs to the Anland
+            // session, which otherwise keeps the pre-rotation geometry
+            // forever (resume is a no-op while a session exists). Converge
+            // it here, event-driven: no sleeps, identical sizes coalesce, a
+            // newer resize supersedes an older pending one.
+            poll_anland_convergence(backend, Some((size.w, size.h)));
         }
         CentralizedEvent::Focus(focused) => {
             if !focused {
