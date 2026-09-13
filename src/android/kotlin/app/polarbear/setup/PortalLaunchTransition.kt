@@ -72,10 +72,9 @@ fun PortalLaunchTransition(
     onReadyPreludeChanged: (Boolean) -> Unit,
     onRevealCommitted: () -> Unit,
     onRevealFinished: () -> Unit,
-    // Return-to-Plasma mode: skip the travelling-logo intro and show the
-    // minimal return screen instead of the installer. Everything else —
-    // READY prelude, scatter, translucency, veil, swipe, handoff — is the
-    // identical path below.
+    // Return-to-Plasma mode: use the minimal return screen as the destination
+    // content while retaining the exact launch intro and every path below —
+    // READY prelude, scatter, translucency, veil, swipe and handoff.
     isReturn: Boolean = false,
 ) {
     val view = LocalView.current
@@ -83,17 +82,15 @@ fun PortalLaunchTransition(
     var resolved by rememberSaveable { mutableStateOf(!playIntro || Build.VERSION.SDK_INT < 33) }
     var ready by remember { mutableStateOf(false) }
     var rootBounds by remember { mutableStateOf(Rect.Zero) }
-    var headerBounds by remember { mutableStateOf(Rect.Zero) }
+    var destinationBounds by remember { mutableStateOf(Rect.Zero) }
     var setupReady by remember { mutableStateOf(false) }
     val clock = remember { Animatable(0f) }
     val currentPreDraw by rememberUpdatedState(onContentPreDraw)
     val currentResolved by rememberUpdatedState(onIntroResolved)
     val currentReadyPreludeChanged by rememberUpdatedState(onReadyPreludeChanged)
-    // First-install still waits for the measured installer header destination
-    // so the travelling mark cannot start before its landing slot exists.
-    // Return has no installer header; its full-screen root is the complete
-    // first-frame geometry and is already measured by PortalRevealVeil.
-    val laidOut = rootBounds.width > 0f && (isReturn || headerBounds.width > 0f)
+    // Both modes wait for the actual measured logo destination so the
+    // travelling mark cannot start before its landing slot exists.
+    val laidOut = rootBounds.width > 0f && destinationBounds.width > 0f
 
     // Unlike a FrameLayout pre-draw, this gate cannot release before both the
     // actual CONFIGURE and its logo destination have participated in layout.
@@ -141,7 +138,7 @@ fun PortalLaunchTransition(
                 resolved = true
             }
         } else if (ready) {
-            // CONFIGURE/header layout is done but the platform splash layer
+            // CONFIGURE/destination layout is done but the platform splash layer
             // is still up: hold the intro at t=0 (centred canonical mark
             // over initial charcoal/frost) so no animation progress hides
             // behind the exiting splash and no frame lacks a mark.
@@ -170,6 +167,9 @@ fun PortalLaunchTransition(
                 }
             }
     } else Modifier
+    val launchMarkModifier = Modifier
+        .onGloballyPositioned { destinationBounds = it.boundsInRoot() }
+        .then(if (active) Modifier.drawWithContent { } else Modifier)
 
     PortalRevealVeil(
         eligible = resolved && setupReady && desktopReady,
@@ -185,20 +185,19 @@ fun PortalLaunchTransition(
         Box(Modifier.fillMaxSize().then(treatment)) {
             if (isReturn) {
                 PortalReturnScreen(
+                    launchMarkModifier = launchMarkModifier,
                     onReturnReady = { setupReady = true },
                 )
             } else {
                 PortalSetupScreen(
                     desktopReady = desktopReady,
                     onSetupReady = { setupReady = true },
-                    launchMarkModifier = Modifier.onGloballyPositioned {
-                        headerBounds = it.boundsInRoot()
-                    }.then(if (active) Modifier.drawWithContent { } else Modifier),
+                    launchMarkModifier = launchMarkModifier,
                 )
             }
         }
         if (active) {
-            TravellingPortalMark(rootBounds, headerBounds) { clock.value }
+            TravellingPortalMark(rootBounds, destinationBounds) { clock.value }
         }
     }
 }

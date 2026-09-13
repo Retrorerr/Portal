@@ -61,7 +61,7 @@ object ComposeOverlay {
     private val desktopReadyLatched = AtomicBoolean(false)
     private val desktopReadyState = mutableStateOf(false)
     // First app-owned frame handshake for the system splash: set on the
-    // Compose content pre-draw (CONFIGURE and header measured), or when
+    // Compose content pre-draw (CONFIGURE and launch destination measured), or when
     // showing fails so the fallback screen can draw instead. PortalActivity
     // holds the system splash until this flips; there is no timed wait
     // anywhere.
@@ -70,7 +70,7 @@ object ComposeOverlay {
     // listener when the platform splash view is actually removed (or
     // immediately if splash install failed and there is nothing to wait
     // for). The launch intro stays frozen at t=0 until this AND the
-    // CONFIGURE/header pre-draw gate both hold. Observed by composition via
+    // CONFIGURE/destination pre-draw gate both hold. Observed by composition via
     // systemSplashRemovedState; the exit callback runs on the main thread.
     private val systemSplashRemoved = AtomicBoolean(false)
     private val systemSplashRemovedState = mutableStateOf(false)
@@ -96,8 +96,8 @@ object ComposeOverlay {
 
     /**
      * Show the overlay in Return-to-Plasma mode (already installed): same
-     * host, same READY prelude, same veil — the minimal return screen
-     * replaces the installer, with no launch intro.
+     * host, same launch intro, READY prelude and veil — the minimal return
+     * screen replaces the installer as the final destination.
      */
     @JvmStatic fun showReturn(activity: Activity) {
         activity.runOnUiThread { doShow(activity, returnMode = true) }
@@ -192,7 +192,7 @@ object ComposeOverlay {
             // decor (real AppCompatActivity owners); nothing is tagged here.
             view.setContent {
                 PortalLaunchTransition(
-                    playIntro = !launchIntroResolved && !returnMode,
+                    playIntro = !launchIntroResolved,
                     splashRemoved = systemSplashRemovedState.value,
                     desktopReady = desktopReadyState.value,
                     onContentPreDraw = { markFirstFrameReady() },
