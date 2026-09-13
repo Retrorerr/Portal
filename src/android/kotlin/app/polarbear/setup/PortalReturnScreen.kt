@@ -45,6 +45,7 @@ private const val RETURN_READY_DELAY_MS = 3_000L
 
 @Composable
 internal fun PortalReturnScreen(
+    launchMarkModifier: Modifier,
     onReturnReady: () -> Unit = {},
 ) {
     val palette = resolvePalette(AppearanceMode.System)
@@ -75,7 +76,7 @@ internal fun PortalReturnScreen(
                     threshold = palette.logoThreshold,
                 ),
                 contentDescription = "Portal logo",
-                modifier = Modifier.size(PortalDimens.LogoSize),
+                modifier = Modifier.size(PortalDimens.LogoSize).then(launchMarkModifier),
             )
             Spacer(modifier = Modifier.height(20.dp))
             Text(
