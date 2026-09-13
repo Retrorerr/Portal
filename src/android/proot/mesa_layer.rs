@@ -99,7 +99,9 @@ fn wanted(archive_path: &str) -> bool {
 /// Legacy entry point (no progress). Prefer `provision_with_progress` from
 /// the spawned setup stage so the UI stays live during the ~11 MB fetch.
 pub fn provision() {
-    provision_with_progress(|_| {});
+    if let Err(error) = provision_with_progress(|_| {}) {
+        log::error!("mesa KGSL layer provisioning failed: {error:#}");
+    }
 }
 
 /// Download (fail closed), verify, and transactionally promote the layer.
@@ -108,16 +110,18 @@ pub fn provision() {
 /// verifying / extracting / promoting` through `report`. Blocking for the
 /// calling thread: run it inside a spawned setup stage, never inline on
 /// the Plasma launch path. QPainter callers must not reach here at all.
-pub fn provision_with_progress(report: impl Fn(String)) {
+pub fn provision_with_progress(report: impl Fn(String)) -> anyhow::Result<()> {
     if is_provisioned() {
-        return;
+        return Ok(());
     }
     if let Err(e) = provision_inner(&report) {
         log::error!(
-            "mesa KGSL layer unavailable ({e}); Anland GPU boot will fail at GBM setup, will retry on next launch"
+            "mesa KGSL layer unavailable ({e}); setup will remain incomplete and retry safely"
         );
         report(format!("Mesa layer unavailable: {e:#}"));
+        return Err(e);
     }
+    Ok(())
 }
 
 fn provision_inner(report: &impl Fn(String)) -> anyhow::Result<()> {
@@ -169,7 +173,7 @@ fn provision_inner(report: &impl Fn(String)) -> anyhow::Result<()> {
             }
         }
     }
-    Err(last_error.unwrap())
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Mesa KGSL layer provisioning failed")))
 }
 
 fn provision_attempt(base: &Path, attempt: u32, report: &impl Fn(String)) -> anyhow::Result<()> {

@@ -25,7 +25,10 @@ struct PopupControl {
 
 static CONTROL: OnceLock<Mutex<PopupControl>> = OnceLock::new();
 static EVENT_LOOP_PROXY: OnceLock<Mutex<Option<EventLoopProxy<AppUserEvent>>>> = OnceLock::new();
-static SETUP_COMPLETE: AtomicBool = AtomicBool::new(false);
+/// Transient event-loop wake only. The durable runtime marker is the sole
+/// installation truth; this bit is never consulted as proof that setup
+/// succeeded.
+static SETUP_HANDOFF_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn control() -> &'static Mutex<PopupControl> {
     CONTROL.get_or_init(|| Mutex::new(PopupControl::default()))
@@ -59,20 +62,20 @@ pub fn wake_event_loop() {
     }
 }
 
-/// Mark setup complete and ask the popup Looper to return. The handoff event is sent only after
-/// the popup thread has dismissed its window, so a newly created Wayland surface cannot be hidden
-/// by a stale WebView. If no popup exists (for example, a very fast test/setup path), wake the
-/// event loop immediately.
+/// Signal that native setup has committed and ask the popup Looper to return.
+/// The event is only a transient wake; the event-loop revalidates the durable
+/// installation marker before constructing Wayland.
 pub fn complete_setup(android_app: AndroidApp) {
-    SETUP_COMPLETE.store(true, Ordering::Release);
+    SETUP_HANDOFF_PENDING.store(true, Ordering::Release);
     if !request_close(android_app) {
         wake_event_loop();
     }
 }
 
-/// Consume the completion bit from the event-loop thread.
-pub fn take_setup_complete() -> bool {
-    SETUP_COMPLETE.swap(false, Ordering::AcqRel)
+/// Consume the transient handoff event after the popup is closed. This is not
+/// an installed-state query.
+pub fn take_setup_handoff() -> bool {
+    SETUP_HANDOFF_PENDING.swap(false, Ordering::AcqRel)
 }
 
 /// Register the Looper and PopupWindow owned by the WebView thread.
@@ -91,7 +94,7 @@ pub fn install(env: &mut JNIEnv<'_>, looper: &JObject<'_>, popup: &JObject<'_>) 
     if let Ok(mut control) = control().lock() {
         control.looper = Some(looper);
         control.popup = Some(popup);
-        if SETUP_COMPLETE.load(Ordering::Acquire) {
+        if SETUP_HANDOFF_PENDING.load(Ordering::Acquire) {
             if let Some(looper) = control.looper.as_ref() {
                 let _ = env.call_method(looper, "quitSafely", "()V", &[]);
             }
@@ -137,7 +140,7 @@ pub fn clear() {
         control.looper = None;
         control.popup = None;
     }
-    if SETUP_COMPLETE.load(Ordering::Acquire) {
+    if SETUP_HANDOFF_PENDING.load(Ordering::Acquire) {
         wake_event_loop();
     }
 }

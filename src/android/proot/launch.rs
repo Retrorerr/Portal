@@ -163,7 +163,15 @@ pub fn launch() {
         return;
     }
     log::info!("launch: active runtime rootfs is {}", rootfs.display());
-    crate::android::proot::setup::sync_session_runtime_files(&rootfs, 1);
+    if let Err(error) = crate::android::proot::setup::try_sync_session_runtime_files(&rootfs, 1)
+    {
+        log::error!("Portal session integration repair failed: {error:#}");
+        LAUNCH_RUNNING.store(false, Ordering::Release);
+        report_failure(
+            "Portal could not repair its desktop session files. Tap Retry Plasma to try again.",
+        );
+        return;
+    }
     crate::android::ime::start_ime_fifo_listener(&rootfs);
 
     let cancel = Arc::new(AtomicBool::new(false));

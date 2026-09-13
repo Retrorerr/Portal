@@ -478,6 +478,10 @@ fn start_socket(
 pub enum ErrorVariant {
     None,
     Unsupported,
+    /// Setup failed after the installer had a safe retryable state. This is
+    /// distinct from a launched-Plasma runtime failure so the fallback page
+    /// keeps its Retry Setup action.
+    Setup(String),
     Runtime(String),
 }
 
@@ -496,7 +500,25 @@ impl WebviewBackend {
         receiver: std::sync::mpsc::Receiver<SetupMessage>,
         progress: Arc<Mutex<u16>>,
     ) -> Self {
-        let socket = Server::bind("127.0.0.1:0").expect("Failed to bind socket");
+        let socket = match Server::bind("127.0.0.1:0") {
+            Ok(socket) => socket,
+            Err(error) => {
+                log::error!("Failed to bind installer WebSocket: {error}");
+                // Keep the receiver owned until its sender is dropped. The
+                // setup worker remains process-lifetime and reports its
+                // structured state to Compose even if the HTML fallback
+                // cannot obtain a socket.
+                thread::spawn(move || for _ in receiver {});
+                return Self {
+                    socket_port: 0,
+                    progress,
+                    error: ErrorVariant::Setup(
+                        "Portal's installer bridge is unavailable. Restart Portal and retry."
+                            .to_string(),
+                    ),
+                };
+            }
+        };
         let state = Arc::new(WebviewState::with_token());
         let socket_port = start_socket(socket, state.clone(), progress.clone());
         let message_state = state_for(socket_port);

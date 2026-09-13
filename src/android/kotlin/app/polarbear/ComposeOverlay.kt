@@ -31,6 +31,8 @@ import android.app.Activity
 import android.util.Log
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
 import app.polarbear.setup.PortalLaunchTransition
@@ -55,11 +57,35 @@ object ComposeOverlay {
     @JvmStatic external fun nativeOnOverlayRemoved()
     @JvmStatic external fun nativeOnOverlayShown()
     @JvmStatic external fun nativeOnOverlayShowFailed(reason: String)
+    @JvmStatic external fun nativeBeginInstall(): Boolean
 
-    // Native readiness is independent of the fake setup phase. A KWin frame
+    // Native readiness is independent of installation progress. A KWin frame
     // can latch this before the Compose hierarchy has finished presenting.
     private val desktopReadyLatched = AtomicBoolean(false)
     private val desktopReadyState = mutableStateOf(false)
+    data class InstallUiState(
+        val phase: String,
+        val progress: Int,
+        val message: String,
+        val error: String?,
+        val complete: Boolean,
+    ) {
+        val failed: Boolean get() = error != null || phase == "Failed"
+        val running: Boolean get() = !complete && !failed && phase != "Idle"
+    }
+
+    private val defaultInstallState = InstallUiState(
+        phase = "Idle",
+        progress = 0,
+        message = "Portal setup is ready to begin.",
+        error = null,
+        complete = false,
+    )
+    // The native worker may publish while the overlay is absent (or while an
+    // Activity is being recreated). Keep the latest snapshot outside the
+    // Compose hierarchy, then apply it on the main thread when available.
+    @Volatile private var installStateSnapshot = defaultInstallState
+    private val installStateValue = mutableStateOf(defaultInstallState)
     // First app-owned frame handshake for the system splash: set on the
     // Compose content pre-draw (CONFIGURE and launch destination measured), or when
     // showing fails so the fallback screen can draw instead. PortalActivity
@@ -136,7 +162,45 @@ object ComposeOverlay {
         }
     }
 
-    /** Retained recovery-state bridge; setup progress itself stays Compose-local. */
+    /**
+     * Native provisioning bridge. This is a snapshot, not a timer tick: the
+     * Rust coordinator only advances it when real work advances, and it sends
+     * `complete=true` after the durable installation marker validates.
+     */
+    @JvmStatic fun updateInstallState(
+        phase: String,
+        progress: Int,
+        message: String,
+        error: String?,
+        complete: Boolean,
+    ) {
+        val next = InstallUiState(
+            phase = phase,
+            progress = progress.coerceIn(0, 100),
+            message = message,
+            error = error,
+            complete = complete,
+        )
+        installStateSnapshot = next
+        composeView?.post { installStateValue.value = installStateSnapshot }
+    }
+
+    /** Subscribe to the process-lifetime native provisioning snapshot. */
+    @Composable
+    fun installState(): State<InstallUiState> = installStateValue
+
+    /** Start or attach to the one native provisioning operation. */
+    @JvmStatic fun beginInstall(): Boolean = try {
+        nativeBeginInstall()
+    } catch (_: UnsatisfiedLinkError) {
+        Log.e(TAG, "nativeBeginInstall unavailable")
+        false
+    } catch (e: Exception) {
+        Log.e(TAG, "nativeBeginInstall failed", e)
+        false
+    }
+
+    /** Retained recovery-state bridge for the launch transition. */
     @JvmStatic fun updateState(value: String) {
         when (value) {
             STATE_READY -> updateDesktopReady(true)
@@ -228,6 +292,7 @@ object ComposeOverlay {
             // Catch readiness that arrived before or while the Compose
             // hierarchy was being attached, always from this UI thread.
             desktopReadyState.value = desktopReadyLatched.get()
+            installStateValue.value = installStateSnapshot
             frame.alpha = 1f
             Log.i(
                 TAG,
