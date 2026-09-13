@@ -10,7 +10,13 @@ use crate::{
         utils::application_context::get_application_context,
         utils::ndk::{active_refresh_millihz, long_press_timeout_ms, scale_factor, touch_slop_px},
     },
-    core::config::{DOCS_HOME_URL, PRODUCTION_FS_ROOT},
+    core::{
+        config::{DOCS_HOME_URL, PRODUCTION_FS_ROOT},
+        provisioning::{
+            begin_installation, InstallOperationState, InstallStart, ProvisioningPhase,
+            ProvisioningSnapshot,
+        },
+    },
 };
 use pathdiff::diff_paths;
 use smithay::utils::Clock;
@@ -22,7 +28,7 @@ use std::{
     process,
     sync::{
         mpsc::{self, Sender},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
@@ -30,7 +36,7 @@ use std::{
 
 use winit::platform::android::activity::AndroidApp;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum SetupMessage {
     Progress(String),
     Error(String),
@@ -39,6 +45,7 @@ pub enum SetupMessage {
 pub struct SetupOptions {
     pub android_app: AndroidApp,
     pub mpsc_sender: Sender<SetupMessage>,
+    pub progress: Arc<dyn Fn(ProvisioningSnapshot) + Send + Sync>,
 }
 
 /// Completion hook used by the lifecycle owner to dismiss the provisioning
@@ -122,53 +129,258 @@ type NamedSetupStage = (&'static str, SetupStage);
 /// For coding agents: READ THIS BEFORE ADDING WORK HERE.
 /// - Heavy/long work belongs inside the spawned thread of a returned `Some(JoinHandle)`, so it runs once at install and surfaces as setup progress.
 /// - Simple/light tasks or important settings that must be run every launch (e.g. the Firefox config) can be done inline on the `None` path.
-type StageOutput = Option<JoinHandle<()>>;
+type StageOutput = Option<JoinHandle<anyhow::Result<()>>>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SetupFailureKind {
+    Network,
+    Storage,
+    Verification,
+    Extraction,
+    Graphics,
+    Filesystem,
+    Unsupported,
+    Stage,
+}
+
+#[derive(Clone, Debug)]
+pub struct SetupFailure {
+    pub stage: String,
+    pub kind: SetupFailureKind,
+    /// Detailed diagnostics stay in native logs/diagnostics and never cross
+    /// the installer UI boundary.
+    pub diagnostic: String,
+    pub user_message: String,
+}
+
+impl SetupFailure {
+    fn from_detail(index: usize, name: &str, detail: impl Into<String>) -> Self {
+        let diagnostic = detail.into();
+        let lower = diagnostic.to_ascii_lowercase();
+        let kind = if lower.contains("no space")
+            || lower.contains("enospc")
+            || lower.contains("storage")
+            || lower.contains("free space")
+        {
+            SetupFailureKind::Storage
+        } else if lower.contains("sha")
+            || lower.contains("size mismatch")
+            || lower.contains("content-range")
+            || lower.contains("range")
+            || lower.contains("verify")
+        {
+            SetupFailureKind::Verification
+        } else if lower.contains("extract")
+            || lower.contains("archive")
+            || lower.contains("tar")
+            || lower.contains("unsafe runtime")
+        {
+            SetupFailureKind::Extraction
+        } else if lower.contains("http")
+            || lower.contains("download")
+            || lower.contains("timeout")
+            || lower.contains("connection")
+            || lower.contains("dns")
+        {
+            SetupFailureKind::Network
+        } else if lower.contains("mesa") || lower.contains("kgsl") || lower.contains("gbm") {
+            SetupFailureKind::Graphics
+        } else if lower.contains("permission")
+            || lower.contains("filesystem")
+            || lower.contains("file system")
+            || lower.contains("failed to")
+        {
+            SetupFailureKind::Filesystem
+        } else {
+            SetupFailureKind::Stage
+        };
+        let action = match kind {
+            SetupFailureKind::Network => "Check your connection and tap Retry.",
+            SetupFailureKind::Storage => "Free some storage and tap Retry.",
+            SetupFailureKind::Verification => "The download could not be verified. Tap Retry.",
+            SetupFailureKind::Extraction => "Debian could not be unpacked safely. Tap Retry.",
+            SetupFailureKind::Graphics => "Portal's graphics support could not be prepared. Tap Retry.",
+            SetupFailureKind::Filesystem => "Portal could not write its setup files. Tap Retry.",
+            SetupFailureKind::Unsupported => "This device cannot run Portal.",
+            SetupFailureKind::Stage => "Portal could not finish setup. Tap Retry.",
+        };
+        Self {
+            stage: format!("{index} ({name})"),
+            kind,
+            diagnostic,
+            user_message: format!("{action}"),
+        }
+    }
+
+    fn from_panic(index: usize, name: &str, payload: &(dyn std::any::Any + Send)) -> Self {
+        Self::from_detail(index, name, panic_text(payload))
+    }
+}
+
+struct SetupSink {
+    android_app: AndroidApp,
+    senders: Vec<Sender<SetupMessage>>,
+    progress: Arc<Mutex<u16>>,
+    on_complete: Option<SetupCompletionCallback>,
+}
+
+#[derive(Clone)]
+struct SetupRegistration {
+    // The worker owns this shared sink rather than a particular Activity or
+    // WebView receiver. A recreation can bind a fresh UI to the same running
+    // operation without starting a second worker or sending JNI calls to a
+    // stale Activity instance.
+    sink: Arc<Mutex<SetupSink>>,
+}
+
+impl SetupRegistration {
+    fn new(
+        android_app: AndroidApp,
+        sender: Sender<SetupMessage>,
+        progress: Arc<Mutex<u16>>,
+        on_complete: Option<SetupCompletionCallback>,
+    ) -> Self {
+        Self {
+            sink: Arc::new(Mutex::new(SetupSink {
+                android_app,
+                senders: vec![sender],
+                progress,
+                on_complete,
+            })),
+        }
+    }
+
+    fn rebind_from(&self, other: &Self) {
+        if Arc::ptr_eq(&self.sink, &other.sink) {
+            return;
+        }
+        let Some((android_app, sender, progress, on_complete)) = other
+            .sink
+            .lock()
+            .ok()
+            .map(|sink| {
+                (
+                    sink.android_app.clone(),
+                    sink.senders.last().cloned(),
+                    sink.progress.clone(),
+                    sink.on_complete.clone(),
+                )
+            })
+            .and_then(|(android_app, sender, progress, on_complete)| {
+                sender.map(|sender| (android_app, sender, progress, on_complete))
+            })
+        else {
+            return;
+        };
+        if let Ok(mut sink) = self.sink.lock() {
+            sink.android_app = android_app;
+            // Only the newest Activity owns a live progress receiver. Drop
+            // the old sender so its WebView forwarding thread can terminate
+            // instead of accumulating one thread per rotation.
+            sink.senders = vec![sender];
+            sink.progress = progress;
+            sink.on_complete = on_complete;
+        }
+    }
+
+    fn android_app(&self) -> Option<AndroidApp> {
+        self.sink.lock().ok().map(|sink| sink.android_app.clone())
+    }
+
+    fn sender(&self) -> Option<Sender<SetupMessage>> {
+        self.sink
+            .lock()
+            .ok()
+            .and_then(|sink| sink.senders.last().cloned())
+    }
+
+    fn progress(&self) -> Option<Arc<Mutex<u16>>> {
+        self.sink.lock().ok().map(|sink| sink.progress.clone())
+    }
+
+    fn completion_callback(&self) -> Option<SetupCompletionCallback> {
+        self.sink
+            .lock()
+            .ok()
+            .and_then(|sink| sink.on_complete.clone())
+    }
+
+    fn publish(&self, message: SetupMessage) -> Option<AndroidApp> {
+        let Ok(mut sink) = self.sink.lock() else {
+            return None;
+        };
+        sink.senders.retain(|sender| sender.send(message.clone()).is_ok());
+        Some(sink.android_app.clone())
+    }
+}
+
+struct SetupCoordinator {
+    state: InstallOperationState,
+    snapshot: ProvisioningSnapshot,
+    registration: Option<SetupRegistration>,
+}
+
+impl Default for SetupCoordinator {
+    fn default() -> Self {
+        Self {
+            state: InstallOperationState::Idle,
+            snapshot: ProvisioningSnapshot::update(
+                ProvisioningPhase::Idle,
+                0,
+                "Portal setup is waiting to begin.",
+            ),
+            registration: None,
+        }
+    }
+}
+
+fn setup_coordinator() -> &'static Mutex<SetupCoordinator> {
+    static COORDINATOR: OnceLock<Mutex<SetupCoordinator>> = OnceLock::new();
+    COORDINATOR.get_or_init(|| Mutex::new(SetupCoordinator::default()))
+}
 
 fn setup_debian_runtime(options: &SetupOptions) -> StageOutput {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
     if artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)) {
         return None;
     }
-    let sender = options.mpsc_sender.clone();
+    let report = options.progress.clone();
     let base = get_application_context().data_dir.clone();
     Some(thread::spawn(move || {
-        artifact
-            .provision(&base, |message| {
-                diagnostics::host_event("runtime-provisioning", &message);
-                let _ = sender.send(SetupMessage::Progress(message));
-            })
-            .unwrap_or_else(|error| panic!("Debian provisioning failed: {error:#}"));
+        artifact.provision_with_progress(&base, |snapshot| {
+            diagnostics::host_event("runtime-provisioning", &snapshot.message);
+            report(snapshot);
+        })
     }))
 }
 
 fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
-    let mpsc_sender = options.mpsc_sender.clone();
+    let report = options.progress.clone();
 
     if !fs_root.join("proc/.version").exists() {
         return Some(thread::spawn(move || {
-            mpsc_sender
-                .send(SetupMessage::Progress(
-                    "Simulating Linux system data...".to_string(),
-                ))
-                .expect(&format!("Failed to send log message"));
+            report(ProvisioningSnapshot::update(
+                ProvisioningPhase::Configuring,
+                72,
+                "Preparing Linux system data…",
+            ));
 
             // Create necessary directories - don't fail if they already exist
-            let _ = fs::create_dir_all(fs_root.join("proc"));
-            let _ = fs::create_dir_all(fs_root.join("sys"));
-            let _ = fs::create_dir_all(fs_root.join("sys/.empty"));
+            fs::create_dir_all(fs_root.join("proc"))?;
+            fs::create_dir_all(fs_root.join("sys"))?;
+            fs::create_dir_all(fs_root.join("sys/.empty"))?;
 
-            // Set permissions - only try to set permissions if we're on Unix and have the capability
+            // Set permissions on the guest directories. A failure is a real
+            // setup failure, not something the installer may silently ignore.
             #[cfg(unix)]
             {
-                // Try to set permissions, but don't fail if we can't
-                let _ =
-                    fs::set_permissions(fs_root.join("proc"), fs::Permissions::from_mode(0o700));
-                let _ = fs::set_permissions(fs_root.join("sys"), fs::Permissions::from_mode(0o700));
-                let _ = fs::set_permissions(
+                fs::set_permissions(fs_root.join("proc"), fs::Permissions::from_mode(0o700))?;
+                fs::set_permissions(fs_root.join("sys"), fs::Permissions::from_mode(0o700))?;
+                fs::set_permissions(
                     fs_root.join("sys/.empty"),
                     fs::Permissions::from_mode(0o700),
-                );
+                )?;
             }
 
             // Create fake proc files
@@ -179,9 +391,9 @@ fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
             ];
 
             for (path, content) in proc_files {
-                let _ = fs::write(fs_root.join(path), content)
-                    .expect(&format!("Permission denied while writing to {}", path));
+                fs::write(fs_root.join(path), content)?;
             }
+            Ok(())
         }));
     }
     None
@@ -1413,6 +1625,83 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     sync_guest_network_config(fs_root);
 }
 
+/// Run the per-session guest integration behind the same recoverable boundary
+/// used by first-install setup. The underlying helper intentionally remains a
+/// void, idempotent sync routine because most of its optional migrations are
+/// best-effort on every launch; required callers use this wrapper so an
+/// environmental panic cannot kill the native activity or mark installation
+/// complete.
+pub fn try_sync_session_runtime_files(fs_root: &Path, ui_scale: i32) -> anyhow::Result<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sync_session_runtime_files(fs_root, ui_scale);
+    }))
+    .map_err(|payload| {
+        anyhow::anyhow!(
+            "guest session integration failed: {}",
+            panic_text(payload.as_ref())
+        )
+    })
+    .and_then(|()| validate_required_session_files(fs_root))
+}
+
+fn validate_required_session_files(fs_root: &Path) -> anyhow::Result<()> {
+    for relative in [
+        "tmp/.X11-unix",
+        "tmp/.ICE-unix",
+        "var/tmp",
+        "usr/local/bin/startplasma-localdesktop",
+        "usr/local/bin/kwin_wayland",
+        "usr/local/bin/start-localdesktop-recovery",
+        "usr/local/bin/localdesktop-retry-plasma",
+        "usr/local/bin/portal-ime-bridge",
+        "usr/local/bin/wl-copy",
+        "usr/local/bin/wl-paste",
+    ] {
+        anyhow::ensure!(
+            fs_root.join(relative).is_file() || fs_root.join(relative).is_dir(),
+            "Required guest setup path is missing: {relative}"
+        );
+    }
+
+    let kwin_dir = fs_root.join("usr/local/lib/portal");
+    anyhow::ensure!(
+        fs::metadata(kwin_dir.join("libkwin.so.6.3.6"))
+            .map(|metadata| metadata.len() == KWIN_LIBRARY.len() as u64)
+            .unwrap_or(false),
+        "Required Portal KWin overlay is incomplete"
+    );
+    for (link, target) in [
+        ("libkwin.so.6", "libkwin.so.6.3.6"),
+        ("libkwin.so", "libkwin.so.6"),
+    ] {
+        anyhow::ensure!(
+            fs::read_link(kwin_dir.join(link)).ok().as_deref() == Some(Path::new(target)),
+            "Required Portal KWin symlink is incomplete: {link}"
+        );
+    }
+
+    if crate::android::anland::is_anland_requested() {
+        let anland_dir = fs_root.join("usr/local/lib/portal-anland");
+        anyhow::ensure!(
+            fs::metadata(anland_dir.join("libkwin.so.6.3.6"))
+                .map(|metadata| metadata.len() == KWIN_ANLAND_LIBRARY.len() as u64)
+                .unwrap_or(false),
+            "Required Anland KWin library is incomplete"
+        );
+        for (link, target) in [
+            ("libkwin.so.6", "libkwin.so.6.3.6"),
+            ("libkwin.so", "libkwin.so.6"),
+        ] {
+            anyhow::ensure!(
+                fs::read_link(anland_dir.join(link)).ok().as_deref()
+                    == Some(Path::new(target)),
+                "Required Anland KWin symlink is incomplete: {link}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Install Portal's ABI-matched Debian KWin overlay and migrate the
 /// pre-Anland layout. Runs on every provisioning pass AND every session
 /// launch (via `sync_session_runtime_files`), so existing runtimes converge
@@ -1437,13 +1726,19 @@ fn sync_kwin_overlay(fs_root: &Path) {
             let _ = fs::set_permissions(&kwin_temporary, fs::Permissions::from_mode(0o755));
             let _ = fs::rename(&kwin_temporary, &kwin_library);
         }
-        for (link, target) in [
-            ("libkwin.so.6", "libkwin.so.6.3.6"),
-            ("libkwin.so", "libkwin.so.6"),
-        ] {
-            let path = kwin_dir.join(link);
-            let _ = fs::remove_file(&path);
-            let _ = symlink(target, path);
+    }
+    // Repair the soname chain even when the binary itself is already the
+    // expected size. A process death after the binary rename must not leave a
+    // same-size library with missing links and a permanently failed retry.
+    for (link, target) in [
+        ("libkwin.so.6", "libkwin.so.6.3.6"),
+        ("libkwin.so", "libkwin.so.6"),
+    ] {
+        let path = kwin_dir.join(link);
+        let tmp = kwin_dir.join(format!("{link}.tmp"));
+        let _ = fs::remove_file(&tmp);
+        if symlink(target, &tmp).is_ok() {
+            let _ = fs::rename(&tmp, &path);
         }
     }
     // Migration: remove pre-Anland overlay links that shadowed libkwin.so.6
@@ -1509,18 +1804,19 @@ fn sync_kwin_anland_overlay(fs_root: &Path) {
             let _ = fs::set_permissions(&kwin_temporary, fs::Permissions::from_mode(0o755));
             let _ = fs::rename(&kwin_temporary, &kwin_library);
         }
-        // Atomic symlink swap (temp + rename): KWin must never observe a
-        // half-deployed soname chain if a launch races a previous update.
-        for (link, target) in [
-            ("libkwin.so.6", "libkwin.so.6.3.6"),
-            ("libkwin.so", "libkwin.so.6"),
-        ] {
-            let path = kwin_dir.join(link);
-            let tmp = kwin_dir.join(format!("{link}.tmp"));
-            let _ = fs::remove_file(&tmp);
-            if symlink(target, &tmp).is_ok() {
-                let _ = fs::rename(&tmp, &path);
-            }
+    }
+    // Atomic symlink swap (temp + rename): KWin must never observe a
+    // half-deployed soname chain if a launch races a previous update. This
+    // also repairs links after a process death following the library rename.
+    for (link, target) in [
+        ("libkwin.so.6", "libkwin.so.6.3.6"),
+        ("libkwin.so", "libkwin.so.6"),
+    ] {
+        let path = kwin_dir.join(link);
+        let tmp = kwin_dir.join(format!("{link}.tmp"));
+        let _ = fs::remove_file(&tmp);
+        if symlink(target, &tmp).is_ok() {
+            let _ = fs::rename(&tmp, &path);
         }
     }
 }
@@ -1802,15 +2098,25 @@ fn setup_mesa_layer(options: &SetupOptions) -> StageOutput {
     // during the ~11 MB download/verify/extract/promote. The stage
     // completes (success or clearly reported failure) before Plasma setup
     // runs, so KWin can never launch while provisioning is unfinished.
+    let report = options.progress.clone();
     let sender = options.mpsc_sender.clone();
     Some(thread::spawn(move || {
         super::mesa_layer::provision_with_progress(|message| {
             diagnostics::host_event("mesa-provisioning", &message);
-            let _ = sender.send(SetupMessage::Progress(message));
-        });
-        // provision_with_progress logs + reports failure without panicking:
-        // the session fails closed at GBM setup with a diagnosable kwin
-        // log and retries on a later launch (preserved behavior).
+            // Mesa keeps detailed failure text in native diagnostics. Do not
+            // let its low-level error string briefly become installer copy.
+            let display_message = if message.starts_with("Mesa layer unavailable:") {
+                "Preparing Portal graphics…".to_string()
+            } else {
+                message
+            };
+            let _ = sender.send(SetupMessage::Progress(display_message.clone()));
+            report(ProvisioningSnapshot::update(
+                ProvisioningPhase::Configuring,
+                78,
+                display_message,
+            ));
+        })
     }))
 }
 
@@ -1821,7 +2127,9 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     // The host Wayland compositor already establishes a logical viewport scaled by
     // guest_scale_factor; the guest Plasma session must run at 1:1 (scale 1) to prevent double scaling.
     let ui_scale = 1;
-    sync_session_runtime_files(fs_root, ui_scale);
+    if let Err(error) = try_sync_session_runtime_files(fs_root, ui_scale) {
+        return Some(thread::spawn(move || Err(error)));
+    }
     sync_kwin_overlay(fs_root);
     // IBus packages pre-session (detached, non-blocking); the autostart
     // launcher only starts an installed daemon, never package-manages.
@@ -1925,10 +2233,9 @@ X-KDE-autostart-after=panel
 
     None
 }
-fn fix_xkb_symlink(options: &SetupOptions) -> StageOutput {
+fn fix_xkb_symlink(_options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let xkb_path = fs_root.join("usr/share/X11/xkb");
-    let mpsc_sender = options.mpsc_sender.clone();
 
     if let Ok(meta) = fs::symlink_metadata(&xkb_path) {
         if meta.file_type().is_symlink() {
@@ -1943,23 +2250,30 @@ fn fix_xkb_symlink(options: &SetupOptions) -> StageOutput {
                     // Both are inside the chroot, so strip the fs_root prefix
                     let xkb_inside = Path::new("/usr/share/X11/xkb");
                     let target_inside = Path::new("/usr/share/xkeyboard-config-2");
-                    let rel_target = diff_paths(target_inside, xkb_inside.parent().unwrap())
+                    let rel_target = diff_paths(
+                        target_inside,
+                        xkb_inside.parent().unwrap_or(Path::new("/")),
+                    )
                         .unwrap_or_else(|| target_inside.to_path_buf());
                     log::info!(
                         "Fixing with new relative symlink: {} -> {}",
                         xkb_path.display(),
                         rel_target.display()
                     );
-                    // Remove the old symlink
-                    let _ = fs::remove_file(&xkb_path);
-                    // Create the new relative symlink
-                    if let Err(e) = symlink(&rel_target, &xkb_path) {
-                        mpsc_sender
-                            .send(SetupMessage::Error(format!(
-                                "Failed to create relative symlink for xkb: {}",
-                                e
-                            )))
-                            .unwrap_or(());
+                    // Stage the replacement first. Renaming the temporary
+                    // symlink over the old one is atomic on the Android
+                    // filesystem, so a failed repair leaves the known-good
+                    // old link intact.
+                    let temporary = xkb_path.with_extension("portal-tmp");
+                    let _ = fs::remove_file(&temporary);
+                    if let Err(error) = symlink(&rel_target, &temporary) {
+                        let message = format!("Failed to stage relative symlink for xkb: {error}");
+                        return Some(thread::spawn(move || Err(anyhow::anyhow!(message))));
+                    }
+                    if let Err(error) = fs::rename(&temporary, &xkb_path) {
+                        let _ = fs::remove_file(&temporary);
+                        let message = format!("Failed to install relative symlink for xkb: {error}");
+                        return Some(thread::spawn(move || Err(anyhow::anyhow!(message))));
                     }
                 }
             }
@@ -1978,39 +2292,75 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-fn send_setup_error(
-    index: usize,
-    name: &str,
-    payload: &(dyn std::any::Any + Send),
-    sender: &Sender<SetupMessage>,
-) {
-    let message = format!(
-        "Setup stage {index} ({name}) failed: {}. Reopen Portal to retry, or export diagnostics for support.",
-        panic_text(payload)
-    );
-    log::error!("{message}");
-    let _ = sender.send(SetupMessage::Error(message));
+/// Publish one native provisioning state to both the process coordinator and
+/// the two UI surfaces (Compose first, WebView fallback). The native
+/// coordinator owns this state; a screen disappearing cannot stop the worker.
+fn publish_snapshot(registration: &SetupRegistration, snapshot: ProvisioningSnapshot) {
+    if let Some(progress) = registration.progress() {
+        if let Ok(mut progress) = progress.lock() {
+            *progress = snapshot.progress;
+        }
+    }
+    if let Ok(mut coordinator) = setup_coordinator().lock() {
+        coordinator.snapshot = snapshot.clone();
+    }
+    let message = if snapshot.error.is_some() {
+        SetupMessage::Error(snapshot.message.clone())
+    } else {
+        SetupMessage::Progress(snapshot.message.clone())
+    };
+    if let Some(android_app) = registration.publish(message) {
+        crate::android::utils::compose_overlay::publish_install_state(&android_app, &snapshot);
+    }
 }
 
-/// Invoke a stage behind a panic boundary and emit the durable stage events
-/// consumed by diagnostics exports. Stage functions historically used
-/// `expect` for filesystem/package failures; converting those panics into an
-/// explicit WebView error keeps the installer actionable instead of blank.
+fn publish_failure(registration: &SetupRegistration, failure: &SetupFailure) {
+    log::error!(
+        "Portal setup stage {} failed ({:?}): {}",
+        failure.stage,
+        failure.kind,
+        failure.diagnostic
+    );
+    let progress = registration
+        .progress()
+        .and_then(|progress| progress.lock().ok().map(|progress| *progress))
+        .unwrap_or(0);
+    let mut snapshot = ProvisioningSnapshot::failed(failure.user_message.clone());
+    snapshot.progress = progress;
+    if let Ok(mut coordinator) = setup_coordinator().lock() {
+        coordinator.state = InstallOperationState::Failed;
+        coordinator.snapshot = snapshot.clone();
+    }
+    if let Some(current) = registration.progress() {
+        if let Ok(mut current) = current.lock() {
+            *current = progress;
+        }
+    }
+    if let Some(android_app) =
+        registration.publish(SetupMessage::Error(failure.user_message.clone()))
+    {
+        crate::android::utils::compose_overlay::publish_install_state(&android_app, &snapshot);
+    }
+}
+
+/// Invoke a stage behind a panic boundary. Remaining legacy helper functions
+/// use `expect` for invariant-like guest writes; this boundary converts any
+/// environmental failure into a retryable structured error and keeps panic
+/// diagnostics native-only.
 fn invoke_stage(
     index: usize,
     name: &'static str,
     stage: &SetupStage,
     options: &SetupOptions,
-    sender: &Sender<SetupMessage>,
-) -> Result<StageOutput, ()> {
+)
+    -> Result<StageOutput, SetupFailure> {
     diagnostics::setup_stage(index, name, "start");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage(options)));
     match result {
         Ok(output) => Ok(output),
         Err(payload) => {
             diagnostics::setup_stage(index, name, "failed");
-            send_setup_error(index, name, payload.as_ref(), sender);
-            Err(())
+            Err(SetupFailure::from_panic(index, name, payload.as_ref()))
         }
     }
 }
@@ -2019,71 +2369,274 @@ fn complete_stage(index: usize, name: &'static str) {
     diagnostics::setup_stage(index, name, "complete");
 }
 
-fn update_progress(progress: &Arc<Mutex<u16>>, index: usize, stage_count: usize) {
-    let value = ((index * 100) / stage_count.max(1)).min(100) as u16;
-    if let Ok(mut current) = progress.lock() {
-        *current = value;
+fn stage_progress(index: usize, count: usize) -> u16 {
+    // Debian image work occupies 0..70; setup stages occupy 70..99. The
+    // final marker write owns 100, so no stage can visually finish early.
+    70 + ((index * 29) / count.max(1)).min(28) as u16
+}
+
+fn join_stage(
+    index: usize,
+    name: &'static str,
+    handle: JoinHandle<anyhow::Result<()>>,
+) -> Result<(), SetupFailure> {
+    match handle.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(SetupFailure::from_detail(index, name, format!("{error:#}"))),
+        Err(payload) => Err(SetupFailure::from_panic(index, name, payload.as_ref())),
     }
 }
 
-fn run_remaining_stages(
-    first_index: usize,
-    first_name: &'static str,
-    first_handle: JoinHandle<()>,
-    stages: Vec<NamedSetupStage>,
-    options: SetupOptions,
-    progress: Arc<Mutex<u16>>,
-    sender: Sender<SetupMessage>,
-    on_complete: Option<SetupCompletionCallback>,
-) {
-    let stage_count = stages.len();
-    if let Err(payload) = first_handle.join() {
-        diagnostics::setup_stage(first_index + 1, first_name, "failed");
-        send_setup_error(first_index + 1, first_name, payload.as_ref(), &sender);
-        return;
-    }
-    complete_stage(first_index + 1, first_name);
-    update_progress(&progress, first_index + 1, stage_count);
+fn stages() -> Vec<NamedSetupStage> {
+    vec![
+        ("debian-runtime", Box::new(setup_debian_runtime)),
+        ("linux-sysdata", Box::new(simulate_linux_sysdata_stage)),
+        ("machine-id", Box::new(setup_machine_id)),
+        ("firefox-config", Box::new(setup_firefox_config)),
+        ("bwrap-shim", Box::new(setup_fake_bwrap)),
+        ("chromium-no-sandbox", Box::new(setup_chromium_no_sandbox)),
+        ("onboard-signal-fix", Box::new(setup_onboard_signal_fix)),
+        ("mesa-kgsl-layer", Box::new(setup_mesa_layer)),
+        ("plasma-wayland", Box::new(setup_plasma_wayland)),
+        ("xkb-symlink", Box::new(fix_xkb_symlink)),
+    ]
+}
 
-    for (index, (name, stage)) in stages.into_iter().enumerate().skip(first_index + 1) {
-        update_progress(&progress, index, stage_count);
-        let output = match invoke_stage(index + 1, name, &stage, &options, &sender) {
-            Ok(output) => output,
-            Err(()) => return,
-        };
+fn run_all_stages(
+    stages: Vec<NamedSetupStage>,
+    options: &SetupOptions,
+    registration: &SetupRegistration,
+) -> Result<(), SetupFailure> {
+    let stage_count = stages.len();
+    for (index, (name, stage)) in stages.into_iter().enumerate() {
+        publish_snapshot(
+            registration,
+            ProvisioningSnapshot::update(
+                ProvisioningPhase::Configuring,
+                stage_progress(index, stage_count),
+                format!("Configuring Portal ({name})…"),
+            ),
+        );
+        let output = invoke_stage(index + 1, name, &stage, options)?;
         if let Some(handle) = output {
-            if let Err(payload) = handle.join() {
-                diagnostics::setup_stage(index + 1, name, "failed");
-                send_setup_error(index + 1, name, payload.as_ref(), &sender);
-                return;
-            }
+            join_stage(index + 1, name, handle)?;
         }
         complete_stage(index + 1, name);
-        update_progress(&progress, index + 1, stage_count);
+        publish_snapshot(
+            registration,
+            ProvisioningSnapshot::update(
+                ProvisioningPhase::Configuring,
+                stage_progress(index + 1, stage_count),
+                format!("Portal setup stage complete: {name}"),
+            ),
+        );
     }
+    Ok(())
+}
 
-    if let Ok(mut current) = progress.lock() {
-        *current = 100;
+fn finalise_installation(registration: &SetupRegistration) -> Result<(), SetupFailure> {
+    publish_snapshot(
+        registration,
+        ProvisioningSnapshot::update(
+            ProvisioningPhase::Finalising,
+            99,
+            "Finalising Portal installation…",
+        ),
+    );
+    if crate::android::anland::is_anland_requested() && !super::mesa_layer::is_provisioned() {
+        return Err(SetupFailure::from_detail(
+            8,
+            "mesa-kgsl-layer",
+            "Mesa KGSL layer is not provisioned after the setup stage",
+        ));
     }
-    let _ = sender.send(SetupMessage::Progress(
-        "Installation finished. Starting Plasma…".to_string(),
-    ));
-    diagnostics::host_event("setup-complete", "all guest provisioning stages completed");
-    if let Some(on_complete) = on_complete {
-        on_complete();
+    let artifact = crate::core::provisioning::RuntimeArtifact::production();
+    artifact
+        .mark_installation_complete(Path::new(PRODUCTION_FS_ROOT))
+        .map_err(|error| SetupFailure::from_detail(11, "installation-marker", format!("{error:#}")))?;
+    if !artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)) {
+        return Err(SetupFailure::from_detail(
+            11,
+            "installation-marker",
+            "final installation marker did not validate after being written",
+        ));
+    }
+    Ok(())
+}
+
+fn run_installation(registration: SetupRegistration) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let progress_registration = registration.clone();
+        let progress: Arc<dyn Fn(ProvisioningSnapshot) + Send + Sync> = Arc::new(move |snapshot| {
+            publish_snapshot(&progress_registration, snapshot);
+        });
+        let Some(android_app) = registration.android_app() else {
+            return Err(SetupFailure::from_detail(
+                0,
+                "setup-coordinator",
+                "setup UI binding is unavailable",
+            ));
+        };
+        let Some(mpsc_sender) = registration.sender() else {
+            return Err(SetupFailure::from_detail(
+                0,
+                "setup-coordinator",
+                "setup progress channel is unavailable",
+            ));
+        };
+        let options = SetupOptions {
+            android_app,
+            mpsc_sender,
+            progress,
+        };
+        run_all_stages(stages(), &options, &registration)
+            .and_then(|()| finalise_installation(&registration))
+    }));
+    match result {
+        Ok(Ok(())) => {
+            let snapshot = ProvisioningSnapshot::complete("Portal installed. Starting Plasma…");
+            if let Ok(mut coordinator) = setup_coordinator().lock() {
+                coordinator.state = InstallOperationState::Complete;
+                coordinator.snapshot = snapshot.clone();
+            }
+            publish_snapshot(&registration, snapshot);
+            diagnostics::host_event("setup-complete", "all guest provisioning stages completed");
+            if let Some(on_complete) = registration.completion_callback() {
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        on_complete();
+                    }))
+                {
+                    log::error!(
+                        "Portal setup handoff callback panicked after installation commit: {}",
+                        panic_text(payload.as_ref())
+                    );
+                }
+            }
+        }
+        Ok(Err(failure)) => publish_failure(&registration, &failure),
+        Err(payload) => {
+            let failure = SetupFailure::from_panic(0, "setup-coordinator", payload.as_ref());
+            publish_failure(&registration, &failure);
+        }
     }
 }
 
-fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
+fn set_registration(
+    registration: SetupRegistration,
+    state: InstallOperationState,
+    snapshot: ProvisioningSnapshot,
+) {
+    let (active_registration, active_snapshot) = if let Ok(mut coordinator) = setup_coordinator().lock()
+    {
+        if coordinator.state == InstallOperationState::Running {
+            if let Some(active_registration) = coordinator.registration.clone() {
+                active_registration.rebind_from(&registration);
+                (active_registration, coordinator.snapshot.clone())
+            } else {
+                coordinator.registration = Some(registration.clone());
+                coordinator.state = state;
+                coordinator.snapshot = snapshot.clone();
+                (registration, snapshot)
+            }
+        } else {
+            coordinator.registration = Some(registration.clone());
+            coordinator.state = state;
+            coordinator.snapshot = snapshot.clone();
+            (registration, snapshot)
+        }
+    } else {
+        (registration, snapshot)
+    };
+    publish_snapshot(&active_registration, active_snapshot);
+}
+
+fn set_operation_complete(registration: &SetupRegistration) {
+    let snapshot = ProvisioningSnapshot::complete("Portal installation is complete.");
+    if let Ok(mut coordinator) = setup_coordinator().lock() {
+        coordinator.state = InstallOperationState::Complete;
+        coordinator.snapshot = snapshot.clone();
+    }
+    publish_snapshot(registration, snapshot);
+}
+
+/// Start or attach to the one process-lifetime native provisioning operation.
+/// The caller is a JNI button bridge or the HTML fallback, never a Compose
+/// coroutine. A process death simply ends this worker; the disk transaction is
+/// resumed by the next process.
+pub fn begin_install() -> bool {
+    let (registration, action, snapshot) = {
+        let Ok(mut coordinator) = setup_coordinator().lock() else {
+            return false;
+        };
+        let Some(registration) = coordinator.registration.clone() else {
+            return false;
+        };
+        let action = begin_installation(&mut coordinator.state);
+        if action == InstallStart::Start {
+            coordinator.snapshot = ProvisioningSnapshot::update(
+                ProvisioningPhase::Preparing,
+                0,
+                "Preparing Portal installation…",
+            );
+        }
+        (registration, action, coordinator.snapshot.clone())
+    };
+    match action {
+        InstallStart::Start => {
+            publish_snapshot(&registration, snapshot);
+            let worker_registration = registration.clone();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                thread::spawn(move || run_installation(worker_registration))
+            })) {
+                Ok(_) => true,
+                Err(payload) => {
+                    let failure = SetupFailure::from_panic(0, "setup-coordinator", payload.as_ref());
+                    publish_failure(&registration, &failure);
+                    false
+                }
+            }
+        }
+        InstallStart::Attach | InstallStart::Noop => {
+            publish_snapshot(&registration, snapshot);
+            true
+        }
+    }
+}
+
+/// The HTML fallback may auto-start only a never-started operation. A failed
+/// operation is deliberately user-driven so an Activity resume cannot turn a
+/// transient network/storage error into an uncontrolled retry loop.
+pub fn should_auto_begin_install() -> bool {
+    setup_coordinator()
+        .lock()
+        .map(|coordinator| coordinator.state == InstallOperationState::Idle)
+        .unwrap_or(false)
+}
+
+/// Re-publish the process-lifetime snapshot after an Activity/Compose
+/// recreation. Compose also retains the value itself, but this native replay
+/// makes a late overlay show deterministic.
+pub fn publish_current_install_state(android_app: &AndroidApp) {
+    let snapshot = setup_coordinator()
+        .lock()
+        .ok()
+        .map(|coordinator| coordinator.snapshot.clone());
+    if let Some(snapshot) = snapshot {
+        crate::android::utils::compose_overlay::publish_install_state(android_app, &snapshot);
+    }
+}
+
+fn build_wayland_backend(android_app: AndroidApp) -> anyhow::Result<PolarBearBackend> {
     let size = android_app
         .native_window()
         .map(|nw| (nw.width(), nw.height()))
         .unwrap_or((1920, 1080));
     let guest_scale_factor = scale_factor(&android_app);
-    let mut compositor =
-        Compositor::new(size, guest_scale_factor).expect("Failed to build compositor");
+    let mut compositor = Compositor::new(size, guest_scale_factor)
+        .map_err(|error| anyhow::anyhow!("Failed to build compositor: {error}"))?;
     compositor.enable_android_clipboard(android_app.clone());
-    PolarBearBackend::Wayland(WaylandBackend {
+    Ok(PolarBearBackend::Wayland(WaylandBackend {
         compositor,
         graphic_renderer: None,
         clock: Clock::new(),
@@ -2141,7 +2694,7 @@ fn build_wayland_backend(android_app: AndroidApp) -> PolarBearBackend {
         anland: None,
         surface_convergence: crate::core::surface_geometry::SurfaceConvergence::new(),
         android_app,
-    })
+    }))
 }
 
 /// Backwards-compatible setup entry point. Lifecycle owners that can dismiss
@@ -2161,76 +2714,139 @@ pub fn setup_with_completion(
     let (sender, receiver) = mpsc::channel();
     let progress = Arc::new(Mutex::new(0));
 
-    if ArchProcess::is_supported(&android_app) {
-        sender
-            .send(SetupMessage::Progress(
-                "✅ Your device is supported!".to_string(),
-            ))
-            .unwrap_or(());
-    } else {
+    if !ArchProcess::is_supported(&android_app) {
         log::info!("PRoot support check failed, showing Device Unsupported page");
         diagnostics::host_event("setup-unsupported", "PRoot support probe failed");
-        return PolarBearBackend::WebView(WebviewBackend {
-            socket_port: 0,
-            progress,
-            error: ErrorVariant::Unsupported,
-        });
+        return PolarBearBackend::WebView(WebviewBackend::unsupported(android_app));
     }
+    let _ = sender.send(SetupMessage::Progress("✅ Your device is supported!".to_string()));
 
-    let options = SetupOptions {
-        android_app: android_app.clone(),
-        mpsc_sender: sender.clone(),
-    };
+    let registration = SetupRegistration::new(
+        android_app.clone(),
+        sender.clone(),
+        progress.clone(),
+        on_complete,
+    );
 
-    let stages: Vec<NamedSetupStage> = vec![
-        ("debian-runtime", Box::new(setup_debian_runtime)),
-        ("linux-sysdata", Box::new(simulate_linux_sysdata_stage)),
-        ("machine-id", Box::new(setup_machine_id)),
-        ("firefox-config", Box::new(setup_firefox_config)),
-        ("bwrap-shim", Box::new(setup_fake_bwrap)),
-        ("chromium-no-sandbox", Box::new(setup_chromium_no_sandbox)),
-        ("onboard-signal-fix", Box::new(setup_onboard_signal_fix)),
-        ("mesa-kgsl-layer", Box::new(setup_mesa_layer)),
-        ("plasma-wayland", Box::new(setup_plasma_wayland)),
-        ("xkb-symlink", Box::new(fix_xkb_symlink)),
-    ];
-
-    for (index, (name, stage)) in stages.iter().enumerate() {
-        let stage_name = *name;
-        update_progress(&progress, index, stages.len());
-        let output = match invoke_stage(index + 1, stage_name, stage, &options, &sender) {
-            Ok(output) => output,
-            Err(()) => return PolarBearBackend::WebView(WebviewBackend::build(receiver, progress)),
-        };
-        let Some(handle) = output else {
-            complete_stage(index + 1, stage_name);
-            update_progress(&progress, index + 1, stages.len());
-            continue;
-        };
-
-        let progress_clone = progress.clone();
-        let sender_clone = sender.clone();
-        let options_clone = SetupOptions {
-            android_app: options.android_app.clone(),
-            mpsc_sender: options.mpsc_sender.clone(),
-        };
-        let on_complete = on_complete.clone();
-        thread::spawn(move || {
-            run_remaining_stages(
-                index,
-                stage_name,
-                handle,
-                stages,
-                options_clone,
-                progress_clone,
-                sender_clone,
-                on_complete,
-            );
-        });
+    let artifact = crate::core::provisioning::RuntimeArtifact::production();
+    let root = Path::new(PRODUCTION_FS_ROOT);
+    let existing_operation = setup_coordinator()
+        .lock()
+        .ok()
+        .map(|coordinator| (coordinator.state, coordinator.snapshot.clone()));
+    // A new NativeActivity/Compose instance may ask for setup while the
+    // process-lifetime worker is still running. Rebind the existing sink and
+    // return a receiver for the new UI; never reset the coordinator to Idle or
+    // launch a second provisioning worker.
+    if matches!(
+        existing_operation,
+        Some((InstallOperationState::Running, _))
+    )
+    {
+        let _ = set_registration(
+            registration,
+            InstallOperationState::Running,
+            ProvisioningSnapshot::update(
+                ProvisioningPhase::Preparing,
+                0,
+                "Reconnecting to Portal installation…",
+            ),
+        );
         return PolarBearBackend::WebView(WebviewBackend::build(receiver, progress));
     }
+    // A failed operation is also process-lifetime state. Rebinding after an
+    // Activity recreation must keep the Retry screen visible; otherwise a
+    // resume would silently turn a known failure back into Idle and the HTML
+    // fallback could start an uncontrolled retry loop.
+    if let Some((InstallOperationState::Failed, snapshot)) = existing_operation {
+        set_registration(registration, InstallOperationState::Failed, snapshot);
+        let mut backend = WebviewBackend::build(receiver, progress);
+        backend.error = ErrorVariant::Setup(
+            setup_coordinator()
+                .lock()
+                .ok()
+                .and_then(|coordinator| coordinator.snapshot.error.clone())
+                .unwrap_or_else(|| "Portal setup needs attention. Tap Retry.".to_string()),
+        );
+        return PolarBearBackend::WebView(backend);
+    }
+    if artifact.is_bootable(root) || artifact.is_legacy_complete(root) {
+        // An already installed runtime still runs the idempotent setup stages
+        // synchronously before a normal Plasma launch. This repairs lightweight
+        // per-launch integration and verifies Mesa without creating a second
+        // provisioning worker.
+        let initial = ProvisioningSnapshot::update(
+            ProvisioningPhase::Configuring,
+            70,
+            "Checking the existing Portal installation…",
+        );
+        set_registration(
+            registration.clone(),
+            InstallOperationState::Running,
+            initial,
+        );
+        let progress_registration = registration.clone();
+        let progress_reporter: Arc<dyn Fn(ProvisioningSnapshot) + Send + Sync> =
+            Arc::new(move |snapshot| publish_snapshot(&progress_registration, snapshot));
+        let options = SetupOptions {
+            android_app: android_app.clone(),
+            mpsc_sender: sender.clone(),
+            progress: progress_reporter,
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_all_stages(stages(), &options, &registration)
+                .and_then(|()| finalise_installation(&registration))
+        }));
+        let result = match result {
+            Ok(result) => result,
+            Err(payload) => Err(SetupFailure::from_panic(
+                0,
+                "setup-coordinator",
+                payload.as_ref(),
+            )),
+        };
+        match result {
+            Ok(()) => {
+                set_operation_complete(&registration);
+                match build_wayland_backend(android_app) {
+                    Ok(backend) => return backend,
+                    Err(error) => {
+                        let failure = SetupFailure::from_detail(
+                            12,
+                            "wayland-backend",
+                            format!("{error:#}"),
+                        );
+                        publish_failure(&registration, &failure);
+                        let mut backend = WebviewBackend::build(receiver, progress);
+                        backend.error = ErrorVariant::Setup(failure.user_message);
+                        return PolarBearBackend::WebView(backend);
+                    }
+                }
+            }
+            Err(failure) => {
+                publish_failure(&registration, &failure);
+                let mut backend = WebviewBackend::build(receiver, progress);
+                backend.error = ErrorVariant::Setup(failure.user_message);
+                return PolarBearBackend::WebView(backend);
+            }
+        }
+    }
 
-    build_wayland_backend(android_app)
+    let initial = if artifact.is_image_ready(root) {
+        ProvisioningSnapshot::update(
+            ProvisioningPhase::Idle,
+            70,
+            "A validated Debian image is ready; tap Begin Install to finish Portal setup.",
+        )
+    } else {
+        ProvisioningSnapshot::update(
+            ProvisioningPhase::Idle,
+            0,
+            "Portal setup is ready to begin.",
+        )
+    };
+    set_registration(registration, InstallOperationState::Idle, initial);
+    PolarBearBackend::WebView(WebviewBackend::build(receiver, progress))
 }
 
 #[cfg(test)]

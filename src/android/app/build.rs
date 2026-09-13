@@ -47,9 +47,9 @@ impl PolarBearApp {
             backend = PolarBearBackend::WebView(WebviewBackend::unsupported(android_app.clone()));
         }
         if let PolarBearBackend::WebView(webview) = &mut backend {
-            // The setup worker predates the action-capable WebView constructor. Attach the
-            // activity here so export_diagnostics can invoke the Android Sharesheet for both
-            // supported and unsupported startup paths.
+            // Attach the activity here so export_diagnostics can invoke the Android Sharesheet
+            // for both supported and unsupported startup paths. The setup worker is owned by the
+            // native process coordinator, not by this backend or by Compose.
             webview.attach_android_app(android_app.clone());
         }
         Self {

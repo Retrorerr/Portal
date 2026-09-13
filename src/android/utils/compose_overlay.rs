@@ -189,6 +189,73 @@ fn publish_desktop_ready(android_app: &AndroidApp, ready: bool) {
     );
 }
 
+/// Publish the process-lifetime native provisioning snapshot. The snapshot is
+/// retained by Kotlin even when the Compose hierarchy is absent, so Activity
+/// recreation only reattaches the observer; it never starts or restarts work.
+pub fn publish_install_state(
+    android_app: &AndroidApp,
+    snapshot: &crate::core::provisioning::ProvisioningSnapshot,
+) {
+    let phase = snapshot.phase.label().to_owned();
+    let message = snapshot.message.clone();
+    let error = snapshot.error.clone();
+    let progress = snapshot.progress as i32;
+    let complete = snapshot.phase == crate::core::provisioning::ProvisioningPhase::Complete;
+    super::ndk::run_in_jvm(
+        move |env, app| {
+            let activity = activity_object(app);
+            let class = match overlay_class(env, &activity) {
+                Ok(class) => class,
+                Err(error) => {
+                    log::error!("Compose overlay class is unavailable: {error}");
+                    clear_exception(env, "find ComposeOverlay for install state");
+                    return;
+                }
+            };
+            let phase = match env.new_string(phase) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::error!("Failed to allocate install phase string: {error}");
+                    return;
+                }
+            };
+            let message = match env.new_string(message) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::error!("Failed to allocate install message string: {error}");
+                    return;
+                }
+            };
+            let error_value = match error {
+                Some(error) => match env.new_string(error) {
+                    Ok(value) => JObject::from(value),
+                    Err(error) => {
+                        log::error!("Failed to allocate install error string: {error}");
+                        JObject::null()
+                    }
+                },
+                None => JObject::null(),
+            };
+            if let Err(error) = env.call_static_method(
+                class,
+                "updateInstallState",
+                "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Z)V",
+                &[
+                    JValue::Object(&phase),
+                    JValue::Int(progress),
+                    JValue::Object(&message),
+                    JValue::Object(&error_value),
+                    JValue::Bool(complete.into()),
+                ],
+            ) {
+                log::error!("Compose overlay updateInstallState failed: {error}");
+                clear_exception(env, "updateInstallState");
+            }
+        },
+        android_app.clone(),
+    );
+}
+
 /// First-resume presentation decision. Showing the overlay does not gate or
 /// defer native startup.
 ///
@@ -270,6 +337,7 @@ fn show_compose_overlay_with(android_app: &AndroidApp, method: &str) {
     if DESKTOP_READY.load(Ordering::Acquire) {
         publish_desktop_ready(android_app, true);
     }
+    crate::android::proot::setup::publish_current_install_state(android_app);
 }
 
 /// Update the small overlay state text (`Idle` / `Starting` / `Desktop ready` / `Error`).
@@ -395,6 +463,21 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayShowFail
         .map(|reason| reason.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".to_string());
     on_overlay_show_failed(&reason);
+}
+
+/// JNI button bridge for the first-run installer. This only asks the native
+/// coordinator to start/attach; it does not perform any filesystem work on
+/// the UI thread and cannot create a duplicate operation.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeBeginInstall(
+    _env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jboolean {
+    if crate::android::proot::setup::begin_install() {
+        1
+    } else {
+        0
+    }
 }
 
 fn on_overlay_show_failed(reason: &str) {

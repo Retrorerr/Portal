@@ -2,7 +2,10 @@
 mod provisioning;
 #[path = "../src/core/runtime.rs"]
 mod runtime;
-use provisioning::{RuntimeArtifact, IMAGE_MARKER, READY_MARKER};
+use provisioning::{
+    begin_installation, InstallOperationState, InstallStart, RuntimeArtifact, IMAGE_MARKER,
+    ProvisioningPhase, ProvisioningSnapshot, IMAGE_READY_MARKER, PARTIAL_ARCHIVE, READY_MARKER,
+};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::Path};
 
@@ -63,7 +66,12 @@ fn interrupted_download_resumes_and_servers_ignoring_ranges_restart_safely() {
         });
         artifact.provision(temp.path(), |_| {}).unwrap();
         server.join().unwrap();
-        assert!(artifact.is_ready(&temp.path().join("runtime-B")));
+        let root = temp.path().join("runtime-B");
+        assert!(artifact.is_image_ready(&root));
+        assert!(!artifact.is_bootable(&root));
+        assert!(!temp.path().join(PARTIAL_ARCHIVE).exists());
+        artifact.mark_installation_complete(&root).unwrap();
+        assert!(artifact.is_bootable(&root));
     }
 }
 
@@ -127,6 +135,158 @@ fn interrupted_extraction_is_not_ready_and_retries_from_staging() {
     artifact.extract(&archive, &staging, &|_| {}).unwrap();
     assert!(!staging.join("partial").exists());
     assert!(artifact.is_ready(&staging));
+    assert!(!staging.join(READY_MARKER).exists());
+    assert!(!artifact.is_bootable(&staging));
+    assert!(!temp.path().join("runtime-B").exists());
+}
+
+#[test]
+fn duplicate_begin_calls_attach_and_retry_is_the_only_restart() {
+    let mut state = InstallOperationState::Idle;
+    assert_eq!(begin_installation(&mut state), InstallStart::Start);
+    assert_eq!(state, InstallOperationState::Running);
+    assert_eq!(begin_installation(&mut state), InstallStart::Attach);
+    state = InstallOperationState::Failed;
+    assert_eq!(begin_installation(&mut state), InstallStart::Start);
+    assert_eq!(begin_installation(&mut state), InstallStart::Attach);
+    state = InstallOperationState::Complete;
+    assert_eq!(begin_installation(&mut state), InstallStart::Noop);
+    assert_eq!(state, InstallOperationState::Complete);
+}
+
+#[test]
+fn nonterminal_progress_can_never_claim_completion() {
+    let snapshot = ProvisioningSnapshot::update(
+        ProvisioningPhase::Finalising,
+        100,
+        "Finalising Portal installation…",
+    );
+    assert_eq!(snapshot.progress, 99);
+    assert_eq!(snapshot.phase, ProvisioningPhase::Finalising);
+    assert_eq!(
+        ProvisioningSnapshot::complete("Portal installed").progress,
+        100
+    );
+}
+
+#[test]
+fn legacy_completed_runtime_is_migrated_in_place_without_download() {
+    let temp = tempfile::tempdir().unwrap();
+    let (artifact, archive) = fixture(temp.path(), "test-v1");
+    let root = temp.path().join("runtime-B");
+    artifact.extract(&archive, &root, &|_| {}).unwrap();
+    fs::remove_file(root.join(IMAGE_READY_MARKER)).unwrap();
+    fs::write(
+        root.join(READY_MARKER),
+        format!("{}\n{}\n", artifact.version, artifact.sha256),
+    )
+    .unwrap();
+    fs::write(root.join("user-file"), "keep").unwrap();
+
+    assert!(!artifact.is_bootable(&root));
+    assert!(artifact.is_legacy_complete(&root));
+    artifact
+        .provision(temp.path(), |_| panic!("legacy runtime must not download"))
+        .unwrap();
+    artifact.mark_installation_complete(&root).unwrap();
+
+    assert!(artifact.is_bootable(&root));
+    assert_eq!(fs::read_to_string(root.join("user-file")).unwrap(), "keep");
+    assert_eq!(
+        fs::read_to_string(root.join(READY_MARKER))
+            .unwrap()
+            .lines()
+            .nth(2),
+        Some("portal-installation-v1")
+    );
+}
+
+#[test]
+fn invalid_resume_range_is_rejected_without_mutating_the_partial_prefix() {
+    use std::io::Read;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (mut artifact, archive) = fixture(temp.path(), "test-v1");
+    let bytes = fs::read(&archive).unwrap();
+    let offset = bytes.len() / 2;
+    let partial = temp.path().join(PARTIAL_ARCHIVE);
+    let prefix = bytes[..offset].to_vec();
+    fs::write(&partial, &prefix).unwrap();
+    fs::write(
+        temp.path().join("portal-runtime.tar.xz.part.offset"),
+        format!("{offset}\n"),
+    )
+    .unwrap();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    artifact.url = format!("http://{}/runtime", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        assert!(String::from_utf8(request)
+            .unwrap()
+            .to_lowercase()
+            .contains(&format!("range: bytes={offset}-")));
+        write!(
+            stream,
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+            bytes.len() - offset,
+            offset + 1,
+            bytes.len() - 1,
+            bytes.len()
+        )
+        .unwrap();
+        let _ = stream.write_all(&bytes[offset..]);
+    });
+
+    assert!(artifact.provision(temp.path(), |_| {}).is_err());
+    server.join().unwrap();
+    assert_eq!(fs::read(&partial).unwrap(), prefix);
+    assert!(!temp.path().join("portal-runtime.tar.xz").exists());
+    assert!(!temp.path().join("runtime-B").exists());
+}
+
+#[test]
+fn incorrect_response_size_is_rejected_before_any_archive_is_committed() {
+    use std::io::Read;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (mut artifact, archive) = fixture(temp.path(), "test-v1");
+    let bytes = fs::read(&archive).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    artifact.url = format!("http://{}/runtime", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len() + 1
+        )
+        .unwrap();
+        stream.write_all(&bytes).unwrap();
+    });
+
+    assert!(artifact.provision(temp.path(), |_| {}).is_err());
+    server.join().unwrap();
+    assert!(!temp.path().join("portal-runtime.tar.xz").exists());
+    assert!(!temp.path().join(PARTIAL_ARCHIVE).exists());
     assert!(!temp.path().join("runtime-B").exists());
 }
 
@@ -136,11 +296,13 @@ fn completed_image_reuses_without_network_and_preserves_user_files() {
     let (artifact, archive) = fixture(temp.path(), "test-v1");
     let root = temp.path().join("runtime-B");
     artifact.extract(&archive, &root, &|_| {}).unwrap();
+    artifact.mark_installation_complete(&root).unwrap();
     fs::write(root.join("user-file"), "keep").unwrap();
     artifact
         .provision(temp.path(), |_| panic!("Ready runtime must not download"))
         .unwrap();
     assert_eq!(fs::read_to_string(root.join("user-file")).unwrap(), "keep");
+    assert!(artifact.is_bootable(&root));
 }
 
 #[test]
@@ -149,6 +311,7 @@ fn compatible_runtime_survives_artifact_revision_and_preserves_user_files() {
     let (artifact, archive) = fixture(temp.path(), "test-v1");
     let root = temp.path().join("runtime-B");
     artifact.extract(&archive, &root, &|_| {}).unwrap();
+    artifact.mark_installation_complete(&root).unwrap();
     fs::write(root.join("user-installed-package"), "keep").unwrap();
 
     // The image is still a complete Debian 13 installation, but the APK now
@@ -175,6 +338,7 @@ fn marked_but_corrupt_runtime_is_rejected_without_destructive_reprovisioning() {
     let (artifact, archive) = fixture(temp.path(), "test-v1");
     let root = temp.path().join("runtime-B");
     artifact.extract(&archive, &root, &|_| {}).unwrap();
+    artifact.mark_installation_complete(&root).unwrap();
     fs::write(root.join("user-installed-package"), "keep").unwrap();
     fs::remove_file(root.join("usr/bin/bash")).unwrap();
 
@@ -208,6 +372,42 @@ fn rejects_wrong_version_and_corrupt_download_without_completion_marker() {
 }
 
 #[test]
+fn malformed_completion_marker_is_never_bootable_and_valid_image_can_repair_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let (artifact, archive) = fixture(temp.path(), "test-v1");
+    let root = temp.path().join("runtime-B");
+    artifact.extract(&archive, &root, &|_| {}).unwrap();
+    fs::write(root.join(READY_MARKER), "not-a-marker\n").unwrap();
+    assert!(!artifact.is_bootable(&root));
+    artifact
+        .provision(temp.path(), |_| panic!("validated image needs no download"))
+        .unwrap();
+    artifact.mark_installation_complete(&root).unwrap();
+    assert!(artifact.is_bootable(&root));
+}
+
+#[test]
+fn full_size_wrong_hash_and_overlong_partial_are_discarded_before_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut artifact, archive) = fixture(temp.path(), "test-v1");
+    let bytes = fs::read(&archive).unwrap();
+    let mut wrong = bytes.clone();
+    wrong[0] ^= 0xFF;
+    fs::write(temp.path().join("portal-runtime.tar.xz"), wrong).unwrap();
+    fs::write(
+        temp.path().join(PARTIAL_ARCHIVE),
+        vec![0u8; bytes.len() + 1],
+    )
+    .unwrap();
+    artifact.url = "http://127.0.0.1:1/not-used".into();
+    let error = artifact.provision(temp.path(), |_| {});
+    assert!(error.is_err());
+    assert!(!temp.path().join("portal-runtime.tar.xz").exists());
+    assert!(!temp.path().join(PARTIAL_ARCHIVE).exists());
+    assert!(!temp.path().join("runtime-B").exists());
+}
+
+#[test]
 fn crashed_rename_promotes_ready_staging_without_redownload() {
     let temp = tempfile::tempdir().unwrap();
     let (artifact, archive) = fixture(temp.path(), "test-v1");
@@ -224,7 +424,11 @@ fn crashed_rename_promotes_ready_staging_without_redownload() {
             );
         })
         .unwrap();
-    assert!(artifact.is_ready(&temp.path().join("runtime-B")));
+    let root = temp.path().join("runtime-B");
+    assert!(artifact.is_image_ready(&root));
+    assert!(!artifact.is_bootable(&root));
+    artifact.mark_installation_complete(&root).unwrap();
+    assert!(artifact.is_bootable(&root));
     assert!(!staging.exists());
 }
 
@@ -240,6 +444,9 @@ fn successful_provision_rotates_and_preserves_previous_runtime_slot() {
     // test-v1.)
     artifact
         .extract(&archive, &temp.path().join("runtime-B"), &|_| {})
+        .unwrap();
+    artifact
+        .mark_installation_complete(&temp.path().join("runtime-B"))
         .unwrap();
     fs::create_dir_all(temp.path().join("runtime-B.previous")).unwrap();
     fs::write(temp.path().join("runtime-B.previous/stale"), "old").unwrap();
@@ -270,9 +477,13 @@ fn successful_provision_rotates_and_preserves_previous_runtime_slot() {
     // Invalidate the live root so provision must re-extract, then confirm the
     // stale backup is rotated and the just-replaced runtime is retained.
     fs::remove_file(temp.path().join(format!("runtime-B/{READY_MARKER}"))).unwrap();
+    fs::remove_file(temp.path().join(format!("runtime-B/{IMAGE_READY_MARKER}"))).unwrap();
     artifact.provision(temp.path(), |_| {}).unwrap();
     server.join().unwrap();
-    assert!(artifact.is_ready(&temp.path().join("runtime-B")));
+    let root = temp.path().join("runtime-B");
+    assert!(artifact.is_image_ready(&root));
+    artifact.mark_installation_complete(&root).unwrap();
+    assert!(artifact.is_bootable(&root));
     assert!(temp.path().join("runtime-B.previous").exists());
     assert!(!temp.path().join("runtime-B.previous/stale").exists());
 }
@@ -280,6 +491,8 @@ fn successful_provision_rotates_and_preserves_previous_runtime_slot() {
 #[test]
 fn source_routes_only_release_image_and_preserves_session_handoff() {
     let setup = include_str!("../src/android/proot/setup.rs");
+    let compose = include_str!("../src/android/kotlin/app/polarbear/ComposeOverlay.kt");
+    let setup_screen = include_str!("../src/android/kotlin/app/polarbear/setup/PortalSetupScreen.kt");
     let config_full = include_str!("../src/core/config.rs");
     // Production defaults live above the unit-test module; legacy migration
     // fixtures below `#[cfg(test)]` intentionally mention old managers.
@@ -313,6 +526,13 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
         assert!(setup.contains(function));
     }
     assert!(setup.contains("on_complete();"));
+    assert!(setup.contains("provision_with_progress"));
+    assert!(setup.contains("mark_installation_complete"));
+    assert!(setup.contains("pub fn begin_install()"));
+    assert!(compose.contains("nativeBeginInstall"));
+    assert!(compose.contains("updateInstallState"));
+    assert!(setup_screen.contains("ComposeOverlay.beginInstall()"));
+    assert!(!setup_screen.contains("FAKE_INSTALL_DURATION_MS"));
     let lifecycle = include_str!("../src/android/app/build.rs");
     assert!(lifecycle.contains("webview_handoff::complete_setup"));
     assert!(include_str!("../src/android/proot/launch.rs")

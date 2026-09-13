@@ -51,10 +51,13 @@ to produce the image or install the app.
    errors, resuming partial bytes when the server accepts the matching range.
 3. Verify compressed size and SHA-256 before unpacking anything.
 4. Extract into `runtime-B.staging`, reporting actual extracted entry counts.
-5. Check Debian identity, image version and required programs. Write the
-   completion identity only after successful extraction, then rename staging
-   to `runtime-B`. A partial extraction is never booted. A relaunch retries it.
-6. Synchronize device/session settings and launch native nested KWin/Plasma.
+5. Check Debian identity, image version and required programs, then write the
+   image-ready identity inside staging. Rename only that validated staging
+   tree to `runtime-B`; a partial extraction is never booted. A relaunch
+   resumes or repairs it without redownloading completed work.
+6. Synchronize required device/session settings, verify Mesa when Anland is
+   selected, and write the final three-line installation marker last. Only
+   then may native nested KWin/Plasma start.
 
 A complete verified staging tree also recovers an interrupted promotion without
 redownloading. Setup explains the required Android Developer Options setting,
@@ -67,9 +70,11 @@ runs during provisioning. A valid completed image is reused on subsequent
 launches. A replaced runtime is retained as `runtime-B.previous`; the next
 replacement rotates that single backup. Old Arch data is not deleted by setup.
 
-The Android UI uses an indeterminate progress bar with actual byte/entry counts,
-then reports configuration and startup. It no longer promises a duration or
-uses setup-stage count as an extraction percentage.
+The Android UI uses the native provisioning snapshot: download bytes, archive
+verification, extraction, promotion, configuration and finalisation. It may
+interpolate between real updates for visual continuity, but it never reports
+100% or leaves the installer until the final marker has been written and
+revalidated.
 
 ## Required Android integration
 

@@ -1,9 +1,9 @@
 package app.polarbear.setup
 
 // SPIKE-ONLY (branch compose-setup-spike): Portal first-run CONFIGURE
-// screen. Local setup selections and storage projection only — no
-// provisioning, no JNI/Rust references. Compose owns the fake install phase;
-// the host separately supplies native desktop readiness for the final veil.
+// screen. Compose owns only the presentation and local selections. The
+// process-lifetime Rust coordinator owns installation and publishes the
+// durable provisioning snapshot consumed below.
 
 import android.animation.ValueAnimator
 import android.util.Log
@@ -17,7 +17,6 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -49,7 +48,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -91,12 +89,12 @@ import androidx.compose.ui.unit.IntSize
 import app.polarbear.setup.components.PortalAgslGlow
 import app.polarbear.setup.components.SlidingSegmentedControl
 import app.polarbear.setup.components.portalBloom
+import app.polarbear.ComposeOverlay
 
 private const val PREVIEW_TAG = "PortalComposeSetup"
-private const val FAKE_INSTALL_DURATION_MS = 13_500
 private const val READY_BACKGROUND_ALPHA = 0.83f
 
-internal enum class SetupPhase { Configure, Installing, Ready }
+internal enum class SetupPhase { Configure, Installing, Failed, Ready }
 
 // Official Portal aperture geometry (assets/portal-icon-foreground.svg),
 // translated into the tight visible artwork bounds: the mark occupies
@@ -151,31 +149,24 @@ fun PortalSetupScreen(
     var settingsHeightPx by remember { mutableStateOf(0) }
     var appearanceControlTopPx by remember { mutableStateOf(0f) }
     var interfaceControlBottomPx by remember { mutableStateOf(0f) }
-    var phase by remember { mutableStateOf(SetupPhase.Configure) }
+    val nativeInstallState by ComposeOverlay.installState()
+    val phase = when {
+        nativeInstallState.complete -> SetupPhase.Ready
+        nativeInstallState.failed -> SetupPhase.Failed
+        nativeInstallState.running -> SetupPhase.Installing
+        else -> SetupPhase.Configure
+    }
     var beginAccepted by remember { mutableStateOf(false) }
     var frozenEssentials by remember { mutableStateOf(DEFAULT_ESSENTIALS) }
-    val installProgress = remember { Animatable(0f) }
-    val installProgressState: State<Float> = remember(installProgress) {
-        derivedStateOf { installProgress.value }
-    }
+    val installProgressState: State<Float> = androidx.compose.animation.core.animateFloatAsState(
+        targetValue = nativeInstallState.progress / 100f,
+        animationSpec = tween(360),
+        label = "native installation progress",
+    )
 
     val currentSetupReady by rememberUpdatedState(onSetupReady)
     LaunchedEffect(phase) {
-        if (phase == SetupPhase.Installing) {
-            installProgress.snapTo(0f)
-            if (ValueAnimator.areAnimatorsEnabled()) {
-                installProgress.animateTo(
-                    targetValue = 1f,
-                    animationSpec = tween(
-                        durationMillis = FAKE_INSTALL_DURATION_MS,
-                        easing = LinearEasing,
-                    ),
-                )
-            } else {
-                installProgress.snapTo(1f)
-            }
-            phase = SetupPhase.Ready
-        } else if (phase == SetupPhase.Ready) {
+        if (phase == SetupPhase.Ready) {
             Log.i(PREVIEW_TAG, "setup READY; starting ambient scatter and translucent veil prelude")
             currentSetupReady()
         }
@@ -183,10 +174,15 @@ fun PortalSetupScreen(
 
     val beginLocalInstall: () -> Unit = {
         if (phase == SetupPhase.Configure && !beginAccepted) {
-            beginAccepted = true
-            frozenEssentials = essentials.toSet()
-            pickerVisible = false
-            phase = SetupPhase.Installing
+            if (ComposeOverlay.beginInstall()) {
+                beginAccepted = true
+                frozenEssentials = essentials.toSet()
+                pickerVisible = false
+            }
+        } else if (phase == SetupPhase.Failed) {
+            // Retry re-attaches to the process-lifetime native coordinator;
+            // it never creates a second installer or clears safe disk state.
+            ComposeOverlay.beginInstall()
         }
     }
     val palette = resolvePalette(appearance)
@@ -367,6 +363,7 @@ fun PortalSetupScreen(
                                     modifier = Modifier.weight(1f),
                                     phase = phase,
                                     installProgress = installProgressState,
+                                    installMessage = nativeInstallState.message,
                                     hasSelectedApps = frozenEssentials.isNotEmpty(),
                                 )
                                 // Reserve the button, let its unchanged 56dp glow
@@ -420,6 +417,7 @@ fun PortalSetupScreen(
                             palette = palette,
                             phase = phase,
                             installProgress = installProgressState,
+                            installMessage = nativeInstallState.message,
                             hasSelectedApps = frozenEssentials.isNotEmpty(),
                         )
                         Spacer(Modifier.height(28.dp))
@@ -572,6 +570,7 @@ private val SetupPhase.title: String
     get() = when (this) {
         SetupPhase.Configure -> "Install Portal Desktop"
         SetupPhase.Installing -> "Installing Portal Desktop"
+        SetupPhase.Failed -> "Portal setup needs attention"
         SetupPhase.Ready -> "Portal is ready"
     }
 
@@ -687,7 +686,8 @@ private fun InstallActionArea(
                 palette = palette,
                 centered = false,
                 onBeginInstall = onBeginInstall,
-                enabled = phase == SetupPhase.Configure,
+                enabled = phase == SetupPhase.Configure || phase == SetupPhase.Failed,
+                label = if (phase == SetupPhase.Failed) "Retry" else "Begin Install",
                 modifier = inactiveConfigurationModifier,
             )
         }
@@ -716,6 +716,7 @@ private fun BeginInstallButton(
     centered: Boolean,
     onBeginInstall: () -> Unit,
     enabled: Boolean = true,
+    label: String = "Begin Install",
     modifier: Modifier = Modifier,
 ) {
     val tap = remember { MutableInteractionSource() }
@@ -793,7 +794,7 @@ private fun BeginInstallButton(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = "Begin Install",
+                    text = label,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = PortalColors.Ivory,

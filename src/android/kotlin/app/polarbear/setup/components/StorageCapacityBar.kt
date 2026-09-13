@@ -74,6 +74,7 @@ internal fun StorageCapacityBar(
     modifier: Modifier = Modifier,
     phase: SetupPhase = SetupPhase.Configure,
     installProgress: State<Float>? = null,
+    installMessage: String? = null,
     hasSelectedApps: Boolean = false,
 ) {
     if (capacity == null && phase == SetupPhase.Configure) {
@@ -198,6 +199,7 @@ internal fun StorageCapacityBar(
             InstallLogLines(
                 progressState = progressState,
                 ready = phase == SetupPhase.Ready,
+                currentMessage = installMessage,
                 hasSelectedApps = hasSelectedApps,
                 palette = palette,
             )
@@ -252,6 +254,7 @@ private fun InstallProgressBar(
 private fun InstallLogLines(
     progressState: State<Float>,
     ready: Boolean,
+    currentMessage: String?,
     hasSelectedApps: Boolean,
     palette: PortalPalette,
 ) {
@@ -267,8 +270,14 @@ private fun InstallLogLines(
     val activeIndex by remember(progressState, hasSelectedApps) {
         derivedStateOf { installStageIndex(progressState.value, hasSelectedApps) }
     }
-    val lines = remember(stages, activeIndex, ready) {
-        val history = if (ready) stages + "Portal is ready" else stages.take(activeIndex + 1)
+    val lines = remember(stages, activeIndex, ready, currentMessage) {
+        val history = if (ready) {
+            stages + "Portal is ready"
+        } else if (!currentMessage.isNullOrBlank()) {
+            stages.take(activeIndex) + currentMessage
+        } else {
+            stages.take(activeIndex + 1)
+        }
         history.takeLast(4)
     }
     AnimatedContent(

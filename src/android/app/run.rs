@@ -533,7 +533,7 @@ impl PolarBearApp {
         backend.attach_android_app(self.frontend.android_app.clone());
         let token = backend.auth_token();
         let url = match &backend.error {
-            ErrorVariant::None => setup_page_url(backend.socket_port, &token),
+            ErrorVariant::None | ErrorVariant::Setup(_) => setup_page_url(backend.socket_port, &token),
             ErrorVariant::Unsupported => runtime_error_page_url(
                 backend.socket_port,
                 &token,
@@ -558,6 +558,15 @@ impl PolarBearApp {
                 android_app,
             );
         });
+        // The HTML page has no Compose Begin button. Its initial page is only
+        // a fallback for a failed/hidden overlay, so start the same native
+        // coordinator after showing it. A failure page remains user-driven by
+        // its explicit Retry Setup action.
+        if matches!(&backend.error, ErrorVariant::None)
+            && crate::android::proot::setup::should_auto_begin_install()
+        {
+            crate::android::proot::setup::begin_install();
+        }
     }
 
     /// Replace a failed Wayland session with a local, graphical recovery page.
@@ -601,16 +610,21 @@ impl PolarBearApp {
 
     /// Handle an action received by the runtime error page without blocking the winit loop.
     fn handle_webview_actions(&mut self, event_loop: &ActiveEventLoop) {
-        let retry_requested = match &self.backend {
-            PolarBearBackend::WebView(backend)
-                if matches!(&backend.error, ErrorVariant::Runtime(_)) =>
-            {
-                backend.take_action(WebviewAction::RetryPlasma)
-            }
-            PolarBearBackend::Wayland(_) => false,
-            PolarBearBackend::WebView(_) => false,
+        let (retry_setup, retry_runtime) = match &self.backend {
+            PolarBearBackend::WebView(backend) => match &backend.error {
+                ErrorVariant::None | ErrorVariant::Setup(_) => {
+                    (backend.take_action(WebviewAction::RetrySetup), false)
+                }
+                ErrorVariant::Runtime(_) => (false, backend.take_action(WebviewAction::RetryPlasma)),
+                ErrorVariant::Unsupported => (false, false),
+            },
+            PolarBearBackend::Wayland(_) => (false, false),
         };
-        if !retry_requested {
+        if retry_setup {
+            crate::android::proot::setup::begin_install();
+            return;
+        };
+        if !retry_runtime {
             return;
         }
 
@@ -667,18 +681,29 @@ impl PolarBearApp {
     /// Transition from completed provisioning WebView to Wayland backend in-process.
     /// Returns true if a transition occurred.
     fn handle_setup_complete(&mut self, event_loop: &ActiveEventLoop) -> bool {
-        if !webview_handoff::take_setup_complete() {
+        if webview_handoff::is_open() || !webview_handoff::take_setup_handoff() {
             return false;
         }
-        // The final setup callback has already closed the popup. Re-run the idempotent
-        // dispatcher synchronously on this event-loop turn; all stages now report
-        // complete, so this constructs the Wayland backend in the current Activity.
+        let runtime = crate::android::runtime::proot::PRootRuntime::active();
+        if !crate::core::provisioning::RuntimeArtifact::production()
+            .is_bootable(runtime.rootfs_path())
+        {
+            // The transient handoff is never installation truth. If the
+            // durable marker is absent/invalid, retain the installer and let
+            // its retry path repair the incomplete transaction.
+            log::error!("Ignoring setup handoff because the committed runtime is not bootable");
+            return false;
+        }
+        // The final setup callback has already closed the popup. Re-run the
+        // idempotent dispatcher synchronously on this event-loop turn; the
+        // durable marker has already proved that the native operation really
+        // completed, so this constructs Wayland in the current Activity.
         let android_app = self.frontend.android_app.clone();
         let mut backend = crate::android::proot::setup::setup(android_app.clone());
         if let PolarBearBackend::WebView(webview) = &mut backend {
             webview.attach_android_app(android_app);
             log::error!(
-                "Setup completion event arrived before the guest was ready; retaining the WebView error screen"
+                "Setup handoff reached the event loop but setup could not build Wayland; retaining the retryable setup screen"
             );
         }
         self.backend = backend;
