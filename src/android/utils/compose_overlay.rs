@@ -209,6 +209,17 @@ pub fn spike_should_show(renderer_active: bool, is_webview: bool) -> bool {
 /// Kotlin acknowledges successful presentation, and a reported failure
 /// returns to `Hidden` so startup proceeds via the fallback paths.
 pub fn show_compose_overlay(android_app: &AndroidApp) {
+    show_compose_overlay_with(android_app, "show");
+}
+
+/// Show the overlay in Return-to-Plasma mode for already-installed launches.
+/// Same state machine, same host, same veil — Kotlin swaps the installer
+/// screen for the minimal return screen with no launch intro.
+pub fn show_compose_return(android_app: &AndroidApp) {
+    show_compose_overlay_with(android_app, "showReturn");
+}
+
+fn show_compose_overlay_with(android_app: &AndroidApp, method: &str) {
     if state() != OverlayState::Hidden {
         // Re-show during Dismissing (e.g. a runtime failure inside the fade)
         // cancels teardown on the Kotlin side; Showing/Visible need nothing.
@@ -235,12 +246,12 @@ pub fn show_compose_overlay(android_app: &AndroidApp) {
                     // through nativeOnOverlayShown / nativeOnOverlayShowFailed.
                     if let Err(error) = env.call_static_method(
                         class,
-                        "show",
+                        method,
                         "(Landroid/app/Activity;)V",
                         &[JValue::Object(&activity)],
                     ) {
-                        log::error!("Compose overlay show call failed: {error}");
-                        clear_exception(env, "show");
+                        log::error!("Compose overlay {method} call failed: {error}");
+                        clear_exception(env, method);
                         on_overlay_show_failed("JNI show call failed");
                     }
                 }
@@ -253,7 +264,6 @@ pub fn show_compose_overlay(android_app: &AndroidApp) {
         },
         android_app.clone(),
     );
-    log_blur_support(android_app);
     crate::android::diagnostics::host_event("compose-spike", "overlay-show-requested");
     // Preserve a readiness signal that raced ahead of Kotlin presentation.
     // Kotlin stores it even when the ComposeView does not exist yet.
@@ -330,54 +340,6 @@ pub fn notify_desktop_ready_cached() {
     let app = cached_app().lock().ok().and_then(|app| app.clone());
     if let Some(app) = app {
         notify_desktop_ready(&app);
-    }
-}
-
-/// Probe (and log) Android 12+ cross-window blur availability for the future
-/// final transition. Investigative only; the spike never depends on it.
-pub fn log_blur_support(android_app: &AndroidApp) -> Option<bool> {
-    let supported: Option<bool> = super::ndk::run_in_jvm(
-        |env, app| {
-            let activity = activity_object(app);
-            let class = match overlay_class(env, &activity) {
-                Ok(class) => class,
-                Err(_) => {
-                    let _ = env.exception_clear();
-                    return None;
-                }
-            };
-            match env.call_static_method(
-                class,
-                "queryBlur",
-                "(Landroid/app/Activity;)Z",
-                &[JValue::Object(&activity)],
-            ) {
-                Ok(value) => value.z().ok(),
-                Err(_) => {
-                    let _ = env.exception_clear();
-                    None
-                }
-            }
-        },
-        android_app.clone(),
-    );
-    match supported {
-        Some(enabled) => {
-            log::info!("compose-spike: WindowManager.isCrossWindowBlurEnabled()={enabled}");
-            crate::android::diagnostics::host_event(
-                "compose-spike",
-                &format!("cross-window-blur={enabled}"),
-            );
-            Some(enabled)
-        }
-        None => {
-            log::info!("compose-spike: cross-window blur probe unavailable (pre-31 or probe failed)");
-            crate::android::diagnostics::host_event(
-                "compose-spike",
-                "cross-window-blur=unknown",
-            );
-            None
-        }
     }
 }
 
