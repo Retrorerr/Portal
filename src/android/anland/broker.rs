@@ -61,6 +61,18 @@ impl Broker {
         }
     }
 
+    /// Screen size currently served to new producer hellos. Updated on
+    /// every rotation rebind (previously write-only dead code): any fresh
+    /// producer connection observes the current geometry.
+    pub fn screen(&self) -> ScreenInfo {
+        self.slot.lock().map(|s| s.screen).unwrap_or(ScreenInfo {
+            width: 0,
+            height: 0,
+            format: 1,
+            refresh: 0,
+        })
+    }
+
     /// Install a fresh deposit for `generation`, replacing any previous one.
     pub fn deposit(&self, deposit: Deposit) {
         if let Ok(mut slot) = self.slot.lock() {
@@ -182,7 +194,7 @@ impl Broker {
     }
 
     fn serve_pickup(&self, fd: &OwnedFd) -> io::Result<()> {
-        let (gen, duped) = {
+        let (gen, duped, sw, sh) = {
             let slot = self
                 .slot
                 .lock()
@@ -202,7 +214,7 @@ impl Broker {
                 }
                 duped[i] = dup;
             }
-            (deposit.generation, duped)
+            (deposit.generation, duped, slot.screen.width, slot.screen.height)
         };
         let hdr = {
             let mut h = [0u8; 8];
@@ -215,7 +227,7 @@ impl Broker {
             unsafe { libc::close(dup) };
         }
         send?;
-        log::info!("anland.broker FDS_READY generation={gen}");
+        log::info!("anland.broker FDS_READY generation={gen} screen={sw}x{sh}");
         if let Ok(slot) = self.slot.lock() {
             for tx in slot.attach_notify.iter() {
                 let _ = tx.send(gen);

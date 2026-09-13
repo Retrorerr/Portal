@@ -18,7 +18,7 @@ pub use output_state::{read_kwin_output_scale, sync_kwin_output_scale, write_gue
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
-pub use event_handler::{dispatch_wayland, handle, log_presentation_state};
+pub use event_handler::{dispatch_wayland, handle, log_presentation_state, poll_anland_convergence};
 pub use socket_watcher::WaylandSocketWatcher;
 pub use winit_backend::{
     bind, AndroidFrameTimestampSample, AndroidFrameTimestampSupport, WinitGraphicsBackend,
@@ -157,6 +157,11 @@ pub struct WaylandBackend {
     /// owns the window; `None` in the preserved Smithay/QPainter mode. The
     /// two renderers never own the window simultaneously.
     pub anland: Option<crate::android::anland::AnlandSession>,
+    /// Authoritative Android surface-geometry convergence (rotation).
+    /// Owned across sessions so delayed resize events from a destroyed
+    /// native window are rejected by epoch; re-based on every Anland
+    /// session start. The single rotation transaction runs through this.
+    pub surface_convergence: crate::core::surface_geometry::SurfaceConvergence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
