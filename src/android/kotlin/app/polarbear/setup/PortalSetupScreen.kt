@@ -7,9 +7,15 @@ package app.polarbear.setup
 
 import android.animation.ValueAnimator
 import android.util.Log
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDp
@@ -88,6 +94,7 @@ import app.polarbear.setup.components.portalBloom
 
 private const val PREVIEW_TAG = "PortalComposeSetup"
 private const val FAKE_INSTALL_DURATION_MS = 13_500
+private const val READY_BACKGROUND_ALPHA = 0.83f
 
 internal enum class SetupPhase { Configure, Installing, Ready }
 
@@ -169,6 +176,7 @@ fun PortalSetupScreen(
             }
             phase = SetupPhase.Ready
         } else if (phase == SetupPhase.Ready) {
+            Log.i(PREVIEW_TAG, "setup READY; starting ambient scatter and translucent veil prelude")
             currentSetupReady()
         }
     }
@@ -224,7 +232,7 @@ fun PortalSetupScreen(
     }
     val configurationRegion = configurationVisual.blockInput(configurationInactive)
 
-    Box(modifier = Modifier.fillMaxSize().background(palette.background)
+    Box(modifier = Modifier.fillMaxSize()
         .onGloballyPositioned { rootOrigin = it.positionInRoot() }
         .pointerInput(Unit) {
             awaitEachGesture {
@@ -241,7 +249,11 @@ fun PortalSetupScreen(
                 }
             }
         }) {
-        SetupBackground(palette = palette, cardBounds = { ambientCardBounds.value.translate(-rootOrigin) })
+        SetupBackground(
+            palette = palette,
+            cardBounds = { ambientCardBounds.value.translate(-rootOrigin) },
+            readyPrelude = phase == SetupPhase.Ready,
+        )
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -429,8 +441,28 @@ fun PortalSetupScreen(
 }
 
 @Composable
-private fun SetupBackground(palette: PortalPalette, cardBounds: () -> Rect) {
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+private fun SetupBackground(
+    palette: PortalPalette,
+    cardBounds: () -> Rect,
+    readyPrelude: Boolean,
+) {
+    val finalLayerAlpha = remember { Animatable(1f) }
+    LaunchedEffect(readyPrelude) {
+        val target = if (readyPrelude) READY_BACKGROUND_ALPHA else 1f
+        if (ValueAnimator.areAnimatorsEnabled()) {
+            finalLayerAlpha.animateTo(target, tween(720))
+        } else {
+            finalLayerAlpha.snapTo(target)
+        }
+        if (readyPrelude) {
+            Log.i(PREVIEW_TAG, "ambient veil settled at final compositing alpha=$READY_BACKGROUND_ALPHA")
+        }
+    }
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer { alpha = finalLayerAlpha.value },
+    ) {
         // Full-canvas pixel size for the ambient loop tables (arc-length
         // traversal needs the real aspect, not fraction space). All ambient
         // interest now comes from the drifting Portal fragments; there is no
@@ -443,6 +475,7 @@ private fun SetupBackground(palette: PortalPalette, cardBounds: () -> Rect) {
             background = palette.background,
             cardBounds = cardBounds,
             scenePx = scenePx,
+            scatter = readyPrelude,
         )
     }
 }
@@ -498,12 +531,28 @@ private fun SetupHeaderIdentity(
             modifier = Modifier.size(PortalDimens.LogoSize).then(launchMarkModifier),
         )
         Column(modifier = Modifier.padding(start = 20.dp)) {
-            Text(
-                text = title,
-                fontSize = PortalDimens.TitleSize,
-                fontWeight = FontWeight.SemiBold,
-                color = palette.textPrimary,
-            )
+            AnimatedContent(
+                targetState = title,
+                transitionSpec = {
+                    (fadeIn(tween(260, delayMillis = 45)) +
+                        slideInVertically(tween(300)) { it / 4 } +
+                        scaleIn(tween(300), initialScale = 0.985f))
+                        .togetherWith(
+                            fadeOut(tween(180)) +
+                                slideOutVertically(tween(220)) { -it / 5 } +
+                                scaleOut(tween(220), targetScale = 0.99f),
+                        )
+                },
+                contentAlignment = Alignment.CenterStart,
+                label = "setup title",
+            ) { animatedTitle ->
+                Text(
+                    text = animatedTitle,
+                    fontSize = PortalDimens.TitleSize,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.textPrimary,
+                )
+            }
             Text(
                 text = "Powered by Debian 13 · KDE Plasma",
                 fontSize = 13.sp,
@@ -622,7 +671,12 @@ private fun InstallActionArea(
             .wrapContentSize(unbounded = true),
         contentAlignment = Alignment.Center,
     ) {
-        if (phase != SetupPhase.Ready) {
+        AnimatedVisibility(
+            visible = phase != SetupPhase.Ready,
+            exit = fadeOut(tween(200)) +
+                slideOutVertically(tween(220)) { -it / 8 } +
+                scaleOut(tween(220), targetScale = 0.985f),
+        ) {
             BeginInstallButton(
                 palette = palette,
                 centered = false,
@@ -633,8 +687,12 @@ private fun InstallActionArea(
         }
         AnimatedVisibility(
             visible = phase == SetupPhase.Ready && !desktopReady,
-            enter = fadeIn(tween(durationMillis = 280, delayMillis = 80)),
-            exit = fadeOut(tween(160)),
+            enter = fadeIn(tween(durationMillis = 300, delayMillis = 90)) +
+                slideInVertically(tween(340, delayMillis = 50)) { it / 3 } +
+                scaleIn(tween(340, delayMillis = 50), initialScale = 0.98f),
+            exit = fadeOut(tween(180)) +
+                slideOutVertically(tween(210)) { -it / 4 } +
+                scaleOut(tween(210), targetScale = 0.99f),
         ) {
             Text(
                 text = "Finishing Portal…",

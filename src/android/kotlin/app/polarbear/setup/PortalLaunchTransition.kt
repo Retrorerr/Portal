@@ -13,7 +13,6 @@ import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -70,7 +69,7 @@ fun PortalLaunchTransition(
     desktopReady: Boolean,
     onContentPreDraw: () -> Unit,
     onIntroResolved: () -> Unit,
-    onRevealEligibilityChanged: (Boolean) -> Unit,
+    onReadyPreludeChanged: (Boolean) -> Unit,
     onRevealCommitted: () -> Unit,
     onRevealFinished: () -> Unit,
 ) {
@@ -84,6 +83,7 @@ fun PortalLaunchTransition(
     val clock = remember { Animatable(0f) }
     val currentPreDraw by rememberUpdatedState(onContentPreDraw)
     val currentResolved by rememberUpdatedState(onIntroResolved)
+    val currentReadyPreludeChanged by rememberUpdatedState(onReadyPreludeChanged)
     val laidOut = rootBounds.width > 0f && headerBounds.width > 0f
 
     // Unlike a FrameLayout pre-draw, this gate cannot release before both the
@@ -139,6 +139,12 @@ fun PortalLaunchTransition(
             Log.i(TAG, "Compose pre-draw ready; holding intro at t=0 until system splash removed")
         }
     }
+    LaunchedEffect(resolved, setupReady) {
+        // Host transparency follows Compose setup completion, independently
+        // of the native first-frame latch. The ambient scene is still fully
+        // opaque internally and owns the controlled final 0.83 compositing.
+        currentReadyPreludeChanged(resolved && setupReady)
+    }
 
     val active = !resolved
     val treatment = if (active && Build.VERSION.SDK_INT >= 33) {
@@ -160,10 +166,8 @@ fun PortalLaunchTransition(
         eligible = resolved && setupReady && desktopReady,
         modifier = Modifier
             .fillMaxSize()
-            .background(PortalColors.Charcoal)
             .onGloballyPositioned { rootBounds = it.boundsInRoot() }
             .then(guard),
-        onEligibilityChanged = onRevealEligibilityChanged,
         onCommitted = onRevealCommitted,
         onFinished = onRevealFinished,
     ) {

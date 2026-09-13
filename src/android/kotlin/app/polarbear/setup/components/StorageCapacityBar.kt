@@ -2,12 +2,17 @@ package app.polarbear.setup.components
 
 import android.os.StatFs
 import android.util.Log
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
@@ -266,41 +271,51 @@ private fun InstallLogLines(
         val history = if (ready) stages + "Portal is ready" else stages.take(activeIndex + 1)
         history.takeLast(4)
     }
-    Column(
+    AnimatedContent(
+        targetState = lines,
         modifier = Modifier
             .fillMaxWidth()
             .height(55.dp),
-        verticalArrangement = Arrangement.spacedBy(1.dp),
-    ) {
-        lines.forEachIndexed { index, line ->
-            val age = lines.lastIndex - index
-            val current = age == 0
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Canvas(Modifier.size(5.dp)) {
-                    if (current) drawCircle(PortalColors.Orange.copy(alpha = 0.8f))
-                }
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = line,
-                    color = if (current) {
-                        palette.textPrimary.copy(alpha = 0.78f)
-                    } else {
-                        palette.textSecondary.copy(
-                            alpha = when (age) {
-                                1 -> 0.44f
-                                2 -> 0.34f
-                                else -> 0.25f
-                            },
-                        )
-                    },
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    lineHeight = 13.sp,
-                    maxLines = 1,
+        transitionSpec = {
+            (fadeIn(tween(190)) + slideInVertically(tween(220)) { it / 8 })
+                .togetherWith(
+                    fadeOut(tween(150)) + slideOutVertically(tween(180)) { -it / 10 },
                 )
+        },
+        contentAlignment = Alignment.TopStart,
+        label = "install log settling",
+    ) { visibleLines ->
+        Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            visibleLines.forEachIndexed { index, line ->
+                val age = visibleLines.lastIndex - index
+                val current = age == 0
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Canvas(Modifier.size(5.dp)) {
+                        if (current) drawCircle(PortalColors.Orange.copy(alpha = 0.8f))
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = line,
+                        color = if (current) {
+                            palette.textPrimary.copy(alpha = 0.78f)
+                        } else {
+                            palette.textSecondary.copy(
+                                alpha = when (age) {
+                                    1 -> 0.44f
+                                    2 -> 0.34f
+                                    else -> 0.25f
+                                },
+                            )
+                        },
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        lineHeight = 13.sp,
+                        maxLines = 1,
+                    )
+                }
             }
         }
     }

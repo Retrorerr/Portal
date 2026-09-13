@@ -1,9 +1,11 @@
 package app.polarbear.setup.components
 
+import android.animation.ValueAnimator
 import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
+import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
@@ -31,17 +33,32 @@ import app.polarbear.setup.PortalColors
 import app.polarbear.setup.PortalDimens
 import kotlin.math.PI
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
 
 private const val SCENE_SCALE = 0.25f
 private const val TAU = (PI * 2).toFloat()
+private const val SCATTER_DURATION_MS = 720
+private const val TAG = "PortalAmbient"
 
 private data class Drift(
     val start: Float, val end: Float, val orange: Boolean,
     val extent: Float, val opacity: Float, val angle: Float,
     val seed: Float, val paceSec: Int,
 )
+
+private data class ScatterOrigin(
+    val x: Float,
+    val y: Float,
+    val phase: Float,
+    val travelX: Float,
+    val travelY: Float,
+)
+
+private val SCATTER_ANGLE_OFFSETS = floatArrayOf(-13f, 10f, -18f, 16f, -8f, 20f, -15f)
+private val SCATTER_DISTANCE_FACTORS = floatArrayOf(2.10f, 2.34f, 2.22f, 2.46f, 2.18f, 2.52f, 2.38f)
+private val SCATTER_EASING = CubicBezierEasing(0.55f, 0f, 0.90f, 0.38f)
 
 // Five ivory aperture sections and two orange thresholds. Fragment shapes,
 // opacities and base orientations are unchanged; only how they travel.
@@ -146,15 +163,29 @@ private class LoopPath private constructor(
  * CONFIGURE does not recompose with the clock.
  */
 @Composable
-fun PortalAmbientFragments(background: Color, cardBounds: () -> Rect, scenePx: IntSize) {
+fun PortalAmbientFragments(
+    background: Color,
+    cardBounds: () -> Rect,
+    scenePx: IntSize,
+    scatter: Boolean,
+) {
     // Modern Pad path. Older devices keep the ordinary backdrop/light without
     // trying to instantiate RuntimeShader (no new dependency or CPU blur fallback).
-    if (Build.VERSION.SDK_INT >= 33) AmbientScene(background, cardBounds, scenePx)
+    if (Build.VERSION.SDK_INT >= 33) {
+        AmbientScene(background, cardBounds, scenePx, scatter)
+    } else {
+        Canvas(Modifier.fillMaxSize()) { drawRect(background) }
+    }
 }
 
 @RequiresApi(33)
 @Composable
-private fun AmbientScene(background: Color, cardBounds: () -> Rect, scenePx: IntSize) {
+private fun AmbientScene(
+    background: Color,
+    cardBounds: () -> Rect,
+    scenePx: IntSize,
+    scatter: Boolean,
+) {
     val paths = remember {
         val aperture = PathParser().parsePathString(APERTURE_PATH).toPath()
         val threshold = PathParser().parsePathString(THRESHOLD_PATH).toPath()
@@ -185,6 +216,58 @@ private fun AmbientScene(background: Color, cardBounds: () -> Rect, scenePx: Int
             infiniteRepeatable(tween(loopMs, easing = LinearEasing), RepeatMode.Restart),
             label = "Portal drift $index")
     }
+    val scatterProgress = remember { Animatable(0f) }
+    var scatterOrigins by remember(scenePx) { mutableStateOf<List<ScatterOrigin>?>(null) }
+    LaunchedEffect(scatter, loops) {
+        if (!scatter) {
+            scatterProgress.stop()
+            scatterProgress.snapTo(0f)
+            scatterOrigins = null
+            return@LaunchedEffect
+        }
+
+        scatterProgress.stop()
+        scatterProgress.snapTo(0f)
+        val centreX = sceneW * 0.5f
+        val centreY = sceneH * 0.5f
+        val diagonal = hypot(sceneW, sceneH).coerceAtLeast(1f)
+        scatterOrigins = loops.mapIndexed { index, loop ->
+            val phase = phases[index].value
+            val at = loop.position(phase / TAU * loop.total)
+            var directionX = at.x - centreX
+            var directionY = at.y - centreY
+            var length = hypot(directionX, directionY)
+            if (length < diagonal * 0.08f) {
+                val fallbackAngle = DRIFTS[index].seed * 1.91f
+                directionX = cos(fallbackAngle)
+                directionY = sin(fallbackAngle)
+                length = 1f
+            }
+            directionX /= length
+            directionY /= length
+            val offsetRadians = SCATTER_ANGLE_OFFSETS[index] * (PI.toFloat() / 180f)
+            val rotatedX = directionX * cos(offsetRadians) - directionY * sin(offsetRadians)
+            val rotatedY = directionX * sin(offsetRadians) + directionY * cos(offsetRadians)
+            val distance = diagonal * SCATTER_DISTANCE_FACTORS[index]
+            ScatterOrigin(
+                x = at.x,
+                y = at.y,
+                phase = phase,
+                travelX = rotatedX * distance,
+                travelY = rotatedY * distance,
+            )
+        }
+        Log.i(TAG, "setup READY; scattering seven ambient fragments over ${SCATTER_DURATION_MS}ms")
+        if (ValueAnimator.areAnimatorsEnabled()) {
+            scatterProgress.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(SCATTER_DURATION_MS, easing = SCATTER_EASING),
+            )
+        } else {
+            scatterProgress.snapTo(1f)
+        }
+        Log.i(TAG, "ambient fragment scatter complete")
+    }
     val source = rememberGraphicsLayer()
     val surrounding = rememberGraphicsLayer()
     val frosted = rememberGraphicsLayer()
@@ -211,23 +294,41 @@ private fun AmbientScene(background: Color, cardBounds: () -> Rect, scenePx: Int
             // charcoal no matter which pass dominates it.
             drawRect(background)
             val base = minOf(sceneWidth, sceneHeight)
+            val capturedScatter = scatterOrigins
+            val scatterAmount = scatterProgress.value.coerceIn(0f, 1f)
             DRIFTS.forEachIndexed { index, drift ->
                 // Uniform forward glide along the loop: constant speed, so
                 // the piece can neither stop nor reverse — heading only ever
                 // changes through the spline's own smooth curvature.
-                val at = loops[index].position(phases[index].value / TAU * loops[index].total)
+                val captured = capturedScatter?.get(index)
+                val phase = captured?.phase ?: phases[index].value
+                val at = if (captured == null) {
+                    loops[index].position(phase / TAU * loops[index].total)
+                } else {
+                    Offset(
+                        captured.x + captured.travelX * scatterAmount,
+                        captured.y + captured.travelY * scatterAmount,
+                    )
+                }
                 val x = at.x
                 val y = at.y
                 // Extremely subtle breathing, kept from the previous tuning:
                 // one slow sway per loop or slower, far too small to read as
                 // translational reversal.
-                val phase = phases[index].value
                 val magnification = base * drift.extent / 514f * (1f + .010f * sin(2f * phase + drift.seed * 2.71828f))
+                val exitAlpha = if (captured == null) 1f else {
+                    (1f - ((scatterAmount - 0.80f) / 0.20f).coerceIn(0f, 1f))
+                }
                 translate(x, y) {
-                    rotate(drift.angle + 1.5f * sin(phase + drift.seed * 1.41421f), Offset.Zero) {
+                    rotate(
+                        drift.angle +
+                            1.5f * sin(phase + drift.seed * 1.41421f) +
+                            SCATTER_ANGLE_OFFSETS[index] * 0.55f * scatterAmount,
+                        Offset.Zero,
+                    ) {
                         scale(magnification, magnification, Offset.Zero) {
                             translate(-centers[index].x, -centers[index].y) {
-                                drawPath(paths[index], colors[index], style = stroke)
+                                drawPath(paths[index], colors[index], alpha = exitAlpha, style = stroke)
                             }
                         }
                     }
