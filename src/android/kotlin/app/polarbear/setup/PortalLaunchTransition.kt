@@ -70,7 +70,6 @@ fun PortalLaunchTransition(
     onContentPreDraw: () -> Unit,
     onIntroResolved: () -> Unit,
     onReadyPreludeChanged: (Boolean) -> Unit,
-    onRevealProgressChanged: (Float) -> Unit,
     onRevealCommitted: () -> Unit,
     onRevealFinished: () -> Unit,
 ) {
@@ -171,7 +170,6 @@ fun PortalLaunchTransition(
             .then(guard),
         onCommitted = onRevealCommitted,
         onFinished = onRevealFinished,
-        onProgressChanged = onRevealProgressChanged,
     ) {
         // Keep this call at the same composition slot before/during/after intro:
         // no second screen, second fade, duplicated state or persistent capture.

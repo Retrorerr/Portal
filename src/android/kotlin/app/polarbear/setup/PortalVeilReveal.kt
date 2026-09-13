@@ -83,7 +83,6 @@ internal fun PortalRevealVeil(
     modifier: Modifier = Modifier,
     onCommitted: () -> Unit,
     onFinished: () -> Unit,
-    onProgressChanged: (Float) -> Unit,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val density = LocalDensity.current
@@ -91,17 +90,11 @@ internal fun PortalRevealVeil(
     val lifecycle = (LocalContext.current as LifecycleOwner).lifecycle
     var displacement by remember { mutableFloatStateOf(0f) }
     var effectStrength by remember { mutableFloatStateOf(0f) }
-    var viewportHeight by remember { mutableFloatStateOf(1f) }
     val animationScope = rememberCoroutineScope()
     val settleJob = remember { arrayOfNulls<Job>(1) }
     val commitInFlight = remember { booleanArrayOf(false) }
     val currentCommitted by rememberUpdatedState(onCommitted)
     val currentFinished by rememberUpdatedState(onFinished)
-    val currentProgressChanged by rememberUpdatedState(onProgressChanged)
-
-    LaunchedEffect(displacement, viewportHeight) {
-        currentProgressChanged((displacement / viewportHeight.coerceAtLeast(1f)).coerceIn(0f, 1f))
-    }
 
     LaunchedEffect(eligible) {
         if (eligible) {
@@ -144,7 +137,6 @@ internal fun PortalRevealVeil(
         if (!eligible) return@pointerInput
         val velocityThresholdPx = COMMIT_VELOCITY_DP_PER_SECOND * densityScale
         val fullHeight = size.height.toFloat().coerceAtLeast(1f)
-        viewportHeight = fullHeight
         awaitEachGesture {
             val down = awaitFirstDown(
                 requireUnconsumed = false,

@@ -28,8 +28,11 @@ package app.polarbear
 // happens only after the veil is completely offscreen.
 
 import android.app.Activity
+import android.content.Context
+import android.os.Build
 import android.util.Log
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
@@ -55,8 +58,6 @@ object ComposeOverlay {
     @JvmStatic external fun nativeOnOverlayRemoved()
     @JvmStatic external fun nativeOnOverlayShown()
     @JvmStatic external fun nativeOnOverlayShowFailed(reason: String)
-    @JvmStatic external fun nativeSetReadyVeilBlur(enabled: Boolean, radiusPx: Float)
-    @JvmStatic external fun nativeSetReadyVeilRevealProgress(progress: Float)
 
     // Native readiness is independent of the fake setup phase. A KWin frame
     // can latch this before the Compose hierarchy has finished presenting.
@@ -81,7 +82,7 @@ object ComposeOverlay {
     private val readyPreludeActive = AtomicBoolean(false)
     private var container: FrameLayout? = null
     private var composeView: ComposeView? = null
-    private var displayDensity = 1f
+    private var hostActivity: Activity? = null
     private var launchIntroResolved = false
 
     /**
@@ -121,7 +122,7 @@ object ComposeOverlay {
             // Recover the intended Ready translucency after an underlying
             // runtime error temporarily restored the safety charcoal.
             if (ready && readyPreludeActive.get()) {
-                applyReadyBackdrop(container, active = true)
+                applyReadyBackdrop(hostActivity, container, active = true)
             }
         }
     }
@@ -134,9 +135,34 @@ object ComposeOverlay {
                 updateDesktopReady(false)
                 revealCommitted.set(false)
                 composeView?.post {
-                    applyReadyBackdrop(container, active = false)
+                    applyReadyBackdrop(hostActivity, container, active = false)
                 }
             }
+        }
+    }
+
+    /**
+     * Android 12+ cross-window blur probe for the future final transition.
+     * Investigative only: the spike never depends on the result.
+     */
+    @JvmStatic fun queryBlur(activity: Activity): Boolean {
+        return queryBlurSupport(activity) == true
+    }
+
+    private fun queryBlurSupport(activity: Activity): Boolean? {
+        if (Build.VERSION.SDK_INT < 31) {
+            Log.i(TAG, "crossWindowBlur: unsupported api=${Build.VERSION.SDK_INT}")
+            return null
+        }
+        return try {
+            val wm = activity.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+            val method = wm.javaClass.getMethod("isCrossWindowBlurEnabled")
+            val enabled = method.invoke(wm) as? Boolean
+            Log.i(TAG, "crossWindowBlur: isCrossWindowBlurEnabled=$enabled")
+            enabled
+        } catch (e: Exception) {
+            Log.i(TAG, "crossWindowBlur: probe failed: $e")
+            null
         }
     }
 
@@ -144,7 +170,7 @@ object ComposeOverlay {
         if (container != null) {
             // Recovery racing a committed reveal: restore a solid host
             // immediately while Compose returns its veil to rest.
-            setNativeReadyBlur(false)
+            clearReadyBackdropBlur(activity)
             container?.animate()?.cancel()
             container?.alpha = 1f
             container?.setBackgroundColor(PORTAL_CHARCOAL)
@@ -161,7 +187,7 @@ object ComposeOverlay {
             revealCommitted.set(false)
             removalRequested.set(false)
             readyPreludeActive.set(false)
-            displayDensity = activity.resources.displayMetrics.density
+            hostActivity = activity
             val frame = FrameLayout(activity).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -193,18 +219,11 @@ object ComposeOverlay {
                         // Setup Ready owns this transition; native Ready only
                         // controls gesture availability. The ambient layer is
                         // still an opaque blur source and composites at 0.83.
-                        // The host becomes transparent for the approved 0.83
-                        // veil composite. The live same-window SurfaceView is
-                        // blurred in Anland's fenced GPU presentation path.
-                        applyReadyBackdrop(frame, active)
+                        // Android's compositor diffuses the live SurfaceView
+                        // behind it without touching Portal's render surface.
+                        applyReadyBackdrop(activity, frame, active)
                         if (active && changed) {
                             Log.i(TAG, "setup READY prelude; overlay host transparent for live SurfaceView")
-                        }
-                    },
-                    onRevealProgressChanged = { progress ->
-                        try {
-                            nativeSetReadyVeilRevealProgress(progress)
-                        } catch (_: UnsatisfiedLinkError) {
                         }
                     },
                     onRevealCommitted = { acknowledgeRevealCommitted() },
@@ -257,7 +276,8 @@ object ComposeOverlay {
             container = null
             composeView = null
             readyPreludeActive.set(false)
-            setNativeReadyBlur(false)
+            clearReadyBackdropBlur(hostActivity)
+            hostActivity = null
             nativeOnOverlayShowFailed(reason)
         } catch (_: UnsatisfiedLinkError) {
         } catch (_: Exception) {
@@ -266,6 +286,7 @@ object ComposeOverlay {
 
     private fun acknowledgeRevealCommitted() {
         if (!revealCommitted.compareAndSet(false, true)) return
+        clearReadyBackdropBlur(hostActivity)
         Log.i(TAG, "final upward reveal committed; native desktop was already ready")
         try {
             nativeOnRevealCommitted()
@@ -288,10 +309,11 @@ object ComposeOverlay {
         } catch (e: Exception) {
             Log.e(TAG, "overlay remove failed", e)
         } finally {
-            setNativeReadyBlur(false)
+            clearReadyBackdropBlur(hostActivity)
             container = null
             composeView = null
             readyPreludeActive.set(false)
+            hostActivity = null
             Log.i(TAG, "overlay removed; native surface undisturbed")
             try {
                 nativeOnOverlayRemoved()
@@ -301,17 +323,42 @@ object ComposeOverlay {
         }
     }
 
-    private fun applyReadyBackdrop(frame: FrameLayout?, active: Boolean) {
+    private fun applyReadyBackdrop(
+        activity: Activity?,
+        frame: FrameLayout?,
+        active: Boolean,
+    ) {
         frame?.setBackgroundColor(if (active) 0x00000000 else PORTAL_CHARCOAL)
-        setNativeReadyBlur(active)
+        if (!active) {
+            clearReadyBackdropBlur(activity)
+            return
+        }
+        if (activity == null || Build.VERSION.SDK_INT < 31 || queryBlurSupport(activity) != true) {
+            return
+        }
+        try {
+            val radiusPx = (READY_BACKDROP_BLUR_DP * activity.resources.displayMetrics.density)
+                .toInt()
+                .coerceAtLeast(1)
+            activity.window.attributes = activity.window.attributes.apply {
+                flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+                setBlurBehindRadius(radiusPx)
+            }
+            Log.i(TAG, "live SurfaceView backdrop blur enabled radiusDp=$READY_BACKDROP_BLUR_DP")
+        } catch (e: Exception) {
+            Log.w(TAG, "live SurfaceView backdrop blur unavailable", e)
+        }
     }
 
-    private fun setNativeReadyBlur(active: Boolean) {
+    private fun clearReadyBackdropBlur(activity: Activity?) {
+        if (activity == null || Build.VERSION.SDK_INT < 31) return
         try {
-            nativeSetReadyVeilBlur(active, READY_BACKDROP_BLUR_DP * displayDensity)
-        } catch (_: UnsatisfiedLinkError) {
+            activity.window.attributes = activity.window.attributes.apply {
+                setBlurBehindRadius(0)
+                flags = flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND.inv()
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "native READY veil blur state failed", e)
+            Log.w(TAG, "failed to clear live SurfaceView backdrop blur", e)
         }
     }
 
