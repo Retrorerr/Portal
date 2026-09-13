@@ -455,13 +455,15 @@ fn fully_validated_staging_without_image_marker_is_recovered_without_redownload(
 }
 
 #[test]
-fn successful_provision_rotates_and_preserves_previous_runtime_slot() {
+fn successful_provision_quarantines_unmarked_current_and_invalid_previous() {
     use std::io::Read;
     let temp = tempfile::tempdir().unwrap();
     let (mut artifact, archive) = fixture(temp.path(), "test-v1");
     let bytes = fs::read(&archive).unwrap();
-    // Seed a live runtime plus a stale `.previous` slot, then invalidate the
-    // live root by removing its READY marker so provision must re-extract.
+    // Seed a live runtime plus a stale `.previous` slot, then remove the
+    // live marker so provision must re-extract. The live tree is structurally
+    // Debian-compatible but unmarked, so it must be quarantined rather than
+    // promoted as a recovery runtime.
     // (The version string stays test-v1: the fixture bytes only validate as
     // test-v1.)
     artifact
@@ -497,7 +499,7 @@ fn successful_provision_rotates_and_preserves_previous_runtime_slot() {
         stream.write_all(&bytes).unwrap();
     });
     // Invalidate the live root so provision must re-extract, then confirm the
-    // stale backup is rotated and the just-replaced runtime is retained.
+    // replacement is committed without trusting either unmarked/invalid tree.
     fs::remove_file(temp.path().join(format!("runtime-B/{READY_MARKER}"))).unwrap();
     fs::remove_file(temp.path().join(format!("runtime-B/{IMAGE_READY_MARKER}"))).unwrap();
     artifact.provision(temp.path(), |_| {}).unwrap();
@@ -506,8 +508,11 @@ fn successful_provision_rotates_and_preserves_previous_runtime_slot() {
     assert!(artifact.is_image_ready(&root));
     artifact.mark_installation_complete(&root).unwrap();
     assert!(artifact.is_bootable(&root));
-    assert!(temp.path().join("runtime-B.previous").exists());
-    assert!(!temp.path().join("runtime-B.previous/stale").exists());
+    assert!(!temp.path().join("runtime-B.previous").exists());
+    let unknown = temp.path().join("runtime-B.unknown");
+    assert!(unknown.exists());
+    assert!(unknown.join("usr/bin/bash").exists());
+    assert!(!unknown.join(READY_MARKER).exists());
 }
 
 #[test]
@@ -564,6 +569,11 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
     assert!(provisioning.contains("sync_parent_directory"));
     assert!(provisioning.contains("PREVIOUS_PENDING_PREFIX"));
     assert!(provisioning.contains("quarantine_path"));
+    assert!(provisioning.contains("RuntimeClassification"));
+    assert!(provisioning.contains("is_trusted_recovery"));
+    assert!(provisioning.contains("UNKNOWN_RUNTIME_PREFIX"));
+    assert!(provisioning.contains("PRESERVED_LEGACY_RUNTIME_PREFIX"));
+    assert!(!provisioning.contains("is_known_valid_runtime"));
     assert!(provisioning.contains("self.validate_image(&staging).is_ok()"));
     assert!(run.contains("build_committed_wayland_backend"));
     assert!(run.contains("enter_committed_install_runtime_error"));

@@ -34,6 +34,11 @@ const PREVIOUS_RUNTIME: &str = "runtime-B.previous";
 const PREVIOUS_PENDING_PREFIX: &str = "runtime-B.previous.pending";
 const INVALID_RUNTIME_PREFIX: &str = "runtime-B.invalid";
 const INVALID_PREVIOUS_PREFIX: &str = "runtime-B.previous.invalid";
+const IMAGE_ONLY_RUNTIME_PREFIX: &str = "runtime-B.image-only";
+const IMAGE_ONLY_PREVIOUS_PREFIX: &str = "runtime-B.previous.image-only";
+const UNKNOWN_RUNTIME_PREFIX: &str = "runtime-B.unknown";
+const UNKNOWN_PREVIOUS_PREFIX: &str = "runtime-B.previous.unknown";
+const PRESERVED_LEGACY_RUNTIME_PREFIX: &str = "runtime-B.legacy-preserved";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvisioningPhase {
@@ -155,6 +160,48 @@ enum CompletionMarkerKind {
     Installation,
 }
 
+/// Runtime ownership and readiness classification used by promotion and
+/// recovery.  A valid Debian layout alone is deliberately not enough to
+/// enter a recovery slot: it has to carry Portal provenance as well.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeClassification {
+    /// The named runtime path is not present.
+    Absent,
+    /// A compatible Debian runtime with the final three-line Portal marker.
+    BootablePortal,
+    /// A compatible Debian runtime with Portal's older two-line marker.
+    LegacyPortal,
+    /// A layout validated against the exact pinned image identity, but with
+    /// no final installation completion marker yet.
+    ValidatedImageOnly,
+    /// A structurally valid Debian tree without accepted Portal provenance.
+    Unknown,
+    /// Missing required layout or otherwise invalid runtime contents.
+    Invalid,
+}
+
+impl RuntimeClassification {
+    /// A runtime in this set is proven Portal-owned and is safe to use as a
+    /// recovery point for replacing another proven recovery runtime.
+    pub const fn is_trusted_recovery(self) -> bool {
+        matches!(self, Self::BootablePortal | Self::LegacyPortal)
+    }
+
+    /// An exact image marker or a completion marker proves that the tree is
+    /// Portal-owned installation state.  Only the completion-marker variants
+    /// are strong enough to replace a user-runtime recovery backup.
+    pub const fn is_portal_owned(self) -> bool {
+        matches!(
+            self,
+            Self::BootablePortal | Self::LegacyPortal | Self::ValidatedImageOnly
+        )
+    }
+
+    pub const fn is_recoverable_installation_state(self) -> bool {
+        self.is_portal_owned()
+    }
+}
+
 impl RuntimeArtifact {
     pub fn production() -> Self {
         serde_json::from_str(include_str!("../../assets/debian-runtime.json"))
@@ -271,6 +318,30 @@ impl RuntimeArtifact {
             && self.validate_image(root).is_ok()
     }
 
+    /// Classify a runtime without inferring Portal ownership from Debian
+    /// binaries alone.  The exact image marker is sufficient for disposable
+    /// installation state; a completion marker is required for a trusted
+    /// recovery root.
+    pub fn classify_runtime(&self, root: &Path) -> RuntimeClassification {
+        if !path_exists(root) {
+            return RuntimeClassification::Absent;
+        }
+        if self.is_bootable(root) {
+            return RuntimeClassification::BootablePortal;
+        }
+        if self.is_legacy_runtime(root) {
+            return RuntimeClassification::LegacyPortal;
+        }
+        if self.is_image_ready(root) {
+            return RuntimeClassification::ValidatedImageOnly;
+        }
+        if Self::validate_debian_layout(root).is_ok() {
+            RuntimeClassification::Unknown
+        } else {
+            RuntimeClassification::Invalid
+        }
+    }
+
     /// Kept as the image-stage compatibility name used by existing callers.
     /// It intentionally does not imply a bootable Portal installation.
     pub fn is_ready(&self, root: &Path) -> bool {
@@ -355,6 +426,17 @@ impl RuntimeArtifact {
     /// without changing the mutable runtime tree.
     pub fn mark_installation_complete(&self, root: &Path) -> anyhow::Result<()> {
         if self.is_bootable(root) {
+            if let Some(base) = root.parent() {
+                if let Err(error) = self.recover_promotion_state(base, root) {
+                    // The marker is already the authoritative committed
+                    // truth. Cleanup of an extra parked backup is recoverable
+                    // on the next provisioning pass and must not turn a
+                    // successful installation into a false setup failure.
+                    log::warn!(
+                        "Could not finish Portal promotion cleanup after committed marker: {error:#}"
+                    );
+                }
+            }
             return Ok(());
         }
 
@@ -373,7 +455,17 @@ impl RuntimeArtifact {
         marker.push_str(INSTALLATION_MARKER);
         marker.push('\n');
         write_atomic(&root.join(READY_MARKER), marker.as_bytes())?;
-        self.validate_compatible(root)
+        self.validate_compatible(root)?;
+        if let Some(base) = root.parent() {
+            if let Err(error) = self.recover_promotion_state(base, root) {
+                // See the already-bootable branch above: marker durability is
+                // the commit point, while parked-backup cleanup is retryable.
+                log::warn!(
+                    "Could not finish Portal promotion cleanup after committed marker: {error:#}"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Complete the Debian image transaction. All paths before this method
@@ -596,15 +688,6 @@ impl RuntimeArtifact {
             || (self.validate_image(staging).is_ok() && self.is_legacy_runtime(staging))
     }
 
-    /// A runtime is known-good for rotation when its contents are a valid
-    /// Debian runtime, even if a crash happened while its marker was being
-    /// migrated. This is intentionally broader than `is_bootable`: retaining
-    /// a valid user-owned tree is safer than treating a missing marker as
-    /// permission to delete it.
-    fn is_known_valid_runtime(&self, root: &Path) -> bool {
-        path_exists(root) && Self::validate_debian_layout(root).is_ok()
-    }
-
     fn pending_backups(&self, base: &Path) -> anyhow::Result<Vec<PathBuf>> {
         if !path_exists(base) {
             return Ok(Vec::new());
@@ -624,7 +707,11 @@ impl RuntimeArtifact {
         Ok(paths)
     }
 
-    fn quarantined_recovery_paths(&self, base: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    /// Return only disposable quarantine paths.  Unknown Debian-shaped trees
+    /// and deliberately preserved legacy runtimes are not included: they may
+    /// contain user data and must remain recoverable until an explicit policy
+    /// can safely remove them.
+    fn disposable_quarantine_paths(&self, base: &Path) -> anyhow::Result<Vec<PathBuf>> {
         if !path_exists(base) {
             return Ok(Vec::new());
         }
@@ -635,6 +722,8 @@ impl RuntimeArtifact {
             if name.to_str().is_some_and(|name| {
                 name.starts_with(INVALID_RUNTIME_PREFIX)
                     || name.starts_with(INVALID_PREVIOUS_PREFIX)
+                    || name.starts_with(IMAGE_ONLY_RUNTIME_PREFIX)
+                    || name.starts_with(IMAGE_ONLY_PREVIOUS_PREFIX)
             }) {
                 paths.push(entry.path());
             }
@@ -643,20 +732,55 @@ impl RuntimeArtifact {
         Ok(paths)
     }
 
-    /// Quarantined trees are disposable Portal-owned state. Once a new live
-    /// root validates, remove them so a failed replacement cannot gradually
-    /// consume the storage needed for the next retry. A known-good runtime is
-    /// never placed under these prefixes, and this function is never called
-    /// until the live root itself validates.
-    fn cleanup_quarantined_recovery_paths(
+    fn quarantine_prefix(
+        classification: RuntimeClassification,
+        previous: bool,
+    ) -> Option<&'static str> {
+        match (classification, previous) {
+            (RuntimeClassification::ValidatedImageOnly, false) => Some(IMAGE_ONLY_RUNTIME_PREFIX),
+            (RuntimeClassification::ValidatedImageOnly, true) => {
+                Some(IMAGE_ONLY_PREVIOUS_PREFIX)
+            }
+            (RuntimeClassification::Unknown, false) => Some(UNKNOWN_RUNTIME_PREFIX),
+            (RuntimeClassification::Unknown, true) => Some(UNKNOWN_PREVIOUS_PREFIX),
+            (RuntimeClassification::Invalid, false) => Some(INVALID_RUNTIME_PREFIX),
+            (RuntimeClassification::Invalid, true) => Some(INVALID_PREVIOUS_PREFIX),
+            (RuntimeClassification::Absent, _)
+            | (RuntimeClassification::BootablePortal, _)
+            | (RuntimeClassification::LegacyPortal, _) => None,
+        }
+    }
+
+    fn quarantine_untrusted_runtime(
+        base: &Path,
+        path: &Path,
+        classification: RuntimeClassification,
+        previous: bool,
+    ) -> anyhow::Result<()> {
+        if let Some(prefix) = Self::quarantine_prefix(classification, previous) {
+            quarantine_path(base, path, prefix)?;
+        }
+        Ok(())
+    }
+
+    /// Remove only disposable Portal-owned debris after an exact image or a
+    /// completed runtime is present. Unknown trees and preserved legacy roots
+    /// are intentionally never swept by this helper.
+    fn cleanup_disposable_quarantine_paths(
         &self,
         base: &Path,
         root: &Path,
+        previous: &Path,
     ) -> anyhow::Result<()> {
-        if !self.is_known_valid_runtime(root) {
+        let root_classification = self.classify_runtime(root);
+        let previous_classification = self.classify_runtime(previous);
+        let safe_to_dispose = root_classification.is_trusted_recovery()
+            || (root_classification == RuntimeClassification::ValidatedImageOnly
+                && previous_classification.is_trusted_recovery());
+        if !safe_to_dispose {
             return Ok(());
         }
-        for path in self.quarantined_recovery_paths(base)? {
+        for path in self.disposable_quarantine_paths(base)? {
             remove_path_synced(&path)?;
         }
         Ok(())
@@ -664,52 +788,72 @@ impl RuntimeArtifact {
 
     /// Recover the only ambiguous promotion window: an old `.previous` was
     /// parked under a pending name, but the process stopped before the next
-    /// rename. Never replace an existing valid backup with an unknown tree.
+    /// rename. Never replace an existing trusted backup with an image-only or
+    /// unknown tree. Pending proven-good roots remain until the new live root
+    /// has its final completion marker.
     fn recover_promotion_state(&self, base: &Path, root: &Path) -> anyhow::Result<()> {
         let pending = self.pending_backups(base)?;
-        if !self.is_known_valid_runtime(root) {
+        let root_classification = self.classify_runtime(root);
+        if !root_classification.is_recoverable_installation_state() {
             return Ok(());
         }
+        let previous = base.join(PREVIOUS_RUNTIME);
         if pending.is_empty() {
-            self.cleanup_quarantined_recovery_paths(base, root)?;
+            self.cleanup_disposable_quarantine_paths(base, root, &previous)?;
             return Ok(());
         }
 
-        let previous = base.join(PREVIOUS_RUNTIME);
-        let mut previous_valid = self.is_known_valid_runtime(&previous);
-        if path_exists(&previous) && !previous_valid {
-            quarantine_path(base, &previous, INVALID_PREVIOUS_PREFIX)?;
+        let mut previous_classification = self.classify_runtime(&previous);
+        if path_exists(&previous) && !previous_classification.is_trusted_recovery() {
+            Self::quarantine_untrusted_runtime(
+                base,
+                &previous,
+                previous_classification,
+                true,
+            )?;
+            previous_classification = RuntimeClassification::Absent;
         }
 
         let valid_pending = pending
             .iter()
-            .find(|path| self.is_known_valid_runtime(path.as_path()))
+            .find(|path| {
+                self.classify_runtime(path.as_path())
+                    .is_trusted_recovery()
+            })
             .cloned();
         let mut restored_pending = false;
-        if !previous_valid {
+        if !previous_classification.is_trusted_recovery() {
             if let Some(path) = valid_pending.as_ref() {
                 rename_synced(path, &previous)?;
-                previous_valid = true;
+                previous_classification = self.classify_runtime(&previous);
                 restored_pending = true;
             }
         }
 
-        // Once the live root and `.previous` are both known-valid, any
-        // additional parked copy is disposable recovery state. Unknown
-        // pending paths are quarantined rather than silently deleted.
+        // A pending trusted runtime is safe to discard only after the live
+        // root itself is fully bootable and another trusted `.previous`
+        // exists. In particular, an image-ready root is still an incomplete
+        // replacement, so it keeps every proven recovery point until final
+        // marker commit. Unknown pending trees are left visibly pending.
         for path in pending {
             if restored_pending && valid_pending.as_ref() == Some(&path) {
                 continue;
             }
-            if self.is_known_valid_runtime(&path) {
-                if previous_valid {
+            let classification = self.classify_runtime(&path);
+            if classification.is_trusted_recovery() {
+                if root_classification.is_trusted_recovery()
+                    && previous_classification.is_trusted_recovery()
+                {
                     remove_path_synced(&path)?;
                 }
-            } else if path_exists(&path) {
-                quarantine_path(base, &path, INVALID_PREVIOUS_PREFIX)?;
+            } else if classification == RuntimeClassification::Invalid
+                && root_classification.is_trusted_recovery()
+                && previous_classification.is_trusted_recovery()
+            {
+                remove_path_synced(&path)?;
             }
         }
-        self.cleanup_quarantined_recovery_paths(base, root)?;
+        self.cleanup_disposable_quarantine_paths(base, root, &previous)?;
         Ok(())
     }
 
@@ -719,13 +863,21 @@ impl RuntimeArtifact {
         root: &Path,
         previous: &Path,
     ) -> anyhow::Result<()> {
-        if !self.is_known_valid_runtime(root) || !self.is_known_valid_runtime(previous) {
+        if !self.classify_runtime(root).is_trusted_recovery()
+            || !self.classify_runtime(previous).is_trusted_recovery()
+        {
             return Ok(());
         }
         for path in self.pending_backups(base)? {
-            remove_path_synced(&path)?;
+            let classification = self.classify_runtime(&path);
+            if classification.is_trusted_recovery()
+                || classification == RuntimeClassification::ValidatedImageOnly
+                || classification == RuntimeClassification::Invalid
+            {
+                remove_path_synced(&path)?;
+            }
         }
-        self.cleanup_quarantined_recovery_paths(base, root)?;
+        self.cleanup_disposable_quarantine_paths(base, root, previous)?;
         Ok(())
     }
 
@@ -740,14 +892,23 @@ impl RuntimeArtifact {
         self.recover_promotion_state(base, root)?;
         let previous = base.join(PREVIOUS_RUNTIME);
 
-        // An invalid backup is disposable but still kept for diagnostics. It
-        // must not block promotion or be mistaken for the last recovery root.
-        if path_exists(&previous) && !self.is_known_valid_runtime(&previous) {
-            quarantine_path(base, &previous, INVALID_PREVIOUS_PREFIX)?;
+        // Only a completion-marker runtime is trusted for recovery rotation.
+        // Image-only, structurally plausible, and invalid previous trees are
+        // classified separately and quarantined without touching a proven
+        // backup.
+        let previous_classification = self.classify_runtime(&previous);
+        if path_exists(&previous) && !previous_classification.is_trusted_recovery() {
+            Self::quarantine_untrusted_runtime(
+                base,
+                &previous,
+                previous_classification,
+                true,
+            )?;
         }
 
-        if path_exists(root) {
-            if self.is_known_valid_runtime(root) {
+        let current_classification = self.classify_runtime(root);
+        match current_classification {
+            RuntimeClassification::BootablePortal => {
                 if path_exists(&previous) {
                     // Park the old recovery root under a unique name first.
                     // A crash here leaves the valid current root untouched;
@@ -755,15 +916,41 @@ impl RuntimeArtifact {
                     let pending = next_available_path(base, PREVIOUS_PENDING_PREFIX);
                     rename_synced(&previous, &pending)?;
                 }
-                // The current root is known-valid, so it is safe to make it
-                // the recovery root. The destination was made vacant above.
+                // A bootable Portal root is proven user-owned state, so it is
+                // safe to make it the recovery root after the old backup has
+                // been parked.
                 rename_synced(root, &previous)?;
-            } else {
-                // Never let an untrusted current tree replace a valid backup.
-                // Quarantine it under a unique name and leave `.previous`
-                // alone.
-                quarantine_path(base, root, INVALID_RUNTIME_PREFIX)?;
             }
+            RuntimeClassification::LegacyPortal => {
+                if self.classify_runtime(&previous) == RuntimeClassification::BootablePortal {
+                    // The modern completion marker is the stronger recovery
+                    // identity. Keep both proven user runtimes instead of
+                    // allowing a legacy tree to displace the stronger one.
+                    quarantine_path(base, root, PRESERVED_LEGACY_RUNTIME_PREFIX)?;
+                } else {
+                    if path_exists(&previous) {
+                        let pending = next_available_path(base, PREVIOUS_PENDING_PREFIX);
+                        rename_synced(&previous, &pending)?;
+                    }
+                    rename_synced(root, &previous)?;
+                }
+            }
+            RuntimeClassification::ValidatedImageOnly
+            | RuntimeClassification::Unknown
+            | RuntimeClassification::Invalid => {
+                // Never let an image-only or merely plausible Debian tree
+                // replace a trusted backup. Unknown trees are retained under
+                // a non-bootable quarantine name because they may contain
+                // user data; disposable image/invalid debris is cleaned only
+                // after a safe replacement exists.
+                Self::quarantine_untrusted_runtime(
+                    base,
+                    root,
+                    current_classification,
+                    false,
+                )?;
+            }
+            RuntimeClassification::Absent => {}
         }
 
         anyhow::ensure!(
@@ -776,6 +963,7 @@ impl RuntimeArtifact {
             "Promoted runtime staging tree failed post-rename validation"
         );
         self.cleanup_pending_backups(base, root, &previous)?;
+        self.cleanup_disposable_quarantine_paths(base, root, &previous)?;
         Ok(())
     }
 
@@ -1206,6 +1394,16 @@ mod tests {
         artifact.mark_installation_complete(root).unwrap();
     }
 
+    fn legacy_image(artifact: &RuntimeArtifact, archive: &Path, root: &Path) {
+        extract_image(artifact, archive, root);
+        fs::remove_file(root.join(IMAGE_READY_MARKER)).unwrap();
+        fs::write(
+            root.join(READY_MARKER),
+            format!("{}\n{}\n", artifact.version, artifact.sha256),
+        )
+        .unwrap();
+    }
+
     fn pending_name(base: &Path) -> PathBuf {
         base.join(PREVIOUS_PENDING_PREFIX)
     }
@@ -1264,6 +1462,208 @@ mod tests {
     }
 
     #[test]
+    fn runtime_classification_requires_portal_provenance() {
+        let temp = tempfile::tempdir().unwrap();
+        let (artifact, archive) = fixture(temp.path(), "classification-v1");
+        let root = temp.path().join("runtime-B");
+
+        extract_image(&artifact, &archive, &root);
+        assert_eq!(
+            artifact.classify_runtime(&root),
+            RuntimeClassification::ValidatedImageOnly
+        );
+
+        fs::remove_file(root.join(IMAGE_READY_MARKER)).unwrap();
+        assert_eq!(
+            artifact.classify_runtime(&root),
+            RuntimeClassification::Unknown,
+            "a Debian-shaped tree without a Portal marker is not trusted"
+        );
+
+        fs::write(
+            root.join(READY_MARKER),
+            format!("{}\n{}\n", artifact.version, artifact.sha256),
+        )
+        .unwrap();
+        assert_eq!(
+            artifact.classify_runtime(&root),
+            RuntimeClassification::LegacyPortal
+        );
+
+        fs::write(
+            root.join(READY_MARKER),
+            format!(
+                "{}\n{}\n{}\n",
+                artifact.version, artifact.sha256, INSTALLATION_MARKER
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            artifact.classify_runtime(&root),
+            RuntimeClassification::BootablePortal
+        );
+
+        fs::remove_file(root.join("usr/bin/apt")).unwrap();
+        assert_eq!(
+            artifact.classify_runtime(&root),
+            RuntimeClassification::Invalid
+        );
+    }
+
+    #[test]
+    fn unmarked_structural_current_is_quarantined_without_replacing_previous() {
+        let temp = tempfile::tempdir().unwrap();
+        let (artifact, archive) = fixture(temp.path(), "unknown-current-v1");
+        let root = temp.path().join("runtime-B");
+        let previous = temp.path().join(PREVIOUS_RUNTIME);
+        let staging = temp.path().join("runtime-B.staging");
+
+        extract_image(&artifact, &archive, &root);
+        fs::remove_file(root.join(IMAGE_READY_MARKER)).unwrap();
+        fs::write(root.join("current-user-data"), "keep unknown tree").unwrap();
+        assert_eq!(
+            artifact.classify_runtime(&root),
+            RuntimeClassification::Unknown
+        );
+
+        bootable_image(&artifact, &archive, &previous);
+        fs::write(previous.join("previous-only"), "proven-good").unwrap();
+        extract_image(&artifact, &archive, &staging);
+
+        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+
+        assert!(artifact.is_image_ready(&root));
+        assert_eq!(
+            artifact.classify_runtime(&previous),
+            RuntimeClassification::BootablePortal
+        );
+        assert_eq!(
+            fs::read_to_string(previous.join("previous-only")).unwrap(),
+            "proven-good"
+        );
+        assert!(!root.join("current-user-data").exists());
+        let unknown = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(UNKNOWN_RUNTIME_PREFIX)
+            })
+            .expect("unknown current must be quarantined");
+        assert_eq!(
+            fs::read_to_string(unknown.join("current-user-data")).unwrap(),
+            "keep unknown tree"
+        );
+    }
+
+    #[test]
+    fn legacy_current_preserves_stronger_bootable_previous() {
+        let temp = tempfile::tempdir().unwrap();
+        let (artifact, archive) = fixture(temp.path(), "legacy-current-v1");
+        let root = temp.path().join("runtime-B");
+        let previous = temp.path().join(PREVIOUS_RUNTIME);
+        let staging = temp.path().join("runtime-B.staging");
+
+        legacy_image(&artifact, &archive, &root);
+        fs::write(root.join("legacy-user-data"), "keep legacy tree").unwrap();
+        assert_eq!(
+            artifact.classify_runtime(&root),
+            RuntimeClassification::LegacyPortal
+        );
+        bootable_image(&artifact, &archive, &previous);
+        fs::write(previous.join("modern-recovery"), "keep modern recovery").unwrap();
+        extract_image(&artifact, &archive, &staging);
+
+        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+
+        assert!(artifact.is_image_ready(&root));
+        assert!(artifact.is_bootable(&previous));
+        assert_eq!(
+            fs::read_to_string(previous.join("modern-recovery")).unwrap(),
+            "keep modern recovery"
+        );
+        let preserved = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(PRESERVED_LEGACY_RUNTIME_PREFIX)
+            })
+            .expect("legacy Portal runtime must be preserved separately");
+        assert!(artifact.is_legacy_complete(&preserved));
+        assert_eq!(
+            fs::read_to_string(preserved.join("legacy-user-data")).unwrap(),
+            "keep legacy tree"
+        );
+    }
+
+    #[test]
+    fn image_only_current_never_replaces_bootable_previous() {
+        let temp = tempfile::tempdir().unwrap();
+        let (artifact, archive) = fixture(temp.path(), "image-only-current-v1");
+        let root = temp.path().join("runtime-B");
+        let previous = temp.path().join(PREVIOUS_RUNTIME);
+        let staging = temp.path().join("runtime-B.staging");
+
+        extract_image(&artifact, &archive, &root);
+        assert_eq!(
+            artifact.classify_runtime(&root),
+            RuntimeClassification::ValidatedImageOnly
+        );
+        bootable_image(&artifact, &archive, &previous);
+        fs::write(previous.join("previous-only"), "proven-good").unwrap();
+        extract_image(&artifact, &archive, &staging);
+
+        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+
+        assert!(artifact.is_image_ready(&root));
+        assert!(artifact.is_bootable(&previous));
+        assert_eq!(
+            fs::read_to_string(previous.join("previous-only")).unwrap(),
+            "proven-good"
+        );
+    }
+
+    #[test]
+    fn pending_recovery_with_unknown_current_preserves_previous_and_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let (artifact, archive) = fixture(temp.path(), "unknown-pending-v1");
+        let root = temp.path().join("runtime-B");
+        let previous = temp.path().join(PREVIOUS_RUNTIME);
+        let pending = pending_name(temp.path());
+        let staging = temp.path().join("runtime-B.staging");
+
+        extract_image(&artifact, &archive, &root);
+        fs::remove_file(root.join(IMAGE_READY_MARKER)).unwrap();
+        fs::write(root.join("unknown-current"), "preserve me").unwrap();
+        bootable_image(&artifact, &archive, &previous);
+        fs::write(previous.join("previous-only"), "proven-good").unwrap();
+        let pending_source = temp.path().join("pending-source");
+        bootable_image(&artifact, &archive, &pending_source);
+        fs::rename(&pending_source, &pending).unwrap();
+        fs::write(pending.join("pending-only"), "proven-pending").unwrap();
+        extract_image(&artifact, &archive, &staging);
+
+        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+
+        assert!(artifact.is_image_ready(&root));
+        assert!(artifact.is_bootable(&previous));
+        assert!(artifact.is_bootable(&pending));
+        assert_eq!(
+            fs::read_to_string(previous.join("previous-only")).unwrap(),
+            "proven-good"
+        );
+        assert_eq!(
+            fs::read_to_string(pending.join("pending-only")).unwrap(),
+            "proven-pending"
+        );
+    }
+
+    #[test]
     fn valid_previous_survives_invalid_current_promotion() {
         let temp = tempfile::tempdir().unwrap();
         let (artifact, archive) = fixture(temp.path(), "promotion-v1");
@@ -1318,6 +1718,8 @@ mod tests {
             "current"
         );
         assert!(!previous.join("previous-only").exists());
+        assert!(path_exists(&pending_name(temp.path())));
+        artifact.mark_installation_complete(&root).unwrap();
         assert!(!path_exists(&pending_name(temp.path())));
     }
 
@@ -1338,6 +1740,8 @@ mod tests {
             artifact.promote_staging(temp.path(), &root, &staging).unwrap();
             assert!(artifact.is_image_ready(&root));
             assert!(artifact.is_bootable(&previous));
+            assert!(path_exists(&pending_name(temp.path())));
+            artifact.mark_installation_complete(&root).unwrap();
             assert!(!path_exists(&pending_name(temp.path())));
         }
 
@@ -1351,14 +1755,15 @@ mod tests {
             let staging = temp.path().join("runtime-B.staging");
             bootable_image(&artifact, &archive, &previous);
             fs::rename(&previous, &pending).unwrap();
-            bootable_image(&artifact, &archive, &previous);
-            fs::rename(&previous, &root).unwrap();
+            bootable_image(&artifact, &archive, &root);
             extract_image(&artifact, &archive, &staging);
             // The current root is valid, the old valid backup is pending, and
             // the next promotion must keep both until the staged image lands.
             artifact.promote_staging(temp.path(), &root, &staging).unwrap();
             assert!(artifact.is_image_ready(&root));
             assert!(artifact.is_bootable(&previous));
+            assert!(path_exists(&pending));
+            artifact.mark_installation_complete(&root).unwrap();
             assert!(!path_exists(&pending));
         }
 
@@ -1385,6 +1790,8 @@ mod tests {
                 .unwrap();
             assert!(artifact.is_image_ready(&root));
             assert!(artifact.is_bootable(&previous));
+            assert!(path_exists(&pending));
+            artifact.mark_installation_complete(&root).unwrap();
             assert!(!path_exists(&pending));
         }
     }
