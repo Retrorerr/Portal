@@ -17,7 +17,11 @@ rotating pattern, demo tap trigger, or permanent shader loop. The mask uses
 premultiplied RGBA, a nonzero soft-edge width, and a safe normal at the origin.
 Colors, timing, geometry, blur capture, lifecycle and interaction are Portal-owned.
 
-`MotionBlur.kt` was inspected but no moving-logo blur was incorporated: the
-canonical vector stays crisp while its measured bounds move without overshoot.
-No library dependency was added. Frost uses Compose GraphicsLayer recording and
-Android RenderEffect blur locally, without Cloudy or cross-window capture.
+`src/android/kotlin/app/polarbear/setup/PortalVeilReveal.kt` also adapts the
+directional multi-sample and offset RGB-channel idea from `MotionBlur.kt` for
+the final interactive veil removal. Portal reduces it to six samples, a
+bounded vertical velocity scalar, and a lower-edge falloff. It is dormant while
+the veil is stationary and never touches the native SurfaceView.
+
+No library dependency was added. Frost uses Compose GraphicsLayer recording
+and Android RenderEffect blur locally, without Cloudy or cross-window capture.

@@ -3,7 +3,7 @@ package app.polarbear.setup
 // SPIKE-ONLY (branch compose-setup-spike): Portal first-run CONFIGURE
 // screen. Local setup selections and storage projection only — no
 // provisioning, no JNI/Rust references. Compose owns the fake install phase;
-// only the final Enter Portal action reaches the host callback.
+// the host separately supplies native desktop readiness for the final veil.
 
 import android.animation.ValueAnimator
 import android.util.Log
@@ -47,6 +47,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -129,7 +130,8 @@ fun portalMarkPainter(main: Color, threshold: Color) = rememberVectorPainter(
 
 @Composable
 fun PortalSetupScreen(
-    onBeginInstall: () -> Unit = {},
+    desktopReady: Boolean = false,
+    onSetupReady: () -> Unit = {},
     launchMarkModifier: Modifier = Modifier,
 ) {
     var appearance by remember { mutableStateOf(AppearanceMode.System) }
@@ -144,13 +146,13 @@ fun PortalSetupScreen(
     var interfaceControlBottomPx by remember { mutableStateOf(0f) }
     var phase by remember { mutableStateOf(SetupPhase.Configure) }
     var beginAccepted by remember { mutableStateOf(false) }
-    var enterAccepted by remember { mutableStateOf(false) }
     var frozenEssentials by remember { mutableStateOf(DEFAULT_ESSENTIALS) }
     val installProgress = remember { Animatable(0f) }
     val installProgressState: State<Float> = remember(installProgress) {
         derivedStateOf { installProgress.value }
     }
 
+    val currentSetupReady by rememberUpdatedState(onSetupReady)
     LaunchedEffect(phase) {
         if (phase == SetupPhase.Installing) {
             installProgress.snapTo(0f)
@@ -166,6 +168,8 @@ fun PortalSetupScreen(
                 installProgress.snapTo(1f)
             }
             phase = SetupPhase.Ready
+        } else if (phase == SetupPhase.Ready) {
+            currentSetupReady()
         }
     }
 
@@ -177,13 +181,6 @@ fun PortalSetupScreen(
             phase = SetupPhase.Installing
         }
     }
-    val enterPortal: () -> Unit = {
-        if (phase == SetupPhase.Ready && !enterAccepted) {
-            enterAccepted = true
-            onBeginInstall()
-        }
-    }
-
     val palette = resolvePalette(appearance)
     val capacity = rememberStorageCapacity()
     val density = LocalDensity.current
@@ -365,11 +362,10 @@ fun PortalSetupScreen(
                                 // making a separate 164dp-tall layout island.
                                 InstallActionArea(
                                     phase = phase,
-                                    enterAccepted = enterAccepted,
+                                    desktopReady = desktopReady,
                                     palette = palette,
                                     inactiveConfigurationModifier = configurationVisual,
                                     onBeginInstall = beginLocalInstall,
-                                    onEnterPortal = enterPortal,
                                 )
                             }
                         }
@@ -418,11 +414,10 @@ fun PortalSetupScreen(
                         Box(Modifier.fillMaxWidth().padding(bottom = 26.dp), contentAlignment = Alignment.Center) {
                             InstallActionArea(
                                 phase = phase,
-                                enterAccepted = enterAccepted,
+                                desktopReady = desktopReady,
                                 palette = palette,
                                 inactiveConfigurationModifier = configurationVisual,
                                 onBeginInstall = beginLocalInstall,
-                                onEnterPortal = enterPortal,
                             )
                         }
                     }
@@ -616,11 +611,10 @@ private fun MinimalInstallRow(
 @Composable
 private fun InstallActionArea(
     phase: SetupPhase,
-    enterAccepted: Boolean,
+    desktopReady: Boolean,
     palette: PortalPalette,
     inactiveConfigurationModifier: Modifier,
     onBeginInstall: () -> Unit,
-    onEnterPortal: () -> Unit,
 ) {
     Box(
         modifier = Modifier
@@ -638,14 +632,15 @@ private fun InstallActionArea(
             )
         }
         AnimatedVisibility(
-            visible = phase == SetupPhase.Ready,
+            visible = phase == SetupPhase.Ready && !desktopReady,
             enter = fadeIn(tween(durationMillis = 280, delayMillis = 80)),
             exit = fadeOut(tween(160)),
         ) {
-            EnterPortalButton(
-                palette = palette,
-                enabled = !enterAccepted,
-                onEnterPortal = onEnterPortal,
+            Text(
+                text = "Finishing Portal…",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.textMuted,
             )
         }
     }
@@ -741,55 +736,6 @@ private fun BeginInstallButton(
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun EnterPortalButton(
-    palette: PortalPalette,
-    enabled: Boolean,
-    onEnterPortal: () -> Unit,
-) {
-    val tap = remember { MutableInteractionSource() }
-    val pressed by tap.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(
-        targetValue = if (enabled && pressed) 0.985f else 1f,
-        animationSpec = tween(110),
-        label = "enter press",
-    )
-    Box(
-        modifier = Modifier
-            .size(PortalDimens.BeginMaxWidth, PortalDimens.BeginHeight)
-            .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
-            }
-            .clip(RoundedCornerShape(26.dp))
-            .background(PortalColors.Orange)
-            .border(1.dp, palette.buttonOutline, RoundedCornerShape(26.dp))
-            .then(
-                if (enabled) {
-                    Modifier.clickable(
-                        interactionSource = tap,
-                        indication = null,
-                        role = Role.Button,
-                        onClick = {
-                            Log.d(PREVIEW_TAG, "compose-setup-preview: Enter Portal pressed")
-                            onEnterPortal()
-                        },
-                    )
-                } else {
-                    Modifier
-                },
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "Enter Portal",
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = PortalColors.Charcoal,
-        )
     }
 }
 

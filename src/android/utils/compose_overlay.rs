@@ -5,9 +5,10 @@
 //! to GameActivity's own root (directly above the native
 //! `InputEnabledSurfaceView`). Same window, same Activity: no `PopupWindow`,
 //! no second window. The winit event loop is never recreated and the native
-//! surface underneath is never touched: showing the overlay defers the first
-//! resume behind an explicit `Start Plasma` action, and the first
-//! actually-presented desktop frame dismisses it with a fade.
+//! surface underneath is never touched: the overlay is a veil over the native
+//! desktop, which starts through the normal event-loop resume path. The first
+//! actually-presented desktop frame only latches readiness for Compose; the
+//! hierarchy remains until Compose confirms a committed reveal has finished.
 //!
 //! Lifecycle/SavedState/ViewModel ownership comes from the real
 //! AppCompatActivity owners, so Compose follows the Activity lifecycle
@@ -22,11 +23,11 @@
 //! reports that showing failed, in which case startup falls through to the
 //! normal fallback paths).
 //!
-//! Threading: every method here runs on the winit event-loop thread and
-//! forwards to the Android UI thread via `Activity.runOnUiThread` inside the
-//! Kotlin object. The button callback runs on the UI thread and does nothing
-//! but set an atomic and wake the event loop through the already-registered
-//! [`super::webview_handoff`] proxy.
+//! Threading: lifecycle methods here run on the winit event-loop thread and
+//! forward to the Android UI thread via `Activity.runOnUiThread` inside the
+//! Kotlin object. Anland can publish readiness from its render thread through
+//! the cached `AndroidApp`; renderer/Wayland lifecycle work remains owned by
+//! the winit event loop.
 
 use jni::{
     objects::{JClass, JObject, JValue},
@@ -59,9 +60,8 @@ const OVERLAY_DOTTED_CLASS: &str = "app.polarbear.ComposeOverlay";
 /// - `Showing`: Kotlin is constructing the popup; treated as screen-owning,
 ///   but not yet confirmed.
 /// - `Visible`: Kotlin confirmed successful presentation.
-/// - `Dismissing`: fade-out requested; the hierarchy is still alive until
-///   Kotlin confirms removal, so resume/recovery paths must not treat this
-///   as fully gone.
+/// - `Dismissing`: the user committed the final upward reveal; the hierarchy
+///   is still alive until Kotlin confirms that it is completely offscreen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayState {
     Hidden,
@@ -102,14 +102,15 @@ pub fn is_hidden() -> bool {
     state() == OverlayState::Hidden
 }
 
-/// First-resume gate latch: the deferred-Start protocol runs at most once per
-/// process. A failed show still consumes the gate so startup falls through
-/// to the normal fallback paths instead of stalling.
-static GATE_FIRED: AtomicBool = AtomicBool::new(false);
-/// Explicit `Start Plasma` action from the overlay button (consumed once).
-static START_REQUESTED: AtomicBool = AtomicBool::new(false);
-/// Desktop-ready dismissal already sent (sent exactly once per overlay session).
-static READY_NOTIFIED: AtomicBool = AtomicBool::new(false);
+/// First-resume presentation latch. A failed show still consumes the request;
+/// native startup never waits on this bit.
+static SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Authoritative first-presented-valid-KWin-frame latch. This is independent
+/// from setup UI readiness and never dismisses the overlay by itself.
+static DESKTOP_READY: AtomicBool = AtomicBool::new(false);
+/// Final reveal commit acknowledgement, guarded once until either removal or
+/// a recovery re-show returns the veil to `Showing`.
+static REVEAL_COMMITTED: AtomicBool = AtomicBool::new(false);
 
 fn activity_object(android_app: &AndroidApp) -> JObject<'static> {
     unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _jobject) }
@@ -162,24 +163,41 @@ fn clear_exception(env: &mut JNIEnv<'_>, context: &str) {
     }
 }
 
-/// Peek without consuming: has the explicit Start action arrived?
-pub fn has_start_requested() -> bool {
-    START_REQUESTED.load(Ordering::Acquire)
+fn publish_desktop_ready(android_app: &AndroidApp, ready: bool) {
+    super::ndk::run_in_jvm(
+        |env, app| {
+            let activity = activity_object(app);
+            let class = match overlay_class(env, &activity) {
+                Ok(class) => class,
+                Err(error) => {
+                    log::error!("Compose overlay class is unavailable: {error}");
+                    clear_exception(env, "find ComposeOverlay");
+                    return;
+                }
+            };
+            if let Err(error) = env.call_static_method(
+                class,
+                "updateDesktopReady",
+                "(Z)V",
+                &[JValue::Bool(ready.into())],
+            ) {
+                log::error!("Compose overlay updateDesktopReady failed: {error}");
+                clear_exception(env, "updateDesktopReady");
+            }
+        },
+        android_app.clone(),
+    );
 }
 
-/// Consume one explicit `Start Plasma` action from the overlay button.
-pub fn take_start_requested() -> bool {
-    START_REQUESTED.swap(false, Ordering::AcqRel)
-}
-
-/// First-resume gate: show the overlay instead of auto-starting the runtime.
+/// First-resume presentation decision. Showing the overlay does not gate or
+/// defer native startup.
 ///
 /// Returns true only once per process, when nothing is rendering yet: either
 /// the backend still needs setup (WebView) or the Wayland renderer has not
 /// been bound. Later resumes (rotation, suspend/resume, retry) always use the
 /// normal paths so surface lifecycle, input, IME, and recovery keep working.
-pub fn spike_should_gate(renderer_active: bool, is_webview: bool) -> bool {
-    if !SPIKE_USE_COMPOSE || GATE_FIRED.load(Ordering::Acquire) || has_start_requested() {
+pub fn spike_should_show(renderer_active: bool, is_webview: bool) -> bool {
+    if !SPIKE_USE_COMPOSE || SHOW_REQUESTED.load(Ordering::Acquire) {
         return false;
     }
     is_webview || !renderer_active
@@ -195,15 +213,16 @@ pub fn show_compose_overlay(android_app: &AndroidApp) {
         // Re-show during Dismissing (e.g. a runtime failure inside the fade)
         // cancels teardown on the Kotlin side; Showing/Visible need nothing.
         if state() == OverlayState::Dismissing {
+            REVEAL_COMMITTED.store(false, Ordering::Release);
             set_state(OverlayState::Showing);
         } else {
             return;
         }
     } else {
-        GATE_FIRED.store(true, Ordering::Release);
+        SHOW_REQUESTED.store(true, Ordering::Release);
+        REVEAL_COMMITTED.store(false, Ordering::Release);
         set_state(OverlayState::Showing);
     }
-    READY_NOTIFIED.store(false, Ordering::Release);
     if let Ok(mut cached) = cached_app().lock() {
         *cached = Some(android_app.clone());
     }
@@ -236,10 +255,18 @@ pub fn show_compose_overlay(android_app: &AndroidApp) {
     );
     log_blur_support(android_app);
     crate::android::diagnostics::host_event("compose-spike", "overlay-show-requested");
+    // Preserve a readiness signal that raced ahead of Kotlin presentation.
+    // Kotlin stores it even when the ComposeView does not exist yet.
+    if DESKTOP_READY.load(Ordering::Acquire) {
+        publish_desktop_ready(android_app, true);
+    }
 }
 
 /// Update the small overlay state text (`Idle` / `Starting` / `Desktop ready` / `Error`).
 pub fn set_compose_state(android_app: &AndroidApp, state: &str) {
+    if state == STATE_ERROR {
+        DESKTOP_READY.store(false, Ordering::Release);
+    }
     super::ndk::run_in_jvm(
         |env, app| {
             let activity = activity_object(app);
@@ -272,28 +299,33 @@ pub fn set_compose_state(android_app: &AndroidApp, state: &str) {
     );
 }
 
-/// Smallest reliable desktop-ready signal consumer: the compositor calls this
-/// exactly when Portal has produced AND presented a valid KWin desktop frame
-/// (generation-safe readiness + Android EGL present). The overlay updates to
-/// `Desktop ready`, fades away on the UI thread, and removes itself without
-/// touching the native surface.
+/// Latch the authoritative native readiness proof: Portal produced and
+/// presented a valid KWin desktop frame (generation-safe readiness plus the
+/// Android present proof). This only publishes state to Compose. It never
+/// translates, fades, dismisses, or removes the overlay.
 pub fn notify_desktop_ready(android_app: &AndroidApp) {
-    if !is_up() || READY_NOTIFIED.swap(true, Ordering::AcqRel) {
+    if DESKTOP_READY.swap(true, Ordering::AcqRel) {
         return;
     }
-    log::info!("compose-spike: desktop frame presented; overlay to Desktop ready");
-    crate::android::diagnostics::host_event("compose-spike", "desktop-ready overlay-dismissing");
-    set_compose_state(android_app, STATE_READY);
-    // The Kotlin side fades (600ms) then removes the hierarchy and confirms
-    // via nativeOnOverlayRemoved, which is the only transition to Hidden.
-    // Resumes during the fade take the normal native path; recovery paths
-    // still observe the overlay as present until removal is confirmed.
-    set_state(OverlayState::Dismissing);
+    log::info!("compose-spike: native desktop ready latched; overlay remains fully visible");
+    crate::android::diagnostics::host_event("compose-spike", "desktop-ready overlay-retained");
+    publish_desktop_ready(android_app, true);
+}
+
+/// Invalidate readiness when Android destroys the native window. If the
+/// setup veil is still present, it returns to the quiet finishing state until
+/// the replacement surface presents a new valid desktop frame.
+pub fn notify_desktop_suspended(android_app: &AndroidApp) {
+    if !DESKTOP_READY.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    log::info!("compose-spike: native desktop readiness cleared for surface suspend");
+    crate::android::diagnostics::host_event("compose-spike", "desktop-ready-cleared suspend");
+    publish_desktop_ready(android_app, false);
 }
 
 /// Event-loop-free variant for readiness paths that run off the winit thread
-/// (Anland consumer). Uses the activity cached at show time; no-op unless
-/// the overlay currently owns the screen.
+/// (Anland consumer). Uses the activity cached at overlay request time.
 pub fn notify_desktop_ready_cached() {
     let app = cached_app().lock().ok().and_then(|app| app.clone());
     if let Some(app) = app {
@@ -349,17 +381,21 @@ pub fn log_blur_support(android_app: &AndroidApp) -> Option<bool> {
     }
 }
 
-/// JNI callback from the overlay `Start Plasma` button (runs on the UI
-/// thread: only set the action bit and wake the event loop).
+/// JNI acknowledgement that the user committed the final reveal. Rust records
+/// `Dismissing` here; native startup is already running and is not touched.
 #[no_mangle]
-pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnStartPlasma(
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnRevealCommitted(
     _env: JNIEnv,
     _class: JObject,
 ) {
-    START_REQUESTED.store(true, Ordering::Release);
-    log::info!("compose-spike: Start Plasma pressed; waking event loop");
-    crate::android::diagnostics::host_event("compose-spike", "start-pressed");
-    super::webview_handoff::wake_event_loop();
+    if REVEAL_COMMITTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if matches!(state(), OverlayState::Showing | OverlayState::Visible) {
+        set_state(OverlayState::Dismissing);
+        log::info!("compose-spike: final reveal committed; awaiting offscreen removal");
+        crate::android::diagnostics::host_event("compose-spike", "reveal-committed");
+    }
 }
 
 /// JNI acknowledgement: Kotlin successfully created and showed the sibling
@@ -369,19 +405,17 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayShown(
     _env: JNIEnv,
     _class: JObject,
 ) {
-    if READY_NOTIFIED.load(Ordering::Acquire) {
-        // The desktop became ready before presentation completed; dismiss
-        // immediately now that the hierarchy exists.
-        set_state(OverlayState::Dismissing);
-        if let Some(app) = cached_app().lock().ok().and_then(|app| app.clone()) {
-            set_compose_state(&app, STATE_READY);
-        }
-        return;
-    }
     if state() == OverlayState::Showing {
         set_state(OverlayState::Visible);
         log::info!("compose-spike: overlay presentation confirmed");
         crate::android::diagnostics::host_event("compose-spike", "overlay-visible");
+    }
+    if DESKTOP_READY.load(Ordering::Acquire) {
+        // A native frame can arrive between the show request and this
+        // acknowledgement. Keep the overlay visible and publish the latch.
+        if let Some(app) = cached_app().lock().ok().and_then(|app| app.clone()) {
+            publish_desktop_ready(&app, true);
+        }
     }
 }
 
@@ -408,8 +442,8 @@ fn on_overlay_show_failed(reason: &str) {
         &format!("overlay-show-failed reason={reason}"),
     );
     if state() == OverlayState::Showing {
-        // The gate stays consumed: the next resume/user event takes the
-        // normal (HTML WebView / Wayland) path instead of stalling startup.
+        // The show request stays consumed; native startup has already taken
+        // the normal WebView/Wayland path and never waits on the overlay.
         set_state(OverlayState::Hidden);
     }
     super::webview_handoff::wake_event_loop();
@@ -423,6 +457,7 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayRemoved(
     _class: JObject,
 ) {
     set_state(OverlayState::Hidden);
+    REVEAL_COMMITTED.store(false, Ordering::Release);
     log::info!("compose-spike: overlay hierarchy removed; native surface undisturbed");
     crate::android::diagnostics::host_event("compose-spike", "overlay-removed");
 }

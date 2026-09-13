@@ -22,8 +22,9 @@ package app.polarbear
 // scroll and generic motion to Compose; once removed,
 // GameActivity/android-activity/Winit receive native input normally.
 //
-// Removal removes the frame and disposes the composition on the UI thread,
-// leaving the native surface visible and operating normally.
+// The final Compose gesture translates the complete opaque veil while this
+// host becomes transparent, exposing the live SurfaceView directly. Removal
+// happens only after the veil is completely offscreen.
 
 import android.app.Activity
 import android.content.Context
@@ -51,12 +52,15 @@ object ComposeOverlay {
         }
     }
 
-    @JvmStatic external fun nativeOnStartPlasma()
+    @JvmStatic external fun nativeOnRevealCommitted()
     @JvmStatic external fun nativeOnOverlayRemoved()
     @JvmStatic external fun nativeOnOverlayShown()
     @JvmStatic external fun nativeOnOverlayShowFailed(reason: String)
 
-    private val state = mutableStateOf(STATE_IDLE)
+    // Native readiness is independent of the fake setup phase. A KWin frame
+    // can latch this before the Compose hierarchy has finished presenting.
+    private val desktopReadyLatched = AtomicBoolean(false)
+    private val desktopReadyState = mutableStateOf(false)
     // First app-owned frame handshake for the system splash: set on the
     // Compose content pre-draw (CONFIGURE and header measured), or when
     // showing fails so the fallback screen can draw instead. PortalActivity
@@ -71,9 +75,8 @@ object ComposeOverlay {
     // systemSplashRemovedState; the exit callback runs on the main thread.
     private val systemSplashRemoved = AtomicBoolean(false)
     private val systemSplashRemovedState = mutableStateOf(false)
-    // Begin Install guard: the Start signal is accepted exactly once per
-    // overlay session so a double-tap cannot double-start the runtime.
-    private val startRequested = AtomicBoolean(false)
+    private val revealCommitted = AtomicBoolean(false)
+    private val removalRequested = AtomicBoolean(false)
     private var container: FrameLayout? = null
     private var composeView: ComposeView? = null
     private var launchIntroResolved = false
@@ -104,40 +107,23 @@ object ComposeOverlay {
         }
     }
 
-    /** Update the small state text. "Desktop ready" fades the overlay out. */
-    @JvmStatic fun updateState(value: String) {
-        val view = composeView
-        if (view != null) {
-            view.post {
-                state.value = value
-                if (value == STATE_READY) {
-                    fadeAndRemove()
-                }
-            }
-        } else {
-            state.value = value
+    /** Publish native desktop readiness without changing overlay visibility. */
+    @JvmStatic fun updateDesktopReady(ready: Boolean) {
+        desktopReadyLatched.set(ready)
+        composeView?.post {
+            desktopReadyState.value = desktopReadyLatched.get()
         }
     }
 
-    /**
-     * SPIKE-ONLY host-validation entry: the CONFIGURE Begin Install button
-     * calls this (via PortalSetupScreen) to start Portal/Plasma beneath the
-     * overlay, bypassing provisioning. Accepted once; the overlay itself is
-     * NOT removed here — removal still happens only on the existing
-     * STATE_READY / "Desktop ready" signal.
-     */
-    private fun onBeginInstallPressed() {
-        if (!startRequested.compareAndSet(false, true)) {
-            Log.i(TAG, "Begin Install ignored: start already requested")
-            return
-        }
-        Log.i(TAG, "spike host validation: Begin Install bypasses provisioning; starting Portal beneath overlay")
-        try {
-            nativeOnStartPlasma()
-        } catch (_: UnsatisfiedLinkError) {
-            Log.e(TAG, "nativeOnStartPlasma unavailable")
-        } catch (e: Exception) {
-            Log.e(TAG, "nativeOnStartPlasma failed", e)
+    /** Retained recovery-state bridge; setup progress itself stays Compose-local. */
+    @JvmStatic fun updateState(value: String) {
+        when (value) {
+            STATE_READY -> updateDesktopReady(true)
+            STATE_ERROR -> {
+                updateDesktopReady(false)
+                revealCommitted.set(false)
+                composeView?.post { container?.setBackgroundColor(PORTAL_CHARCOAL) }
+            }
         }
     }
 
@@ -168,10 +154,11 @@ object ComposeOverlay {
 
     private fun doShow(activity: Activity) {
         if (container != null) {
-            // Re-show during a fade (e.g. recovery racing dismissal):
-            // cancel teardown, restore opacity, re-acknowledge.
+            // Recovery racing a committed reveal: restore a solid host
+            // immediately while Compose returns its veil to rest.
             container?.animate()?.cancel()
             container?.alpha = 1f
+            container?.setBackgroundColor(PORTAL_CHARCOAL)
             ackShown()
             return
         }
@@ -182,13 +169,15 @@ object ComposeOverlay {
             return
         }
         try {
+            revealCommitted.set(false)
+            removalRequested.set(false)
             val frame = FrameLayout(activity).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
                 // Same charcoal as the splash and the setup UI from pixel one.
-                setBackgroundColor(0xFF191B1C.toInt())
+                setBackgroundColor(PORTAL_CHARCOAL)
                 isClickable = true
                 isFocusable = true
                 isFocusableInTouchMode = true
@@ -205,9 +194,18 @@ object ComposeOverlay {
                 PortalLaunchTransition(
                     playIntro = !launchIntroResolved,
                     splashRemoved = systemSplashRemovedState.value,
+                    desktopReady = desktopReadyState.value,
                     onContentPreDraw = { markFirstFrameReady() },
                     onIntroResolved = { launchIntroResolved = true },
-                    onBeginInstall = { onBeginInstallPressed() },
+                    onRevealEligibilityChanged = { eligible ->
+                        // Compose always paints a complete opaque veil. The
+                        // parent may become transparent only after both clocks
+                        // are ready, so translating Compose unveils the actual
+                        // SurfaceView rather than a stationary charcoal frame.
+                        frame.setBackgroundColor(if (eligible) 0x00000000 else PORTAL_CHARCOAL)
+                    },
+                    onRevealCommitted = { acknowledgeRevealCommitted() },
+                    onRevealFinished = { removeNow() },
                 )
             }
             // Sibling above the native SurfaceView in the SAME window: no
@@ -222,6 +220,9 @@ object ComposeOverlay {
             frame.addView(view)
             container = frame
             composeView = view
+            // Catch readiness that arrived before or while the Compose
+            // hierarchy was being attached, always from this UI thread.
+            desktopReadyState.value = desktopReadyLatched.get()
             frame.alpha = 1f
             Log.i(TAG, "overlay shown as GameActivity sibling; Compose-local launch treatment")
             ackShown()
@@ -255,17 +256,20 @@ object ComposeOverlay {
         }
     }
 
-    private fun fadeAndRemove() {
-        val frame = container ?: return
+    private fun acknowledgeRevealCommitted() {
+        if (!revealCommitted.compareAndSet(false, true)) return
+        Log.i(TAG, "final upward reveal committed; native desktop was already ready")
         try {
-            frame.animate().alpha(0f).setDuration(600).withEndAction { removeNow() }.start()
+            nativeOnRevealCommitted()
+        } catch (_: UnsatisfiedLinkError) {
+            Log.e(TAG, "nativeOnRevealCommitted unavailable")
         } catch (e: Exception) {
-            Log.e(TAG, "overlay fade failed; removing immediately", e)
-            removeNow()
+            Log.e(TAG, "nativeOnRevealCommitted failed", e)
         }
     }
 
     private fun removeNow() {
+        if (!removalRequested.compareAndSet(false, true)) return
         try {
             val frame = container
             (frame?.parent as? ViewGroup)?.removeView(frame)
@@ -286,4 +290,6 @@ object ComposeOverlay {
             }
         }
     }
+
+    private val PORTAL_CHARCOAL = 0xFF191B1C.toInt()
 }

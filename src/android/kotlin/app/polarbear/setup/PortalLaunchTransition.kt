@@ -67,9 +67,12 @@ private val ApertureEase = CubicBezierEasing(0.58f, 0f, 0.30f, 1f)
 fun PortalLaunchTransition(
     playIntro: Boolean,
     splashRemoved: Boolean,
+    desktopReady: Boolean,
     onContentPreDraw: () -> Unit,
     onIntroResolved: () -> Unit,
-    onBeginInstall: () -> Unit,
+    onRevealEligibilityChanged: (Boolean) -> Unit,
+    onRevealCommitted: () -> Unit,
+    onRevealFinished: () -> Unit,
 ) {
     val view = LocalView.current
     val lifecycle = (LocalContext.current as LifecycleOwner).lifecycle
@@ -77,6 +80,7 @@ fun PortalLaunchTransition(
     var ready by remember { mutableStateOf(false) }
     var rootBounds by remember { mutableStateOf(Rect.Zero) }
     var headerBounds by remember { mutableStateOf(Rect.Zero) }
+    var setupReady by remember { mutableStateOf(false) }
     val clock = remember { Animatable(0f) }
     val currentPreDraw by rememberUpdatedState(onContentPreDraw)
     val currentResolved by rememberUpdatedState(onIntroResolved)
@@ -152,14 +156,23 @@ fun PortalLaunchTransition(
             }
     } else Modifier
 
-    Box(Modifier.fillMaxSize().background(PortalColors.Charcoal).onGloballyPositioned {
-        rootBounds = it.boundsInRoot()
-    }.then(guard)) {
+    PortalRevealVeil(
+        eligible = resolved && setupReady && desktopReady,
+        modifier = Modifier
+            .fillMaxSize()
+            .background(PortalColors.Charcoal)
+            .onGloballyPositioned { rootBounds = it.boundsInRoot() }
+            .then(guard),
+        onEligibilityChanged = onRevealEligibilityChanged,
+        onCommitted = onRevealCommitted,
+        onFinished = onRevealFinished,
+    ) {
         // Keep this call at the same composition slot before/during/after intro:
         // no second screen, second fade, duplicated state or persistent capture.
         Box(Modifier.fillMaxSize().then(treatment)) {
             PortalSetupScreen(
-                onBeginInstall = { if (!active) onBeginInstall() },
+                desktopReady = desktopReady,
+                onSetupReady = { setupReady = true },
                 launchMarkModifier = Modifier.onGloballyPositioned {
                     headerBounds = it.boundsInRoot()
                 }.then(if (active) Modifier.drawWithContent { } else Modifier),

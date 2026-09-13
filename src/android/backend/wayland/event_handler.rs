@@ -879,7 +879,8 @@ fn complete_kwin_android_presentation(
             "egl-android-display-present",
             Some(sample.timestamp_ns),
         );
-        // SPIKE compose-setup: first presented desktop frame dismisses the overlay.
+        // The authoritative native-ready proof is latched for Compose; the
+        // still-visible setup veil is removed only after its final swipe.
         crate::android::utils::compose_overlay::notify_desktop_ready(&backend.android_app);
     }
 }
@@ -913,7 +914,8 @@ fn complete_kwin_presentation_without_android_timestamp(
             "egl-swap-and-wayland-feedback-no-frame-timestamp",
             None,
         );
-        // SPIKE compose-setup: first presented desktop frame dismisses the overlay.
+        // The authoritative native-ready proof is latched for Compose; the
+        // still-visible setup veil is removed only after its final swipe.
         crate::android::utils::compose_overlay::notify_desktop_ready(&backend.android_app);
     }
 }
