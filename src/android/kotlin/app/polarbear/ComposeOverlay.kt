@@ -102,6 +102,7 @@ object ComposeOverlay {
     private val systemSplashRemovedState = mutableStateOf(false)
     private val revealCommitted = AtomicBoolean(false)
     private val removalRequested = AtomicBoolean(false)
+    private val recoveryDismissRequested = AtomicBoolean(false)
     private val readyPreludeActive = AtomicBoolean(false)
     private var container: FrameLayout? = null
     private var composeView: ComposeView? = null
@@ -214,7 +215,43 @@ object ComposeOverlay {
         }
     }
 
+    /**
+     * Remove the Compose veil immediately so the existing runtime-error page
+     * can present its Retry Plasma action after a committed install fails to
+     * bind or resume Wayland. No native surface is recreated or touched.
+     */
+    @JvmStatic fun dismissForRuntimeRecovery(activity: Activity) {
+        recoveryDismissRequested.set(true)
+        activity.runOnUiThread {
+            if (!recoveryDismissRequested.compareAndSet(true, false)) return@runOnUiThread
+            revealCommitted.set(false)
+            val frame = container
+            if (frame == null) {
+                acknowledgeOverlayRemoved()
+                return@runOnUiThread
+            }
+            frame.animate()?.cancel()
+            frame.alpha = 1f
+            // removeNow is guarded so the recovery path cannot race a final
+            // reveal callback that was queued on this same UI thread.
+            removalRequested.set(false)
+            removeNow()
+        }
+    }
+
     private fun doShow(activity: Activity, returnMode: Boolean) {
+        // A recovery dismissal may have been requested before a queued show
+        // runnable reached the UI thread. Consume it rather than attaching a
+        // new veil after the runtime error page was selected.
+        if (recoveryDismissRequested.compareAndSet(true, false)) {
+            if (container == null) {
+                acknowledgeOverlayRemoved()
+            } else {
+                removalRequested.set(false)
+                removeNow()
+            }
+            return
+        }
         if (container != null) {
             // Recovery racing a committed reveal: restore a solid host
             // immediately while Compose returns its veil to rest.
@@ -325,6 +362,7 @@ object ComposeOverlay {
             composeView = null
             readyPreludeActive.set(false)
             returnMode = false
+            recoveryDismissRequested.set(false)
             nativeOnOverlayShowFailed(reason)
         } catch (_: UnsatisfiedLinkError) {
         } catch (_: Exception) {
@@ -359,12 +397,17 @@ object ComposeOverlay {
             composeView = null
             readyPreludeActive.set(false)
             returnMode = false
+            recoveryDismissRequested.set(false)
             Log.i(TAG, "overlay removed; native surface undisturbed")
-            try {
-                nativeOnOverlayRemoved()
-            } catch (_: UnsatisfiedLinkError) {
-            } catch (_: Exception) {
-            }
+            acknowledgeOverlayRemoved()
+        }
+    }
+
+    private fun acknowledgeOverlayRemoved() {
+        try {
+            nativeOnOverlayRemoved()
+        } catch (_: UnsatisfiedLinkError) {
+        } catch (_: Exception) {
         }
     }
 

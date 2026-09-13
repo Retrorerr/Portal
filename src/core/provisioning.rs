@@ -11,8 +11,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Write},
-    path::Path,
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -30,6 +30,10 @@ pub const PARTIAL_ARCHIVE: &str = "portal-runtime.tar.xz.part";
 /// before this checkpoint are eligible for a Range resume.
 const PARTIAL_CHECKPOINT: &str = "portal-runtime.tar.xz.part.offset";
 const INSTALLATION_MARKER: &str = "portal-installation-v1";
+const PREVIOUS_RUNTIME: &str = "runtime-B.previous";
+const PREVIOUS_PENDING_PREFIX: &str = "runtime-B.previous.pending";
+const INVALID_RUNTIME_PREFIX: &str = "runtime-B.invalid";
+const INVALID_PREVIOUS_PREFIX: &str = "runtime-B.previous.invalid";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvisioningPhase {
@@ -274,8 +278,13 @@ impl RuntimeArtifact {
     }
 
     pub fn verify(&self, archive: &Path) -> anyhow::Result<()> {
+        let metadata = fs::symlink_metadata(archive)?;
         anyhow::ensure!(
-            fs::metadata(archive)?.len() == self.compressed_bytes,
+            metadata.file_type().is_file(),
+            "Runtime archive is not a regular file"
+        );
+        anyhow::ensure!(
+            metadata.len() == self.compressed_bytes,
             "Runtime download size mismatch"
         );
         let mut file = fs::File::open(archive)?;
@@ -311,10 +320,12 @@ impl RuntimeArtifact {
         report: &impl Fn(String),
     ) -> anyhow::Result<()> {
         self.verify(archive)?;
-        if staging.exists() {
-            fs::remove_dir_all(staging)?;
+        if path_exists(staging) {
+            remove_path_synced(staging)?;
         }
         fs::create_dir_all(staging)?;
+        sync_parent_directory(staging)?;
+        sync_directory(staging)?;
         let decoder = xz2::read::XzDecoder::new(fs::File::open(archive)?);
         let mut tar = tar::Archive::new(decoder);
         let mut count = 0u64;
@@ -332,6 +343,10 @@ impl RuntimeArtifact {
             &staging.join(IMAGE_READY_MARKER),
             self.identity().as_bytes(),
         )?;
+        // The marker rename is durable in the staging directory. Sync the
+        // directory entry which makes the staging tree discoverable after a
+        // sudden stop as well.
+        sync_parent_directory(staging)?;
         Ok(())
     }
 
@@ -374,6 +389,12 @@ impl RuntimeArtifact {
         report: impl Fn(ProvisioningSnapshot),
     ) -> anyhow::Result<()> {
         let root = base.join("runtime-B");
+        fs::create_dir_all(base)?;
+        // A previous promotion may have stopped after parking a backup but
+        // before the next rename. Resolve only states whose ownership is
+        // proven by the runtime contents; unknown trees are quarantined, not
+        // overwritten.
+        self.recover_promotion_state(base, &root)?;
         // runtime-B is mutable user state. Once it is a complete Portal
         // installation, keep it across APK/image revisions.
         if self.is_bootable(&root) {
@@ -403,14 +424,25 @@ impl RuntimeArtifact {
             "Preparing Portal's Debian runtime…",
         );
 
-        fs::create_dir_all(base)?;
         let staging = base.join("runtime-B.staging");
 
-        // A previous attempt may have crashed between `rename(root, previous)`
-        // and `rename(staging, root)`. Promote a fully validated image without
-        // downloading again. Legacy two-line staging markers are accepted only
-        // when the exact image itself still validates.
-        if self.is_staged_image(&staging) {
+        // A previous attempt may have crashed between extraction validation
+        // and the IMAGE_READY marker write, or between `rename(root,
+        // previous)` and `rename(staging, root)`. An exact image validation is
+        // sufficient to recreate the disposable staging marker; promote a
+        // fully validated image without downloading or extracting again.
+        let staging_ready = if self.is_staged_image(&staging) {
+            true
+        } else if self.validate_image(&staging).is_ok() {
+            write_atomic(
+                &staging.join(IMAGE_READY_MARKER),
+                self.identity().as_bytes(),
+            )?;
+            true
+        } else {
+            false
+        };
+        if staging_ready {
             self.emit(
                 &report,
                 ProvisioningPhase::Promoting,
@@ -418,7 +450,9 @@ impl RuntimeArtifact {
                 "Recovering the validated Debian runtime…",
             );
             self.promote_staging(base, &root, &staging)?;
-            let _ = fs::remove_file(base.join("portal-runtime.tar.xz"));
+            if let Err(error) = remove_path_synced(&base.join("portal-runtime.tar.xz")) {
+                log::warn!("Could not remove verified Portal runtime archive: {error}");
+            }
             self.emit(
                 &report,
                 ProvisioningPhase::Configuring,
@@ -429,8 +463,8 @@ impl RuntimeArtifact {
         }
 
         // Incomplete staging is never launchable and extraction replaces it.
-        if staging.exists() {
-            fs::remove_dir_all(&staging)?;
+        if path_exists(&staging) {
+            remove_path_synced(&staging)?;
         }
 
         let archive = base.join("portal-runtime.tar.xz");
@@ -517,7 +551,7 @@ impl RuntimeArtifact {
                 // The archive is disposable only after the live image has
                 // proved valid. Failure to remove it is harmless: next launch
                 // verifies and reuses it.
-                if let Err(error) = fs::remove_file(&archive) {
+                if let Err(error) = remove_path_synced(&archive) {
                     log::warn!("Could not remove verified Portal runtime archive: {error}");
                 }
                 self.emit(
@@ -562,18 +596,186 @@ impl RuntimeArtifact {
             || (self.validate_image(staging).is_ok() && self.is_legacy_runtime(staging))
     }
 
-    fn promote_staging(&self, base: &Path, root: &Path, staging: &Path) -> anyhow::Result<()> {
-        // The staging tree has already passed exact image validation. Keep the
-        // old root in `.previous` until the new rename succeeds; never delete
-        // the known-good root before its replacement proves out.
-        if root.exists() {
-            let previous = base.join("runtime-B.previous");
-            if previous.exists() {
-                fs::remove_dir_all(&previous)?;
-            }
-            fs::rename(root, &previous)?;
+    /// A runtime is known-good for rotation when its contents are a valid
+    /// Debian runtime, even if a crash happened while its marker was being
+    /// migrated. This is intentionally broader than `is_bootable`: retaining
+    /// a valid user-owned tree is safer than treating a missing marker as
+    /// permission to delete it.
+    fn is_known_valid_runtime(&self, root: &Path) -> bool {
+        path_exists(root) && Self::validate_debian_layout(root).is_ok()
+    }
+
+    fn pending_backups(&self, base: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        if !path_exists(base) {
+            return Ok(Vec::new());
         }
-        fs::rename(staging, root)?;
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(base)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .is_some_and(|name| name.starts_with(PREVIOUS_PENDING_PREFIX))
+            {
+                paths.push(entry.path());
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn quarantined_recovery_paths(&self, base: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        if !path_exists(base) {
+            return Ok(Vec::new());
+        }
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(base)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name.to_str().is_some_and(|name| {
+                name.starts_with(INVALID_RUNTIME_PREFIX)
+                    || name.starts_with(INVALID_PREVIOUS_PREFIX)
+            }) {
+                paths.push(entry.path());
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    }
+
+    /// Quarantined trees are disposable Portal-owned state. Once a new live
+    /// root validates, remove them so a failed replacement cannot gradually
+    /// consume the storage needed for the next retry. A known-good runtime is
+    /// never placed under these prefixes, and this function is never called
+    /// until the live root itself validates.
+    fn cleanup_quarantined_recovery_paths(
+        &self,
+        base: &Path,
+        root: &Path,
+    ) -> anyhow::Result<()> {
+        if !self.is_known_valid_runtime(root) {
+            return Ok(());
+        }
+        for path in self.quarantined_recovery_paths(base)? {
+            remove_path_synced(&path)?;
+        }
+        Ok(())
+    }
+
+    /// Recover the only ambiguous promotion window: an old `.previous` was
+    /// parked under a pending name, but the process stopped before the next
+    /// rename. Never replace an existing valid backup with an unknown tree.
+    fn recover_promotion_state(&self, base: &Path, root: &Path) -> anyhow::Result<()> {
+        let pending = self.pending_backups(base)?;
+        if !self.is_known_valid_runtime(root) {
+            return Ok(());
+        }
+        if pending.is_empty() {
+            self.cleanup_quarantined_recovery_paths(base, root)?;
+            return Ok(());
+        }
+
+        let previous = base.join(PREVIOUS_RUNTIME);
+        let mut previous_valid = self.is_known_valid_runtime(&previous);
+        if path_exists(&previous) && !previous_valid {
+            quarantine_path(base, &previous, INVALID_PREVIOUS_PREFIX)?;
+        }
+
+        let valid_pending = pending
+            .iter()
+            .find(|path| self.is_known_valid_runtime(path.as_path()))
+            .cloned();
+        let mut restored_pending = false;
+        if !previous_valid {
+            if let Some(path) = valid_pending.as_ref() {
+                rename_synced(path, &previous)?;
+                previous_valid = true;
+                restored_pending = true;
+            }
+        }
+
+        // Once the live root and `.previous` are both known-valid, any
+        // additional parked copy is disposable recovery state. Unknown
+        // pending paths are quarantined rather than silently deleted.
+        for path in pending {
+            if restored_pending && valid_pending.as_ref() == Some(&path) {
+                continue;
+            }
+            if self.is_known_valid_runtime(&path) {
+                if previous_valid {
+                    remove_path_synced(&path)?;
+                }
+            } else if path_exists(&path) {
+                quarantine_path(base, &path, INVALID_PREVIOUS_PREFIX)?;
+            }
+        }
+        self.cleanup_quarantined_recovery_paths(base, root)?;
+        Ok(())
+    }
+
+    fn cleanup_pending_backups(
+        &self,
+        base: &Path,
+        root: &Path,
+        previous: &Path,
+    ) -> anyhow::Result<()> {
+        if !self.is_known_valid_runtime(root) || !self.is_known_valid_runtime(previous) {
+            return Ok(());
+        }
+        for path in self.pending_backups(base)? {
+            remove_path_synced(&path)?;
+        }
+        self.cleanup_quarantined_recovery_paths(base, root)?;
+        Ok(())
+    }
+
+    fn promote_staging(&self, base: &Path, root: &Path, staging: &Path) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.is_staged_image(staging),
+            "Refusing to promote an unvalidated runtime staging tree"
+        );
+
+        // First converge any earlier interrupted rotation. This can restore a
+        // valid pending backup, but it never overwrites a valid `.previous`.
+        self.recover_promotion_state(base, root)?;
+        let previous = base.join(PREVIOUS_RUNTIME);
+
+        // An invalid backup is disposable but still kept for diagnostics. It
+        // must not block promotion or be mistaken for the last recovery root.
+        if path_exists(&previous) && !self.is_known_valid_runtime(&previous) {
+            quarantine_path(base, &previous, INVALID_PREVIOUS_PREFIX)?;
+        }
+
+        if path_exists(root) {
+            if self.is_known_valid_runtime(root) {
+                if path_exists(&previous) {
+                    // Park the old recovery root under a unique name first.
+                    // A crash here leaves the valid current root untouched;
+                    // the next launch can restore or clean it deterministically.
+                    let pending = next_available_path(base, PREVIOUS_PENDING_PREFIX);
+                    rename_synced(&previous, &pending)?;
+                }
+                // The current root is known-valid, so it is safe to make it
+                // the recovery root. The destination was made vacant above.
+                rename_synced(root, &previous)?;
+            } else {
+                // Never let an untrusted current tree replace a valid backup.
+                // Quarantine it under a unique name and leave `.previous`
+                // alone.
+                quarantine_path(base, root, INVALID_RUNTIME_PREFIX)?;
+            }
+        }
+
+        anyhow::ensure!(
+            !path_exists(root),
+            "Runtime promotion destination is still occupied"
+        );
+        rename_synced(staging, root)?;
+        anyhow::ensure!(
+            self.is_staged_image(root),
+            "Promoted runtime staging tree failed post-rename validation"
+        );
+        self.cleanup_pending_backups(base, root, &previous)?;
         Ok(())
     }
 
@@ -584,42 +786,47 @@ impl RuntimeArtifact {
         checkpoint: &Path,
     ) -> anyhow::Result<()> {
         if self.verify(archive).is_ok() {
-            let _ = fs::remove_file(partial);
-            let _ = fs::remove_file(checkpoint);
+            remove_path_synced(partial)?;
+            remove_path_synced(checkpoint)?;
             return Ok(());
         }
-        if archive.exists() {
-            let length = fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
-            if length > 0 && length < self.compressed_bytes && !partial.exists() {
-                fs::rename(archive, partial)?;
+        if path_exists(archive) {
+            let length = regular_file_length(archive).unwrap_or(0);
+            if length > 0 && length < self.compressed_bytes && !path_exists(partial) {
+                rename_synced(archive, partial)?;
                 // Older Portal builds used the final archive name while
                 // downloading and synced the file at the end of each
                 // response. Carry that resumable prefix forward; current
                 // writes add a stricter checkpoint after every synced window.
                 write_atomic(checkpoint, length.to_string().as_bytes())?;
             } else {
-                let _ = fs::remove_file(archive);
+                remove_path_synced(archive)?;
             }
         }
-        if let Ok(length) = fs::metadata(partial).map(|m| m.len()) {
+        if let Some(length) = regular_file_length(partial) {
             if length > self.compressed_bytes {
-                fs::remove_file(partial)?;
-                let _ = fs::remove_file(checkpoint);
+                remove_path_synced(partial)?;
+                remove_path_synced(checkpoint)?;
             } else if length == self.compressed_bytes {
                 // A full-size `.part` is still untrusted. Reuse it only when
                 // the exact pinned digest proves it is the archive; otherwise
                 // discard the ambiguous full-size prefix before requesting a
                 // new range.
                 if self.verify(partial).is_ok() {
-                    fs::rename(partial, archive)?;
-                    let _ = fs::remove_file(checkpoint);
+                    rename_synced(partial, archive)?;
+                    remove_path_synced(checkpoint)?;
                 } else {
-                    fs::remove_file(partial)?;
-                    let _ = fs::remove_file(checkpoint);
+                    remove_path_synced(partial)?;
+                    remove_path_synced(checkpoint)?;
                 }
             }
+        } else if path_exists(partial) {
+            // Do not let a dangling symlink, directory, or other unexpected
+            // node reach OpenOptions in the downloader.
+            remove_path_synced(partial)?;
+            remove_path_synced(checkpoint)?;
         } else {
-            let _ = fs::remove_file(checkpoint);
+            remove_path_synced(checkpoint)?;
         }
         Ok(())
     }
@@ -639,9 +846,19 @@ impl RuntimeArtifact {
             5,
             format!("Downloading Debian runtime (attempt {attempt}/3)…"),
         );
-        let actual_length = fs::metadata(partial)
-            .map(|m| m.len().min(self.compressed_bytes))
-            .unwrap_or(0);
+        let mut actual_length = regular_file_length(partial).unwrap_or(0);
+        if path_exists(partial) && regular_file_length(partial).is_none() {
+            remove_path_synced(partial)?;
+            remove_path_synced(checkpoint)?;
+            actual_length = 0;
+        } else if actual_length > self.compressed_bytes {
+            // A full-size or overlong `.part` is never a valid resume prefix.
+            // Discard only this disposable download state; the runtime roots
+            // are not touched.
+            remove_path_synced(partial)?;
+            remove_path_synced(checkpoint)?;
+            actual_length = 0;
+        }
         let checkpoint_length = fs::read_to_string(checkpoint)
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
@@ -660,7 +877,7 @@ impl RuntimeArtifact {
         }
         let offset = checkpoint_length;
         if offset == 0 {
-            let _ = fs::remove_file(checkpoint);
+            remove_path_synced(checkpoint)?;
         }
         let mut request = client.get(&self.url);
         if offset > 0 {
@@ -770,8 +987,8 @@ impl RuntimeArtifact {
         write_atomic(&checkpoint, downloaded.to_string().as_bytes())?;
         if let Some(expected_end) = ranged_end {
             if downloaded > expected_end {
-                let _ = fs::remove_file(partial);
-                let _ = fs::remove_file(checkpoint);
+                let _ = remove_path_synced(partial);
+                let _ = remove_path_synced(checkpoint);
                 anyhow::bail!("Server returned more bytes than its Content-Range proved");
             }
             anyhow::ensure!(
@@ -780,10 +997,10 @@ impl RuntimeArtifact {
             );
         }
         anyhow::ensure!(
-            fs::metadata(partial)?.len() <= self.compressed_bytes,
+            regular_file_length(partial).unwrap_or(0) <= self.compressed_bytes,
             "Runtime partial download exceeds expected size"
         );
-        if fs::metadata(partial)?.len() == self.compressed_bytes {
+        if regular_file_length(partial).unwrap_or(0) == self.compressed_bytes {
             self.emit(
                 report,
                 ProvisioningPhase::Downloading,
@@ -793,15 +1010,15 @@ impl RuntimeArtifact {
             // A full-size prefix is still not a final archive until this verify
             // succeeds. Move it atomically only after the exact check.
             if let Err(error) = self.verify(partial) {
-                let _ = fs::remove_file(partial);
-                let _ = fs::remove_file(checkpoint);
+                let _ = remove_path_synced(partial);
+                let _ = remove_path_synced(checkpoint);
                 return Err(error);
             }
-            if archive.exists() {
-                fs::remove_file(archive)?;
+            if path_exists(archive) {
+                remove_path_synced(archive)?;
             }
-            fs::rename(partial, archive)?;
-            let _ = fs::remove_file(checkpoint);
+            rename_synced(partial, archive)?;
+            remove_path_synced(checkpoint)?;
         }
         Ok(())
     }
@@ -815,7 +1032,95 @@ fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
 }
 
+fn path_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn regular_file_length(path: &Path) -> Option<u64> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    Some(metadata.len())
+}
+
+fn sync_directory(directory: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(directory)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+    }
+    Ok(())
+}
+
+/// Persist the directory entry containing path. Android/Linux use a real
+/// directory fsync; Windows has no portable equivalent for this host-side
+/// test path, so the helper is deliberately a no-op there.
+fn sync_parent_directory(path: &Path) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    sync_directory(parent)
+}
+
+fn rename_synced(from: &Path, to: &Path) -> anyhow::Result<()> {
+    fs::rename(from, to)?;
+    sync_parent_directory(from)?;
+    sync_parent_directory(to)?;
+    Ok(())
+}
+
+fn remove_path_synced(path: &Path) -> anyhow::Result<()> {
+    if !path_exists(path) {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    sync_parent_directory(path)
+}
+
+fn next_available_path(base: &Path, prefix: &str) -> PathBuf {
+    let first = base.join(prefix);
+    if !path_exists(&first) {
+        return first;
+    }
+    for index in 1u64.. {
+        let candidate = base.join(format!("{prefix}.{index}"));
+        if !path_exists(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("exhausted Portal recovery path names")
+}
+
+fn quarantine_path(base: &Path, source: &Path, prefix: &str) -> anyhow::Result<()> {
+    if !path_exists(source) {
+        return Ok(());
+    }
+    let destination = next_available_path(base, prefix);
+    rename_synced(source, &destination)
+}
+
 fn write_atomic(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    write_atomic_with(path, contents, replace_atomic)
+}
+
+fn write_atomic_with<F>(
+    path: &Path,
+    contents: &[u8],
+    replace: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Path has no parent: {}", path.display()))?;
@@ -828,13 +1133,259 @@ fn write_atomic(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     let mut file = fs::File::create(&temporary)?;
     file.write_all(contents)?;
     file.sync_all()?;
-    // Android filesystems generally replace atomically. Windows does not allow
-    // rename-over-existing, so remove only this disposable marker target if
-    // necessary; a crash in that tiny gap leaves an incomplete, non-bootable
-    // installation which the next launch repairs.
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(&temporary, path)?;
+    // Unix rename replaces the destination as one directory operation. The
+    // old marker therefore remains visible if the process dies before this
+    // point, and the new marker is the only visible value afterwards. The
+    // Windows fallback is isolated because its rename contract differs.
+    replace(&temporary, path)?;
+    sync_parent_directory(path)?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_atomic(temporary: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(temporary, destination)
+}
+
+#[cfg(windows)]
+fn replace_atomic(temporary: &Path, destination: &Path) -> io::Result<()> {
+    // Windows does not provide the same rename-over-existing behavior used by
+    // Android/Linux. This branch is only for host tests and development; the
+    // production Android path above never unlinks the old marker first.
+    if fs::symlink_metadata(destination).is_ok() {
+        fs::remove_file(destination)?;
+    }
+    fs::rename(temporary, destination)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(directory: &Path, version: &str) -> (RuntimeArtifact, PathBuf) {
+        let archive = directory.join(format!("{version}.tar.xz"));
+        let encoder = xz2::write::XzEncoder::new(fs::File::create(&archive).unwrap(), 1);
+        let mut tar = tar::Builder::new(encoder);
+        for (path, value) in [
+            (IMAGE_MARKER, version),
+            ("usr/lib/os-release", "ID=debian\nVERSION_ID=\"13\"\n"),
+            ("usr/bin/dpkg", "binary"),
+            ("usr/bin/apt", "binary"),
+            ("usr/bin/bash", "binary"),
+            ("usr/bin/kwin_wayland", "binary"),
+            ("usr/bin/plasmashell", "binary"),
+            ("usr/bin/python3", "binary"),
+            ("var/lib/dpkg/status", "Package: dpkg\n"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(value.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, path, value.as_bytes()).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap();
+        let bytes = fs::read(&archive).unwrap();
+        (
+            RuntimeArtifact {
+                version: version.to_string(),
+                url: "http://127.0.0.1:1/not-used".to_string(),
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                compressed_bytes: bytes.len() as u64,
+                source_commit: None,
+            },
+            archive,
+        )
+    }
+
+    fn extract_image(artifact: &RuntimeArtifact, archive: &Path, root: &Path) {
+        artifact.extract(archive, root, &|_| {}).unwrap();
+    }
+
+    fn bootable_image(artifact: &RuntimeArtifact, archive: &Path, root: &Path) {
+        extract_image(artifact, archive, root);
+        artifact.mark_installation_complete(root).unwrap();
+    }
+
+    fn pending_name(base: &Path) -> PathBuf {
+        base.join(PREVIOUS_PENDING_PREFIX)
+    }
+
+    #[test]
+    fn atomic_legacy_marker_migration_keeps_old_marker_if_replace_is_interrupted() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join(READY_MARKER);
+        let old = b"debian-v1\n0000000000000000000000000000000000000000000000000000000000000000\n";
+        let new = b"debian-v1\n0000000000000000000000000000000000000000000000000000000000000000\nportal-installation-v1\n";
+        fs::write(&marker, old).unwrap();
+
+        let error = write_atomic_with(&marker, new, |_temporary, _destination| {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "fault injected before rename",
+            ))
+        });
+        assert!(error.is_err());
+        assert_eq!(fs::read(&marker).unwrap(), old);
+
+        write_atomic(&marker, new).unwrap();
+        assert_eq!(fs::read(&marker).unwrap(), new);
+        assert!(!path_exists(&temp.path().join(".portal-runtime-complete.tmp")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn atomic_marker_is_either_old_or_new_when_post_rename_durability_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join(READY_MARKER);
+        let old = b"debian-v1\n0000000000000000000000000000000000000000000000000000000000000000\n";
+        let new = b"debian-v1\n0000000000000000000000000000000000000000000000000000000000000000\nportal-installation-v1\n";
+        fs::write(&marker, old).unwrap();
+
+        let error = write_atomic_with(&marker, new, |temporary, destination| {
+            fs::rename(temporary, destination)?;
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "fault injected after atomic replacement",
+            ))
+        });
+        assert!(error.is_err());
+        // Once Unix rename has happened, the destination is the complete new
+        // marker; there is never a missing-marker interval to observe.
+        assert_eq!(fs::read(&marker).unwrap(), new);
+    }
+
+    #[test]
+    fn parent_directory_sync_is_host_testable() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("marker");
+        fs::write(&path, b"durable").unwrap();
+        sync_parent_directory(&path).unwrap();
+        sync_directory(temp.path()).unwrap();
+    }
+
+    #[test]
+    fn valid_previous_survives_invalid_current_promotion() {
+        let temp = tempfile::tempdir().unwrap();
+        let (artifact, archive) = fixture(temp.path(), "promotion-v1");
+        let root = temp.path().join("runtime-B");
+        let previous = temp.path().join(PREVIOUS_RUNTIME);
+        let staging = temp.path().join("runtime-B.staging");
+
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("untrusted-current"), "keep separate").unwrap();
+        bootable_image(&artifact, &archive, &previous);
+        fs::write(previous.join("previous-only"), "known-good").unwrap();
+        extract_image(&artifact, &archive, &staging);
+
+        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+
+        assert!(artifact.is_image_ready(&root));
+        assert!(artifact.is_bootable(&previous));
+        assert_eq!(
+            fs::read_to_string(previous.join("previous-only")).unwrap(),
+            "known-good"
+        );
+        assert!(!root.join("untrusted-current").exists());
+        assert!(!fs::read_dir(temp.path())
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(INVALID_RUNTIME_PREFIX)));
+    }
+
+    #[test]
+    fn valid_current_and_previous_rotate_only_after_staging_is_validated() {
+        let temp = tempfile::tempdir().unwrap();
+        let (artifact, archive) = fixture(temp.path(), "promotion-v2");
+        let root = temp.path().join("runtime-B");
+        let previous = temp.path().join(PREVIOUS_RUNTIME);
+        let staging = temp.path().join("runtime-B.staging");
+
+        bootable_image(&artifact, &archive, &root);
+        fs::write(root.join("current-only"), "current").unwrap();
+        bootable_image(&artifact, &archive, &previous);
+        fs::write(previous.join("previous-only"), "previous").unwrap();
+        extract_image(&artifact, &archive, &staging);
+
+        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+
+        assert!(artifact.is_image_ready(&root));
+        assert!(artifact.is_bootable(&previous));
+        assert_eq!(
+            fs::read_to_string(previous.join("current-only")).unwrap(),
+            "current"
+        );
+        assert!(!previous.join("previous-only").exists());
+        assert!(!path_exists(&pending_name(temp.path())));
+    }
+
+    #[test]
+    fn interrupted_promotion_boundaries_converge_without_losing_valid_roots() {
+        // Process death after parking the old previous root.
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let (artifact, archive) = fixture(temp.path(), "boundary-park");
+            let root = temp.path().join("runtime-B");
+            let previous = temp.path().join(PREVIOUS_RUNTIME);
+            let staging = temp.path().join("runtime-B.staging");
+            bootable_image(&artifact, &archive, &root);
+            bootable_image(&artifact, &archive, &previous);
+            fs::rename(&previous, pending_name(temp.path())).unwrap();
+            extract_image(&artifact, &archive, &staging);
+
+            artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+            assert!(artifact.is_image_ready(&root));
+            assert!(artifact.is_bootable(&previous));
+            assert!(!path_exists(&pending_name(temp.path())));
+        }
+
+        // Process death after moving the valid current root to previous.
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let (artifact, archive) = fixture(temp.path(), "boundary-rotate");
+            let root = temp.path().join("runtime-B");
+            let previous = temp.path().join(PREVIOUS_RUNTIME);
+            let pending = pending_name(temp.path());
+            let staging = temp.path().join("runtime-B.staging");
+            bootable_image(&artifact, &archive, &previous);
+            fs::rename(&previous, &pending).unwrap();
+            bootable_image(&artifact, &archive, &previous);
+            fs::rename(&previous, &root).unwrap();
+            extract_image(&artifact, &archive, &staging);
+            // The current root is valid, the old valid backup is pending, and
+            // the next promotion must keep both until the staged image lands.
+            artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+            assert!(artifact.is_image_ready(&root));
+            assert!(artifact.is_bootable(&previous));
+            assert!(!path_exists(&pending));
+        }
+
+        // Process death immediately after staging became the live image.
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let (artifact, archive) = fixture(temp.path(), "boundary-commit");
+            let root = temp.path().join("runtime-B");
+            let previous = temp.path().join(PREVIOUS_RUNTIME);
+            let pending = pending_name(temp.path());
+            let staging = temp.path().join("runtime-B.staging");
+            let old_previous = temp.path().join("runtime-old-previous");
+            bootable_image(&artifact, &archive, &root);
+            bootable_image(&artifact, &archive, &previous);
+            bootable_image(&artifact, &archive, &old_previous);
+            fs::rename(&old_previous, &pending).unwrap();
+            fs::remove_dir_all(&root).unwrap();
+            extract_image(&artifact, &archive, &staging);
+            fs::rename(&staging, &root).unwrap();
+            // This is the next-launch recovery path: provision checks the
+            // pending rotation before accepting the image-ready live root.
+            artifact
+                .provision(temp.path(), |_| panic!("committed staging must not download"))
+                .unwrap();
+            assert!(artifact.is_image_ready(&root));
+            assert!(artifact.is_bootable(&previous));
+            assert!(!path_exists(&pending));
+        }
+    }
 }

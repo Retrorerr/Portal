@@ -2697,6 +2697,22 @@ fn build_wayland_backend(android_app: AndroidApp) -> anyhow::Result<PolarBearBac
     }))
 }
 
+/// Construct the Wayland backend after a provisioning worker has committed
+/// and revalidated the durable installation marker. This deliberately does
+/// not call any setup stage: the immediate first-install handoff must not
+/// replay work that has just succeeded. Normal future launches continue to
+/// use setup() so their lightweight repair/sync stages still run.
+pub fn build_committed_wayland_backend(
+    android_app: AndroidApp,
+) -> anyhow::Result<PolarBearBackend> {
+    let artifact = crate::core::provisioning::RuntimeArtifact::production();
+    anyhow::ensure!(
+        artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)),
+        "Committed Portal runtime is no longer bootable"
+    );
+    build_wayland_backend(android_app)
+}
+
 /// Backwards-compatible setup entry point. Lifecycle owners that can dismiss
 /// the provisioning popup in-process should use `setup_with_completion`.
 pub fn setup(android_app: AndroidApp) -> PolarBearBackend {

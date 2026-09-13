@@ -569,13 +569,35 @@ impl PolarBearApp {
         }
     }
 
+    /// Complete the committed-install runtime-error handoff after Compose
+    /// confirms that its hierarchy is gone. This keeps the existing HTML
+    /// Retry Plasma page from appearing underneath a still-visible veil.
+    fn finish_pending_runtime_error_page(&mut self) -> bool {
+        if !self.pending_runtime_error_page || !compose_overlay::is_hidden() {
+            return false;
+        }
+        self.pending_runtime_error_page = false;
+        self.show_webview();
+        true
+    }
+
     /// Replace a failed Wayland session with a local, graphical recovery page.
     ///
     /// This is deliberately an in-process backend swap. The NativeActivity and its current
     /// configuration remain alive, so Android does not briefly expose a blank native surface or
     /// require a fixed-delay activity recreation.
     fn enter_runtime_error(&mut self, reason: impl Into<String>) {
-        let reason = reason.into();
+        self.enter_runtime_error_with_mode(reason.into(), false);
+    }
+
+    /// Runtime launch failure after the installer has committed. The durable
+    /// marker remains untouched and the existing HTML runtime-error page
+    /// provides Retry Plasma; it must not be represented as setup failure.
+    fn enter_committed_install_runtime_error(&mut self, reason: impl Into<String>) {
+        self.enter_runtime_error_with_mode(reason.into(), true);
+    }
+
+    fn enter_runtime_error_with_mode(&mut self, reason: String, committed_install: bool) {
         let android_app = self.frontend.android_app.clone();
         // Reap the tracked PRoot/session worker before dropping the compositor. Otherwise its
         // launch guard can keep the next Retry Plasma request from starting a new session.
@@ -597,6 +619,26 @@ impl PolarBearApp {
         log::error!("Switching to graphical runtime error screen: {reason}");
         self.backend =
             PolarBearBackend::WebView(WebviewBackend::runtime_error(android_app, reason));
+        self.pending_runtime_error_page = false;
+        if committed_install {
+            if compose_overlay::is_hidden() {
+                self.show_webview();
+            } else if compose_overlay::SPIKE_USE_COMPOSE {
+                // Dismiss the setup veil first. nativeOnOverlayRemoved wakes
+                // the event loop, which then opens the existing Runtime /
+                // Retry Plasma page.
+                self.pending_runtime_error_page = true;
+                compose_overlay::dismiss_for_runtime_recovery(
+                    &self.frontend.android_app,
+                );
+                if compose_overlay::is_hidden() {
+                    self.finish_pending_runtime_error_page();
+                }
+            } else {
+                self.show_webview();
+            }
+            return;
+        }
         // SPIKE compose-setup: surface recovery through the Compose overlay in the
         // SAME NativeActivity. The HTML WebView path is retained as fallback.
         if compose_overlay::SPIKE_USE_COMPOSE {
@@ -694,28 +736,44 @@ impl PolarBearApp {
             log::error!("Ignoring setup handoff because the committed runtime is not bootable");
             return false;
         }
-        // The final setup callback has already closed the popup. Re-run the
-        // idempotent dispatcher synchronously on this event-loop turn; the
-        // durable marker has already proved that the native operation really
-        // completed, so this constructs Wayland in the current Activity.
+        // The final setup callback has already closed the popup and committed
+        // every required setup stage. Construct only the Wayland backend here;
+        // replaying setup() would turn a successful durable install into a
+        // second, failure-prone setup pass.
         let android_app = self.frontend.android_app.clone();
-        let mut backend = crate::android::proot::setup::setup(android_app.clone());
-        if let PolarBearBackend::WebView(webview) = &mut backend {
-            webview.attach_android_app(android_app);
-            log::error!(
-                "Setup handoff reached the event loop but setup could not build Wayland; retaining the retryable setup screen"
-            );
-        }
+        let backend =
+            match crate::android::proot::setup::build_committed_wayland_backend(android_app) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    log::error!(
+                        "Committed Portal installation could not build the Wayland backend: {error:#}"
+                    );
+                    self.enter_committed_install_runtime_error(
+                        "Portal is installed, but Plasma could not start. Tap Retry Plasma.",
+                    );
+                    return true;
+                }
+            };
         self.backend = backend;
-        if let PolarBearBackend::Wayland(backend) = &mut self.backend {
-            let _ = resume_wayland(backend, event_loop, &self.frontend.android_app);
+        let resume_failed = if let PolarBearBackend::Wayland(backend) = &mut self.backend {
+            !resume_wayland(backend, event_loop, &self.frontend.android_app)
+        } else {
+            true
+        };
+        if resume_failed {
+            log::error!("Committed Portal installation could not resume Wayland");
+            self.enter_committed_install_runtime_error(
+                "Portal is installed, but Plasma could not start. Tap Retry Plasma.",
+            );
+            return true;
+        }
+        if let PolarBearBackend::Wayland(_) = &mut self.backend {
             crate::android::tablet_mode_manager::apply_kwin_tablet_mode(
                 ime::is_desktop_input_present(),
             );
         }
         true
     }
-
 }
 
 impl ApplicationHandler<AppUserEvent> for PolarBearApp {
@@ -772,6 +830,12 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 return;
             }
         }
+        if self.pending_runtime_error_page {
+            if self.finish_pending_runtime_error_page() {
+                return;
+            }
+            return;
+        }
         if matches!(&self.backend, PolarBearBackend::WebView(_)) {
             if self.handle_setup_complete(event_loop) {
                 return;
@@ -809,6 +873,12 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 self.enter_runtime_error(reason);
                 return;
             }
+        }
+        if self.pending_runtime_error_page {
+            if self.finish_pending_runtime_error_page() {
+                return;
+            }
+            return;
         }
         if matches!(&self.backend, PolarBearBackend::WebView(_)) {
             accessibility::drain_pending_events();

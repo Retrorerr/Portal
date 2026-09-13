@@ -15,6 +15,7 @@
 
 use std::{
     fs,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -366,6 +367,44 @@ pub fn sync_dir_best_effort(path: &Path) {
     }
 }
 
+/// Persist the directory entries affected by a rename. On Android/Linux
+/// `sync_dir_best_effort` performs a real directory fsync; Windows keeps the
+/// host-test fallback intentionally best-effort because it has no portable
+/// directory-fsync equivalent.
+fn rename_synced(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)?;
+    if let Some(parent) = from.parent() {
+        sync_dir_best_effort(parent);
+    }
+    if let Some(parent) = to.parent() {
+        sync_dir_best_effort(parent);
+    }
+    Ok(())
+}
+
+fn remove_file_synced(path: &Path) -> io::Result<()> {
+    fs::remove_file(path)?;
+    if let Some(parent) = path.parent() {
+        sync_dir_best_effort(parent);
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_marker_atomic(temporary: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(temporary, destination)
+}
+
+#[cfg(windows)]
+fn replace_marker_atomic(temporary: &Path, destination: &Path) -> io::Result<()> {
+    // Windows host tests do not have Unix rename-over-existing semantics.
+    // Android/Linux always use the atomic replacement branch above.
+    if fs::symlink_metadata(destination).is_ok() {
+        fs::remove_file(destination)?;
+    }
+    fs::rename(temporary, destination)
+}
+
 /// Write the completion marker (temp + rename + best-effort syncs). The
 /// marker is only written after the target has revalidated, so a lost
 /// write degrades to a retry, never to a false completion claim.
@@ -380,7 +419,7 @@ pub fn write_marker_best_effort(
     let tmp = marker_path.with_extension("complete.tmp");
     fs::write(&tmp, marker_content(version, sha256))?;
     sync_file_best_effort(&tmp);
-    fs::rename(&tmp, marker_path)?;
+    replace_marker_atomic(&tmp, marker_path)?;
     sync_file_best_effort(marker_path);
     if let Some(parent) = marker_path.parent() {
         sync_dir_best_effort(parent);
@@ -429,7 +468,7 @@ pub fn recover_interrupted(base: &Path, version: &str, sha256: &str) -> anyhow::
 
     if !target_exists {
         if staging_current {
-            fs::rename(&paths.staging, &paths.target)
+            rename_synced(&paths.staging, &paths.target)
                 .map_err(|e| anyhow::anyhow!("recovery: cannot promote staging: {e}"))?;
             validate_layer_dir(&paths.target, version, sha256).map_err(|e| {
                 anyhow::anyhow!("recovery: promoted staging failed validation: {e}")
@@ -445,7 +484,7 @@ pub fn recover_interrupted(base: &Path, version: &str, sha256: &str) -> anyhow::
             if paths.staging.exists() {
                 let _ = fs::remove_dir_all(&paths.staging);
             }
-            fs::rename(&paths.previous, &paths.target)
+            rename_synced(&paths.previous, &paths.target)
                 .map_err(|e| anyhow::anyhow!("recovery: cannot restore previous: {e}"))?;
             validate_layer_dir(&paths.target, version, sha256).map_err(|e| {
                 anyhow::anyhow!("recovery: restored previous failed validation: {e}")
@@ -462,7 +501,7 @@ pub fn recover_interrupted(base: &Path, version: &str, sha256: &str) -> anyhow::
             let _ = fs::remove_dir_all(&paths.staging);
         }
         if !marker_valid {
-            let _ = fs::remove_file(&paths.marker);
+            let _ = remove_file_synced(&paths.marker);
         }
         return Ok(Recovery::NeedsProvision);
     }
@@ -520,11 +559,12 @@ pub fn promote_with_validator(
     // 1. Invalidate the completion marker BEFORE modifying the working
     // target so a crash can never leave a valid marker over a
     // half-replaced tree.
-    match fs::remove_file(&paths.marker) {
+    match remove_file_synced(&paths.marker) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => anyhow::bail!("mesa promotion: cannot invalidate marker: {e}"),
     }
+    sync_dir_best_effort(base);
 
     let target_exists = fs::symlink_metadata(&paths.target).is_ok();
     let target_valid = validator(&paths.target).is_ok();
@@ -536,7 +576,7 @@ pub fn promote_with_validator(
             fs::remove_dir_all(&paths.previous)
                 .map_err(|e| anyhow::anyhow!("mesa promotion: cannot clear previous: {e}"))?;
         }
-        fs::rename(&paths.target, &paths.previous)
+        rename_synced(&paths.target, &paths.previous)
             .map_err(|e| anyhow::anyhow!("mesa promotion: cannot park current target: {e}"))?;
         moved_to_previous = true;
     } else if target_exists {
@@ -547,10 +587,10 @@ pub fn promote_with_validator(
     }
 
     // 6. Promote staging.
-    if let Err(e) = fs::rename(&paths.staging, &paths.target) {
+    if let Err(e) = rename_synced(&paths.staging, &paths.target) {
         // Restore the parked good tree if we moved it.
         if moved_to_previous {
-            let _ = fs::rename(&paths.previous, &paths.target);
+            let _ = rename_synced(&paths.previous, &paths.target);
         }
         anyhow::bail!("mesa promotion: staging rename failed: {e}");
     }
@@ -560,7 +600,7 @@ pub fn promote_with_validator(
         // Roll back: drop the bad promotion, restore previous.
         let _ = fs::remove_dir_all(&paths.target);
         if moved_to_previous {
-            let _ = fs::rename(&paths.previous, &paths.target);
+            let _ = rename_synced(&paths.previous, &paths.target);
         }
         anyhow::bail!("mesa promotion: promoted target failed validation: {e}");
     }

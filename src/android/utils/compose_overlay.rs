@@ -377,6 +377,48 @@ pub fn set_compose_state(android_app: &AndroidApp, state: &str) {
     );
 }
 
+/// Remove the Compose veil before showing the existing HTML runtime recovery
+/// page. This is used only when installation has already committed but the
+/// first Wayland/Anland handoff fails; it keeps that launch failure separate
+/// from provisioning failure and does not touch the native surface.
+pub fn dismiss_for_runtime_recovery(android_app: &AndroidApp) {
+    if is_hidden() {
+        return;
+    }
+    REVEAL_COMMITTED.store(false, Ordering::Release);
+    set_state(OverlayState::Dismissing);
+    let requested = super::ndk::run_in_jvm(
+        |env, app| {
+            let activity = activity_object(app);
+            let class = match overlay_class(env, &activity) {
+                Ok(class) => class,
+                Err(error) => {
+                    log::error!("Compose overlay class is unavailable: {error}");
+                    clear_exception(env, "find ComposeOverlay for runtime recovery");
+                    return false;
+                }
+            };
+            if let Err(error) = env.call_static_method(
+                class,
+                "dismissForRuntimeRecovery",
+                "(Landroid/app/Activity;)V",
+                &[JValue::Object(&activity)],
+            ) {
+                log::error!("Compose overlay runtime recovery dismissal failed: {error}");
+                clear_exception(env, "dismissForRuntimeRecovery");
+                false
+            } else {
+                true
+            }
+        },
+        android_app.clone(),
+    );
+    if !requested {
+        set_state(OverlayState::Hidden);
+        super::webview_handoff::wake_event_loop();
+    }
+}
+
 /// Latch the authoritative native readiness proof: Portal produced and
 /// presented a valid KWin desktop frame (generation-safe readiness plus the
 /// Android present proof). This only publishes state to Compose. It never
@@ -505,4 +547,5 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayRemoved(
     REVEAL_COMMITTED.store(false, Ordering::Release);
     log::info!("compose-spike: overlay hierarchy removed; native surface undisturbed");
     crate::android::diagnostics::host_event("compose-spike", "overlay-removed");
+    super::webview_handoff::wake_event_loop();
 }
