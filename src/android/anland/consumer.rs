@@ -14,7 +14,7 @@ use std::ffi::c_void;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc, Arc, Mutex, OnceLock, Weak,
+    mpsc, Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -22,7 +22,6 @@ use std::time::Duration;
 use super::anw::{self, ANativeWindowBuffer, AnwApi};
 use super::broker::{Broker, Deposit};
 use super::protocol::*;
-use super::ready_blur::ReadyBlur;
 use super::sys;
 
 const FENCE_WAIT_MS: i32 = 5000;
@@ -157,25 +156,10 @@ struct Inner {
 /// (input stream, per-frame busy composites).
 fn kick(inner: &Arc<Inner>, burst_ms: u64) {
     let until = sys::now_ns().wrapping_add(burst_ms.wrapping_mul(1_000_000));
-    inner.demand_until_ns.fetch_max(until, Ordering::AcqRel);
+    inner
+        .demand_until_ns
+        .fetch_max(until, Ordering::AcqRel);
     let _ = sys::eventfd_write(&inner.wake, 1);
-}
-
-fn active_session() -> &'static Mutex<Weak<Inner>> {
-    static ACTIVE: OnceLock<Mutex<Weak<Inner>>> = OnceLock::new();
-    ACTIVE.get_or_init(|| Mutex::new(Weak::new()))
-}
-
-/// Wake the current Anland render thread when Compose changes READY blur or
-/// reveal progress. This never invokes renderer work on the Android UI thread.
-pub fn notify_ready_veil_changed() {
-    let inner = active_session()
-        .lock()
-        .ok()
-        .and_then(|active| active.upgrade());
-    if let Some(inner) = inner {
-        kick(&inner, 180);
-    }
 }
 
 unsafe impl Send for Inner {}
@@ -229,8 +213,12 @@ impl AnlandSession {
         // (its supposed address disagrees with every dlsym'd entry on this
         // device), while the dlsym'd dequeue/queue path is proven working.
         unsafe { anw.connect_cpu_ritual(window)? };
-        let (win_w, win_h) =
-            unsafe { (anw::get_width(window, &anw), anw::get_height(window, &anw)) };
+        let (win_w, win_h) = unsafe {
+            (
+                anw::get_width(window, &anw),
+                anw::get_height(window, &anw),
+            )
+        };
         let (w, h) = if win_w > 0 && win_h > 0 {
             (win_w as u32, win_h as u32)
         } else {
@@ -306,9 +294,6 @@ impl AnlandSession {
             finger_axes: Mutex::new(0),
             vsync: Mutex::new(Some(vsync)),
         });
-        if let Ok(mut active) = active_session().lock() {
-            *active = Arc::downgrade(&inner);
-        }
         // Collect window slots (dup dma-buf fds, hold one spare back).
         collect_buffers(&inner, total)?;
         // First generation: fresh fds + deposit at the broker.
@@ -435,9 +420,7 @@ impl AnlandSession {
         kick(inner, INPUT_BURST_MS);
         let _guard = inner.io_lock.lock().unwrap();
         let gen = inner.gen.lock().unwrap();
-        let Some(gen) = gen.as_ref() else {
-            return false;
-        };
+        let Some(gen) = gen.as_ref() else { return false };
         if inner.connected_gen.lock().unwrap().as_ref() != Some(&gen.id) {
             return false;
         }
@@ -843,8 +826,6 @@ fn render_loop(inner: Arc<Inner>) {
     let mut log_unknown_ns: u64 = 0;
     let mut log_mismatch_ns: u64 = 0;
     let mut log_gen0_ns: u64 = 0;
-    let mut ready_blur: Option<ReadyBlur> = None;
-    let mut blur_failure_logged = false;
     while inner.running.load(Ordering::Acquire) {
         // Snapshot generation.
         let (gen_id, fence_dup) = {
@@ -859,15 +840,6 @@ fn render_loop(inner: Arc<Inner>) {
             cur_fence = fence_dup;
             pending = None;
             idle_logged = false;
-            // Producer generation changed: BufferQueue slots may have been
-            // reallocated underneath us. Drop cached EGLImage imports so the
-            // READY blur never samples a freed GraphicBuffer via a stale
-            // pointer-keyed entry; the next READY frame re-imports cleanly.
-            // Normal zero-copy presentation is unaffected (no GPU resources).
-            if ready_blur.take().is_some() {
-                log::info!("anland.ready_blur=generation_changed imports_dropped");
-            }
-            blur_failure_logged = false;
         }
         // Demand gate: select on every display-vsync tick while the user is
         // active (input bursts, connect/start bursts, self-sustaining busy
@@ -940,7 +912,9 @@ fn render_loop(inner: Arc<Inner>) {
         // way (generation 1 always died ~5s after deposit, long before kwin
         // could render; the working generation was always 2). Generation 0
         // (no producer by design) still flows to the idle path below.
-        if cur_gen != 0 && inner.connected_gen.lock().unwrap().as_ref() != Some(&cur_gen) {
+        if cur_gen != 0
+            && inner.connected_gen.lock().unwrap().as_ref() != Some(&cur_gen)
+        {
             win_skips += 1;
             log_fps_window(
                 &inner,
@@ -992,12 +966,6 @@ fn render_loop(inner: Arc<Inner>) {
             // Unknown slot (e.g. the held spare surfaced, or SF reallocated
             // buffers): CANCEL back to the free pool, never present — it was
             // not rendered by KWin (see ACQUIRE_WAIT_MS invariant).
-            // Also drop cached blur imports: a reallocation means old
-            // EGLImages may reference freed GraphicBuffers.
-            if ready_blur.take().is_some() {
-                log::info!("anland.ready_blur=slots_reallocated imports_dropped");
-            }
-            blur_failure_logged = false;
             let now = sys::now_ns();
             if iters <= 30 || now.wrapping_sub(log_unknown_ns) >= 1_000_000_000 {
                 log::info!("anland.sink unknown-slot cancel-back (SF may have reallocated)");
@@ -1045,7 +1013,9 @@ fn render_loop(inner: Arc<Inner>) {
                 _ => {
                     let now = sys::now_ns();
                     if iters <= 60 || now.wrapping_sub(log_mismatch_ns) >= 1_000_000_000 {
-                        log::info!("anland.sink gen-mismatch cancel-back cur={cur_gen}");
+                        log::info!(
+                            "anland.sink gen-mismatch cancel-back cur={cur_gen}"
+                        );
                         log_mismatch_ns = now;
                     }
                     unsafe { inner.anw.cancel(inner.window, anb, -1) };
@@ -1056,59 +1026,16 @@ fn render_loop(inner: Arc<Inner>) {
         // refresh_done: 5s poll on our fence dup, then non-blocking recvmsg.
         let rfence = refresh_done(&inner, cur_fence.as_ref(), pending == Some(cur_gen));
         if pending == Some(cur_gen) && rfence == FENCE_LOST {
-            log::warn!(
-                "anland.render fence lost (generation died); buffer cancelled, not presented"
-            );
+            log::warn!("anland.render fence lost (generation died); buffer cancelled, not presented");
             unsafe { inner.anw.cancel(inner.window, anb, -1) };
             continue;
         }
         pending = None;
         selects += 1;
-        let blur_snapshot = crate::android::utils::compose_overlay::ready_veil_blur_snapshot();
-        let queue_fence = if let Some((radius_px, strength)) = blur_snapshot {
-            if strength > 0.001 {
-                if ready_blur.is_none() && !blur_failure_logged {
-                    match unsafe { ReadyBlur::new(inner.screen_w, inner.screen_h) } {
-                        Ok(blur) => ready_blur = Some(blur),
-                        Err(error) => {
-                            blur_failure_logged = true;
-                            log::error!(
-                                "anland.ready_blur=gpu_init_failed actual=false error={error}"
-                            );
-                        }
-                    }
-                }
-                if let Some(blur) = ready_blur.as_mut() {
-                    match unsafe { blur.process(anb, rfence, radius_px, strength) } {
-                        Ok(output_fence) => output_fence,
-                        Err(error) => {
-                            // Errors returned here occur before ownership of
-                            // KWin's fence transfers, so the direct queue path
-                            // remains synchronization-correct.
-                            if !blur_failure_logged {
-                                log::error!("anland.ready_blur=frame_failed using_original_fence error={error}");
-                                blur_failure_logged = true;
-                            }
-                            rfence
-                        }
-                    }
-                } else {
-                    rfence
-                }
-            } else {
-                rfence
-            }
-        } else {
-            if ready_blur.take().is_some() {
-                log::info!("anland.ready_blur=disabled normal_zero_copy_restored");
-            }
-            blur_failure_logged = false;
-            rfence
-        };
-        let q = unsafe { inner.anw.queue(inner.window, anb, queue_fence) };
+        let q = unsafe { inner.anw.queue(inner.window, anb, rfence) };
         if q != 0 {
             log::warn!("anland.render queueBuffer failed: {q}");
-            close_silently(queue_fence);
+            close_silently(rfence);
         } else {
             inner.frames_queued.fetch_add(1, Ordering::Relaxed);
             // Readiness contract (mirrors the Smithay path's first-frame
@@ -1119,7 +1046,7 @@ fn render_loop(inner: Arc<Inner>) {
             // a bare frame (llvmpipe is CPU-synchronous, so pixels are final
             // when signaled and no fence exists — without this, software
             // sessions could never mark ready).
-            let (evidence, ready_log) = if queue_fence >= 0 {
+            let (evidence, ready_log) = if rfence >= 0 {
                 inner.frames_fenced.fetch_add(1, Ordering::Relaxed);
                 (
                     "anland-queue-fenced",
@@ -1132,8 +1059,8 @@ fn render_loop(inner: Arc<Inner>) {
                     "anland.session=ready first software frame queued bare (plasma-ready marked, no GPU fence)",
                 )
             };
-            let ready_eligible = queue_fence >= 0
-                || (inner.software_gl && !inner.ready_marked.load(Ordering::Acquire));
+            let ready_eligible =
+                rfence >= 0 || (inner.software_gl && !inner.ready_marked.load(Ordering::Acquire));
             if ready_eligible && !inner.ready_marked.swap(true, Ordering::AcqRel) {
                 let bufs = inner.buffers.lock().map(|b| b.len()).unwrap_or(0);
                 crate::android::diagnostics::mark_plasma_frame_presented_for_generation_with_evidence(
@@ -1206,7 +1133,11 @@ fn log_fps_window(
     let frames = *win_frames;
     let skips = *win_skips;
     let hz = frames as f64 * 1_000_000_000.0 / elapsed_ns as f64;
-    let avg_us = if frames > 0 { *win_comp_us / frames } else { 0 };
+    let avg_us = if frames > 0 {
+        *win_comp_us / frames
+    } else {
+        0
+    };
     let skip_pct = skips * 100 / (frames + skips).max(1);
     let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
     log::info!(
@@ -1526,10 +1457,7 @@ fn sample_client_activity(inner: &Arc<Inner>) {
         // Temporary sampler visibility (demand-tuning build).
         let peek = inner.client_prev.lock().unwrap();
         let peek_delta = total.wrapping_sub(peek.0);
-        log::info!(
-            "anland.demand scan procs={scanned} watched={} total={total} delta500ms={peek_delta}",
-            inner.client_cache.lock().unwrap().0.len()
-        );
+        log::info!("anland.demand scan procs={scanned} watched={} total={total} delta500ms={peek_delta}", inner.client_cache.lock().unwrap().0.len());
     }
     let mut prev = inner.client_prev.lock().unwrap();
     let (prev_total, prev_ns, streak) = *prev;

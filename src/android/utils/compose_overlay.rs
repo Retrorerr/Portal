@@ -35,7 +35,7 @@ use jni::{
     JNIEnv,
 };
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
 };
 use winit::platform::android::activity::AndroidApp;
@@ -111,32 +111,6 @@ static DESKTOP_READY: AtomicBool = AtomicBool::new(false);
 /// Final reveal commit acknowledgement, guarded once until either removal or
 /// a recovery re-show returns the veil to `Showing`.
 static REVEAL_COMMITTED: AtomicBool = AtomicBool::new(false);
-/// Compose-owned READY veil treatment. Anland reads this atomically on its
-/// render thread; it is independent from the desktop-ready latch.
-static READY_VEIL_BLUR: AtomicBool = AtomicBool::new(false);
-static READY_VEIL_RADIUS_BITS: AtomicU32 = AtomicU32::new(0);
-static READY_VEIL_PROGRESS_BITS: AtomicU32 = AtomicU32::new(0);
-
-/// Current native postprocess parameters. Blur reaches zero at 55% reveal
-/// travel, leaving the final 45% fully sharp beneath the departing veil.
-pub(crate) fn ready_veil_blur_snapshot() -> Option<(f32, f32)> {
-    if !READY_VEIL_BLUR.load(Ordering::Acquire) {
-        return None;
-    }
-    let radius = f32::from_bits(READY_VEIL_RADIUS_BITS.load(Ordering::Acquire));
-    let progress = f32::from_bits(READY_VEIL_PROGRESS_BITS.load(Ordering::Acquire));
-    let strength = (1.0 - progress.clamp(0.0, 1.0) / 0.55).clamp(0.0, 1.0);
-    Some((radius.max(0.0), strength))
-}
-
-fn clear_ready_veil_blur(reason: &str) {
-    let was_enabled = READY_VEIL_BLUR.swap(false, Ordering::AcqRel);
-    READY_VEIL_PROGRESS_BITS.store(0f32.to_bits(), Ordering::Release);
-    if was_enabled {
-        log::info!("compose-spike: native READY veil blur disabled reason={reason}");
-        crate::android::anland::consumer::notify_ready_veil_changed();
-    }
-}
 
 fn activity_object(android_app: &AndroidApp) -> JObject<'static> {
     unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _jobject) }
@@ -162,7 +136,12 @@ fn overlay_class<'local>(
     activity: &JObject,
 ) -> jni::errors::Result<JClass<'local>> {
     let loader = env
-        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .call_method(
+            activity,
+            "getClassLoader",
+            "()Ljava/lang/ClassLoader;",
+            &[],
+        )?
         .l()?;
     let name = env.new_string(OVERLAY_DOTTED_CLASS)?;
     let class = env
@@ -274,6 +253,7 @@ pub fn show_compose_overlay(android_app: &AndroidApp) {
         },
         android_app.clone(),
     );
+    log_blur_support(android_app);
     crate::android::diagnostics::host_event("compose-spike", "overlay-show-requested");
     // Preserve a readiness signal that raced ahead of Kotlin presentation.
     // Kotlin stores it even when the ComposeView does not exist yet.
@@ -336,7 +316,6 @@ pub fn notify_desktop_ready(android_app: &AndroidApp) {
 /// setup veil is still present, it returns to the quiet finishing state until
 /// the replacement surface presents a new valid desktop frame.
 pub fn notify_desktop_suspended(android_app: &AndroidApp) {
-    clear_ready_veil_blur("desktop-suspended");
     if !DESKTOP_READY.swap(false, Ordering::AcqRel) {
         return;
     }
@@ -354,45 +333,51 @@ pub fn notify_desktop_ready_cached() {
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeSetReadyVeilBlur(
-    _env: JNIEnv,
-    _class: JObject,
-    enabled: jni::sys::jboolean,
-    radius_px: jni::sys::jfloat,
-) {
-    if enabled == 0 {
-        clear_ready_veil_blur("compose-ready-ended");
-        return;
-    }
-    let radius = if radius_px.is_finite() {
-        radius_px.clamp(0.0, 256.0)
-    } else {
-        0.0
-    };
-    READY_VEIL_RADIUS_BITS.store(radius.to_bits(), Ordering::Release);
-    READY_VEIL_PROGRESS_BITS.store(0f32.to_bits(), Ordering::Release);
-    let changed = !READY_VEIL_BLUR.swap(true, Ordering::AcqRel);
-    if changed {
-        log::info!("compose-spike: native READY veil blur enabled radius_px={radius:.1} source=setup-ready");
-    }
-    crate::android::anland::consumer::notify_ready_veil_changed();
-}
-
-#[no_mangle]
-pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeSetReadyVeilRevealProgress(
-    _env: JNIEnv,
-    _class: JObject,
-    progress: jni::sys::jfloat,
-) {
-    let progress = if progress.is_finite() {
-        progress.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    READY_VEIL_PROGRESS_BITS.store(progress.to_bits(), Ordering::Release);
-    if READY_VEIL_BLUR.load(Ordering::Acquire) {
-        crate::android::anland::consumer::notify_ready_veil_changed();
+/// Probe (and log) Android 12+ cross-window blur availability for the future
+/// final transition. Investigative only; the spike never depends on it.
+pub fn log_blur_support(android_app: &AndroidApp) -> Option<bool> {
+    let supported: Option<bool> = super::ndk::run_in_jvm(
+        |env, app| {
+            let activity = activity_object(app);
+            let class = match overlay_class(env, &activity) {
+                Ok(class) => class,
+                Err(_) => {
+                    let _ = env.exception_clear();
+                    return None;
+                }
+            };
+            match env.call_static_method(
+                class,
+                "queryBlur",
+                "(Landroid/app/Activity;)Z",
+                &[JValue::Object(&activity)],
+            ) {
+                Ok(value) => value.z().ok(),
+                Err(_) => {
+                    let _ = env.exception_clear();
+                    None
+                }
+            }
+        },
+        android_app.clone(),
+    );
+    match supported {
+        Some(enabled) => {
+            log::info!("compose-spike: WindowManager.isCrossWindowBlurEnabled()={enabled}");
+            crate::android::diagnostics::host_event(
+                "compose-spike",
+                &format!("cross-window-blur={enabled}"),
+            );
+            Some(enabled)
+        }
+        None => {
+            log::info!("compose-spike: cross-window blur probe unavailable (pre-31 or probe failed)");
+            crate::android::diagnostics::host_event(
+                "compose-spike",
+                "cross-window-blur=unknown",
+            );
+            None
+        }
     }
 }
 
@@ -451,7 +436,6 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayShowFail
 }
 
 fn on_overlay_show_failed(reason: &str) {
-    clear_ready_veil_blur("overlay-show-failed");
     log::error!("compose-spike: overlay show failed: {reason}");
     crate::android::diagnostics::host_event(
         "compose-spike",
@@ -472,7 +456,6 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayRemoved(
     _env: JNIEnv,
     _class: JObject,
 ) {
-    clear_ready_veil_blur("overlay-removed");
     set_state(OverlayState::Hidden);
     REVEAL_COMMITTED.store(false, Ordering::Release);
     log::info!("compose-spike: overlay hierarchy removed; native surface undisturbed");
