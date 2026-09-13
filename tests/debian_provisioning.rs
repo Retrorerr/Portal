@@ -433,6 +433,28 @@ fn crashed_rename_promotes_ready_staging_without_redownload() {
 }
 
 #[test]
+fn fully_validated_staging_without_image_marker_is_recovered_without_redownload() {
+    let temp = tempfile::tempdir().unwrap();
+    let (artifact, archive) = fixture(temp.path(), "validated-staging-v1");
+    let staging = temp.path().join("runtime-B.staging");
+    artifact.extract(&archive, &staging, &|_| {}).unwrap();
+    fs::remove_file(staging.join(IMAGE_READY_MARKER)).unwrap();
+
+    artifact
+        .provision(temp.path(), |message| {
+            assert!(
+                !message.to_ascii_lowercase().contains("download"),
+                "validated staging must not download: {message}"
+            );
+        })
+        .unwrap();
+
+    let root = temp.path().join("runtime-B");
+    assert!(artifact.is_image_ready(&root));
+    assert!(!staging.exists());
+}
+
+#[test]
 fn successful_provision_rotates_and_preserves_previous_runtime_slot() {
     use std::io::Read;
     let temp = tempfile::tempdir().unwrap();
@@ -491,6 +513,8 @@ fn successful_provision_rotates_and_preserves_previous_runtime_slot() {
 #[test]
 fn source_routes_only_release_image_and_preserves_session_handoff() {
     let setup = include_str!("../src/android/proot/setup.rs");
+    let provisioning = include_str!("../src/core/provisioning.rs");
+    let run = include_str!("../src/android/app/run.rs");
     let compose = include_str!("../src/android/kotlin/app/polarbear/ComposeOverlay.kt");
     let setup_screen = include_str!("../src/android/kotlin/app/polarbear/setup/PortalSetupScreen.kt");
     let config_full = include_str!("../src/core/config.rs");
@@ -528,11 +552,36 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
     assert!(setup.contains("on_complete();"));
     assert!(setup.contains("provision_with_progress"));
     assert!(setup.contains("mark_installation_complete"));
+    assert!(setup.contains("build_committed_wayland_backend"));
+    assert!(setup.contains("run_all_stages(stages(), &options, &registration)"));
     assert!(setup.contains("pub fn begin_install()"));
     assert!(compose.contains("nativeBeginInstall"));
     assert!(compose.contains("updateInstallState"));
+    assert!(compose.contains("dismissForRuntimeRecovery"));
     assert!(setup_screen.contains("ComposeOverlay.beginInstall()"));
     assert!(!setup_screen.contains("FAKE_INSTALL_DURATION_MS"));
+    assert!(provisioning.contains("replace_atomic"));
+    assert!(provisioning.contains("sync_parent_directory"));
+    assert!(provisioning.contains("PREVIOUS_PENDING_PREFIX"));
+    assert!(provisioning.contains("quarantine_path"));
+    assert!(provisioning.contains("self.validate_image(&staging).is_ok()"));
+    assert!(run.contains("build_committed_wayland_backend"));
+    assert!(run.contains("enter_committed_install_runtime_error"));
+    assert!(run.contains("pending_runtime_error_page"));
+    assert!(run.contains("dismiss_for_runtime_recovery"));
+    let handoff = run
+        .split("fn handle_setup_complete")
+        .nth(1)
+        .and_then(|source| source.split("impl ApplicationHandler").next())
+        .expect("setup handoff function must remain present");
+    assert!(
+        !handoff.contains("proot::setup::setup("),
+        "immediate first-install handoff must not replay setup stages"
+    );
+    assert!(!handoff.contains("run_all_stages"));
+    assert!(handoff.contains("let resume_failed"));
+    assert!(handoff.contains("!resume_wayland"));
+    assert!(handoff.contains("enter_committed_install_runtime_error"));
     let lifecycle = include_str!("../src/android/app/build.rs");
     assert!(lifecycle.contains("webview_handoff::complete_setup"));
     assert!(include_str!("../src/android/proot/launch.rs")

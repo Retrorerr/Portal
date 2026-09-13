@@ -14,6 +14,10 @@ pub struct PolarBearApp {
     /// the Wayland surface is rebound, preventing a stale popup from covering
     /// the resumed desktop.
     pub pending_runtime_retry: bool,
+    /// A committed first install may fail while binding/resuming Wayland. The
+    /// Compose veil is dismissed before showing the existing runtime recovery
+    /// page so this state never looks like unfinished installation.
+    pub pending_runtime_error_page: bool,
 }
 
 pub struct PolarBearFrontend {
@@ -56,6 +60,7 @@ impl PolarBearApp {
             backend,
             frontend: PolarBearFrontend { android_app },
             pending_runtime_retry: false,
+            pending_runtime_error_page: false,
         }
     }
 }

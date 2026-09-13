@@ -208,30 +208,34 @@ fn drmshim_reports_version_with_correct_drm_version_layout() {
     // layout keeps the 64-byte size (ioctl number still matches) but
     // misplaces every field after name_len, so Mesa's version query fails
     // and KWin dies at "Failed to create gbm device" (proven on-device).
-    assert!(DRMSHIM_SOURCE.contains("size_t name_len;\n    char *name;"));
-    assert!(DRMSHIM_SOURCE.contains("size_t date_len;\n    char *date;"));
-    assert!(DRMSHIM_SOURCE.contains("size_t desc_len;\n    char *desc;"));
-    assert!(DRMSHIM_SOURCE.contains(
+    // The checked-in C source may be materialized with CRLF by a Windows
+    // checkout. Normalize only the test view; the source and staged binary
+    // remain byte-for-byte behaviorally unchanged.
+    let source = DRMSHIM_SOURCE.replace("\r\n", "\n");
+    assert!(source.contains("size_t name_len;\n    char *name;"));
+    assert!(source.contains("size_t date_len;\n    char *date;"));
+    assert!(source.contains("size_t desc_len;\n    char *desc;"));
+    assert!(source.contains(
         "_Static_assert(sizeof(struct drm_version) == 64"
     ));
-    assert!(DRMSHIM_SOURCE.contains("KGSL-backed DRM node (portal-shimmed)"));
+    assert!(source.contains("KGSL-backed DRM node (portal-shimmed)"));
     // close() must stay uninterposed: a raw-SVC close replacement breaks
     // processes under PRoot (proven by bisect: EFAULT after successful
     // reads with close-only interposition).
-    assert!(!DRMSHIM_SOURCE.contains("int close("));
-    assert!(DRMSHIM_SOURCE.contains("close() is deliberately"));
-    assert!(DRMSHIM_SOURCE.contains("register long r0 __asm__(\"x0\")"));
+    assert!(!source.contains("int close("));
+    assert!(source.contains("close() is deliberately"));
+    assert!(source.contains("register long r0 __asm__(\"x0\")"));
     // KGSL-backed render node: the fake fd is a real /dev/kgsl-3d0 open so
     // the kgsl winsys probe succeeds against real hardware; the reported
     // DRM version name steers Mesa away from the MSM winsys (whose GEM
     // ioctls need an unobtainable real render node). Dups of fake fds stay
     // fake (Mesa dups via fcntl64); non-DRM ioctls pass through to the real
     // device instead of failing.
-    assert!(DRMSHIM_SOURCE.contains("/dev/kgsl-3d0"));
-    assert!(DRMSHIM_SOURCE.contains("version_name[] = \"kgsl\""));
-    assert!(DRMSHIM_SOURCE.contains("int fcntl64("));
-    assert!(DRMSHIM_SOURCE.contains("int dup3("));
-    assert!(DRMSHIM_SOURCE.contains("int openat64("));
+    assert!(source.contains("/dev/kgsl-3d0"));
+    assert!(source.contains("version_name[] = \"kgsl\""));
+    assert!(source.contains("int fcntl64("));
+    assert!(source.contains("int dup3("));
+    assert!(source.contains("int openat64("));
     // The staged binary matches the source contract: AArch64 shared object
     // exporting exactly open/open64/openat/openat64/ioctl/dup/fcntl-family
     // (never close).
