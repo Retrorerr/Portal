@@ -69,7 +69,6 @@ private const val COMMIT_VELOCITY_DP_PER_SECOND = 1_450f
 private const val EFFECT_START_DP_PER_SECOND = 280f
 private const val EFFECT_FULL_DP_PER_SECOND = 2_600f
 private val MAX_SMEAR = 15.dp
-private val MAX_CHROMA = 4.6.dp
 
 /**
  * Stationary input shell plus one translated Compose visual layer. Keeping the
@@ -244,7 +243,7 @@ internal fun PortalRevealVeil(
                         displacement = value.coerceIn(0f, fullHeight)
                         // Hold the release energy through most of the exit, then
                         // collapse it over the final 22% of remaining travel.
-                        // This ties the last refraction frame to veil geometry
+                        // This ties the last motion frame to veil geometry
                         // instead of guessing at a fixed delay.
                         val remainingFraction = (
                             (fullHeight - displacement) / remainingTravel
@@ -385,7 +384,6 @@ private fun rememberPortalVeilMotionLayer(
 ): Modifier {
     val density = LocalDensity.current
     val maxSmearPx = with(density) { MAX_SMEAR.toPx() }
-    val maxChromaPx = with(density) { MAX_CHROMA.toPx() }
     val shader = if (Build.VERSION.SDK_INT >= 33) remember { RuntimeShader(VEIL_MOTION_SHADER) } else null
     val effect = if (Build.VERSION.SDK_INT >= 33 && shader != null) {
         remember(shader) { createVeilMotionEffect(shader) }
@@ -398,7 +396,6 @@ private fun rememberPortalVeilMotionLayer(
             shader.setFloatUniform("size", size.width, size.height)
             shader.setFloatUniform("strength", amount)
             shader.setFloatUniform("maxSmear", maxSmearPx)
-            shader.setFloatUniform("maxChroma", maxChromaPx)
             renderEffect = effect
         } else {
             renderEffect = null
@@ -441,7 +438,6 @@ uniform shader inputShader;
 uniform float2 size;
 uniform float strength;
 uniform float maxSmear;
-uniform float maxChroma;
 
 half4 main(float2 p) {
     half4 base = inputShader.eval(p);
@@ -456,11 +452,9 @@ half4 main(float2 p) {
     half4 s3 = inputShader.eval(p - float2(0.0, smear));
     half4 blurred = (base + s1 + s2 + s3) * 0.25;
 
-    float chroma = maxChroma * amount;
-    half red = inputShader.eval(p - float2(0.0, chroma)).r;
-    half blue = inputShader.eval(p + float2(0.0, chroma * 0.82)).b;
-    half3 refracted = half3(red, base.g, blue);
-    half3 treated = mix(blurred.rgb, refracted, half(0.66));
+    // Preserve the visible vertical smear while dropping the ineffective
+    // chromatic-aberration samples.
+    half3 treated = mix(blurred.rgb, base.rgb, half(0.66));
     return half4(mix(base.rgb, treated, half(amount * 0.86)),
                  max(base.a, blurred.a));
 }

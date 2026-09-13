@@ -72,6 +72,11 @@ fun PortalLaunchTransition(
     onReadyPreludeChanged: (Boolean) -> Unit,
     onRevealCommitted: () -> Unit,
     onRevealFinished: () -> Unit,
+    // Return-to-Plasma mode: skip the travelling-logo intro and show the
+    // minimal return screen instead of the installer. Everything else —
+    // READY prelude, scatter, translucency, veil, swipe, handoff — is the
+    // identical path below.
+    isReturn: Boolean = false,
 ) {
     val view = LocalView.current
     val lifecycle = (LocalContext.current as LifecycleOwner).lifecycle
@@ -84,7 +89,11 @@ fun PortalLaunchTransition(
     val currentPreDraw by rememberUpdatedState(onContentPreDraw)
     val currentResolved by rememberUpdatedState(onIntroResolved)
     val currentReadyPreludeChanged by rememberUpdatedState(onReadyPreludeChanged)
-    val laidOut = rootBounds.width > 0f && headerBounds.width > 0f
+    // First-install still waits for the measured installer header destination
+    // so the travelling mark cannot start before its landing slot exists.
+    // Return has no installer header; its full-screen root is the complete
+    // first-frame geometry and is already measured by PortalRevealVeil.
+    val laidOut = rootBounds.width > 0f && (isReturn || headerBounds.width > 0f)
 
     // Unlike a FrameLayout pre-draw, this gate cannot release before both the
     // actual CONFIGURE and its logo destination have participated in layout.
@@ -174,13 +183,19 @@ fun PortalLaunchTransition(
         // Keep this call at the same composition slot before/during/after intro:
         // no second screen, second fade, duplicated state or persistent capture.
         Box(Modifier.fillMaxSize().then(treatment)) {
-            PortalSetupScreen(
-                desktopReady = desktopReady,
-                onSetupReady = { setupReady = true },
-                launchMarkModifier = Modifier.onGloballyPositioned {
-                    headerBounds = it.boundsInRoot()
-                }.then(if (active) Modifier.drawWithContent { } else Modifier),
-            )
+            if (isReturn) {
+                PortalReturnScreen(
+                    onReturnReady = { setupReady = true },
+                )
+            } else {
+                PortalSetupScreen(
+                    desktopReady = desktopReady,
+                    onSetupReady = { setupReady = true },
+                    launchMarkModifier = Modifier.onGloballyPositioned {
+                        headerBounds = it.boundsInRoot()
+                    }.then(if (active) Modifier.drawWithContent { } else Modifier),
+                )
+            }
         }
         if (active) {
             TravellingPortalMark(rootBounds, headerBounds) { clock.value }

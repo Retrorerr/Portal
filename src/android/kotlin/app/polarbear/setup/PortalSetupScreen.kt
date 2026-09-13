@@ -249,7 +249,7 @@ fun PortalSetupScreen(
                 }
             }
         }) {
-        SetupBackground(
+        PortalAmbientBackground(
             palette = palette,
             cardBounds = { ambientCardBounds.value.translate(-rootOrigin) },
             readyPrelude = phase == SetupPhase.Ready,
@@ -440,8 +440,14 @@ fun PortalSetupScreen(
     }
 }
 
+// Shared Portal ambient background primitive: exact installer background
+// implementation (opaque charcoal + seven blurred drifting Portal fragments,
+// 720 ms scatter dispersion on readyPrelude, 1.0 -> 0.83 final alpha). Used
+// by BOTH the first-install screen and the Return to Plasma screen, so there
+// is exactly ONE implementation. Callers without a card pass Rect.Zero, which
+// keeps the identical soft surroundings and skips only the card frost mask.
 @Composable
-private fun SetupBackground(
+internal fun PortalAmbientBackground(
     palette: PortalPalette,
     cardBounds: () -> Rect,
     readyPrelude: Boolean,

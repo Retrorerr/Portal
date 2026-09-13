@@ -710,7 +710,18 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             };
             if compose_overlay::spike_should_show(renderer_active, is_webview) {
                 let app = self.frontend.android_app.clone();
-                compose_overlay::show_compose_overlay(&app);
+                // Launch routing on the existing durable setup marker: a
+                // WebView backend means provisioning is still pending, so the
+                // polished first-install intro shows unchanged; a Wayland
+                // backend means Portal is already installed, so the minimal
+                // Return to Plasma screen shows through the same overlay,
+                // transition and veil. Nothing is written here; merely
+                // launching never completes setup.
+                if is_webview {
+                    compose_overlay::show_compose_overlay(&app);
+                } else {
+                    compose_overlay::show_compose_return(&app);
+                }
                 let initial = match &self.backend {
                     PolarBearBackend::WebView(backend)
                         if !matches!(backend.error, ErrorVariant::None) =>
