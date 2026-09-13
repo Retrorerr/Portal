@@ -113,15 +113,16 @@ struct Inner {
     /// are tagged against this: nothing from an older generation may mutate
     /// newer state or present into the new BufferQueue.
     surface_gen: Mutex<u64>,
-    /// True while the event-loop thread performs a surface rebind. The
+    /// True while a requested render-thread surface rebind is outstanding. The
     /// render loop selects nothing (SurfaceFlinger holds its last frame),
     /// input is dropped, and fallback re-deposits are skipped: the rebind
     /// owns the next generation.
     rebind_active: AtomicBool,
-    /// Buffers owned by the render thread between dequeue and queue/cancel.
-    /// The rebind drains this (bounded) before touching BufferQueue
-    /// ownership so no stale-dimension buffer is ever presented.
-    inflight: AtomicU64,
+    /// Latest requested geometry; consumed only between frames by the render
+    /// thread. Android's lifecycle thread never operates on live queue slots.
+    rebind_request: Mutex<Option<(u32, u32, u64)>>,
+    /// Serializes reconnect/fallback generation replacement.
+    transition_lock: Mutex<()>,
     /// Generation that completed its BUFS_READY push. Input events are only
     /// sent for this generation: anything earlier would land in the data
     /// channel ahead of BUFS_READY and desync the producer's handshake.
@@ -170,6 +171,8 @@ struct Inner {
     /// Active touchpad finger-scroll axes as a bitmask (bit 0 = vertical,
     /// bit 1 = horizontal). Scroll-stop events go only to live streams.
     finger_axes: Mutex<u8>,
+    /// Key/button presses actually delivered to KWin, released before resize.
+    held_inputs: Mutex<std::collections::BTreeSet<(u32, i32)>>,
     /// Display-VSYNC tick source (Choreographer, timer fallback).
     vsync: Mutex<Option<sys::VsyncPump>>,
     /// Surface generation the once-per-generation first-motion diagnostic
@@ -183,9 +186,7 @@ struct Inner {
 /// (input stream, per-frame busy composites).
 fn kick(inner: &Arc<Inner>, burst_ms: u64) {
     let until = sys::now_ns().wrapping_add(burst_ms.wrapping_mul(1_000_000));
-    inner
-        .demand_until_ns
-        .fetch_max(until, Ordering::AcqRel);
+    inner.demand_until_ns.fetch_max(until, Ordering::AcqRel);
     let _ = sys::eventfd_write(&inner.wake, 1);
 }
 
@@ -240,12 +241,8 @@ impl AnlandSession {
         // (its supposed address disagrees with every dlsym'd entry on this
         // device), while the dlsym'd dequeue/queue path is proven working.
         unsafe { anw.connect_cpu_ritual(window)? };
-        let (win_w, win_h) = unsafe {
-            (
-                anw::get_width(window, &anw),
-                anw::get_height(window, &anw),
-            )
-        };
+        let (win_w, win_h) =
+            unsafe { (anw::get_width(window, &anw), anw::get_height(window, &anw)) };
         let (w, h) = if win_w > 0 && win_h > 0 {
             (win_w as u32, win_h as u32)
         } else {
@@ -311,7 +308,8 @@ impl AnlandSession {
             surface_epoch,
             surface_gen: Mutex::new(1),
             rebind_active: AtomicBool::new(false),
-            inflight: AtomicU64::new(0),
+            rebind_request: Mutex::new(None),
+            transition_lock: Mutex::new(()),
             connected_gen: Mutex::new(None),
             frames_queued: AtomicU64::new(0),
             frames_fenced: AtomicU64::new(0),
@@ -326,11 +324,12 @@ impl AnlandSession {
             demand_until_ns: AtomicU64::new(0),
             last_pointer: Mutex::new(None),
             finger_axes: Mutex::new(0),
+            held_inputs: Mutex::new(std::collections::BTreeSet::new()),
             vsync: Mutex::new(Some(vsync)),
             motion_logged_gen: Mutex::new(0),
         });
         // Collect window slots (dup dma-buf fds, hold one spare back).
-        collect_buffers(&inner, total)?;
+        collect_buffers(&inner, total, w, h)?;
         // First generation: fresh fds + deposit at the broker.
         deposit_generation(&inner)?;
         // Threads.
@@ -409,8 +408,10 @@ impl AnlandSession {
         // subsequent frames lock to ticks — low latency without free-spin).
         kick(inner, INPUT_BURST_MS);
         let _guard = inner.io_lock.lock().unwrap();
-        let gen = inner.gen.lock().unwrap();
-        let Some(gen) = gen.as_ref() else { return };
+        let gen_guard = inner.gen.lock().unwrap();
+        let Some(gen) = gen_guard.as_ref() else {
+            return;
+        };
         if inner.connected_gen.lock().unwrap().as_ref() != Some(&gen.id) {
             return;
         }
@@ -420,9 +421,17 @@ impl AnlandSession {
         wire[8..12].copy_from_slice(&ev.ev_type.to_ne_bytes());
         wire[12..28].copy_from_slice(&ev.payload);
         if sys::send_all(&gen.data, &wire).is_err() {
-            drop(gen);
+            let failed_gen = gen.id;
+            drop(gen_guard);
             drop(_guard);
-            enter_fallback(inner, "input send failed");
+            enter_fallback(inner, failed_gen, "input send failed");
+        } else if let Some((code, pressed)) = ev.press_edge() {
+            let mut held = inner.held_inputs.lock().unwrap();
+            if pressed {
+                held.insert((ev.ev_type, code));
+            } else {
+                held.remove(&(ev.ev_type, code));
+            }
         }
     }
 
@@ -486,8 +495,10 @@ impl AnlandSession {
         }
         kick(inner, INPUT_BURST_MS);
         let _guard = inner.io_lock.lock().unwrap();
-        let gen = inner.gen.lock().unwrap();
-        let Some(gen) = gen.as_ref() else { return false };
+        let gen_guard = inner.gen.lock().unwrap();
+        let Some(gen) = gen_guard.as_ref() else {
+            return false;
+        };
         if inner.connected_gen.lock().unwrap().as_ref() != Some(&gen.id) {
             return false;
         }
@@ -500,9 +511,10 @@ impl AnlandSession {
         if sys::send_all(&gen.data, &wire).is_err()
             || sys::send_all(&gen.data, text.as_bytes()).is_err()
         {
-            drop(gen);
+            let failed_gen = gen.id;
+            drop(gen_guard);
             drop(_guard);
-            enter_fallback(inner, "text send failed");
+            enter_fallback(inner, failed_gen, "text send failed");
             return false;
         }
         log::info!("anland.input text committed ({} bytes)", text.len());
@@ -592,94 +604,66 @@ impl AnlandSession {
         self.inner.broker.screen()
     }
 
-    /// Rebind the live surface to a new physical size: exactly one coherent
-    /// transition affecting presentation buffers, broker ScreenInfo, KWin
-    /// output (via producer reconnect) and input mapping together.
-    ///
-    /// `gen` is the surface generation minted by the convergence machine
-    /// for this transition (session start was 1); on success the session
-    /// converges to it, so input anchors, readiness and frame ownership
-    /// all share one generation domain with the transaction log.
-    ///
-    /// Runs synchronously on the event-loop thread (like session start).
-    /// Steps, in order: stop accepting the old generation (the producer
-    /// sees consumer loss and enters its fallback loop), drain in-flight
-    /// render-thread buffers (bounded), return every collected slot to the
-    /// queue, publish the new ScreenInfo first (any fresh hello observes
-    /// current geometry), resize the BufferQueue, collect fresh slots,
-    /// reset input anchors + readiness, deposit the new generation. Only
-    /// after the producer attaches and the first valid frame of the new
-    /// generation is presented is the geometry fully converged.
-    ///
-    /// The PRoot/Debian runtime, Plasma and KWin are untouched: the
-    /// producer reconnects through its existing fallback loop. No
-    /// framebuffer processing, no copies, no readback anywhere here.
+    /// Queue a resize for the render thread, which owns native buffer operations.
     pub fn rebind_surface(&self, w: u32, h: u32, gen: u64) -> Result<u64, String> {
         let inner = &self.inner;
-        if !inner.running.load(Ordering::Acquire) {
-            return Err("session stopping".into());
+        if w == 0 || h == 0 || !inner.running.load(Ordering::Acquire) {
+            return Err("invalid geometry or session stopping".into());
         }
-        if inner.rebind_active.swap(true, Ordering::AcqRel) {
-            return Err("rebind already in progress".into());
+        // End scroll streams while the old channel is still valid.
+        self.send_finger_stops();
+        let held = std::mem::take(&mut *inner.held_inputs.lock().unwrap());
+        for (kind, code) in held {
+            let release = if kind == INPUT_TYPE_KEY {
+                InputEvent::key(INPUT_ACTION_UP, code)
+            } else {
+                InputEvent::pointer_button(code as u32, false)
+            };
+            self.send_input(&release);
         }
-        let result = self.rebind_surface_inner(w, h, gen);
-        inner.rebind_active.store(false, Ordering::Release);
-        result
+        let mut request = inner.rebind_request.lock().unwrap();
+        inner.rebind_active.store(true, Ordering::Release);
+        *request = Some((w, h, gen));
+        kick(inner, CONNECT_BURST_MS);
+        Ok(gen)
     }
 
-    fn rebind_surface_inner(&self, w: u32, h: u32, gen: u64) -> Result<u64, String> {
-        let inner = &self.inner;
+    pub fn presented_surface_gen(&self) -> Option<u64> {
+        *self.inner.ready_surface_gen.lock().unwrap()
+    }
+
+    /// Render-thread-only transaction. Shutdown the old connection, release
+    /// our spare, resize and recollect, then publish one complete buffer set.
+    /// KWin resizes its existing output from BUFS_READY buffer dimensions on
+    /// import; SCREEN_INFO is only used by a new producer's initial hello.
+    fn rebind_surface_inner(inner: &Arc<Inner>, w: u32, h: u32, gen: u64) -> Result<u64, String> {
         let (old_w, old_h) = *inner.screen.lock().unwrap();
         let cur_sgen = *inner.surface_gen.lock().unwrap();
-        if gen <= cur_sgen {
+        if gen < cur_sgen {
             // Obsolete attempt (a newer transition already converged or is
             // being attempted): never rewind the generation.
             return Err(format!("stale rebind gen={gen} current={cur_sgen}"));
         }
-        let (win_w, win_h) = self.window_inner_size().unwrap_or((0, 0));
-        let (nat_w, nat_h) = self.native_window_size();
         // Packed struct: copy fields to locals before use (no field borrows).
         let (bw, bh) = {
             let p = inner.broker.screen();
             (p.width, p.height)
         };
         log::info!(
-            "anland.rotate sgen={gen} begin old={old_w}x{old_h} new={w}x{h} winit={win_w}x{win_h} native={nat_w}x{nat_h} ptr={:p} epoch={} broker={bw}x{bh}",
+            "anland.rotate sgen={gen} begin old={old_w}x{old_h} new={w}x{h} ptr={:p} epoch={} broker={bw}x{bh}",
             inner.window,
             inner.surface_epoch,
         );
-        // Drain render-thread buffers in flight (bounded): refresh_done
-        // aborts promptly while rebind_active is set, so this resolves in
-        // milliseconds unless the producer is wedged — in which case the
-        // leftovers cancel-back below instead of presenting stale geometry.
-        let drain_start = std::time::Instant::now();
-        while inner.inflight.load(Ordering::Acquire) != 0 {
-            if drain_start.elapsed() > Duration::from_millis(2000) {
-                log::warn!(
-                    "anland.rotate sgen={gen} drain timed out; stale buffers will cancel-back, never present"
-                );
-                break;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-        // Stop accepting the old generation first: withdraw the deposit and
-        // close its masters (the producer observes consumer loss and enters
-        // its fallback loop; the render loop cancel-backs on the mismatch).
+        // No frame is in flight: this runs between render-loop iterations.
         teardown_generation(inner);
-        // Return every collected slot and the stop-time spare before the
-        // geometry change so no old-dimension handle survives it. Never two
-        // live consumers own this window: the render loop selects nothing
-        // while rebind_active is set.
+        // Only the held spare is dequeued and may be cancelled.
         if let Ok(mut spare) = inner.spare.lock() {
             if let Some(anb) = spare.take() {
                 unsafe { inner.anw.cancel(inner.window, anb, -1) };
             }
         }
-        if let Ok(buffers) = inner.buffers.lock() {
-            for slot in buffers.iter() {
-                unsafe { inner.anw.cancel(inner.window, slot.anb, -1) };
-            }
-        }
+        // Collected slots are QUEUED, not owned/dequeued: cancelling them
+        // violates BufferQueue's ownership contract. Only the spare is ours.
         inner.buffers.lock().unwrap().clear();
         // Publish the new size before touching the queue: any producer hello
         // from here on (reconnect, fresh KWin, wrapper relaunch) observes
@@ -692,15 +676,21 @@ impl AnlandSession {
             refresh: inner.refresh_mhz,
         });
         let r = unsafe {
-            anw::set_buffers_geometry(inner.window, &inner.anw, w as i32, h as i32, anw::FORMAT_RGBA_8888)
+            anw::set_buffers_geometry(
+                inner.window,
+                &inner.anw,
+                w as i32,
+                h as i32,
+                anw::FORMAT_RGBA_8888,
+            )
         };
         if r != 0 {
-            return Err(format!("ANativeWindow_setBuffersGeometry({w}x{h}) failed: {r}"));
+            return Err(format!(
+                "ANativeWindow_setBuffersGeometry({w}x{h}) failed: {r}"
+            ));
         }
-        let min_undequeued =
-            unsafe { inner.anw.query_min_undequeued(inner.window) }.map_err(|e| {
-                format!("ANativeWindow query min-undequeued after resize: {e}")
-            })?;
+        let min_undequeued = unsafe { inner.anw.query_min_undequeued(inner.window) }
+            .map_err(|e| format!("ANativeWindow query min-undequeued after resize: {e}"))?;
         let total = (min_undequeued + 2).clamp(3, MAX_BUFS as i32) as usize;
         let r = unsafe { inner.anw.set_buffer_count(inner.window, total) };
         if r != 0 {
@@ -709,7 +699,7 @@ impl AnlandSession {
         // Fresh slots for the new geometry (old handles are all returned
         // above; a failed collect leaves the failure pending so the next
         // event retries with the producer waiting in fallback).
-        collect_buffers(inner, total)
+        collect_buffers(inner, total, w, h)
             .map_err(|e| format!("collect after resize to {w}x{h}: {e}"))?;
         *inner.screen.lock().unwrap() = (w, h);
         *inner.surface_gen.lock().unwrap() = gen;
@@ -759,12 +749,7 @@ impl AnlandSession {
             join_bounded(h, JOIN_TIMEOUT, "broker");
         }
         teardown_generation(&inner);
-        // Release window buffers back to the queue state and disconnect.
-        if let Ok(buffers) = inner.buffers.lock() {
-            for slot in buffers.iter() {
-                unsafe { inner.anw.cancel(inner.window, slot.anb, -1) };
-            }
-        }
+        // The render thread returned its slot; queued slots belong to Android.
         unsafe {
             // No API disconnect: the window was connected via the lock ritual
             // and struct perform() is untrusted. The NativeActivity window is
@@ -782,7 +767,8 @@ impl AnlandSession {
     }
 }
 
-fn join_bounded(handle: JoinHandle<()>, timeout: Duration, what: &str) {    let (tx, rx) = mpsc::channel();
+fn join_bounded(handle: JoinHandle<()>, timeout: Duration, what: &str) {
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let _ = handle.join();
         let _ = tx.send(());
@@ -794,7 +780,12 @@ fn join_bounded(handle: JoinHandle<()>, timeout: Duration, what: &str) {    let 
 
 /// Dequeue/rotate all window slots, dup their dma-buf fds, and hold one
 /// spare dequeued (in our hands, never queued) for stop-time unblocking.
-fn collect_buffers(inner: &Arc<Inner>, total: usize) -> Result<(), String> {
+fn collect_buffers(
+    inner: &Arc<Inner>,
+    total: usize,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
     let need_producer = total.saturating_sub(1).max(2);
     let mut found: Vec<SlotInfo> = Vec::new();
     for attempt in 0..total * 4 + 2 {
@@ -808,6 +799,12 @@ fn collect_buffers(inner: &Arc<Inner>, total: usize) -> Result<(), String> {
             unsafe { inner.anw.cancel(inner.window, anb, -1) };
             continue;
         };
+        if bw != width as i32 || bh != height as i32 {
+            unsafe { inner.anw.cancel(inner.window, anb, -1) };
+            return Err(format!(
+                "buffer geometry {bw}x{bh} differs from requested {width}x{height}"
+            ));
+        }
         // Dedup by slot pointer (stable per queue slot).
         if found.iter().any(|s: &SlotInfo| s.anb == anb) {
             unsafe { inner.anw.queue(inner.window, anb, -1) };
@@ -916,10 +913,11 @@ fn deposit_generation(inner: &Arc<Inner>) -> Result<(), String> {
             audio_theirs,
         ],
     };
-    inner.broker.deposit(deposit);
     // One-shot waiter: on producer attach, push the dma-buf set.
     let waiter_inner = inner.clone();
     let attach_rx = inner.broker.subscribe_attach();
+    // Subscribe BEFORE publishing: pickup can happen immediately on reconnect.
+    inner.broker.deposit(deposit);
     thread::Builder::new()
         .name(format!("anland-handshake-{id}"))
         .spawn(move || handshake_waiter(waiter_inner, id, attach_rx))
@@ -935,18 +933,29 @@ fn teardown_generation(inner: &Arc<Inner>) {
     let _guard = inner.io_lock.lock().unwrap();
     let mut gen = inner.gen.lock().unwrap();
     if let Some(g) = gen.take() {
+        // close() is insufficient while polling threads retain dup()s. Shutdown
+        // reaches every duplicate and wakes the producer even on an idle desktop.
+        unsafe {
+            libc::shutdown(g.data.as_raw_fd(), libc::SHUT_RDWR);
+            libc::shutdown(g.fence_read.as_raw_fd(), libc::SHUT_RDWR);
+            libc::shutdown(g._audio.as_raw_fd(), libc::SHUT_RDWR);
+        }
         sys::munmap_index(g.shm_ptr as *mut u32);
         // OwnedFds drop here (under io_lock, so no select/send races).
     }
 }
 
 /// Drop to fallback and immediately re-deposit (reference `enter_fallback`).
-fn enter_fallback(inner: &Arc<Inner>, reason: &str) {
+fn enter_fallback(inner: &Arc<Inner>, expected: u64, reason: &str) {
+    let _transition = inner.transition_lock.lock().unwrap();
     if inner.rebind_active.load(Ordering::Acquire) {
         // A rotation rebind owns the next generation (teardown + deposit):
         // a concurrent fallback must not withdraw it or deposit a spare.
         log::info!("anland.fallback suppressed during surface rebind reason={reason}");
         return;
+    }
+    if inner.gen.lock().unwrap().as_ref().map(|g| g.id) != Some(expected) {
+        return; // An old failed operation cannot tear down its replacement.
     }
     inner.fallback_count.fetch_add(1, Ordering::Relaxed);
     log::warn!("anland.fallback reason={reason}");
@@ -979,8 +988,10 @@ fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receive
     }
     // Push BUFS_READY: header + infos, fds as SCM_RIGHTS, then infos bytes.
     let _guard = inner.io_lock.lock().unwrap();
-    let gen = inner.gen.lock().unwrap();
-    let Some(gen) = gen.as_ref() else { return };
+    let gen_guard = inner.gen.lock().unwrap();
+    let Some(gen) = gen_guard.as_ref() else {
+        return;
+    };
     if gen.id != generation {
         return;
     }
@@ -1008,15 +1019,15 @@ fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receive
     };
     drop(buffers);
     if sys::send_fds(&gen.data, &hdr, &fds).is_err() {
-        drop(gen);
+        drop(gen_guard);
         drop(_guard);
-        enter_fallback(&inner, "BUFS_READY send failed");
+        enter_fallback(&inner, generation, "BUFS_READY send failed");
         return;
     }
     if sys::send_all(&gen.data, &infos).is_err() {
-        drop(gen);
+        drop(gen_guard);
         drop(_guard);
-        enter_fallback(&inner, "BUFS_READY infos send failed");
+        enter_fallback(&inner, generation, "BUFS_READY infos send failed");
         return;
     }
     *inner.connected_gen.lock().unwrap() = Some(generation);
@@ -1035,21 +1046,9 @@ fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receive
     let _ = sys::send_all(&gen.data, &wire);
 }
 
-/// RAII release of one render-thread buffer ownership (see `inflight`): a
-/// rotation rebind drains these before touching BufferQueue ownership, so
-/// every dequeue..queue/cancel path must hold one.
-struct InFlight<'a> {
-    inner: &'a Arc<Inner>,
-}
-
-impl Drop for InFlight<'_> {
-    fn drop(&mut self) {
-        self.inner.inflight.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 fn render_loop(inner: Arc<Inner>) {
-    log::info!("anland.render thread started");    // Per-generation dups owned by this thread (immune to teardown close).
+    log::info!("anland.render thread started");
+    // Per-generation dups owned by this thread (immune to teardown close).
     let mut cur_gen: u64 = 0;
     let mut cur_fence: Option<OwnedFd> = None;
     let mut pending: Option<u64> = None; // generation a select was issued on
@@ -1087,6 +1086,31 @@ fn render_loop(inner: Arc<Inner>) {
     let mut log_mismatch_ns: u64 = 0;
     let mut log_gen0_ns: u64 = 0;
     while inner.running.load(Ordering::Acquire) {
+        // Resize only between frames: this thread owns all live queue slots.
+        let request = inner.rebind_request.lock().unwrap().take();
+        if let Some((w, h, sgen)) = request {
+            let result = {
+                let _transition = inner.transition_lock.lock().unwrap();
+                AnlandSession::rebind_surface_inner(&inner, w, h, sgen)
+            };
+            let failed = result.is_err();
+            {
+                let mut next = inner.rebind_request.lock().unwrap();
+                if let Err(e) = result {
+                    log::warn!("anland.rotate sgen={sgen} retry after rebind failure: {e}");
+                    if next.is_none() {
+                        *next = Some((w, h, sgen));
+                    }
+                }
+                inner.rebind_active.store(next.is_some(), Ordering::Release);
+            }
+            if failed {
+                // Retry without blocking Android's lifecycle/input thread.
+                let _ = sys::poll_readable(&wake, 500);
+                drain_fd(&wake);
+            }
+            continue;
+        }
         // Snapshot generation.
         let (gen_id, fence_dup) = {
             let gen = inner.gen.lock().unwrap();
@@ -1180,9 +1204,7 @@ fn render_loop(inner: Arc<Inner>) {
         // way (generation 1 always died ~5s after deposit, long before kwin
         // could render; the working generation was always 2). Generation 0
         // (no producer by design) still flows to the idle path below.
-        if cur_gen != 0
-            && inner.connected_gen.lock().unwrap().as_ref() != Some(&cur_gen)
-        {
+        if cur_gen != 0 && inner.connected_gen.lock().unwrap().as_ref() != Some(&cur_gen) {
             win_skips += 1;
             log_fps_window(
                 &inner,
@@ -1193,6 +1215,9 @@ fn render_loop(inner: Arc<Inner>) {
                 &mut win_skips,
                 &mut win_stalls,
             );
+            continue;
+        }
+        if inner.rebind_active.load(Ordering::Acquire) {
             continue;
         }
         // Selected: this dequeue hands us the slot KWin will render into.
@@ -1207,10 +1232,6 @@ fn render_loop(inner: Arc<Inner>) {
                 continue;
             }
         };
-        // Owned from here to queue/cancel: the rebind drains this before
-        // touching BufferQueue ownership (RAII so every path releases).
-        inner.inflight.fetch_add(1, Ordering::AcqRel);
-        let _inflight = InFlight { inner: &inner };
         // The surface generation this frame belongs to. A rotation that
         // lands between here and queueBuffer must cancel, never present,
         // a buffer produced for the old dimensions.
@@ -1280,7 +1301,7 @@ fn render_loop(inner: Arc<Inner>) {
                     if sys::eventfd_write(&g.buf_ready, 1).is_err() {
                         drop(gen);
                         drop(_guard);
-                        enter_fallback(&inner, "eventfd signal failed");
+                        enter_fallback(&inner, cur_gen, "eventfd signal failed");
                         unsafe { inner.anw.cancel(inner.window, anb, -1) };
                         continue;
                     }
@@ -1289,9 +1310,7 @@ fn render_loop(inner: Arc<Inner>) {
                 _ => {
                     let now = sys::now_ns();
                     if iters <= 60 || now.wrapping_sub(log_mismatch_ns) >= 1_000_000_000 {
-                        log::info!(
-                            "anland.sink gen-mismatch cancel-back cur={cur_gen}"
-                        );
+                        log::info!("anland.sink gen-mismatch cancel-back cur={cur_gen}");
                         log_mismatch_ns = now;
                     }
                     unsafe { inner.anw.cancel(inner.window, anb, -1) };
@@ -1300,9 +1319,16 @@ fn render_loop(inner: Arc<Inner>) {
             }
         }
         // refresh_done: 5s poll on our fence dup, then non-blocking recvmsg.
-        let rfence = refresh_done(&inner, cur_fence.as_ref(), pending == Some(cur_gen));
+        let rfence = refresh_done(
+            &inner,
+            cur_fence.as_ref(),
+            pending == Some(cur_gen),
+            cur_gen,
+        );
         if pending == Some(cur_gen) && rfence == FENCE_LOST {
-            log::warn!("anland.render fence lost (generation died); buffer cancelled, not presented");
+            log::warn!(
+                "anland.render fence lost (generation died); buffer cancelled, not presented"
+            );
             unsafe { inner.anw.cancel(inner.window, anb, -1) };
             continue;
         }
@@ -1312,11 +1338,13 @@ fn render_loop(inner: Arc<Inner>) {
         // dequeue must cancel, never present, a buffer produced for the old
         // dimensions into the newly sized BufferQueue.
         let cur_sgen = *inner.surface_gen.lock().unwrap();
-        if !surface_geometry::generation_completion_allowed(frame_sgen, cur_sgen) {
+        if inner.rebind_active.load(Ordering::Acquire)
+            || !surface_geometry::generation_completion_allowed(frame_sgen, cur_sgen)
+        {
             log::info!(
                 "anland.render stale-generation cancel-back frame_sgen={frame_sgen} sgen={cur_sgen}"
             );
-            unsafe { inner.anw.cancel(inner.window, anb, -1) };
+            unsafe { inner.anw.cancel(inner.window, anb, rfence) };
             continue;
         }
         let q = unsafe { inner.anw.queue(inner.window, anb, rfence) };
@@ -1353,8 +1381,7 @@ fn render_loop(inner: Arc<Inner>) {
             // explicit software fallback accepts a bare frame.
             let should_mark = {
                 let mut ready_gen = inner.ready_surface_gen.lock().unwrap();
-                let eligible =
-                    rfence >= 0 || (inner.software_gl && ready_gen.is_none());
+                let eligible = rfence >= 0 || (inner.software_gl && ready_gen.is_none());
                 if eligible && ready_gen.is_none() {
                     *ready_gen = Some(cur_sgen);
                     true
@@ -1444,11 +1471,7 @@ fn log_fps_window(
     let frames = *win_frames;
     let skips = *win_skips;
     let hz = frames as f64 * 1_000_000_000.0 / elapsed_ns as f64;
-    let avg_us = if frames > 0 {
-        *win_comp_us / frames
-    } else {
-        0
-    };
+    let avg_us = if frames > 0 { *win_comp_us / frames } else { 0 };
     let skip_pct = skips * 100 / (frames + skips).max(1);
     let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
     log::info!(
@@ -1468,7 +1491,12 @@ const FENCE_LOST: i32 = -2;
 
 /// Wait for the producer's render-done message; return its fence fd (>=0),
 /// -1 for ready-now, or FENCE_LOST when the generation died.
-fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, selected: bool) -> i32 {
+fn refresh_done(
+    inner: &Arc<Inner>,
+    fence: Option<&OwnedFd>,
+    selected: bool,
+    generation: u64,
+) -> i32 {
     if !selected {
         return -1;
     }
@@ -1487,15 +1515,7 @@ fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, selected: bool) -> 
     };
     let mut waited_ms: i64 = 0;
     loop {
-        // While a rotation rebind is draining in-flight buffers, poll in
-        // short quanta so the drain resolves promptly instead of sitting
-        // out the full stall budget on an obsolete generation.
-        let quantum_cap = if inner.rebind_active.load(Ordering::Acquire) {
-            200
-        } else {
-            FENCE_WAIT_MS
-        };
-        let quantum_ms = quantum_cap.min((budget_ms - waited_ms).max(1) as i32);
+        let quantum_ms = 200.min((budget_ms - waited_ms).max(1) as i32);
         match sys::poll_readable(fence, quantum_ms) {
             Ok(true) => break,
             _ => {
@@ -1505,15 +1525,8 @@ fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, selected: bool) -> 
                     // the render thread still joins promptly.
                     return FENCE_LOST;
                 }
-                if inner.rebind_active.load(Ordering::Acquire) {
-                    // The surface is being rebound: this select belongs to
-                    // the old generation. Bail without fallback churn (the
-                    // rebind owns the next generation) so the buffer
-                    // cancel-backs instead of presenting stale geometry.
-                    return FENCE_LOST;
-                }
                 if waited_ms >= budget_ms {
-                    enter_fallback(inner, "refresh_done timeout (producer stalled)");
+                    enter_fallback(inner, generation, "refresh_done timeout (producer stalled)");
                     return FENCE_LOST;
                 }
             }
@@ -1533,12 +1546,12 @@ fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, selected: bool) -> 
     msg.msg_controllen = cmsg_buf.len() as _;
     let n = unsafe { libc::recvmsg(fence.as_raw_fd(), &mut msg, libc::MSG_DONTWAIT) };
     if n == 0 {
-        enter_fallback(inner, "fence channel EOF (producer gone)");
+        enter_fallback(inner, generation, "fence channel EOF (producer gone)");
         return FENCE_LOST;
     }
     if n < 0 {
         // EAGAIN after POLLIN (fd swapped under us) or error: treat as lost.
-        enter_fallback(inner, "fence channel recv failed");
+        enter_fallback(inner, generation, "fence channel recv failed");
         return FENCE_LOST;
     }
     let mut rfence = -1;
@@ -1783,7 +1796,10 @@ fn sample_client_activity(inner: &Arc<Inner>) {
         // Temporary sampler visibility (demand-tuning build).
         let peek = inner.client_prev.lock().unwrap();
         let peek_delta = total.wrapping_sub(peek.0);
-        log::info!("anland.demand scan procs={scanned} watched={} total={total} delta500ms={peek_delta}", inner.client_cache.lock().unwrap().0.len());
+        log::info!(
+            "anland.demand scan procs={scanned} watched={} total={total} delta500ms={peek_delta}",
+            inner.client_cache.lock().unwrap().0.len()
+        );
     }
     let mut prev = inner.client_prev.lock().unwrap();
     let (prev_total, prev_ns, streak) = *prev;

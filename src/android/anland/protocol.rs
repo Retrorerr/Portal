@@ -147,6 +147,18 @@ fn put_f32(buf: &mut [u8; 16], off: usize, v: f32) {
 }
 
 impl InputEvent {
+    /// Delivered key/button state for cleanup at a geometry boundary. These
+    /// two wire payloads use different field orders and down/up conventions.
+    pub fn press_edge(&self) -> Option<(i32, bool)> {
+        let a = i32::from_ne_bytes(self.payload[0..4].try_into().unwrap());
+        let b = i32::from_ne_bytes(self.payload[4..8].try_into().unwrap());
+        match self.ev_type {
+            INPUT_TYPE_KEY => Some((b, a == INPUT_ACTION_DOWN)),
+            INPUT_TYPE_POINTER_BUTTON => Some((a, b != 0)),
+            _ => None,
+        }
+    }
+
     pub fn touch(action: i32, x: f32, y: f32, pointer_id: i32) -> Self {
         let mut payload = [0u8; 16];
         put_i32(&mut payload, 0, action);
@@ -283,7 +295,7 @@ mod tests {
     #[test]
     fn touch_encodes_action_xy_id() {
         let ev = InputEvent::touch(INPUT_ACTION_DOWN, 100.5, 200.25, 3);
-        assert_eq!(ev.ev_type, INPUT_TYPE_TOUCH);
+        assert_eq!({ ev.ev_type }, INPUT_TYPE_TOUCH);
         assert_eq!(i32::from_ne_bytes(ev.payload[0..4].try_into().unwrap()), 0);
         assert_eq!(
             f32::from_ne_bytes(ev.payload[4..8].try_into().unwrap()),
@@ -309,6 +321,23 @@ mod tests {
             272
         );
         assert_eq!(i32::from_ne_bytes(ev.payload[4..8].try_into().unwrap()), 1);
+        assert_eq!(ev.press_edge(), Some((272, true)));
+        assert_eq!(
+            InputEvent::pointer_button(272, false).press_edge(),
+            Some((272, false))
+        );
+        assert_eq!(
+            InputEvent::key(INPUT_ACTION_DOWN, 30).press_edge(),
+            Some((30, true))
+        );
+        assert_eq!(
+            InputEvent::key(INPUT_ACTION_UP, 30).press_edge(),
+            Some((30, false))
+        );
+        assert_eq!(
+            InputEvent::pointer_motion(1.0, 2.0, 0.0, 0.0).press_edge(),
+            None
+        );
     }
 
     #[test]

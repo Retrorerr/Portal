@@ -137,6 +137,28 @@ impl SurfaceConvergence {
         self.pending.is_some()
     }
 
+    /// Observe one current pair atomically, without evaluating a new winit
+    /// value against the previous poll's native value.
+    pub fn note_sizes(
+        &mut self,
+        w: u32,
+        h: u32,
+        nw: u32,
+        nh: u32,
+        epoch: u64,
+    ) -> ConvergenceAction {
+        let (Some(window), Some(native)) = (SurfaceSize::new(w, h), SurfaceSize::new(nw, nh))
+        else {
+            return ConvergenceAction::IgnoredInvalid;
+        };
+        if epoch != self.epoch {
+            return ConvergenceAction::IgnoredStaleEpoch;
+        }
+        self.winit = Some((window, epoch));
+        self.native = Some((native, epoch));
+        self.evaluate()
+    }
+
     /// Observe the winit resize-event size for `epoch`.
     pub fn note_winit_size(&mut self, w: u32, h: u32, epoch: u64) -> ConvergenceAction {
         let Some(size) = SurfaceSize::new(w, h) else {
@@ -166,9 +188,10 @@ impl SurfaceConvergence {
     /// A completion for any other generation is ignored and reported false
     /// so stale work can never mark a newer surface ready.
     pub fn confirm_converged(&mut self, gen: u64) -> bool {
-        let ok = self.pending.is_some_and(|p| {
-            p.emitted && self.next_gen > 2 && gen == self.next_gen - 1
-        }) || self.pending.is_none() && self.converged.is_some_and(|(_, g)| g == gen);
+        let ok = self
+            .pending
+            .is_some_and(|p| p.emitted && self.next_gen > 2 && gen == self.next_gen - 1)
+            || self.pending.is_none() && self.converged.is_some_and(|(_, g)| g == gen);
         if !ok {
             return false;
         }
@@ -204,7 +227,10 @@ impl SurfaceConvergence {
             }
             return ConvergenceAction::Recorded;
         }
-        if self.converged.is_some_and(|(c, _)| c == wsize) {
+        // An emitted resize may already be operating on the queue. Returning
+        // to the last presented size must supersede it, not cancel the request.
+        let work_outstanding = self.converged.is_some_and(|(_, g)| self.next_gen - 1 > g);
+        if !work_outstanding && self.converged.is_some_and(|(c, _)| c == wsize) {
             self.pending = None;
             return ConvergenceAction::CoalescedIdentical;
         }
@@ -265,7 +291,11 @@ pub fn anchor_motion(
     if event_gen != current_gen {
         return (prev, MotionDecision::Drop);
     }
-    let next = Some(PointerAnchor { x, y, gen: event_gen });
+    let next = Some(PointerAnchor {
+        x,
+        y,
+        gen: event_gen,
+    });
     match prev {
         Some(a) if a.gen == event_gen => (
             next,
@@ -385,13 +415,10 @@ mod tests {
         );
         assert_eq!(c.desired(), Some(PORT)); // winit leads
         assert!(c.has_pending()); // un-emitted desire: keep retrying
-        // Native catches up: exactly one rebind, generation 2.
+                                  // Native catches up: exactly one rebind, generation 2.
         assert_eq!(
             c.note_native_size(PORT.w, PORT.h, EPOCH),
-            ConvergenceAction::Rebind {
-                gen: 2,
-                size: PORT
-            }
+            ConvergenceAction::Rebind { gen: 2, size: PORT }
         );
         assert!(c.has_pending()); // emitted, awaiting confirmation
         assert!(c.confirm_converged(2));
@@ -405,13 +432,7 @@ mod tests {
         let a = c.note_winit_size(PORT.w, PORT.h, EPOCH);
         let b = c.note_native_size(PORT.w, PORT.h, EPOCH);
         assert_eq!(a, ConvergenceAction::Recorded);
-        assert_eq!(
-            b,
-            ConvergenceAction::Rebind {
-                gen: 2,
-                size: PORT
-            }
-        );
+        assert_eq!(b, ConvergenceAction::Rebind { gen: 2, size: PORT });
         // Repeats of the agreed pair coalesce (no second generation).
         assert_eq!(
             c.note_winit_size(PORT.w, PORT.h, EPOCH),
@@ -432,10 +453,7 @@ mod tests {
         assert_eq!(c.desired(), Some(LAND));
         assert_eq!(
             c.note_native_size(LAND.w, LAND.h, EPOCH),
-            ConvergenceAction::Rebind {
-                gen: 3,
-                size: LAND
-            }
+            ConvergenceAction::Rebind { gen: 3, size: LAND }
         );
         assert!(c.confirm_converged(3));
         assert_eq!(c.converged(), Some((LAND, 3)));
@@ -467,10 +485,7 @@ mod tests {
         // the obsolete intermediates.
         assert_eq!(
             c.note_native_size(PORT.w, PORT.h, EPOCH),
-            ConvergenceAction::Rebind {
-                gen: 2,
-                size: PORT
-            }
+            ConvergenceAction::Rebind { gen: 2, size: PORT }
         );
         assert!(c.confirm_converged(2));
         assert_eq!(c.converged(), Some((PORT, 2)));
@@ -482,20 +497,14 @@ mod tests {
         c.note_winit_size(PORT.w, PORT.h, EPOCH);
         assert_eq!(
             c.note_native_size(PORT.w, PORT.h, EPOCH),
-            ConvergenceAction::Rebind {
-                gen: 2,
-                size: PORT
-            }
+            ConvergenceAction::Rebind { gen: 2, size: PORT }
         );
         // Rebind failed (e.g. slot collection): allow exactly one retry.
         c.abort_pending();
         assert!(c.has_pending());
         assert_eq!(
             c.note_native_size(PORT.w, PORT.h, EPOCH),
-            ConvergenceAction::Rebind {
-                gen: 3,
-                size: PORT
-            }
+            ConvergenceAction::Rebind { gen: 3, size: PORT }
         );
         assert!(c.confirm_converged(3));
         assert_eq!(c.converged(), Some((PORT, 3)));
@@ -518,10 +527,7 @@ mod tests {
         c.note_winit_size(PORT.w, PORT.h, EPOCH);
         assert_eq!(
             c.note_native_size(PORT.w, PORT.h, EPOCH),
-            ConvergenceAction::Rebind {
-                gen: 2,
-                size: PORT
-            }
+            ConvergenceAction::Rebind { gen: 2, size: PORT }
         );
         assert!(!c.confirm_converged(1)); // previous surface
         assert!(!c.confirm_converged(3)); // never emitted
@@ -536,13 +542,7 @@ mod tests {
         let (a1, d1) = anchor_motion(None, 100.0, 200.0, 2, 2);
         assert_eq!(d1, MotionDecision::Send { dx: 0.0, dy: 0.0 });
         let (a2, d2) = anchor_motion(a1, 110.0, 205.0, 2, 2);
-        assert_eq!(
-            d2,
-            MotionDecision::Send {
-                dx: 10.0,
-                dy: 5.0
-            }
-        );
+        assert_eq!(d2, MotionDecision::Send { dx: 10.0, dy: 5.0 });
         // Rotation converged to gen 3: the old anchor must not produce a
         // cross-boundary jump; first motion re-anchors with zero delta.
         let (a3, d3) = anchor_motion(a2, 2000.0, 100.0, 3, 3);
@@ -586,5 +586,33 @@ mod tests {
         );
         // winit still portrait, native landscape: newest desired is winit's.
         assert_eq!(c.desired(), Some(PORT));
+    }
+
+    #[test]
+    fn rapid_return_to_original_size_supersedes_unpresented_resize() {
+        let mut c = landed();
+        assert_eq!(
+            c.note_sizes(PORT.w, PORT.h, PORT.w, PORT.h, EPOCH),
+            ConvergenceAction::Rebind { gen: 2, size: PORT }
+        );
+        assert_eq!(
+            c.note_sizes(LAND.w, LAND.h, LAND.w, LAND.h, EPOCH),
+            ConvergenceAction::Rebind { gen: 3, size: LAND }
+        );
+        assert!(!c.confirm_converged(2));
+        assert!(c.confirm_converged(3));
+        assert_eq!(c.converged(), Some((LAND, 3)));
+    }
+
+    #[test]
+    fn current_pair_never_uses_previous_native_observation() {
+        let mut c = landed();
+        c.note_sizes(LAND.w, LAND.h, PORT.w, PORT.h, EPOCH);
+        assert_eq!(
+            c.note_sizes(PORT.w, PORT.h, LAND.w, LAND.h, EPOCH),
+            ConvergenceAction::Recorded
+        );
+        assert_eq!(c.converged(), Some((LAND, 1)));
+        assert!(!c.confirm_converged(2));
     }
 }

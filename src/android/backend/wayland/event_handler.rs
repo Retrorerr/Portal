@@ -276,35 +276,28 @@ fn poll_long_press(backend: &mut WaylandBackend) {
 /// page). Never touches READY blur/chromatic state (none exists), Plasma
 /// scale (still governed by kwinoutputconfig on this same resize path),
 /// provisioning visuals, or the Compose veil (which relayouts normally).
-pub fn poll_anland_convergence(
-    backend: &mut WaylandBackend,
-    winit_size: Option<(i32, i32)>,
-) {
+pub fn poll_anland_convergence(backend: &mut WaylandBackend, winit_size: Option<(i32, i32)>) {
     let Some(session) = backend.anland.as_mut() else {
         return;
     };
     let epoch = session.surface_epoch();
-    let mut emitted = None;
-    if let Some((w, h)) = winit_size {
-        if let ConvergenceAction::Rebind { gen, size } = backend
-            .surface_convergence
-            .note_winit_size(w.max(0) as u32, h.max(0) as u32, epoch)
-        {
-            emitted = Some((gen, size));
-        }
+    if let Some(gen) = session.presented_surface_gen() {
+        backend.surface_convergence.confirm_converged(gen);
     }
-    // Always feed the live native observation too: the winit event and the
-    // SurfaceView resize can arrive in either order during rotation.
-    if emitted.is_none() {
-        let (nw, nh) = session.native_window_size();
-        if let ConvergenceAction::Rebind { gen, size } = backend
-            .surface_convergence
-            .note_native_size(nw.max(0) as u32, nh.max(0) as u32, epoch)
-        {
-            emitted = Some((gen, size));
-        }
-    }
-    let Some((gen, size)) = emitted else {
+    let (w, h) = winit_size.unwrap_or_else(|| {
+        session
+            .window_inner_size()
+            .map(|(w, h)| (w as i32, h as i32))
+            .unwrap_or((0, 0))
+    });
+    let (nw, nh) = session.native_window_size();
+    let ConvergenceAction::Rebind { gen, size } = backend.surface_convergence.note_sizes(
+        w.max(0) as u32,
+        h.max(0) as u32,
+        nw.max(0) as u32,
+        nh.max(0) as u32,
+        epoch,
+    ) else {
         return;
     };
     // Full transaction diagnostics (one line per genuine transition, never
@@ -326,9 +319,7 @@ pub fn poll_anland_convergence(
         session.native_window_ptr(),
     );
     match session.rebind_surface(size.w, size.h, gen) {
-        Ok(g) => {
-            backend.surface_convergence.confirm_converged(g);
-        }
+        Ok(_) => {} // Only the first presented frame confirms convergence.
         Err(e) => {
             backend.surface_convergence.abort_pending();
             log::warn!(
@@ -761,6 +752,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 .try_update_physical_size(size.w, size.h)
                 .is_some();
             if !host_changed {
+                poll_anland_convergence(backend, Some((size.w, size.h)));
                 // Coalesced repeat (same size) or nothing to do: output,
                 // configure, scale and transforms are already correct.
                 return;
