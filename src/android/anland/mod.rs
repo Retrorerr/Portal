@@ -398,8 +398,9 @@ pub fn create_window(
         RawWindowHandle::AndroidNdk(h) => {
             // Lifecycle evidence (spike/game-activity-host): the GameActivity
             // SurfaceView ANativeWindow backing this Winit window. Anland
-            // acquires and owns it for the session; it must stay valid until
-            // the Winit suspend/terminate path stops the session.
+            // acquires and owns it for this surface generation; suspend
+            // joins surface workers and releases it before Android destroys
+            // the surface while the persistent broker/session remains alive.
             let ptr = h.a_native_window.as_ptr();
             log::info!("Anland create_window: AndroidNdk a_native_window={ptr:p}");
             Ok((window, ptr))

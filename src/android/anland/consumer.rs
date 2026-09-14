@@ -45,7 +45,6 @@ const COLD_FIRST_FRAME_WAIT_MS: i64 = 150_000;
 /// released slot. On (near-impossible) timeout the buffer is CANCELLED back
 /// to the free pool, never presented.
 const ACQUIRE_WAIT_MS: i32 = 1000;
-const JOIN_TIMEOUT: Duration = Duration::from_secs(8);
 
 // Demand-driven presentation budgets (see render_loop).
 /// Full-rate window after any forwarded input event (touch/pointer/key).
@@ -69,8 +68,8 @@ struct SlotInfo {
     info: BufInfo,
 }
 
-// SAFETY: slots are only touched by the render thread while the session lives,
-// and the spare is cancelled before the window is released.
+// SAFETY: slots are only touched by the render thread while their surface
+// generation lives, and the spare is cancelled before the window is released.
 unsafe impl Send for SlotInfo {}
 
 struct ActiveGen {
@@ -87,7 +86,11 @@ struct ActiveGen {
 }
 
 struct Inner {
-    window: *mut c_void,
+    /// The current Android presentation surface. This is `None` while the
+    /// Activity is suspended. It is never read by a surface-bound worker
+    /// unless `window_live` is true and the worker has been started for that
+    /// surface generation.
+    window: Mutex<Option<*mut c_void>>,
     anw: AnwApi,
     broker: Arc<Broker>,
     running: AtomicBool,
@@ -104,10 +107,10 @@ struct Inner {
     spare: Mutex<Option<*mut ANativeWindowBuffer>>,
     screen: Mutex<(u32, u32)>,
     refresh_mhz: u32,
-    /// Native-window epoch minted at session start (see
+    /// Native-window epoch minted for each surface attachment (see
     /// [`surface_geometry::mint_surface_epoch`]). Delayed resize events from
     /// a destroyed surface carry the old epoch and are rejected as stale.
-    surface_epoch: u64,
+    surface_epoch: AtomicU64,
     /// Converged presentation surface generation. 1 = session start; each
     /// rotation rebind mints exactly one more. Input anchors and readiness
     /// are tagged against this: nothing from an older generation may mutate
@@ -198,7 +201,9 @@ pub struct AnlandSession {
     render_thread: Option<JoinHandle<()>>,
     event_thread: Option<JoinHandle<()>>,
     broker_thread: Option<JoinHandle<()>>,
-    _window_holder: Option<Arc<winit::window::Window>>,
+    /// The winit holder is surface-scoped. The broker/session remains alive
+    /// while this is `None` between Android surface lifetimes.
+    window_holder: Option<Arc<winit::window::Window>>,
 }
 
 pub struct AnlandConfig {
@@ -222,10 +227,117 @@ fn close_silently(fd: i32) {
     }
 }
 
+fn current_window(inner: &Arc<Inner>) -> Option<*mut c_void> {
+    inner.window.lock().ok().and_then(|window| *window)
+}
+
+fn install_window(inner: &Arc<Inner>, window: *mut c_void) -> Result<(), String> {
+    let mut current = inner
+        .window
+        .lock()
+        .map_err(|_| "Anland surface state is poisoned".to_string())?;
+    if current.is_some() {
+        return Err("Anland surface is already attached".into());
+    }
+    *current = Some(window);
+    Ok(())
+}
+
+fn remove_window(inner: &Arc<Inner>) -> Option<*mut c_void> {
+    inner.window.lock().ok().and_then(|mut window| window.take())
+}
+
+fn release_window(inner: &Arc<Inner>) {
+    if let Some(window) = remove_window(inner) {
+        unsafe { anw::release(window, &inner.anw) };
+    }
+}
+
+/// Acquire and configure one Android surface. Every failure after acquire
+/// releases the reference again, so a failed resume cannot leak or leave a
+/// half-configured surface owned by the persistent session.
+fn configure_window(
+    window: *mut c_void,
+    anw: &AnwApi,
+    cfg: &AnlandConfig,
+) -> Result<(u32, u32, usize), String> {
+    unsafe { anw::acquire(window, anw) };
+    let result = (|| {
+        // Connect to the CPU API via the lock/unlock ritual (see anw.rs):
+        // the in-object perform() slot is not trusted for indirect calls
+        // (its supposed address disagrees with every dlsym'd entry on this
+        // device), while the dlsym'd dequeue/queue path is proven working.
+        unsafe { anw.connect_cpu_ritual(window)? };
+        let (win_w, win_h) = unsafe { (anw::get_width(window, anw), anw::get_height(window, anw)) };
+        let (w, h) = if win_w > 0 && win_h > 0 {
+            (win_w as u32, win_h as u32)
+        } else {
+            (cfg.width, cfg.height)
+        };
+        if w == 0 || h == 0 {
+            return Err("Android surface has zero geometry".into());
+        }
+        log::info!(
+            "anland.renderer=anland-gpu window={w}x{h} requested={}x{}",
+            cfg.width,
+            cfg.height
+        );
+        let r = unsafe {
+            anw::set_buffers_geometry(window, anw, w as i32, h as i32, anw::FORMAT_RGBA_8888)
+        };
+        if r != 0 {
+            return Err(format!("ANativeWindow_setBuffersGeometry failed: {r}"));
+        }
+        let min_undequeued = unsafe { anw.query_min_undequeued(window) }?;
+        let total = (min_undequeued + 2).clamp(3, MAX_BUFS as i32) as usize;
+        let r = unsafe { anw.set_buffer_count(window, total) };
+        if r != 0 {
+            return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
+        }
+        Ok((w, h, total))
+    })();
+    if result.is_err() {
+        unsafe { anw::release(window, anw) };
+    }
+    result
+}
+
 impl AnlandSession {
+    fn spawn_broker_thread(inner: &Arc<Inner>) -> Result<JoinHandle<()>, String> {
+        let broker = inner.broker.clone();
+        let shutdown = inner.broker_stop.clone();
+        thread::Builder::new()
+            .name("anland-broker".into())
+            .spawn(move || {
+                if let Err(error) = broker.serve(shutdown) {
+                    log::warn!("anland.broker serve ended: {error}");
+                }
+            })
+            .map_err(|error| format!("spawn broker thread: {error}"))
+    }
+
+    fn ensure_broker_thread(&mut self) -> Result<(), String> {
+        if self
+            .broker_thread
+            .as_ref()
+            .is_some_and(|thread| thread.is_finished())
+        {
+            if let Some(thread) = self.broker_thread.take() {
+                join_surface_thread(thread, "broker-recovery");
+            }
+            self.inner.broker_stop.store(false, Ordering::Release);
+            self.broker_thread = Some(Self::spawn_broker_thread(&self.inner)?);
+            log::info!("anland.broker listener restarted before surface resume");
+        }
+        if self.broker_thread.is_none() {
+            return Err("Anland broker listener is unavailable".into());
+        }
+        Ok(())
+    }
+
     /// Take over `window` for zero-copy GPU presentation.
     ///
-    /// `window_holder` keeps the winit Window alive for the session lifetime.
+    /// `window_holder` keeps the winit Window alive for this surface lifetime.
     /// The caller must guarantee `window` is a valid, current `ANativeWindow*`
     /// and must call [`Self::stop`] while it is still valid (Portal's
     /// `suspended()` runs while the lifecycle window is alive).
@@ -235,46 +347,11 @@ impl AnlandSession {
         cfg: &AnlandConfig,
     ) -> Result<Self, String> {
         let anw = unsafe { AnwApi::load() }?;
-        unsafe { anw::acquire(window, &anw) };
-        // Connect to the CPU API via the lock/unlock ritual (see anw.rs):
-        // the in-object perform() slot is not trusted for indirect calls
-        // (its supposed address disagrees with every dlsym'd entry on this
-        // device), while the dlsym'd dequeue/queue path is proven working.
-        unsafe { anw.connect_cpu_ritual(window)? };
-        let (win_w, win_h) =
-            unsafe { (anw::get_width(window, &anw), anw::get_height(window, &anw)) };
-        let (w, h) = if win_w > 0 && win_h > 0 {
-            (win_w as u32, win_h as u32)
-        } else {
-            (cfg.width, cfg.height)
-        };
-        log::info!(
-            "anland.renderer=anland-gpu window={w}x{h} requested={}x{}",
-            cfg.width,
-            cfg.height
-        );
-        let r = unsafe {
-            anw::set_buffers_geometry(window, &anw, w as i32, h as i32, anw::FORMAT_RGBA_8888)
-        };
-        if r != 0 {
-            unsafe {
-                anw::release(window, &anw);
-            }
-            return Err(format!("ANativeWindow_setBuffersGeometry failed: {r}"));
-        }
-        let min_undequeued = unsafe { anw.query_min_undequeued(window) }?;
-        let total = (min_undequeued + 2).clamp(3, MAX_BUFS as i32) as usize;
-        let r = unsafe { anw.set_buffer_count(window, total) };
-        if r != 0 {
-            unsafe {
-                anw::release(window, &anw);
-            }
-            return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
-        }
         if let Some(parent) = cfg.socket_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create anland socket dir: {e}"))?;
         }
+        let (w, h, total) = configure_window(window, &anw, cfg)?;
         let screen = ScreenInfo {
             width: w,
             height: h,
@@ -284,15 +361,26 @@ impl AnlandSession {
         let broker = Arc::new(Broker::new(screen, cfg.socket_path.clone()));
         // Demand pacing: kick channel + display-VSYNC tick source. Pump
         // failure fails the session loudly (never a silent free-spin).
-        let wake = sys::make_eventfd().map_err(|e| format!("wake eventfd: {e}"))?;
-        let vsync =
-            sys::VsyncPump::start(cfg.refresh_mhz).map_err(|e| format!("vsync pump: {e}"))?;
+        let wake = match sys::make_eventfd() {
+            Ok(wake) => wake,
+            Err(error) => {
+                unsafe { anw::release(window, &anw) };
+                return Err(format!("wake eventfd: {error}"));
+            }
+        };
+        let vsync = match sys::VsyncPump::start(cfg.refresh_mhz) {
+            Ok(vsync) => vsync,
+            Err(error) => {
+                unsafe { anw::release(window, &anw) };
+                return Err(format!("vsync pump: {error}"));
+            }
+        };
         // Surface epoch for rotation convergence: delayed resize events from
         // a previous native window carry the old epoch and are rejected.
         // This session converges as surface generation 1; rotations mint 2+.
         let surface_epoch = surface_geometry::mint_surface_epoch();
         let inner = Arc::new(Inner {
-            window,
+            window: Mutex::new(Some(window)),
             anw,
             broker: broker.clone(),
             running: AtomicBool::new(true),
@@ -305,7 +393,7 @@ impl AnlandSession {
             spare: Mutex::new(None),
             screen: Mutex::new((w, h)),
             refresh_mhz: cfg.refresh_mhz,
-            surface_epoch,
+            surface_epoch: AtomicU64::new(surface_epoch),
             surface_gen: Mutex::new(1),
             rebind_active: AtomicBool::new(false),
             rebind_request: Mutex::new(None),
@@ -329,37 +417,38 @@ impl AnlandSession {
             motion_logged_gen: Mutex::new(0),
         });
         // Collect window slots (dup dma-buf fds, hold one spare back).
-        collect_buffers(&inner, total, w, h)?;
+        if let Err(error) = collect_buffers(&inner, total, w, h) {
+            cleanup_failed_session(&inner);
+            return Err(error);
+        }
         // First generation: fresh fds + deposit at the broker.
-        deposit_generation(&inner)?;
-        // Threads.
-        let broker_thread = {
-            let broker = broker.clone();
-            let shutdown = inner.broker_stop.clone();
-            thread::Builder::new()
-                .name("anland-broker".into())
-                .spawn(move || {
-                    if let Err(e) = broker.serve(shutdown) {
-                        log::warn!("anland.broker serve ended: {e}");
-                    }
-                })
-                .map_err(|e| format!("spawn broker thread: {e}"))?
+        if let Err(error) = deposit_generation(&inner) {
+            cleanup_failed_session(&inner);
+            return Err(error);
+        }
+        // The broker is session-scoped. Its listener intentionally outlives
+        // the presentation surface so KWin's producer can remain alive and
+        // use its normal fallback/reconnect path while Android owns no
+        // window.
+        let broker_thread = match Self::spawn_broker_thread(&inner) {
+            Ok(thread) => thread,
+            Err(error) => {
+                cleanup_failed_session(&inner);
+                return Err(error);
+            }
         };
-        let render_thread = {
-            let inner = inner.clone();
-            thread::Builder::new()
-                .name("anland-render".into())
-                .spawn(move || render_loop(inner))
-                .map_err(|e| format!("spawn render thread: {e}"))?
+        let mut session = Self {
+            inner,
+            render_thread: None,
+            event_thread: None,
+            broker_thread: Some(broker_thread),
+            window_holder: Some(window_holder),
         };
-        let event_thread = {
-            let inner = inner.clone();
-            thread::Builder::new()
-                .name("anland-event".into())
-                .spawn(move || event_loop(inner))
-                .map_err(|e| format!("spawn event thread: {e}"))?
-        };
-        // Stash shutdown flag inside inner for stop(); broker thread owns its clone.
+        if let Err(error) = session.start_surface_threads() {
+            session.stop();
+            return Err(error);
+        }
+        let inner = session.inner.clone();
         log::info!(
             "anland.session=start screen={}x{} fmt=RGBA_8888 refresh_mhz={} bufs={} socket={} epoch={surface_epoch} sgen=1",
             w,
@@ -372,7 +461,31 @@ impl AnlandSession {
         // Session-start burst covers window mapping + startup animation;
         // the loop then lapses to heartbeat unless input/work sustains it.
         kick(&inner, START_BURST_MS);
-        if let Ok(vsync) = inner.vsync.lock() {
+        session.log_pacing();
+        Ok(session)
+    }
+
+    fn start_surface_threads(&mut self) -> Result<(), String> {
+        let inner = self.inner.clone();
+        let render_thread = thread::Builder::new()
+            .name("anland-render".into())
+            .spawn({
+                let inner = inner.clone();
+                move || render_loop(inner)
+            })
+            .map_err(|e| format!("spawn render thread: {e}"))?;
+        self.render_thread = Some(render_thread);
+
+        let event_thread = thread::Builder::new()
+            .name("anland-event".into())
+            .spawn(move || event_loop(inner))
+            .map_err(|e| format!("spawn event thread: {e}"))?;
+        self.event_thread = Some(event_thread);
+        Ok(())
+    }
+
+    fn log_pacing(&self) {
+        if let Ok(vsync) = self.inner.vsync.lock() {
             if let Some(pump) = vsync.as_ref() {
                 log::info!(
                     "anland.pacing demand-driven vsync={} period_ns={}",
@@ -381,20 +494,178 @@ impl AnlandSession {
                 );
             }
         }
-        Ok(Self {
-            inner,
-            render_thread: Some(render_thread),
-            event_thread: Some(event_thread),
-            broker_thread: Some(broker_thread),
-            _window_holder: Some(window_holder),
-        })
+    }
+
+    /// Reattach a newly-created Android surface to this still-running
+    /// Anland session. The broker, KWin producer and guest Plasma process are
+    /// deliberately not recreated here; only the surface generation is.
+    pub fn resume_surface(
+        &mut self,
+        window: *mut c_void,
+        window_holder: Arc<winit::window::Window>,
+        cfg: &AnlandConfig,
+    ) -> Result<(u32, u32), String> {
+        let inner = self.inner.clone();
+        if !inner.running.load(Ordering::Acquire) {
+            return Err("Anland session is permanently stopped".into());
+        }
+        if inner.window_live.load(Ordering::Acquire) || current_window(&inner).is_some() {
+            return Err("Anland surface is already attached".into());
+        }
+        self.ensure_broker_thread()?;
+        let (w, h, total) = configure_window(window, &inner.anw, cfg)?;
+        if let Err(error) = install_window(&inner, window) {
+            unsafe { anw::release(window, &inner.anw) };
+            return Err(error);
+        }
+        inner.window_live.store(true, Ordering::Release);
+
+        let epoch = surface_geometry::mint_surface_epoch();
+        inner.surface_epoch.store(epoch, Ordering::Release);
+        *inner.surface_gen.lock().unwrap() = 1;
+        *inner.last_pointer.lock().unwrap() = None;
+        *inner.finger_axes.lock().unwrap() = 0;
+        *inner.ready_surface_gen.lock().unwrap() = None;
+        *inner.motion_logged_gen.lock().unwrap() = 0;
+        *inner.rebind_request.lock().unwrap() = None;
+        inner.rebind_active.store(false, Ordering::Release);
+        inner.demand_until_ns.store(0, Ordering::Release);
+        *inner.screen.lock().unwrap() = (w, h);
+        inner.broker.set_screen(ScreenInfo {
+            width: w,
+            height: h,
+            format: PIXEL_FORMAT_RGBA_8888,
+            refresh: inner.refresh_mhz,
+        });
+
+        let vsync = match sys::VsyncPump::start(inner.refresh_mhz) {
+            Ok(vsync) => vsync,
+            Err(error) => {
+                self.suspend_surface();
+                return Err(format!("vsync pump after Android surface resume: {error}"));
+            }
+        };
+        *inner.vsync.lock().unwrap() = Some(vsync);
+
+        // The producer is already alive in the guest. Withdrawn generation
+        // fds make it enter its normal fallback; this fresh set lets its
+        // existing try_exit_fallback/reconnect path recover onto the new
+        // BufferQueue without another launch() call.
+        if let Err(error) = collect_buffers(&inner, total, w, h) {
+            self.suspend_surface();
+            return Err(format!("collect buffers after Android surface resume: {error}"));
+        }
+        if let Err(error) = deposit_generation(&inner) {
+            self.suspend_surface();
+            return Err(format!("deposit Anland generation after surface resume: {error}"));
+        }
+        if let Err(error) = self.start_surface_threads() {
+            self.suspend_surface();
+            return Err(error);
+        }
+
+        self.window_holder = Some(window_holder);
+        log::info!(
+            "anland.surface=resumed epoch={epoch} sgen=1 screen={w}x{h} bufs={total}; guest session preserved"
+        );
+        self.log_pacing();
+        kick(&inner, CONNECT_BURST_MS);
+        Ok((w, h))
+    }
+
+    fn release_surface_inputs(&self) {
+        if !self.inner.window_live.load(Ordering::Acquire) {
+            return;
+        }
+        self.send_finger_stops();
+        let held = std::mem::take(&mut *self.inner.held_inputs.lock().unwrap());
+        for (kind, code) in held {
+            let release = if kind == INPUT_TYPE_KEY {
+                InputEvent::key(INPUT_ACTION_UP, code)
+            } else {
+                InputEvent::pointer_button(code as u32, false)
+            };
+            self.send_input(&release);
+        }
+    }
+
+    /// Retire only the current Android presentation surface. This is
+    /// intentionally distinct from [`Self::stop`]: broker/listener state and
+    /// the guest KWin/Plasma process survive the Android suspend callback.
+    pub fn suspend_surface(&mut self) {
+        let has_surface = current_window(&self.inner).is_some()
+            || self.render_thread.is_some()
+            || self.event_thread.is_some()
+            || self
+                .inner
+                .vsync
+                .lock()
+                .map(|vsync| vsync.is_some())
+                .unwrap_or(false);
+        if !has_surface {
+            self.inner.window_live.store(false, Ordering::Release);
+            return;
+        }
+
+        // The old channel is still live here, so all delivered keys/buttons
+        // and active finger axes get their matching release/stop events.
+        self.release_surface_inputs();
+        self.inner.window_live.store(false, Ordering::Release);
+        self.inner.rebind_active.store(false, Ordering::Release);
+        self.inner.rebind_request.lock().unwrap().take();
+        self.inner.demand_until_ns.store(0, Ordering::Release);
+        let _ = sys::eventfd_write(&self.inner.wake, 1);
+
+        // Return the one dequeued spare before joining. This is the explicit
+        // unblock for a render thread that is inside dequeueBuffer. The
+        // render thread is joined before the native pointer is released;
+        // detaching a surface-bound worker would make use-after-destroy
+        // possible.
+        if let Some(window) = current_window(&self.inner) {
+            if let Ok(mut spare) = self.inner.spare.lock() {
+                if let Some(anb) = spare.take() {
+                    unsafe { self.inner.anw.cancel(window, anb, -1) };
+                }
+            }
+        }
+        if let Some(handle) = self.render_thread.take() {
+            join_surface_thread(handle, "render");
+        }
+        if let Ok(mut vsync) = self.inner.vsync.lock() {
+            if let Some(pump) = vsync.take() {
+                pump.stop();
+            }
+        }
+        // Closing the generation after render quiescence withdraws the
+        // producer deposit and wakes its existing fallback/reconnect logic.
+        teardown_generation(&self.inner);
+        if let Some(handle) = self.event_thread.take() {
+            join_surface_thread(handle, "event");
+        }
+        // These slots were queued back to Android; clear only our duplicate
+        // dma-buf metadata. Never cancel the collected queued slots.
+        self.inner.buffers.lock().unwrap().clear();
+        *self.inner.ready_surface_gen.lock().unwrap() = None;
+        *self.inner.last_pointer.lock().unwrap() = None;
+        *self.inner.finger_axes.lock().unwrap() = 0;
+        *self.inner.surface_gen.lock().unwrap() = 0;
+
+        // No worker can touch the pointer now. Release our reference and
+        // remove it from the persistent session before dropping the winit
+        // holder, so later callbacks cannot observe the old surface.
+        release_window(&self.inner);
+        self.window_holder.take();
+        self.inner.surface_epoch.store(0, Ordering::Release);
+        log::info!("anland.surface=suspended broker=preserved guest=preserved");
     }
 
     /// Forward one fixed-size input event to the producer. No-op unless the
     /// current generation completed its BUFS_READY push.
     pub fn send_input(&self, ev: &InputEvent) {
         let inner = &self.inner;
-        if !inner.running.load(Ordering::Acquire) {
+        if !inner.running.load(Ordering::Acquire)
+            || !inner.window_live.load(Ordering::Acquire)
+        {
             return;
         }
         if inner.rebind_active.load(Ordering::Acquire) {
@@ -443,7 +714,9 @@ impl AnlandSession {
     /// a jump) reports zero delta, never a spike.
     pub fn send_pointer_motion(&self, x: f32, y: f32) {
         let inner = &self.inner;
-        if !inner.running.load(Ordering::Acquire) {
+        if !inner.running.load(Ordering::Acquire)
+            || !inner.window_live.load(Ordering::Acquire)
+        {
             return;
         }
         if inner.rebind_active.load(Ordering::Acquire) {
@@ -487,7 +760,9 @@ impl AnlandSession {
             return false;
         }
         let inner = &self.inner;
-        if !inner.running.load(Ordering::Acquire) {
+        if !inner.running.load(Ordering::Acquire)
+            || !inner.window_live.load(Ordering::Acquire)
+        {
             return false;
         }
         if inner.rebind_active.load(Ordering::Acquire) {
@@ -524,6 +799,9 @@ impl AnlandSession {
     /// Forward one touchpad finger-scroll value (axis 0 = vertical,
     /// 1 = horizontal) and mark the stream live for stop events.
     pub fn send_finger_axis(&self, axis: u32, value: f32) {
+        if !self.surface_active() {
+            return;
+        }
         if axis < 2 {
             if let Ok(mut live) = self.inner.finger_axes.lock() {
                 *live |= 1u8 << axis;
@@ -563,9 +841,10 @@ impl AnlandSession {
         *self.inner.screen.lock().unwrap()
     }
 
-    /// Native-window epoch minted at session start (stale-event rejection).
+    /// Native-window epoch minted at each surface attachment (stale-event
+    /// rejection). Zero means the persistent session is surface-suspended.
     pub fn surface_epoch(&self) -> u64 {
-        self.inner.surface_epoch
+        self.inner.surface_epoch.load(Ordering::Acquire)
     }
 
     /// Currently converged presentation surface generation.
@@ -573,27 +852,60 @@ impl AnlandSession {
         *self.inner.surface_gen.lock().unwrap()
     }
 
-    /// Raw `ANativeWindow*` this session owns (stable for the session
-    /// lifetime; a surface destroy/recreate stops the session instead).
+    /// Whether a valid Android presentation surface is currently attached.
+    /// The broker and guest session remain alive while this is false.
+    pub fn surface_active(&self) -> bool {
+        self.inner.window_live.load(Ordering::Acquire)
+    }
+
+    /// Whether the attached surface still has all of its session-owned
+    /// workers. A worker can terminate because of an unexpected pacing or
+    /// broker failure; treating that dead session as an active surface would
+    /// make a later resume a no-op and leave a black BufferQueue.
+    pub fn surface_healthy(&self) -> bool {
+        self.surface_active()
+            && self
+                .render_thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+            && self
+                .event_thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+            && self
+                .broker_thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+    }
+
+    /// Raw `ANativeWindow*` this session owns for the current surface. It is
+    /// null between Android surface lifetimes and must never be retained by a
+    /// caller after the next suspend callback.
     pub fn native_window_ptr(&self) -> *mut c_void {
-        self.inner.window
+        current_window(&self.inner).unwrap_or(std::ptr::null_mut())
     }
 
     /// Live `ANativeWindow` size. Read on every rotation transaction: the
     /// winit event size and this must agree before the new geometry is
     /// treated as authoritative.
     pub fn native_window_size(&self) -> (i32, i32) {
+        if !self.surface_active() {
+            return (0, 0);
+        }
+        let Some(window) = current_window(&self.inner) else {
+            return (0, 0);
+        };
         unsafe {
             (
-                anw::get_width(self.inner.window, &self.inner.anw),
-                anw::get_height(self.inner.window, &self.inner.anw),
+                anw::get_width(window, &self.inner.anw),
+                anw::get_height(window, &self.inner.anw),
             )
         }
     }
 
     /// winit's view of the window size, if the holder is still alive.
     pub fn window_inner_size(&self) -> Option<(u32, u32)> {
-        self._window_holder.as_ref().map(|w| {
+        self.window_holder.as_ref().map(|w| {
             let s = w.inner_size();
             (s.width, s.height)
         })
@@ -607,7 +919,12 @@ impl AnlandSession {
     /// Queue a resize for the render thread, which owns native buffer operations.
     pub fn rebind_surface(&self, w: u32, h: u32, gen: u64) -> Result<u64, String> {
         let inner = &self.inner;
-        if w == 0 || h == 0 || !inner.running.load(Ordering::Acquire) {
+        if w == 0
+            || h == 0
+            || !inner.running.load(Ordering::Acquire)
+            || !inner.window_live.load(Ordering::Acquire)
+            || current_window(inner).is_none()
+        {
             return Err("invalid geometry or session stopping".into());
         }
         // End scroll streams while the old channel is still valid.
@@ -637,6 +954,12 @@ impl AnlandSession {
     /// KWin resizes its existing output from BUFS_READY buffer dimensions on
     /// import; SCREEN_INFO is only used by a new producer's initial hello.
     fn rebind_surface_inner(inner: &Arc<Inner>, w: u32, h: u32, gen: u64) -> Result<u64, String> {
+        let Some(window) = current_window(inner) else {
+            return Err("Android surface is no longer attached".into());
+        };
+        if !inner.window_live.load(Ordering::Acquire) {
+            return Err("Android surface is suspended".into());
+        }
         let (old_w, old_h) = *inner.screen.lock().unwrap();
         let cur_sgen = *inner.surface_gen.lock().unwrap();
         if gen < cur_sgen {
@@ -651,15 +974,15 @@ impl AnlandSession {
         };
         log::info!(
             "anland.rotate sgen={gen} begin old={old_w}x{old_h} new={w}x{h} ptr={:p} epoch={} broker={bw}x{bh}",
-            inner.window,
-            inner.surface_epoch,
+            window,
+            inner.surface_epoch.load(Ordering::Acquire),
         );
         // No frame is in flight: this runs between render-loop iterations.
         teardown_generation(inner);
         // Only the held spare is dequeued and may be cancelled.
         if let Ok(mut spare) = inner.spare.lock() {
             if let Some(anb) = spare.take() {
-                unsafe { inner.anw.cancel(inner.window, anb, -1) };
+                unsafe { inner.anw.cancel(window, anb, -1) };
             }
         }
         // Collected slots are QUEUED, not owned/dequeued: cancelling them
@@ -677,7 +1000,7 @@ impl AnlandSession {
         });
         let r = unsafe {
             anw::set_buffers_geometry(
-                inner.window,
+                window,
                 &inner.anw,
                 w as i32,
                 h as i32,
@@ -689,10 +1012,10 @@ impl AnlandSession {
                 "ANativeWindow_setBuffersGeometry({w}x{h}) failed: {r}"
             ));
         }
-        let min_undequeued = unsafe { inner.anw.query_min_undequeued(inner.window) }
+        let min_undequeued = unsafe { inner.anw.query_min_undequeued(window) }
             .map_err(|e| format!("ANativeWindow query min-undequeued after resize: {e}"))?;
         let total = (min_undequeued + 2).clamp(3, MAX_BUFS as i32) as usize;
-        let r = unsafe { inner.anw.set_buffer_count(inner.window, total) };
+        let r = unsafe { inner.anw.set_buffer_count(window, total) };
         if r != 0 {
             return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
         }
@@ -716,46 +1039,16 @@ impl AnlandSession {
         Ok(gen)
     }
 
-    /// Stop the session while the window is still valid. Bounded joins;
-    /// never blocks the lifecycle thread indefinitely.
+    /// Permanently stop the session. Unlike [`Self::suspend_surface`], this
+    /// also tears down the persistent broker/listener. Normal Android
+    /// suspend/resume must never call this method.
     pub fn stop(mut self) {
+        self.suspend_surface();
         let inner = self.inner.clone();
         inner.running.store(false, Ordering::Release);
-        inner.window_live.store(false, Ordering::Release);
-        // Unblock a render loop parked in its vsync/kick poll promptly.
-        let _ = sys::eventfd_write(&inner.wake, 1);
-        // Return the held spare to the queue so a thread blocked in
-        // dequeueBuffer wakes promptly (cancel presents nothing).
-        if let Ok(mut spare) = inner.spare.lock() {
-            if let Some(anb) = spare.take() {
-                unsafe { inner.anw.cancel(inner.window, anb, -1) };
-            }
-        }
-        if let Some(h) = self.render_thread.take() {
-            join_bounded(h, JOIN_TIMEOUT, "render");
-        }
-        // The render thread is joined: no reader of the vsync tick remains,
-        // so the pump can stop (its thread joins bounded by construction).
-        if let Ok(mut vsync) = inner.vsync.lock() {
-            if let Some(pump) = vsync.take() {
-                pump.stop();
-            }
-        }
-        if let Some(h) = self.event_thread.take() {
-            join_bounded(h, JOIN_TIMEOUT, "event");
-        }
         if let Some(h) = self.broker_thread.take() {
             inner.broker_stop.store(true, Ordering::Release);
-            join_bounded(h, JOIN_TIMEOUT, "broker");
-        }
-        teardown_generation(&inner);
-        // The render thread returned its slot; queued slots belong to Android.
-        unsafe {
-            // No API disconnect: the window was connected via the lock ritual
-            // and struct perform() is untrusted. The NativeActivity window is
-            // destroyed by the framework right after suspend, which drops all
-            // API state; a renderer-flag switch always lands on a fresh window.
-            anw::release(inner.window, &inner.anw);
+            join_surface_thread(h, "broker");
         }
         let (q, f, b, fb) = (
             inner.frames_queued.load(Ordering::Relaxed),
@@ -767,14 +1060,46 @@ impl AnlandSession {
     }
 }
 
-fn join_bounded(handle: JoinHandle<()>, timeout: Duration, what: &str) {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = handle.join();
-        let _ = tx.send(());
-    });
-    if rx.recv_timeout(timeout).is_err() {
-        log::warn!("anland.{what} join timed out after {timeout:?}; detaching");
+/// Clean up a session whose surface was configured but whose persistent
+/// session could not finish starting. This path is only used before a fully
+/// constructed [`AnlandSession`] is returned, so it may stop the session
+/// state outright. It mirrors the normal surface teardown ordering: workers
+/// are absent, the generation is withdrawn before the native window is
+/// released, and any detached handshake waiter observes `running=false`.
+fn cleanup_failed_session(inner: &Arc<Inner>) {
+    inner.running.store(false, Ordering::Release);
+    inner.window_live.store(false, Ordering::Release);
+    inner.broker_stop.store(true, Ordering::Release);
+    inner.rebind_active.store(false, Ordering::Release);
+    inner.rebind_request.lock().unwrap().take();
+    if let Ok(mut vsync) = inner.vsync.lock() {
+        if let Some(pump) = vsync.take() {
+            pump.stop();
+        }
+    }
+    if let Some(window) = current_window(inner) {
+        if let Ok(mut spare) = inner.spare.lock() {
+            if let Some(anb) = spare.take() {
+                unsafe { inner.anw.cancel(window, anb, -1) };
+            }
+        }
+    }
+    teardown_generation(inner);
+    inner.buffers.lock().unwrap().clear();
+    *inner.surface_gen.lock().unwrap() = 0;
+    *inner.ready_surface_gen.lock().unwrap() = None;
+    *inner.last_pointer.lock().unwrap() = None;
+    *inner.finger_axes.lock().unwrap() = 0;
+    release_window(inner);
+    inner.surface_epoch.store(0, Ordering::Release);
+}
+
+/// Surface-bound threads are joined rather than detached. A detached render
+/// worker could retain an old `ANativeWindow*` past Android's destruction of
+/// the surface, which is never an acceptable recovery strategy.
+fn join_surface_thread(handle: JoinHandle<()>, what: &str) {
+    if let Err(error) = handle.join() {
+        log::error!("anland.{what} thread panicked while stopping: {error:?}");
     }
 }
 
@@ -786,32 +1111,35 @@ fn collect_buffers(
     width: u32,
     height: u32,
 ) -> Result<(), String> {
+    let Some(window) = current_window(inner) else {
+        return Err("cannot collect buffers without an Android surface".into());
+    };
     let need_producer = total.saturating_sub(1).max(2);
     let mut found: Vec<SlotInfo> = Vec::new();
     for attempt in 0..total * 4 + 2 {
         if found.len() >= need_producer {
             break;
         }
-        let (anb, fence) = unsafe { inner.anw.dequeue(inner.window) }
+        let (anb, fence) = unsafe { inner.anw.dequeue(window) }
             .map_err(|r| format!("collect dequeueBuffer failed on attempt {attempt}: {r}"))?;
         close_silently(fence); // enumeration only; no wait needed
         let Some((dma_fd, stride_px, bw, bh)) = (unsafe { AnwApi::buffer_dma_info(anb) }) else {
-            unsafe { inner.anw.cancel(inner.window, anb, -1) };
+            unsafe { inner.anw.cancel(window, anb, -1) };
             continue;
         };
         if bw != width as i32 || bh != height as i32 {
-            unsafe { inner.anw.cancel(inner.window, anb, -1) };
+            unsafe { inner.anw.cancel(window, anb, -1) };
             return Err(format!(
                 "buffer geometry {bw}x{bh} differs from requested {width}x{height}"
             ));
         }
         // Dedup by slot pointer (stable per queue slot).
         if found.iter().any(|s: &SlotInfo| s.anb == anb) {
-            unsafe { inner.anw.queue(inner.window, anb, -1) };
+            unsafe { inner.anw.queue(window, anb, -1) };
             continue;
         }
         // Post back so the next dequeue rotates to another slot.
-        unsafe { inner.anw.queue(inner.window, anb, -1) };
+        unsafe { inner.anw.queue(window, anb, -1) };
         let dup = unsafe { libc::dup(dma_fd) };
         if dup < 0 {
             continue;
@@ -848,7 +1176,7 @@ fn collect_buffers(
     // hands, stop() can always cancelBuffer to unblock a stuck dequeue.
     // The spare never reaches the producer and is never queued mid-run; if
     // the render loop dequeues it at runtime it is handed straight back.
-    let spare = match unsafe { inner.anw.dequeue(inner.window) } {
+    let spare = match unsafe { inner.anw.dequeue(window) } {
         Ok((anb, fence)) => {
             close_silently(fence);
             log::info!("anland.collect spare held dequeued (stop-time unblock)");
@@ -970,7 +1298,9 @@ fn enter_fallback(inner: &Arc<Inner>, expected: u64, reason: &str) {
 fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receiver<u64>) {
     // Wait for the broker to serve our generation (producer picked up fds).
     loop {
-        if !inner.running.load(Ordering::Acquire) {
+        if !inner.running.load(Ordering::Acquire)
+            || !inner.window_live.load(Ordering::Acquire)
+        {
             return;
         }
         match attach_rx.recv_timeout(Duration::from_millis(200)) {
@@ -1086,6 +1416,12 @@ fn render_loop(inner: Arc<Inner>) {
     let mut log_mismatch_ns: u64 = 0;
     let mut log_gen0_ns: u64 = 0;
     while inner.running.load(Ordering::Acquire) {
+        let Some(window) = current_window(&inner) else {
+            break;
+        };
+        if !inner.window_live.load(Ordering::Acquire) {
+            break;
+        }
         // Resize only between frames: this thread owns all live queue slots.
         let request = inner.rebind_request.lock().unwrap().take();
         if let Some((w, h, sgen)) = request {
@@ -1222,7 +1558,7 @@ fn render_loop(inner: Arc<Inner>) {
         }
         // Selected: this dequeue hands us the slot KWin will render into.
         // (BufferQueue backpressure still applies when all slots are live.)
-        let (anb, acquire) = match unsafe { inner.anw.dequeue(inner.window) } {
+        let (anb, acquire) = match unsafe { inner.anw.dequeue(window) } {
             Ok(v) => v,
             Err(r) => {
                 if inner.running.load(Ordering::Acquire) {
@@ -1232,6 +1568,10 @@ fn render_loop(inner: Arc<Inner>) {
                 continue;
             }
         };
+        if !inner.window_live.load(Ordering::Acquire) {
+            unsafe { inner.anw.cancel(window, anb, -1) };
+            break;
+        }
         // The surface generation this frame belongs to. A rotation that
         // lands between here and queueBuffer must cancel, never present,
         // a buffer produced for the old dimensions.
@@ -1248,9 +1588,13 @@ fn render_loop(inner: Arc<Inner>) {
                     log::warn!("anland.sink acquire-stall (SF release pending >1s); cancelling");
                     log_stall_ns = now;
                 }
-                unsafe { inner.anw.cancel(inner.window, anb, -1) };
+                unsafe { inner.anw.cancel(window, anb, -1) };
                 continue;
             }
+        }
+        if !inner.window_live.load(Ordering::Acquire) {
+            unsafe { inner.anw.cancel(window, anb, -1) };
+            break;
         }
         // Match slot -> producer index.
         let idx = inner
@@ -1268,12 +1612,12 @@ fn render_loop(inner: Arc<Inner>) {
                 log::info!("anland.sink unknown-slot cancel-back (SF may have reallocated)");
                 log_unknown_ns = now;
             }
-            unsafe { inner.anw.cancel(inner.window, anb, -1) };
+            unsafe { inner.anw.cancel(window, anb, -1) };
             continue;
         };
         if cur_gen == 0 {
             // Fallback: keep the window alive with unrendered frames.
-            unsafe { inner.anw.queue(inner.window, anb, -1) };
+            unsafe { inner.anw.queue(window, anb, -1) };
             if !idle_logged {
                 log::info!(
                     "anland.render fallback: presenting unrendered frames until producer connects"
@@ -1302,7 +1646,7 @@ fn render_loop(inner: Arc<Inner>) {
                         drop(gen);
                         drop(_guard);
                         enter_fallback(&inner, cur_gen, "eventfd signal failed");
-                        unsafe { inner.anw.cancel(inner.window, anb, -1) };
+                        unsafe { inner.anw.cancel(window, anb, -1) };
                         continue;
                     }
                     pending = Some(cur_gen);
@@ -1313,7 +1657,7 @@ fn render_loop(inner: Arc<Inner>) {
                         log::info!("anland.sink gen-mismatch cancel-back cur={cur_gen}");
                         log_mismatch_ns = now;
                     }
-                    unsafe { inner.anw.cancel(inner.window, anb, -1) };
+                    unsafe { inner.anw.cancel(window, anb, -1) };
                     continue;
                 }
             }
@@ -1329,8 +1673,15 @@ fn render_loop(inner: Arc<Inner>) {
             log::warn!(
                 "anland.render fence lost (generation died); buffer cancelled, not presented"
             );
-            unsafe { inner.anw.cancel(inner.window, anb, -1) };
+            unsafe { inner.anw.cancel(window, anb, -1) };
             continue;
+        }
+        if !inner.window_live.load(Ordering::Acquire) {
+            // A surface suspend may land while a bare/software frame was
+            // selected. Return the slot, never queue or mark readiness after
+            // the lifecycle has retired this surface generation.
+            unsafe { inner.anw.cancel(window, anb, rfence) };
+            break;
         }
         pending = None;
         selects += 1;
@@ -1344,10 +1695,10 @@ fn render_loop(inner: Arc<Inner>) {
             log::info!(
                 "anland.render stale-generation cancel-back frame_sgen={frame_sgen} sgen={cur_sgen}"
             );
-            unsafe { inner.anw.cancel(inner.window, anb, rfence) };
+            unsafe { inner.anw.cancel(window, anb, rfence) };
             continue;
         }
-        let q = unsafe { inner.anw.queue(inner.window, anb, rfence) };
+        let q = unsafe { inner.anw.queue(window, anb, rfence) };
         if q != 0 {
             log::warn!("anland.render queueBuffer failed: {q}");
             close_silently(rfence);
@@ -1520,9 +1871,12 @@ fn refresh_done(
             Ok(true) => break,
             _ => {
                 waited_ms += quantum_ms as i64;
-                if !inner.running.load(Ordering::Acquire) {
-                    // Session is stopping: bail without fallback churn so
-                    // the render thread still joins promptly.
+                if !inner.running.load(Ordering::Acquire)
+                    || !inner.window_live.load(Ordering::Acquire)
+                {
+                    // Session or surface is stopping: bail without fallback
+                    // churn so the render thread can be joined before the
+                    // native window is released.
                     return FENCE_LOST;
                 }
                 if waited_ms >= budget_ms {
@@ -1572,7 +1926,9 @@ fn event_loop(inner: Arc<Inner>) {
     log::info!("anland.event thread started");
     let mut cur_gen: u64 = 0;
     let mut cur_data: Option<OwnedFd> = None;
-    while inner.running.load(Ordering::Acquire) {
+    while inner.running.load(Ordering::Acquire)
+        && inner.window_live.load(Ordering::Acquire)
+    {
         let gen_id = inner
             .gen
             .lock()

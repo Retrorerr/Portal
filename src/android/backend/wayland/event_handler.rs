@@ -280,6 +280,13 @@ pub fn poll_anland_convergence(backend: &mut WaylandBackend, winit_size: Option<
     let Some(session) = backend.anland.as_mut() else {
         return;
     };
+    if !session.surface_active() {
+        // A delayed resize/redraw from the old winit window is not a valid
+        // surface observation. The persistent Anland broker remains alive,
+        // but convergence resumes only after the new Android surface has
+        // been attached and assigned a fresh epoch.
+        return;
+    }
     let epoch = session.surface_epoch();
     if let Some(gen) = session.presented_surface_gen() {
         backend.surface_convergence.confirm_converged(gen);
