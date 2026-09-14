@@ -510,13 +510,13 @@ fn pump_thread_timer(tick_fd: libc::c_int, running: Arc<AtomicBool>, period_ns: 
     }
 }
 
-/// Display-VSYNC tick source for demand-driven presentation.
+/// Display-VSYNC tick source for presentation pacing.
 ///
 /// Preferred mode is Android Choreographer on a dedicated looper thread (one
 /// eventfd write per display vsync, no polling, no timers). When the NDK
 /// symbols are unavailable it degrades to a nanosleep timer at the panel
-/// rate. The render loop polls the tick fd alongside its kick fd, so both
-/// modes share the pacing logic.
+/// rate. The render loop polls the tick fd alongside its lifecycle/rebind
+/// control fd; control wakes never authorize a presentation.
 pub struct VsyncPump {
     tick: OwnedFd,
     running: Arc<AtomicBool>,

@@ -418,6 +418,33 @@ fn anland_session_forces_wayland_qpa_for_plasma_clients() {
 }
 
 #[test]
+fn anland_presentation_is_vsync_driven_while_surface_is_live() {
+    // Presentation must follow every display tick while the Android surface
+    // is active. The control fd can interrupt lifecycle/rebind waits, but it
+    // must never become an alternate presentation clock.
+    assert!(ANLAND_CONSUMER_SOURCE.contains("sys::poll_two(&tick, &wake, -1)"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("if !tick_ready"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("control wake only"));
+
+    // The old idle gate is intentionally retired: no CPU heuristic, burst
+    // deadline, or heartbeat may decide whether KWin gets another buffer.
+    for obsolete in [
+        "demand_until_ns",
+        "HEARTBEAT_NS",
+        "sample_client_activity",
+        "proc_jiffies",
+        "INPUT_BURST_MS",
+        "SELF_SUSTAIN_MS",
+        "demanding",
+    ] {
+        assert!(
+            !ANLAND_CONSUMER_SOURCE.contains(obsolete),
+            "obsolete Anland demand gate remains: {obsolete}"
+        );
+    }
+}
+
+#[test]
 fn automatic_tablet_and_laptop_mode_switching_policy() {
     use tablet_mode::{
         is_desktop_pointer, is_physical_alphabetic_keyboard, InputDeviceDescriptor,
