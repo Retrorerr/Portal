@@ -60,6 +60,8 @@ object ComposeOverlay {
     @JvmStatic external fun nativeBeginInstall(): Boolean
     /** Explicit repair action for an already-installed QPainter/legacy runtime. */
     @JvmStatic external fun nativeRepairEnableAnland(): Boolean
+    /** Return to the existing committed-runtime recovery page after a repair failure. */
+    @JvmStatic external fun nativeRequestAnlandRepairRecovery(): Boolean
 
     // Native readiness is independent of installation progress. A KWin frame
     // can latch this before the Compose hierarchy has finished presenting.
@@ -76,6 +78,24 @@ object ComposeOverlay {
         val running: Boolean get() = !complete && !failed && phase != "Idle"
     }
 
+    const val ANLAND_REPAIR_UNAVAILABLE = 0
+    const val ANLAND_REPAIR_AVAILABLE = 1
+    const val ANLAND_REPAIR_RUNNING = 2
+    const val ANLAND_REPAIR_FAILED = 3
+    const val ANLAND_REPAIR_COMPLETE = 4
+
+    data class AnlandRepairUiState(
+        val status: Int,
+        val progress: Int,
+        val message: String,
+        val error: String?,
+    ) {
+        val available: Boolean get() = status == ANLAND_REPAIR_AVAILABLE
+        val running: Boolean get() = status == ANLAND_REPAIR_RUNNING
+        val failed: Boolean get() = status == ANLAND_REPAIR_FAILED
+        val complete: Boolean get() = status == ANLAND_REPAIR_COMPLETE
+    }
+
     private val defaultInstallState = InstallUiState(
         phase = "Idle",
         progress = 0,
@@ -88,6 +108,14 @@ object ComposeOverlay {
     // Compose hierarchy, then apply it on the main thread when available.
     @Volatile private var installStateSnapshot = defaultInstallState
     private val installStateValue = mutableStateOf(defaultInstallState)
+    private val defaultAnlandRepairState = AnlandRepairUiState(
+        status = ANLAND_REPAIR_UNAVAILABLE,
+        progress = 0,
+        message = "",
+        error = null,
+    )
+    @Volatile private var anlandRepairStateSnapshot = defaultAnlandRepairState
+    private val anlandRepairStateValue = mutableStateOf(defaultAnlandRepairState)
     // First app-owned frame handshake for the system splash: set on the
     // Compose content pre-draw (CONFIGURE and launch destination measured), or when
     // showing fails so the fallback screen can draw instead. PortalActivity
@@ -192,6 +220,27 @@ object ComposeOverlay {
     @Composable
     fun installState(): State<InstallUiState> = installStateValue
 
+    /** Subscribe to the process-lifetime explicit Anland repair state. */
+    @Composable
+    fun anlandRepairState(): State<AnlandRepairUiState> = anlandRepairStateValue
+
+    /** Publish native repair availability/progress without coupling it to install completion. */
+    @JvmStatic fun updateAnlandRepairState(
+        status: Int,
+        progress: Int,
+        message: String,
+        error: String?,
+    ) {
+        val next = AnlandRepairUiState(
+            status = status.coerceIn(ANLAND_REPAIR_UNAVAILABLE, ANLAND_REPAIR_COMPLETE),
+            progress = progress.coerceIn(0, 100),
+            message = message,
+            error = error,
+        )
+        anlandRepairStateSnapshot = next
+        composeView?.post { anlandRepairStateValue.value = anlandRepairStateSnapshot }
+    }
+
     /** Start or attach to the one native provisioning operation. */
     @JvmStatic fun beginInstall(): Boolean = try {
         nativeBeginInstall()
@@ -211,6 +260,17 @@ object ComposeOverlay {
         false
     } catch (e: Exception) {
         Log.e(TAG, "nativeRepairEnableAnland failed", e)
+        false
+    }
+
+    /** Ask native recovery to show the existing Retry Plasma page. */
+    @JvmStatic fun requestAnlandRepairRecovery(): Boolean = try {
+        nativeRequestAnlandRepairRecovery()
+    } catch (_: UnsatisfiedLinkError) {
+        Log.e(TAG, "nativeRequestAnlandRepairRecovery unavailable")
+        false
+    } catch (e: Exception) {
+        Log.e(TAG, "nativeRequestAnlandRepairRecovery failed", e)
         false
     }
 
@@ -343,6 +403,7 @@ object ComposeOverlay {
             // hierarchy was being attached, always from this UI thread.
             desktopReadyState.value = desktopReadyLatched.get()
             installStateValue.value = installStateSnapshot
+            anlandRepairStateValue.value = anlandRepairStateSnapshot
             frame.alpha = 1f
             Log.i(
                 TAG,

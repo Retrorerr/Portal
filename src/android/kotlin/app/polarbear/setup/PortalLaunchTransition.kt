@@ -84,6 +84,7 @@ fun PortalLaunchTransition(
     var rootBounds by remember { mutableStateOf(Rect.Zero) }
     var destinationBounds by remember { mutableStateOf(Rect.Zero) }
     var setupReady by remember { mutableStateOf(false) }
+    var returnRepairBlocked by remember { mutableStateOf(false) }
     val clock = remember { Animatable(0f) }
     val currentPreDraw by rememberUpdatedState(onContentPreDraw)
     val currentResolved by rememberUpdatedState(onIntroResolved)
@@ -172,7 +173,7 @@ fun PortalLaunchTransition(
         .then(if (active) Modifier.drawWithContent { } else Modifier)
 
     PortalRevealVeil(
-        eligible = resolved && setupReady && desktopReady,
+        eligible = resolved && setupReady && desktopReady && !returnRepairBlocked,
         modifier = Modifier
             .fillMaxSize()
             .onGloballyPositioned { rootBounds = it.boundsInRoot() }
@@ -187,6 +188,7 @@ fun PortalLaunchTransition(
                 PortalReturnScreen(
                     launchMarkModifier = launchMarkModifier,
                     onReturnReady = { setupReady = true },
+                    onRepairBlockedChanged = { returnRepairBlocked = it },
                 )
             } else {
                 PortalSetupScreen(

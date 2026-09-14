@@ -102,12 +102,31 @@ pub fn is_hidden() -> bool {
     state() == OverlayState::Hidden
 }
 
+/// Request the existing committed-install recovery page after an explicit
+/// Anland repair failure. This only sets an event-loop-owned intent; the
+/// actual backend swap remains on the winit thread.
+pub fn request_anland_repair_recovery() -> bool {
+    if !crate::android::proot::setup::anland_repair_failed() {
+        return false;
+    }
+    ANLAND_REPAIR_RECOVERY_REQUESTED.store(true, Ordering::Release);
+    super::webview_handoff::wake_event_loop();
+    true
+}
+
+pub fn take_anland_repair_recovery_request() -> bool {
+    ANLAND_REPAIR_RECOVERY_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
 /// First-resume presentation latch. A failed show still consumes the request;
 /// native startup never waits on this bit.
 static SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Authoritative first-presented-valid-KWin-frame latch. This is independent
 /// from setup UI readiness and never dismisses the overlay by itself.
 static DESKTOP_READY: AtomicBool = AtomicBool::new(false);
+/// A failed targeted repair leaves the same Return screen in place until the
+/// user explicitly chooses the existing committed-runtime recovery path.
+static ANLAND_REPAIR_RECOVERY_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Final reveal commit acknowledgement, guarded once until either removal or
 /// a recovery re-show returns the veil to `Showing`.
 static REVEAL_COMMITTED: AtomicBool = AtomicBool::new(false);
@@ -256,6 +275,73 @@ pub fn publish_install_state(
     );
 }
 
+/// Publish the explicit Anland repair stream separately from installation
+/// completion. Return-to-Plasma can therefore animate a real graphics repair
+/// without ever treating it as a second install or guessing from UI state.
+pub fn publish_anland_repair_state(
+    android_app: &AndroidApp,
+    status: crate::android::proot::setup::AnlandRepairAvailability,
+    snapshot: &crate::core::provisioning::ProvisioningSnapshot,
+) {
+    let status = status.code();
+    let message = snapshot.message.clone();
+    let error = snapshot.error.clone();
+    let progress = snapshot.progress as i32;
+    super::ndk::run_in_jvm(
+        move |env, app| {
+            let activity = activity_object(app);
+            let class = match overlay_class(env, &activity) {
+                Ok(class) => class,
+                Err(error) => {
+                    log::error!("Compose overlay class is unavailable: {error}");
+                    clear_exception(env, "find ComposeOverlay for Anland repair state");
+                    return;
+                }
+            };
+            let message = match env.new_string(message) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::error!("Failed to allocate Anland repair message string: {error}");
+                    return;
+                }
+            };
+            let error_value = match error {
+                Some(error) => match env.new_string(error) {
+                    Ok(value) => JObject::from(value),
+                    Err(error) => {
+                        log::error!("Failed to allocate Anland repair error string: {error}");
+                        JObject::null()
+                    }
+                },
+                None => JObject::null(),
+            };
+            if let Err(error) = env.call_static_method(
+                class,
+                "updateAnlandRepairState",
+                "(IILjava/lang/String;Ljava/lang/String;)V",
+                &[
+                    JValue::Int(status),
+                    JValue::Int(progress),
+                    JValue::Object(&message),
+                    JValue::Object(&error_value),
+                ],
+            ) {
+                log::error!("Compose overlay updateAnlandRepairState failed: {error}");
+                clear_exception(env, "updateAnlandRepairState");
+            }
+        },
+        android_app.clone(),
+    );
+}
+
+/// Rehydrate the Return-to-Plasma repair affordance after the overlay is
+/// created or an Activity is recreated. The native coordinator remains the
+/// sole source of availability and progress.
+pub fn publish_current_anland_repair_state(android_app: &AndroidApp) {
+    let (status, snapshot) = crate::android::proot::setup::anland_repair_ui_snapshot();
+    publish_anland_repair_state(android_app, status, &snapshot);
+}
+
 /// First-resume presentation decision. Showing the overlay does not gate or
 /// defer native startup.
 ///
@@ -338,6 +424,7 @@ fn show_compose_overlay_with(android_app: &AndroidApp, method: &str) {
         publish_desktop_ready(android_app, true);
     }
     crate::android::proot::setup::publish_current_install_state(android_app);
+    publish_current_anland_repair_state(android_app);
 }
 
 /// Update the small overlay state text (`Idle` / `Starting` / `Desktop ready` / `Error`).
@@ -531,6 +618,21 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRepairEnableAnlan
     _class: JObject,
 ) -> jni::sys::jboolean {
     if crate::android::proot::setup::repair_enable_anland() {
+        1
+    } else {
+        0
+    }
+}
+
+/// JNI bridge for the existing committed-runtime recovery page after an
+/// explicit repair failure. The actual backend transition stays on the
+/// winit event-loop thread.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRequestAnlandRepairRecovery(
+    _env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jboolean {
+    if request_anland_repair_recovery() {
         1
     } else {
         0

@@ -724,6 +724,16 @@ impl PolarBearApp {
     /// repaired and revalidated the graphics contract. Installation remains
     /// committed throughout this path; a Wayland/Anland failure is therefore
     /// a runtime launch failure and must use the existing Retry Plasma page.
+    fn handle_anland_repair_recovery_request(&mut self) -> bool {
+        if !compose_overlay::take_anland_repair_recovery_request() {
+            return false;
+        }
+        self.enter_committed_install_runtime_error(
+            "Portal is installed, but Anland graphics repair failed. Tap Retry Plasma.",
+        );
+        true
+    }
+
     fn handle_anland_repair_result(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let Some(result) = crate::android::proot::setup::take_anland_repair_result() else {
             return false;
@@ -731,14 +741,32 @@ impl PolarBearApp {
         match result {
             crate::android::proot::setup::AnlandRepairResult::Failed(reason) => {
                 log::error!("Anland repair did not complete: {reason}");
-                self.enter_committed_install_runtime_error(reason);
+                if compose_overlay::is_hidden() {
+                    self.enter_committed_install_runtime_error(
+                        "Portal is installed, but Anland graphics repair failed. Tap Retry Plasma.",
+                    );
+                }
                 true
             }
             crate::android::proot::setup::AnlandRepairResult::Succeeded => {
                 self.pending_runtime_retry = false;
                 let android_app = self.frontend.android_app.clone();
+                // The old QPainter compositor still owns the guest Wayland
+                // listener while the Return veil is up. Drop that complete
+                // backend before constructing Anland, otherwise the second
+                // compositor can fail to bind the same socket even though
+                // the guest-side Plasma process was stopped successfully.
+                compose_overlay::notify_desktop_suspended(&android_app);
+                let old_backend = std::mem::replace(
+                    &mut self.backend,
+                    PolarBearBackend::WebView(WebviewBackend::runtime_error(
+                        android_app.clone(),
+                        "Portal is switching to accelerated graphics…",
+                    )),
+                );
+                drop(old_backend);
                 let backend = match crate::android::proot::setup::build_committed_wayland_backend(
-                    android_app,
+                    android_app.clone(),
                 ) {
                     Ok(backend) => backend,
                     Err(error) => {
@@ -840,6 +868,9 @@ impl PolarBearApp {
 
 impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.handle_anland_repair_recovery_request() {
+            return;
+        }
         if self.handle_anland_repair_result(event_loop) {
             return;
         }
@@ -937,6 +968,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: AppUserEvent) {
+        if self.handle_anland_repair_recovery_request() {
+            return;
+        }
         if self.handle_anland_repair_result(event_loop) {
             return;
         }
