@@ -382,6 +382,81 @@ fn anland_repair_coordinator() -> &'static Mutex<AnlandRepairCoordinator> {
     COORDINATOR.get_or_init(|| Mutex::new(AnlandRepairCoordinator::default()))
 }
 
+/// Native state exposed to the Return-to-Plasma affordance. Availability is
+/// deliberately derived here, next to the repair coordinator, so Compose
+/// never guesses from a stale flag or from the presence of Mesa files.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnlandRepairAvailability {
+    Unavailable,
+    Available,
+    Running,
+    Failed,
+    Complete,
+}
+
+impl AnlandRepairAvailability {
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::Unavailable => 0,
+            Self::Available => 1,
+            Self::Running => 2,
+            Self::Failed => 3,
+            Self::Complete => 4,
+        }
+    }
+}
+
+/// Return the current process-lifetime repair state and its real native
+/// progress snapshot. The normal renderer policy remains conservative: a
+/// completed runtime is merely *eligible* when it still resolves to QPainter;
+/// this query never changes renderer-mode or starts repair work.
+pub fn anland_repair_ui_snapshot() -> (AnlandRepairAvailability, ProvisioningSnapshot) {
+    let (state, snapshot) = anland_repair_coordinator()
+        .lock()
+        .ok()
+        .map(|coordinator| (coordinator.state, coordinator.snapshot.clone()))
+        .unwrap_or_else(|| {
+            (
+                AnlandRepairState::Idle,
+                ProvisioningSnapshot::update(
+                    ProvisioningPhase::Idle,
+                    0,
+                    "Anland graphics repair is ready.",
+                ),
+            )
+        });
+
+    let availability = match state {
+        AnlandRepairState::Running => AnlandRepairAvailability::Running,
+        AnlandRepairState::Failed => AnlandRepairAvailability::Failed,
+        AnlandRepairState::Complete => AnlandRepairAvailability::Complete,
+        AnlandRepairState::Idle => {
+            let artifact = crate::core::provisioning::RuntimeArtifact::production();
+            let root = Path::new(PRODUCTION_FS_ROOT);
+            let eligible = artifact
+                .classify_runtime(root)
+                .is_trusted_recovery()
+                && matches!(
+                    crate::android::anland::active_renderer(),
+                    crate::android::anland::RendererKind::Smithay
+                );
+            if eligible {
+                AnlandRepairAvailability::Available
+            } else {
+                AnlandRepairAvailability::Unavailable
+            }
+        }
+    };
+    (availability, snapshot)
+}
+
+pub fn anland_repair_failed() -> bool {
+    anland_repair_coordinator()
+        .lock()
+        .map(|coordinator| coordinator.state == AnlandRepairState::Failed)
+        .unwrap_or(false)
+}
+
 /// One-shot handoff token set only after targeted repair validation. It keeps
 /// the immediately following `launch()` from replaying the broad normal
 /// per-launch sync; the token is consumed before the guest starts, and every
@@ -2594,7 +2669,12 @@ fn publish_repair_snapshot(registration: &SetupRegistration, snapshot: Provision
         SetupMessage::Progress(snapshot.message.clone())
     };
     if let Some(android_app) = registration.publish(message) {
-        crate::android::utils::compose_overlay::publish_install_state(&android_app, &snapshot);
+        let (status, _) = anland_repair_ui_snapshot();
+        crate::android::utils::compose_overlay::publish_anland_repair_state(
+            &android_app,
+            status,
+            &snapshot,
+        );
     }
 }
 

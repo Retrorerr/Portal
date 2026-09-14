@@ -34,6 +34,10 @@ const COMPOSE_OVERLAY_RUST_SOURCE: &str =
     include_str!("../src/android/utils/compose_overlay.rs");
 const COMPOSE_OVERLAY_KOTLIN_SOURCE: &str =
     include_str!("../src/android/kotlin/app/polarbear/ComposeOverlay.kt");
+const PORTAL_RETURN_SCREEN_SOURCE: &str =
+    include_str!("../src/android/kotlin/app/polarbear/setup/PortalReturnScreen.kt");
+const PORTAL_LAUNCH_TRANSITION_SOURCE: &str =
+    include_str!("../src/android/kotlin/app/polarbear/setup/PortalLaunchTransition.kt");
 const XWAYLAND_SHA256SUMS_SOURCE: &str =
     include_str!("../assets/xwayland-candidate/SHA256SUMS");
 
@@ -873,4 +877,97 @@ fn normal_renderer_policy_still_preserves_legacy_fallback_until_explicit_repair(
         .and_then(|source| source.split("pub fn ensure_renderer_mode").next())
         .expect("active renderer policy must exist");
     assert!(!active.contains("force_anland_renderer"));
+}
+
+#[test]
+fn return_to_plasma_anland_affordance_is_inline_and_native_state_driven() {
+    for required in [
+        "Accelerated graphics available →",
+        "Enabling accelerated graphics…",
+        "Preparing Anland and GPU acceleration",
+        "ReturnAnlandAffordance",
+        "ComposeOverlay.anlandRepairState()",
+        "ComposeOverlay.repairEnableAnland()",
+        "AnimatedVisibility(",
+        "AnimatedContent(",
+        "animateContentSize",
+        "SizeTransform",
+        "updateTransition",
+    ] {
+        assert!(
+            PORTAL_RETURN_SCREEN_SOURCE.contains(required),
+            "Return-to-Plasma affordance is missing {required}"
+        );
+    }
+    // The user-facing Return screen must not expose implementation details
+    // from the graphics transaction.
+    for forbidden in ["Mesa", "KGSL", "drmshim", "diagnostic"] {
+        assert!(
+            !PORTAL_RETURN_SCREEN_SOURCE.contains(forbidden),
+            "Return screen leaked implementation detail {forbidden}"
+        );
+    }
+    assert!(COMPOSE_OVERLAY_KOTLIN_SOURCE.contains("updateAnlandRepairState"));
+    assert!(COMPOSE_OVERLAY_RUST_SOURCE.contains("publish_current_anland_repair_state"));
+    assert!(ANDROID_SETUP_SOURCE.contains("AnlandRepairAvailability::Available"));
+    assert!(ANDROID_SETUP_SOURCE.contains("is_trusted_recovery()"));
+    assert!(ANDROID_SETUP_SOURCE.contains("RendererKind::Smithay"));
+}
+
+#[test]
+fn return_repair_morph_gates_only_the_shared_reveal_and_reuses_runtime_recovery() {
+    assert!(PORTAL_LAUNCH_TRANSITION_SOURCE.contains(
+        "eligible = resolved && setupReady && desktopReady && !returnRepairBlocked"
+    ));
+    assert!(PORTAL_LAUNCH_TRANSITION_SOURCE.contains("onRepairBlockedChanged"));
+    assert!(PORTAL_RETURN_SCREEN_SOURCE.contains("requestAnlandRepairRecovery()"));
+    assert!(COMPOSE_OVERLAY_KOTLIN_SOURCE.contains("nativeRequestAnlandRepairRecovery"));
+    assert!(COMPOSE_OVERLAY_RUST_SOURCE.contains("take_anland_repair_recovery_request"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("handle_anland_repair_recovery_request"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains(
+        "Portal is installed, but Anland graphics repair failed. Tap Retry Plasma."
+    ));
+    // There is one shared PortalRevealVeil: repair does not create a second
+    // dismissal/reveal animation or bypass the real desktop-ready latch.
+    assert_eq!(PORTAL_LAUNCH_TRANSITION_SOURCE.matches("PortalRevealVeil(").count(), 1);
+    assert!(PORTAL_LAUNCH_TRANSITION_SOURCE.contains("desktopReady"));
+}
+
+#[test]
+fn return_repair_progress_is_real_and_never_claims_completion() {
+    assert!(COMPOSE_OVERLAY_KOTLIN_SOURCE.contains("progress.coerceIn(0, 100)"));
+    assert!(PORTAL_RETURN_SCREEN_SOURCE.contains("progress.coerceIn(0, 99)"));
+    assert!(ANDROID_SETUP_SOURCE.contains("ProvisioningPhase::Finalising"));
+    assert!(ANDROID_SETUP_SOURCE.contains("99,"));
+    assert!(ANDROID_SETUP_SOURCE.contains("publish_anland_repair_state"));
+    // Graphics repair is a separate stream and never publishes the Debian
+    // installation Complete snapshot.
+    let repair_success = ANDROID_SETUP_SOURCE
+        .split("fn publish_repair_success")
+        .nth(1)
+        .and_then(|source| source.split("fn run_anland_repair_inner").next())
+        .expect("repair success publisher must exist");
+    assert!(!repair_success.contains("ProvisioningSnapshot::complete"));
+    assert!(repair_success.contains("Anland graphics ready. Restarting Plasma…"));
+}
+
+#[test]
+fn return_repair_drops_the_old_compositor_before_rebinding_wayland() {
+    let handoff = ANDROID_SETUP_RUN_SOURCE
+        .split("fn handle_anland_repair_result")
+        .nth(1)
+        .and_then(|source| source.split("fn handle_setup_complete").next())
+        .expect("repair handoff must exist");
+    let readiness_clear = handoff
+        .find("notify_desktop_suspended")
+        .expect("repair handoff must clear old readiness");
+    let backend_replace = handoff
+        .find("std::mem::replace")
+        .expect("repair handoff must drop the old backend before rebinding");
+    let backend_build = handoff
+        .find("build_committed_wayland_backend")
+        .expect("repair handoff must build the committed backend");
+    assert!(readiness_clear < backend_replace);
+    assert!(backend_replace < backend_build);
+    assert!(handoff.contains("drop(old_backend)"));
 }
