@@ -1,7 +1,6 @@
 //! Project Anland GPU renderer (Android-only).
 //!
-//! Zero-copy Plasma presentation path, kept strictly beside the stable
-//! Smithay/QPainter renderer:
+//! Zero-copy Plasma presentation path:
 //!
 //! ```text
 //! Plasma apps -> KWin OpenGL -> Mesa freedreno/KGSL -> Android dma-buf
@@ -9,12 +8,8 @@
 //! ```
 //!
 //! Selection is explicit and durable: `<APP_FILES>/renderer-mode` containing
-//! `anland` selects this path, while an explicit QPainter/Smithay value keeps
-//! the known-good fallback. A missing flag is initialized by the native setup
-//! owner: fresh/image-only installs select Anland, while a completed legacy
-//! or older v1 Portal marker without this flag stays on QPainter compatibility
-//! and is recorded explicitly. There is deliberately **no silent renderer
-//! migration** after a choice exists.
+//! `anland` selects this path. Historical QPainter/Smithay values are still
+//! parsed during migration but never reactivate the retired graphics stack.
 //!
 //! Upstream reference: `third_party/anland/` (protocol, broker/consumer
 //! design, hidden window ABI) + `docs/anland-*.md` as added.
@@ -30,7 +25,8 @@ pub use consumer::{AnlandConfig, AnlandSession};
 use std::ffi::c_void;
 use std::sync::Arc;
 
-/// Renderer selection. `Smithay` is the preserved QPainter fallback.
+/// Renderer selection. `Smithay` remains as an internal legacy enum value so
+/// old serialized state can be parsed, but it is no longer selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendererKind {
     Smithay,
@@ -43,11 +39,8 @@ pub fn mode_flag_path() -> std::path::PathBuf {
         .join(crate::core::renderer_policy::RENDERER_MODE_FILE)
 }
 
-/// Resolve the active renderer. Missing state defaults to Anland only for
-/// fresh/uninitialised state; a completed Portal runtime without the flag
-/// keeps the historical QPainter compatibility path. Installation setup calls
-/// [`ensure_renderer_mode`] to make that choice durable before the completion
-/// marker is committed.
+/// Resolve the active renderer. Every state selects Anland; installation setup
+/// makes that choice durable before the completion marker is committed.
 pub fn active_renderer() -> RendererKind {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
     let runtime = artifact.classify_runtime(std::path::Path::new(
@@ -56,29 +49,23 @@ pub fn active_renderer() -> RendererKind {
     let kind = match crate::core::renderer_policy::resolve_renderer_mode(&mode_flag_path(), runtime)
     {
         Ok(crate::core::renderer_policy::RendererSelection::Anland) => RendererKind::Anland,
-        Ok(crate::core::renderer_policy::RendererSelection::QPainter) => RendererKind::Smithay,
+        Ok(crate::core::renderer_policy::RendererSelection::QPainter) => RendererKind::Anland,
         Err(error) => {
-            log::error!(
-                "renderer-mode could not be read (using safe QPainter recovery): {error:#}"
-            );
-            RendererKind::Smithay
+            log::error!("renderer-mode could not be read (using Anland): {error:#}");
+            RendererKind::Anland
         }
     };
     match kind {
         RendererKind::Anland => {
             log::info!("anland.renderer=anland-gpu selected (durable renderer-mode policy)");
         }
-        RendererKind::Smithay => {
-            log::info!("anland.renderer=smithay-qpainter (explicit/legacy-safe fallback)");
-        }
+        RendererKind::Smithay => unreachable!("legacy renderer is not selected"),
     }
     kind
 }
 
-/// Initialize or validate the durable renderer selection used by setup and
-/// committed-install handoff. Existing values, including explicit fallback
-/// values and malformed legacy values, are preserved; only missing state is
-/// initialized according to the runtime's Portal classification.
+/// Initialize or validate the durable Anland renderer selection used by setup
+/// and committed-install handoff.
 pub fn ensure_renderer_mode() -> anyhow::Result<RendererKind> {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
     let runtime = artifact.classify_runtime(std::path::Path::new(
@@ -87,14 +74,11 @@ pub fn ensure_renderer_mode() -> anyhow::Result<RendererKind> {
     let selection = crate::core::renderer_policy::ensure_renderer_mode(&mode_flag_path(), runtime)?;
     Ok(match selection {
         crate::core::renderer_policy::RendererSelection::Anland => RendererKind::Anland,
-        crate::core::renderer_policy::RendererSelection::QPainter => RendererKind::Smithay,
+        crate::core::renderer_policy::RendererSelection::QPainter => RendererKind::Anland,
     })
 }
 
-/// Explicit repair action: select Anland even when an existing Portal install
-/// previously chose (or implicitly fell back to) QPainter. Normal startup
-/// must continue through [`ensure_renderer_mode`]; only the user-requested
-/// graphics repair is allowed to intentionally change an existing choice.
+/// Explicit migration/repair action: persist Anland for an existing install.
 pub fn force_anland_renderer() -> anyhow::Result<RendererKind> {
     let selection = crate::core::renderer_policy::set_renderer_mode(
         &mode_flag_path(),
@@ -130,24 +114,14 @@ pub fn guest_socket_path() -> &'static str {
 /// deliberately NOT set (it forces QtQuick software fallback with
 /// OffscreenQuickView texture failures).
 ///
-/// The hardware path needs three guest-side pieces beyond these variables:
-/// the lfdevs KWin stack (runtime overlay), the `mesa-kgsl-layer` overlay
-/// (lfdevs Mesa 26.3 with the kgsl winsys; stock Mesa has no kgsl winsys at
-/// all), and the `drmshim.so` preload, which presents the (sandbox-denied)
-/// render node backed by the real /dev/kgsl-3d0 and answers the DRM version
-/// probe so Mesa selects the kgsl winsys. `ANLAND_NO_DRM_DEVICE` is NOT set
-/// here: the accelerated configuration is the default.
-///
-/// Emergency software fallback: if `<guest>/var/lib/localdesktop/kwin-glmode`
-/// contains `sw`, the KWin wrapper forces surfaceless software rendering
-/// instead (see `software_gl_fallback_requested`). That mode is explicitly
-/// labelled everywhere (bare-frame READY evidence, relaxed first-frame
-/// watchdog) and must never silently become the default.
-/// - `XWAYLAND_FORCE_KGSL_SURFACELESS=1`: the `-91` XWayland's KGSL glamor
-///   backend instead of GBM (which cannot work without a render node).
-///   Proven: `Xwayland glamor: using KGSL surfaceless EGL backend`.
-/// - `MOZ_ENABLE_WAYLAND=1`: explicit native backend for Firefox
-///   (per-launch overrides can still force X11 for A/B tests).
+/// The active hardware path needs the Forky Anland KWin assets and the
+/// verified `mesa-kgsl-layer` overlay (the KGSL winsys is not supplied by
+/// stock Debian Mesa). KWin uses KGSL-backed surfaceless EGL while Anland
+/// owns Android dmabuf presentation; the retired drmshim/QPainter path is
+/// not selected.
+/// - `XWAYLAND_FORCE_KGSL_SURFACELESS=1`: keeps XWayland's KGSL glamor path
+///   available for applications that genuinely require X11.
+/// - `MOZ_ENABLE_WAYLAND=1`: Firefox uses its normal native Wayland backend.
 pub fn guest_mesa_env() -> Vec<(String, String)> {
     vec![
         ("MESA_LOADER_DRIVER_OVERRIDE".into(), "kgsl".into()),
@@ -157,28 +131,10 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         ("FD_KGSL_ENABLE_DMABUF".into(), "1".into()),
         ("TURNIP_KMD".into(), "kgsl".into()),
         ("XWAYLAND_FORCE_KGSL_SURFACELESS".into(), "1".into()),
-        // Firefox backend selection: X11. Proven by A/B (about:support via
-        // Marionette): native Wayland = WebRender (Software) — its dmabuf
-        // compositor needs GBM/a render node (absent in PRoot, no override
-        // possible). X11 + KGSL glamor + forced WR prefs (see setup.rs
-        // sync_firefox_config) = real GPU `Compositing: WebRender` on
-        // Adreno 830 with correct rendering (screenshot-verified).
-        ("MOZ_ENABLE_WAYLAND".into(), "0".into()),
-        // XInput2 for X11 clients: KWin forwards native touch through the
-        // xwayland-touch XI2 device (direct touch, 20 slots, server-verified
-        // via xinput). Without this Firefox X11 only sees KWin's pointer
-        // emulation (tap works, drag/scroll/pinch don't).
-        ("MOZ_USE_XINPUT2".into(), "1".into()),
-        // Phase B XWayland A/B: explicit per-launch selection consumed by the
-        // KWin wrapper (stock default; candidate only with SHA-validated
-        // staging, otherwise deterministic stock fallback before Plasma).
-        (
-            "LOCALDESKTOP_XWAYLAND_VARIANT".into(),
-            match xwayland_variant() {
-                XwaylandVariant::Candidate => "candidate".to_string(),
-                XwaylandVariant::Stock => "stock".to_string(),
-            },
-        ),
+        // Firefox is a normal native Wayland client. XWayland remains
+        // installed and available to other applications, but Portal no
+        // longer forces the browser through that compatibility path.
+        ("MOZ_ENABLE_WAYLAND".into(), "1".into()),
         // GTK input method: IBus. The Portal IBus engine bridges X11/GTK
         // editable focus to the Android IME (real FocusIn/FocusOut, commit,
         // delete, enter). Qt/Wayland clients are unaffected (QT_IM_MODULE
@@ -196,7 +152,7 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
 /// Validate the host-side Anland launch contract without probing or starting
 /// a guest session. The actual Mesa bytes are checked by `mesa_layer`; this
 /// function makes sure the environment and bind targets that `launch()` will
-/// use still describe the accelerated X11/XWayland path.
+/// use still describe the accelerated Anland/Wayland path.
 pub fn validate_launch_contract() -> anyhow::Result<()> {
     let environment = guest_mesa_env();
     for (name, value) in [
@@ -206,10 +162,7 @@ pub fn validate_launch_contract() -> anyhow::Result<()> {
         ("FD_KGSL_ENABLE_DMABUF", "1"),
         ("TURNIP_KMD", "kgsl"),
         ("XWAYLAND_FORCE_KGSL_SURFACELESS", "1"),
-        // Firefox intentionally uses X11/XWayland on the accelerated path;
-        // native Firefox Wayland requires a GBM render node that PRoot does
-        // not expose on the supported Android devices.
-        ("MOZ_ENABLE_WAYLAND", "0"),
+        ("MOZ_ENABLE_WAYLAND", "1"),
         ("ANLAND", "1"),
         ("ANLAND_SOCKET", guest_socket_path()),
     ] {
@@ -261,54 +214,7 @@ pub fn kwin_glmode_flag_path() -> std::path::PathBuf {
 /// fenced READY evidence; the software path (llvmpipe, CPU-synchronous)
 /// labels bare frames honestly and allows a long cold first-frame budget.
 pub fn software_gl_fallback_requested() -> bool {
-    std::fs::read_to_string(kwin_glmode_flag_path())
-        .map(|s| s.trim().to_ascii_lowercase() == "sw")
-        .unwrap_or(false)
-}
-
-/// Phase B XWayland A/B selection. `Candidate` serves the 0005
-/// touchpad-source build from `/usr/local/lib/portal-xwayland`; `Stock` is
-/// the untouched `/usr/bin/Xwayland` and MUST remain the default until a
-/// real mouse validates the candidate (no mouse is available in this task).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum XwaylandVariant {
-    Stock,
-    Candidate,
-}
-
-/// Parse an xwayland-variant flag value. Only the exact word `candidate`
-/// (case-insensitive, trimmed) selects the candidate; anything else —
-/// including absent/unreadable — is stock. Pure function for unit tests.
-pub fn parse_xwayland_variant(raw: &str) -> XwaylandVariant {
-    if raw.trim().to_ascii_lowercase() == "candidate" {
-        XwaylandVariant::Candidate
-    } else {
-        XwaylandVariant::Stock
-    }
-}
-
-/// App-private flag file selecting the XWayland variant (content
-/// `candidate`; absent or anything else means stock).
-pub fn xwayland_variant_flag_path() -> std::path::PathBuf {
-    std::path::Path::new(crate::core::config::APP_FILES_ROOT).join("xwayland-variant")
-}
-
-/// Resolve the active XWayland variant, logging the decision. The guest
-/// session receives it as `LOCALDESKTOP_XWAYLAND_VARIANT`; the KWin wrapper
-/// enforces stock-on-any-doubt (missing/corrupt/wrong-SHA staging).
-pub fn xwayland_variant() -> XwaylandVariant {
-    let variant = std::fs::read_to_string(xwayland_variant_flag_path())
-        .map(|s| parse_xwayland_variant(&s))
-        .unwrap_or(XwaylandVariant::Stock);
-    match variant {
-        XwaylandVariant::Candidate => {
-            log::info!("anland.xwayland=candidate selected via xwayland-variant flag (stock remains default; wrapper SHA-gates staging)");
-        }
-        XwaylandVariant::Stock => {
-            log::info!("anland.xwayland=stock (default; write 'candidate' to xwayland-variant to try the 0005 build)");
-        }
-    }
-    variant
+    false
 }
 
 /// Bind mounts for the Anland guest session: broker socket dir + Mesa overlay.
@@ -317,10 +223,9 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
     let files = std::path::Path::new(crate::core::config::APP_FILES_ROOT);
     let mesa = files.join("mesa-kgsl-layer");
     let mut binds = vec![BindMount::new(files.join("anland"), "/tmp/anland")];
-    // Mesa overlay: lfdevs Mesa 26.3 (kgsl winsys) over stock paths. Each
-    // entry is skipped when the layer file is absent so QPainter sessions
-    // and layer-less installs are unaffected (KWin then cannot do GPU and
-    // the session fails closed instead of silently falling back).
+    // Mesa overlay: the verified KGSL winsys over stock Debian paths. Each
+    // entry is skipped when the layer file is absent; setup then fails closed
+    // instead of silently selecting another graphics backend.
     let lib = mesa.join("usr/lib/aarch64-linux-gnu");
     let share = mesa.join("usr/share");
     let pairs = [

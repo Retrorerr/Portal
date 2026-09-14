@@ -52,152 +52,23 @@ for name in HOME USER LOGNAME WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
     printf 'env %s=%q\n' "$name" "$value" >> "$log_file"
 done
 ulimit -c unlimited 2>/dev/null || true
-# Project Anland: when the host runs a GPU session it exports ANLAND_SOCKET.
-# The distro libkwin (lfdevs Anland build) owns the Anland backend, so the
-# Portal QPainter overlay in /usr/local/lib/portal must NOT shadow it here.
-# (The overlay relocation keeps /usr/local/lib itself free of libkwin.so.6.)
-anland_mode=0
-if [ -n "${ANLAND_SOCKET:-}" ]; then
-    anland_mode=1
+# Portal has one graphics path: Android Surface -> Anland -> KWin/Plasma.
+# The Forky Anland-capable KWin binary and its matching libkwin are staged by
+# setup in this private directory. XWayland stays the Debian package for
+# applications that genuinely need X11; no Firefox or compositor A/B variant
+# is selected here.
+anland_mode=1
+kwin_anland_dir=/usr/local/lib/portal-anland
+kwin_bin="$kwin_anland_dir/kwin_wayland"
+printf 'anland_mode=%s socket=%s kwin=%s\n' \
+    "$anland_mode" "${ANLAND_SOCKET:-unset}" "$kwin_bin" >> "$log_file"
+if [ ! -x "$kwin_bin" ] || [ ! -r "$kwin_anland_dir/libkwin.so.6.7.4" ]; then
+    printf 'anland KWin assets are incomplete\n' >> "$log_file"
+    exit 127
 fi
-printf 'anland_mode=%s socket=%s\n' "$anland_mode" "${ANLAND_SOCKET:-unset}" >> "$log_file"
-if [ "$anland_mode" -eq 0 ]; then
-    export LD_LIBRARY_PATH="/usr/local/lib/portal${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    # Project Anland load-time stub (QPainter only): the lfdevs binary needs
-    # AnlandBackend at load while the overlay lib has none. Covers normal and
-    # gdb launches below; never set in Anland mode.
-    if [ -r /usr/local/lib/portal/libanland-stub.so ]; then
-        export LD_PRELOAD="/usr/local/lib/portal/libanland-stub.so${LD_PRELOAD:+:$LD_PRELOAD}"
-    fi
-else
-    # Project Anland KWin variant selection (deterministic A/B without APK
-    # rebuilds): /var/lib/localdesktop/kwin-variant selects the libkwin for
-    # Anland sessions. Values: "unified" (default: Portal overlay libcarrying
-    # the Anland backend plus the Portal Touchpad input path — PixelDelta
-    # finger scrolling, axis-stop, NaturalScroll/ScrollFactor, kcminputrc
-    # persistence; physically validated), "stock" (exact untouched distro
-    # lfdevs binaries; kept as the A/B and recovery option), or "ab:<name>"
-    # (bisect candidate at /usr/local/lib/portal-ab/<name>/libkwin.so.6.3.6,
-    # staged out-of-band; never touched by the per-launch overlay sync).
-    # The file is read once here, before KWin starts; nothing is swapped
-    # while KWin is alive. Any failed sanity check falls back to stock and
-    # is logged, so KWin is never left unloadable or half-deployed.
-    kwin_variant=unified
-    if [ -r /var/lib/localdesktop/kwin-variant ]; then
-        read -r kwin_variant < /var/lib/localdesktop/kwin-variant
-    fi
-    kwin_anland_dir=/usr/local/lib/portal-anland
-    case "$kwin_variant" in
-        ab:*)
-            ab_name=${kwin_variant#ab:}
-            case "$ab_name" in
-                *[!a-zA-Z0-9._-]* | "" | .* | *..*)
-                    printf 'kwin_variant=%s status=rejected-bad-name falling back to stock\n' \
-                        "$kwin_variant" >> "$log_file"
-                    kwin_variant=stock
-                    ;;
-                *)
-                    kwin_anland_dir="/usr/local/lib/portal-ab/$ab_name"
-                    ;;
-            esac
-            ;;
-    esac
-    if [ "$kwin_variant" != "stock" ]; then
-        # Sanity: real file, plausible size, resolving soname chain. The
-        # per-launch sync writes the library atomically (temp+rename), so a
-        # complete file here is never partial; a failed check selects stock.
-        if [ -r "$kwin_anland_dir/libkwin.so.6.3.6" ] \
-            && [ "$(wc -c < "$kwin_anland_dir/libkwin.so.6.3.6" 2>/dev/null || echo 0)" -ge 1000000 ] \
-            && [ -r "$kwin_anland_dir/libkwin.so.6" ]; then
-            export LD_LIBRARY_PATH="$kwin_anland_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-        else
-            printf 'kwin_variant=%s status=incomplete-lib falling back to stock\n' \
-                "$kwin_variant" >> "$log_file"
-            kwin_variant=stock
-        fi
-    fi
-    printf 'kwin_variant=%s anland_lib_dir=%s\n' \
-        "$kwin_variant" "$kwin_anland_dir" >> "$log_file"
-    # Exact binaries mapped for this run (post-mortem A/B attribution).
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum /usr/bin/kwin_wayland >> "$log_file" 2>/dev/null || true
-        if [ "$kwin_variant" != "stock" ]; then
-            sha256sum "$kwin_anland_dir/libkwin.so.6.3.6" >> "$log_file" 2>/dev/null || true
-        else
-            sha256sum /usr/lib/aarch64-linux-gnu/libkwin.so.6 >> "$log_file" 2>/dev/null || true
-        fi
-    fi
-    # Project Anland XWayland variant selection (Phase B A/B without APK
-    # rebuilds): explicit selection only. files/xwayland-variant arrives as
-    # LOCALDESKTOP_XWAYLAND_VARIANT ("candidate" or "stock");
-    # /var/lib/localdesktop/xwayland-variant is the out-of-band test
-    # override (same pattern as kwin-variant above). Default MUST remain
-    # stock: anything unrecognized, and any failed staging check, falls back
-    # to stock and is logged. Stock keeps today's exact PATH/environment:
-    # no wrapper binary, no extra processes, no behavior change.
-    xwayland_variant=stock
-    case "${LOCALDESKTOP_XWAYLAND_VARIANT:-}" in
-        candidate|stock) xwayland_variant="$LOCALDESKTOP_XWAYLAND_VARIANT" ;;
-    esac
-    if [ -r /var/lib/localdesktop/xwayland-variant ]; then
-        read -r xwayland_override < /var/lib/localdesktop/xwayland-variant
-        case "$xwayland_override" in
-            candidate|stock) xwayland_variant="$xwayland_override" ;;
-            *)
-                printf 'xwayland_variant override=%q rejected (want candidate|stock), keeping %s\n' \
-                    "$xwayland_override" "$xwayland_variant" >> "$log_file"
-                ;;
-        esac
-    fi
-    xwayland_bin=/usr/bin/Xwayland
-    if [ "$xwayland_variant" = "candidate" ]; then
-        # Staging gate (single decision per launch, no retry loop): readable
-        # + plausible size + exact pinned SHA. SHA equality also pins ELF
-        # architecture and every staged byte. Any failure selects stock.
-        xwayland_cand_dir=/usr/local/lib/portal-xwayland
-        xwayland_cand_bin="$xwayland_cand_dir/Xwayland"
-        xwayland_cand_sha_expected="b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d"
-        if [ -x "$xwayland_cand_bin" ] \
-            && [ "$(wc -c < "$xwayland_cand_bin" 2>/dev/null || echo 0)" -ge 1000000 ]; then
-            xwayland_cand_sha=$(sha256sum "$xwayland_cand_bin" 2>/dev/null | cut -d' ' -f1)
-            if [ "$xwayland_cand_sha" = "$xwayland_cand_sha_expected" ]; then
-                # KWin locates Xwayland via PATH: prepending the Portal dir
-                # selects the candidate with no wrapper and no stock impact
-                # (stock never touches PATH here).
-                PATH="$xwayland_cand_dir:$PATH"
-                export PATH
-                xwayland_bin="$xwayland_cand_bin"
-                printf 'xwayland_variant=candidate status=active sha=%s\n' \
-                    "$xwayland_cand_sha" >> "$log_file"
-            else
-                printf 'xwayland_variant=candidate status=rejected-bad-sha falling back to stock\n' \
-                    >> "$log_file"
-                xwayland_variant=stock
-            fi
-        else
-            printf 'xwayland_variant=candidate status=incomplete-staging falling back to stock\n' \
-                >> "$log_file"
-            xwayland_variant=stock
-        fi
-    fi
-    printf 'xwayland_variant=%s bin=%s resolved=%s\n' \
-        "$xwayland_variant" "$xwayland_bin" "$(command -v Xwayland)" >> "$log_file"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum /usr/bin/Xwayland >> "$log_file" 2>/dev/null || true
-        if [ "$xwayland_variant" = "candidate" ]; then
-            sha256sum "$xwayland_cand_bin" >> "$log_file" 2>/dev/null || true
-        fi
-    fi
-    # Project Anland unified libkwin (Anland backend + Portal Touchpad) is
-    # served from its own dir so the QPainter overlay and distro libkwin are
-    # never shadowed. It provides the AnlandBackend symbol itself, so the
-    # load-time stub must never be preloaded here (it would win and trap).
-    # Project Anland DRM shim (Anland only): the app sandbox cannot open
-    # /dev/dri/renderD128, which KWin's Anland backend requires at init.
-    # Never set in QPainter mode.
-    if [ -r /usr/local/lib/portal/drmshim.so ]; then
-        export LD_PRELOAD="/usr/local/lib/portal/drmshim.so${LD_PRELOAD:+:$LD_PRELOAD}"
-    fi
+export LD_LIBRARY_PATH="$kwin_anland_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$kwin_bin" "$kwin_anland_dir/libkwin.so.6.7.4" >> "$log_file" 2>/dev/null || true
 fi
 export QT_FORCE_STDERR_LOGGING=1
 export QT_LOGGING_RULES="kwin_core.warning=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
@@ -346,32 +217,13 @@ portal_xinput_probe() {
 }
 
 run_real_kwin() {
-    if [ "$anland_mode" -eq 0 ]; then
-        export LD_LIBRARY_PATH="/usr/local/lib/portal${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    elif [ "${kwin_variant:-unified}" != "stock" ] && [ -n "${kwin_anland_dir:-}" ] \
-        && [ -r "$kwin_anland_dir/libkwin.so.6.3.6" ]; then
-        case "$LD_LIBRARY_PATH" in
-            "$kwin_anland_dir"*) ;;
-            *) export LD_LIBRARY_PATH="$kwin_anland_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
-        esac
-    fi
+    export LD_LIBRARY_PATH="$kwin_anland_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export QT_FORCE_STDERR_LOGGING=1
-    # Renderer mode (default: hardware accelerated). The emergency software
-    # fallback is explicit: /var/lib/localdesktop/kwin-glmode containing
-    # "sw" forces KWin surfaceless software rendering (ANLAND_NO_DRM_DEVICE)
-    # and drops the freedreno gallium forcing (inside the software EGL stack
-    # it demands the KGSL winsys and kills EGL init; proven by matrix).
-    # Anything else (including absent) is the production GPU path: make sure
-    # no stale NO_DRM_DEVICE leaks in and keep GALLIUM_DRIVER=freedreno so
-    # Mesa selects the kgsl winsys for the KGSL-backed render node.
-    if [ "$(cat /var/lib/localdesktop/kwin-glmode 2>/dev/null || echo hw)" = "sw" ]; then
-        export ANLAND_NO_DRM_DEVICE=1
-        unset GALLIUM_DRIVER
-        printf 'anland GL mode=sw (emergency software fallback): NO_DRM_DEVICE=1, GALLIUM_DRIVER unset\n' >> "$log_file"
-    else
-        unset ANLAND_NO_DRM_DEVICE
-        printf 'anland GL mode=hw (accelerated default): NO_DRM_DEVICE unset, GALLIUM_DRIVER=%s\n' "${GALLIUM_DRIVER:-unset}" >> "$log_file"
-    fi
+    # Portal's app UID cannot open Android's /dev/dri node. Current Forky
+    # KWin/Anland uses KGSL-backed surfaceless EGL while Anland owns the
+    # Android dmabuf presentation path; this remains hardware accelerated.
+    export ANLAND_NO_DRM_DEVICE=1
+    printf 'anland GL mode=hw (KGSL surfaceless EGL; Anland dmabuf path)\n' >> "$log_file"
     if [ -n "$segfault_lib" ]; then
         export LD_PRELOAD="$segfault_lib${LD_PRELOAD:+:$LD_PRELOAD}"
         export SEGFAULT_SIGNALS=all
@@ -381,25 +233,11 @@ run_real_kwin() {
     # session. This captures loader, protocol and signal-handler diagnostics
     # even when the guest process exits before a host frame exists.
     # Always disable KWin's internal guest screen locker; device locking belongs to Android.
-    # In Anland mode prefer the Anland backend explicitly, but ONLY when the
-    # installed kwin_wayland advertises --anland: the lfdevs Anland build
-    # accepts it, while stock distro kwin_wayland exits(1) on unknown
-    # options, wedging the session in a compositor restart loop. Env
-    # (ANLAND_SOCKET) plus the unified libkwin selects the backend
-    # otherwise, so probing keeps both binaries working.
-    if [ "$anland_mode" -eq 1 ]; then
-        case " $* " in
-            *" --anland "*) ;;
-            *)
-                if /usr/bin/kwin_wayland --help 2>/dev/null | grep -qF -- '--anland'; then
-                    set -- "$@" --anland
-                else
-                    printf 'anland backend via env only (binary lacks --anland)\n' >> "$log_file"
-                fi
-                ;;
-        esac
-    fi
-    /usr/bin/kwin_wayland --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" 2>&1 | tee -a "$log_file"
+    case " $* " in
+        *" --anland "*) ;;
+        *) set -- "$@" --anland ;;
+    esac
+    "$kwin_bin" --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" 2>&1 | tee -a "$log_file"
     return "${PIPESTATUS[0]}"
 }
 
@@ -415,14 +253,14 @@ if [ "${LOCALDESKTOP_GDB_BACKTRACE:-0}" = "1" ] && command -v gdb >/dev/null 2>&
             -ex 'set pagination off' \
             -ex run \
             -ex 'thread apply all bt full' \
-            --args /usr/bin/kwin_wayland --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" \
+            --args "$kwin_bin" --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" \
             > "$debugger_output" 2>&1
     else
         gdb --batch --quiet \
             -ex 'set pagination off' \
             -ex run \
             -ex 'thread apply all bt full' \
-            --args /usr/bin/kwin_wayland --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" \
+            --args "$kwin_bin" --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" \
             > "$debugger_output" 2>&1
     fi
     gdb_status=$?
@@ -491,7 +329,7 @@ if [ "$status" -ge 128 ]; then
         "$(date +%s%3N 2>/dev/null || date +%s000)" "$attempt_id" "$status" \
         "$((status - 128))" "${core:-unavailable}" >> "$trace_file"
     if [ -n "$core" ] && command -v gdb >/dev/null 2>&1; then
-        gdb --batch --quiet /usr/bin/kwin_wayland "$core" \
+        gdb --batch --quiet "$kwin_bin" "$core" \
             -ex 'set pagination off' -ex 'thread apply all bt full' \
             >> "$trace_file" 2>&1 || true
     fi

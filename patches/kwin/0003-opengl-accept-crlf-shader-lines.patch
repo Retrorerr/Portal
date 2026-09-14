@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Portal maintainers <portal@example.invalid>
+Date: Mon, 14 Sep 2026 17:00:00 +0100
+Subject: [PATCH] opengl: accept CRLF shader resource lines
+
+The ARM64 KWin source is staged through Portal's Windows build workspace.
+Normalize the trailing carriage return before matching KWin's embedded GLSL
+include directives so the current Forky shader resources are expanded before
+Mesa compiles them.
+
+This is limited to shader preprocessing and does not change the renderer or
+graphics backend selection.
+---
+ src/opengl/glshader.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/opengl/glshader.cpp b/src/opengl/glshader.cpp
+--- a/src/opengl/glshader.cpp
++++ b/src/opengl/glshader.cpp
+@@ -112,7 +112,10 @@ std::optional<QByteArray> GLShader::preprocess(const QByteArray &src, GLenum sha
+ 
+     for (auto it = split.begin(); it != split.end(); it++) {
+-        const auto &line = *it;
++        QByteArray line = *it;
++        if (line.endsWith('\r')) {
++            line.chop(1);
++        }
+         if (line.startsWith("#version")) {
+             // this is intentionally ignored!
+         } else if (line.startsWith("#include \"") && line.endsWith("\"")) {

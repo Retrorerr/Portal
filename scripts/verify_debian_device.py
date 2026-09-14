@@ -42,7 +42,8 @@ def verify(serial):
     state = shell(serial, ["run-as", PACKAGE, "sh", "-c",
         f"test ! -e {FILES}/arch && test ! -e {FILES}/runtime-B.staging && cat {FILES}/runtime-B/.portal-runtime-complete"])
     print("Runtime completion:\n" + state)
-    print(guest(serial, "set -e; . /etc/os-release; test \"$ID\" = debian; test \"$VERSION_ID\" = 13; "
+    print(guest(serial, "set -e; . /etc/os-release; test \"$ID\" = debian; "
+        "test \"${VERSION_ID:-}\" = 14 || test \"${VERSION_CODENAME:-}\" = forky; "
         "cat /etc/os-release; dpkg --version | head -1; "
         "dpkg-query -W plasma-desktop kwin-wayland dolphin konsole systemsettings firefox-esr ark kate gwenview okular kcalc; "
         "! command -v pacman; echo 'pacman absent'; test -x /usr/local/bin/portal-ime-bridge; "

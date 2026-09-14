@@ -42,8 +42,6 @@ const PORTAL_RETURN_SCREEN_SOURCE: &str =
     include_str!("../src/android/kotlin/app/polarbear/setup/PortalReturnScreen.kt");
 const PORTAL_LAUNCH_TRANSITION_SOURCE: &str =
     include_str!("../src/android/kotlin/app/polarbear/setup/PortalLaunchTransition.kt");
-const XWAYLAND_SHA256SUMS_SOURCE: &str =
-    include_str!("../assets/xwayland-candidate/SHA256SUMS");
 
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
@@ -300,7 +298,9 @@ fn nested_android_owned_settings_are_truthful() {
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_tablet.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_mouse.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("Failed to restore Portal touchpad settings module"));
-    assert!(ANDROID_SETUP_SOURCE.contains("kwin-debian-arm64/libkwin.so.6.3.6"));
+    assert!(ANDROID_SETUP_SOURCE.contains("kwin-forky-anland-arm64/kwin_wayland"));
+    assert!(ANDROID_SETUP_SOURCE.contains("kwin-forky-anland-arm64/libkwin.so.6.7.4"));
+    assert!(!ANDROID_SETUP_SOURCE.contains("kwin-debian-arm64/libkwin.so.6.3.6"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings_qwidgets/kcm_clock.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("with_extension(\"so.portal-disabled\")"));
     assert!(ANDROID_SETUP_SOURCE.contains("org.kde.dolphin.desktop"));
@@ -348,15 +348,15 @@ fn ibus_autostart_never_blocks_session_startup() {
 }
 
 #[test]
-fn anland_hardware_acceleration_is_default_with_explicit_software_fallback() {
-    // The production Anland path is hardware-accelerated: the default
-    // session env must not force software rendering, the Mesa layer binds
-    // track the pinned 26.3 layer, and the emergency software fallback is
-    // an explicit guest flag file mirrored host-side (never silent).
-    assert!(ANLAND_ENV_SOURCE.contains("software_gl_fallback_requested"));
-    assert!(ANLAND_ENV_SOURCE.contains("kwin-glmode"));
+fn anland_hardware_acceleration_is_the_only_active_graphics_path() {
+    // The production Anland path is hardware-accelerated. It uses KGSL-backed
+    // surfaceless EGL because the Android app UID cannot open /dev/dri; the
+    // old software/QPainter graphics stack is not active.
     assert!(ANLAND_ENV_SOURCE.contains("libgallium-26.3.0-devel.so"));
     assert!(!ANLAND_ENV_SOURCE.contains("libgallium-26.2.0-devel.so"));
+    assert!(!KWIN_WRAPPER_SOURCE.contains("kwin-glmode"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("export ANLAND_NO_DRM_DEVICE=1"));
+    assert!(!KWIN_WRAPPER_SOURCE.contains("unset ANLAND_NO_DRM_DEVICE"));
     // No software-forcing default in the session environment: the env
     // constructor body (up to the next item) must be free of it; docs and
     // fallback plumbing elsewhere may still mention it.
@@ -381,9 +381,9 @@ fn mesa_kgsl_layer_is_pinned_and_matches_session_binds() {
     // set must stay identical to what session_binds mounts, or the layer
     // silently stops engaging.
     for pin in [
-        "mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz",
-        "11648933",
-        "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf",
+        "mesa-for-android-container_26.3.0-devel-20260824_ubuntu_resolute_arm64.tar.gz",
+        "12069639",
+        "ee762f0855c47f9a245df3ce53a46d40b2240ede9b5c9ddf7606e724362fec77",
         "mesa-kgsl-layer.complete",
         "libgallium-26.3.0-devel.so",
         "libgbm.so.1",
@@ -573,35 +573,13 @@ fn input_method_bridge_and_fallback_policy() {
     // 2b. Anland sessions load the unified Anland libkwin (Anland backend +
     // Portal Touchpad) from its own dir; the stub is never preloaded there.
     assert!(KWIN_WRAPPER_SOURCE.contains("/usr/local/lib/portal-anland"));
-    // 2c. Deterministic KWin A/B without APK rebuilds: kwin-variant selects
-    // unified/stock/ab candidates, every run logs SHA256 attributions, and
-    // failed sanity checks fall back to stock (never unloadable).
-    assert!(KWIN_WRAPPER_SOURCE.contains("kwin-variant"));
-    assert!(KWIN_WRAPPER_SOURCE.contains("sha256sum"));
-    assert!(KWIN_WRAPPER_SOURCE.contains("falling back to stock"));
-    // 2c-ii. Canonical default is the unified Portal lib (Anland backend
-    // plus the physically validated Portal Touchpad input path); stock
-    // stays selectable for A/B/recovery. Pinned as the exact
-    // default-assignment block (fallbacks elsewhere reuse similar words,
-    // so a bare substring would prove nothing).
-    assert!(KWIN_WRAPPER_SOURCE.contains(
-        "kwin_variant=unified\n    if [ -r /var/lib/localdesktop/kwin-variant ]"
-    ));
-    // 2d. --anland is probe-gated: stock distro kwin_wayland exits(1) on
-    // unknown options (compositor restart loop), so the flag is only passed
-    // when the binary advertises it; env + unified libkwin otherwise.
-    assert!(KWIN_WRAPPER_SOURCE.contains("grep -q"));
-    assert!(KWIN_WRAPPER_SOURCE.contains("binary lacks --anland"));
-    // 2e. Renderer mode defaults to hardware acceleration; the emergency
-    // software fallback is an explicit guest flag file (kwin-glmode == sw)
-    // that forces surfaceless software rendering for KWin only. Forcing
-    // freedreno inside the software EGL stack demands the KGSL winsys and
-    // kills EGL init (proven by matrix), so the fallback also drops
-    // GALLIUM_DRIVER for kwin_wayland.
-    assert!(KWIN_WRAPPER_SOURCE.contains("kwin-glmode"));
-    assert!(KWIN_WRAPPER_SOURCE.contains("ANLAND_NO_DRM_DEVICE=1"));
-    assert!(KWIN_WRAPPER_SOURCE.contains("unset GALLIUM_DRIVER"));
-    assert!(KWIN_WRAPPER_SOURCE.contains("unset ANLAND_NO_DRM_DEVICE"));
+    // 2c. The active launcher always uses the Portal-built Forky KWin and
+    // passes the Anland backend flag; there is no compositor A/B selector.
+    assert!(KWIN_WRAPPER_SOURCE.contains("kwin_anland_dir=/usr/local/lib/portal-anland"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("set -- \"$@\" --anland"));
+    assert!(!KWIN_WRAPPER_SOURCE.contains("kwin-variant"));
+    assert!(!KWIN_WRAPPER_SOURCE.contains("falling back to stock"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("export ANLAND_NO_DRM_DEVICE=1"));
 
     // 3. Startplasma sets kwinrc InputMethod and VirtualKeyboardMode
     assert!(STARTPLASMA_SOURCE.contains("InputMethod=/usr/share/applications/portal-ime.desktop"));
@@ -636,44 +614,14 @@ fn input_method_bridge_and_fallback_policy() {
 }
 
 #[test]
-fn xwayland_variant_selection_policy() {
-    // 1. Setup stages the Phase B candidate + xinput into their own dir
-    // (never /usr/bin, never the loader path) on every launch.
-    assert!(ANDROID_SETUP_SOURCE.contains("usr/local/lib/portal-xwayland"));
-    assert!(ANDROID_SETUP_SOURCE.contains("sync_xwayland_candidate_overlay"));
-    // 2. The staged candidate SHA is pinned identically in setup.rs, the
-    // guest-side selection gate, and the asset manifest (transcription
-    // slips fail closed here, not on the tablet).
-    for pinned in [
-        "b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d",
-    ] {
-        assert!(ANDROID_SETUP_SOURCE.contains(pinned));
-        assert!(KWIN_WRAPPER_SOURCE.contains(pinned));
-        assert!(XWAYLAND_SHA256SUMS_SOURCE.contains(pinned));
-    }
-    // 3. files/xwayland-variant reaches the guest as an explicit env var.
-    assert!(ANLAND_ENV_SOURCE.contains("LOCALDESKTOP_XWAYLAND_VARIANT"));
-    assert!(ANLAND_ENV_SOURCE.contains("xwayland-variant"));
-    // 4. Wrapper default is stock, pinned as the exact assignment block so a
-    // bare substring (also used by fallback lines) proves nothing.
-    assert!(KWIN_WRAPPER_SOURCE.contains(
-        "xwayland_variant=stock\n    case \"${LOCALDESKTOP_XWAYLAND_VARIANT:-}\" in"
-    ));
-    // 5. Every staging failure falls back to stock; stock never touches PATH.
-    assert!(KWIN_WRAPPER_SOURCE.contains("status=rejected-bad-sha falling back to stock"));
-    assert!(KWIN_WRAPPER_SOURCE.contains("status=incomplete-staging falling back to stock"));
-    assert!(KWIN_WRAPPER_SOURCE.contains("PATH=\"$xwayland_cand_dir:$PATH\""));
-    // 6. Runs are attributed (which binary KWin actually resolved + SHAs).
-    assert!(KWIN_WRAPPER_SOURCE.contains("resolved="));
-    // 7. The XI2 proof harness is inert without its explicit flag file and
-    // resolves the touchpad device by property, never by name alone.
-    assert!(KWIN_WRAPPER_SOURCE.contains("xwayland-xinput-probe"));
-    assert!(KWIN_WRAPPER_SOURCE.contains("xwayland-xinput.log"));
-    assert!(KWIN_WRAPPER_SOURCE.contains("libinput Tapping Enabled"));
-    // 7b. The probe authenticates like KWin's own X clients: display and
-    // cookie come from our argv (--xwayland-display/--xwayland-xauthority),
-    // with a bounded socket scan only as fallback.
-    assert!(KWIN_WRAPPER_SOURCE.contains("--xwayland-xauthority"));
+fn stock_xwayland_and_native_firefox_policy() {
+    // XWayland remains the Debian-provided compatibility server, but no
+    // Portal-specific candidate or Firefox-forcing selector is active.
+    assert!(KWIN_WRAPPER_SOURCE.contains("XWayland stays the Debian package"));
+    assert!(ANLAND_ENV_SOURCE.contains("MOZ_ENABLE_WAYLAND"));
+    assert!(!ANLAND_ENV_SOURCE.contains("LOCALDESKTOP_XWAYLAND_VARIANT"));
+    assert!(!ANDROID_SETUP_SOURCE.contains("sync_xwayland_candidate_overlay"));
+    assert!(!ANDROID_SETUP_SOURCE.contains("Firefox Portal GPU preference is missing"));
 }
 
 #[test]
@@ -683,11 +631,12 @@ fn fresh_renderer_selection_is_initialized_before_mesa_and_handoff() {
     // The policy is shared with the production provisioning writer, so the
     // renderer flag gets the same atomic replacement and parent durability as
     // the runtime markers. Only uninitialised/image-only state selects
-    // Anland; completed legacy state keeps the QPainter compatibility path.
+    // Anland; historical renderer values remain parseable but do not select a
+    // retired graphics backend.
     assert!(RENDERER_POLICY_SOURCE.contains("provisioning::write_atomic"));
     assert!(RENDERER_POLICY_SOURCE.contains("RuntimeClassification::LegacyPortal"));
     assert!(RENDERER_POLICY_SOURCE.contains("RendererSelection::Anland"));
-    assert!(RENDERER_POLICY_SOURCE.contains("RendererSelection::QPainter"));
+    assert!(RENDERER_POLICY_SOURCE.contains("never select the"));
 
     // Setup establishes the mode after the image stage and before Mesa reads
     // it. Finalisation revalidates the same durable choice before writing the
@@ -784,22 +733,17 @@ fn anland_repair_only_refreshes_portal_owned_session_assets() {
 }
 
 #[test]
-fn anland_repair_revalidates_mesa_kwin_drmshim_firefox_and_session_contract() {
+fn anland_repair_revalidates_mesa_kwin_firefox_and_session_contract() {
     assert!(ANDROID_SETUP_SOURCE.contains("validate_launch_contract()"));
     assert!(ANDROID_SETUP_SOURCE.contains("KWIN_ANLAND_LIBRARY"));
-    assert!(ANDROID_SETUP_SOURCE.contains("DRMSHIM_BINARY"));
+    assert!(!ANDROID_SETUP_SOURCE.contains("DRMSHIM_BINARY"));
     assert!(ANDROID_SETUP_SOURCE.contains("sync_kwin_anland_overlay_for_repair"));
     assert!(ANDROID_SETUP_SOURCE.contains("bytes == KWIN_ANLAND_LIBRARY"));
-    assert!(ANDROID_SETUP_SOURCE.contains("bytes == DRMSHIM_BINARY"));
     assert!(ANDROID_SETUP_SOURCE.contains("validate_firefox_anland_config"));
-    for required in [
-        "gfx.webrender.all",
-        "layers.acceleration.force-enabled",
-        "Firefox Portal autoconfig is incomplete",
-        "Firefox Portal GPU preference is missing",
-    ] {
-        assert!(ANDROID_SETUP_SOURCE.contains(required));
-    }
+    assert!(ANDROID_SETUP_SOURCE.contains(
+        "Firefox config still contains a Portal-specific XWayland/GPU override"
+    ));
+    assert!(!ANDROID_SETUP_SOURCE.contains("Firefox Portal GPU preference is missing"));
     for required in [
         "MESA_LOADER_DRIVER_OVERRIDE",
         "GALLIUM_DRIVER",
@@ -811,8 +755,8 @@ fn anland_repair_revalidates_mesa_kwin_drmshim_firefox_and_session_contract() {
         assert!(ANLAND_ENV_SOURCE.contains(required));
     }
     for required in [
-        "usr/local/lib/portal-anland/libkwin.so.6.3.6",
-        "usr/local/lib/portal/drmshim.so",
+        "usr/local/lib/portal-anland/kwin_wayland",
+        "usr/local/lib/portal-anland/libkwin.so.6.7.4",
         "localdesktop-crash-handler.so",
         "portal-ibus-engine",
         "portal-ibus-lazy",
@@ -1027,25 +971,18 @@ fn anland_surface_resume_failures_use_committed_runtime_recovery() {
 }
 
 #[test]
-fn qpainter_lifecycle_remains_the_non_anland_path() {
-    let resume = ANDROID_SETUP_RUN_SOURCE
-        .split("fn resume_wayland")
-        .nth(1)
-        .and_then(|source| source.split("/// Project Anland resume").next())
-        .expect("Smithay resume operation must exist");
-    assert!(resume.contains("match bind(event_loop)"));
-    assert!(ANDROID_SETUP_RUN_SOURCE.contains("backend.graphic_renderer = None"));
+fn anland_lifecycle_is_the_authoritative_graphics_path() {
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("fn resume_anland"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("anland.surface resume failed"));
     assert!(ANDROID_SETUP_RUN_SOURCE.contains("backend.anland.as_mut()"));
 }
 
 #[test]
-fn normal_renderer_policy_still_preserves_legacy_fallback_until_explicit_repair() {
+fn normal_renderer_policy_always_selects_anland() {
     assert!(RENDERER_POLICY_SOURCE.contains("missing_mode_selection"));
     assert!(RENDERER_POLICY_SOURCE.contains("RuntimeClassification::BootablePortal"));
-    assert!(RENDERER_POLICY_SOURCE.contains("RendererSelection::QPainter"));
+    assert!(RENDERER_POLICY_SOURCE.contains("Existing historical values resolve to Anland"));
     assert!(RENDERER_POLICY_SOURCE.contains("pub fn set_renderer_mode"));
-    // The explicit override is kept at the separate Anland repair boundary,
-    // not in automatic startup resolution.
     assert!(ANLAND_ENV_SOURCE.contains("pub fn force_anland_renderer"));
     let active = ANLAND_ENV_SOURCE
         .split("pub fn active_renderer")
@@ -1085,9 +1022,8 @@ fn return_to_plasma_anland_affordance_is_inline_and_native_state_driven() {
     }
     assert!(COMPOSE_OVERLAY_KOTLIN_SOURCE.contains("updateAnlandRepairState"));
     assert!(COMPOSE_OVERLAY_RUST_SOURCE.contains("publish_current_anland_repair_state"));
-    assert!(ANDROID_SETUP_SOURCE.contains("AnlandRepairAvailability::Available"));
+    assert!(ANDROID_SETUP_SOURCE.contains("AnlandRepairAvailability::Unavailable"));
     assert!(ANDROID_SETUP_SOURCE.contains("is_trusted_recovery()"));
-    assert!(ANDROID_SETUP_SOURCE.contains("RendererKind::Smithay"));
 }
 
 #[test]

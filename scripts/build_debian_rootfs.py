@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Pre-provisions a minimal Debian 13 (Trixie) ARM64 KDE Plasma 6 desktop rootfs
+Pre-provisions a minimal Debian 14 (Forky) ARM64 KDE Plasma 6 desktop rootfs
 off-device on the development machine.
 
-Downloads the official Debian Trixie package catalog, resolves the transitive
+Downloads the official Debian Forky package catalogs, resolves the transitive
 dependency closure for Plasma 6, KWin, Dolphin, System Settings, Konsole, KScreen,
 Breeze, D-Bus, XWayland, PipeWire, and Firefox ESR, downloads the .deb files
 concurrently, and extracts them into a clean rootfs directory ready for packaging
@@ -25,7 +25,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 DEBIAN_MIRROR = "https://deb.debian.org/debian"
-PACKAGES_URL = f"{DEBIAN_MIRROR}/dists/trixie/main/binary-arm64/Packages.xz"
+DEBIAN_SECURITY_MIRROR = "https://security.debian.org/debian-security"
+DEBIAN_SUITE = "forky"
+DEBIAN_VERSION = "14"
+DEBIAN_REPOSITORIES = (
+    ("forky-main", DEBIAN_MIRROR, f"{DEBIAN_MIRROR}/dists/{DEBIAN_SUITE}/main/binary-arm64/Packages.xz"),
+    ("forky-updates", DEBIAN_MIRROR, f"{DEBIAN_MIRROR}/dists/{DEBIAN_SUITE}-updates/main/binary-arm64/Packages.xz"),
+    ("forky-security", DEBIAN_SECURITY_MIRROR, f"{DEBIAN_SECURITY_MIRROR}/dists/{DEBIAN_SUITE}-security/main/binary-arm64/Packages.xz"),
+)
+PACKAGES_URL = DEBIAN_REPOSITORIES[0][2]
 
 SEED_PACKAGES = [
     # Core desktop & window manager
@@ -117,7 +125,7 @@ SEED_PACKAGES = [
     # GTK/Qt integration, browser integration, fonts & spellcheck
     "kde-config-gtk-style",
     "xsettings-kde",
-    "plasma5-integration",
+    "plasma-integration",
     "plasma-browser-integration",
     "webext-plasma-browser-integration",
     "fonts-noto-color-emoji",
@@ -147,7 +155,7 @@ SEED_PACKAGES = [
     "ksshaskpass",
     "baloo6",
     # Compression & archive tools
-    "p7zip-full",
+    "7zip",
     "unzip",
     "zip",
     "zstd",
@@ -173,39 +181,129 @@ EXCLUDE_PACKAGES = {
     "fwupd",
 }
 
+def _debian_part_compare(left: str, right: str) -> int:
+    """Compare one upstream/revision portion using Debian version ordering."""
+    i = j = 0
+    while i < len(left) or j < len(right):
+        if i < len(left) and left[i] == "~":
+            if j >= len(right) or right[j] != "~":
+                return -1
+        elif j < len(right) and right[j] == "~":
+            return 1
+        if i >= len(left):
+            return -1
+        if j >= len(right):
+            return 1
+
+        left_digit = left[i].isdigit()
+        right_digit = right[j].isdigit()
+        if left_digit and right_digit:
+            left_end = i
+            while left_end < len(left) and left[left_end].isdigit():
+                left_end += 1
+            right_end = j
+            while right_end < len(right) and right[right_end].isdigit():
+                right_end += 1
+            left_digits = left[i:left_end].lstrip("0") or "0"
+            right_digits = right[j:right_end].lstrip("0") or "0"
+            if len(left_digits) != len(right_digits):
+                return 1 if len(left_digits) > len(right_digits) else -1
+            if left_digits != right_digits:
+                return 1 if left_digits > right_digits else -1
+            i, j = left_end, right_end
+            continue
+        if left_digit != right_digit:
+            # Debian's ordering places the non-digit run before a digit run.
+            return 1 if left_digit else -1
+
+        if left[i] != right[j]:
+            return 1 if ord(left[i]) > ord(right[j]) else -1
+        i += 1
+        j += 1
+    return 0
+
+
+def debian_version_compare(left: str, right: str) -> int:
+    """Return -1/0/1 for two Debian package versions."""
+    left_epoch, left_has_epoch, left_rest = left.partition(":")
+    right_epoch, right_has_epoch, right_rest = right.partition(":")
+    if not left_has_epoch:
+        left_rest = left
+        left_epoch = "0"
+    if not right_has_epoch:
+        right_rest = right
+        right_epoch = "0"
+    if int(left_epoch or "0") != int(right_epoch or "0"):
+        return 1 if int(left_epoch or "0") > int(right_epoch or "0") else -1
+
+    left_upstream, left_dash, left_revision = left_rest.rpartition("-")
+    right_upstream, right_dash, right_revision = right_rest.rpartition("-")
+    if not left_dash:
+        left_upstream, left_revision = left_rest, ""
+    if not right_dash:
+        right_upstream, right_revision = right_rest, ""
+    result = _debian_part_compare(left_upstream, right_upstream)
+    return result if result else _debian_part_compare(left_revision, right_revision)
+
+
+def _read_packages_text(index_file: Path, url: str) -> str:
+    if index_file.exists() and index_file.stat().st_size > 10 * 1024 * 1024:
+        print(f"Loading cached Packages from {index_file}...")
+        return index_file.read_text(encoding="utf-8", errors="replace")
+
+    print(f"Downloading Packages.xz from {url}...")
+    req = urllib.request.Request(url, headers={"User-Agent": "Portal-Provisioner/1.0"})
+    with urllib.request.urlopen(req) as resp:
+        compressed = resp.read()
+    print(f"Decompressing {len(compressed)/(1024*1024):.1f} MB Packages.xz...")
+    text = lzma.decompress(compressed).decode("utf-8", errors="replace")
+    index_file.parent.mkdir(parents=True, exist_ok=True)
+    index_file.write_text(text, encoding="utf-8")
+    return text
+
+
 def fetch_package_index(cache_file: Path) -> dict:
-    if cache_file.exists() and cache_file.stat().st_size > 10 * 1024 * 1024:
-        print(f"Loading cached Packages from {cache_file}...")
-        with open(cache_file, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
-    else:
-        print(f"Downloading Packages.xz from {PACKAGES_URL}...")
-        req = urllib.request.Request(PACKAGES_URL, headers={"User-Agent": "Portal-Provisioner/1.0"})
-        with urllib.request.urlopen(req) as resp:
-            compressed = resp.read()
-        print(f"Decompressing {len(compressed)/(1024*1024):.1f} MB Packages.xz...")
-        text = lzma.decompress(compressed).decode("utf-8", errors="replace")
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_file, "w", encoding="utf-8") as f:
-            f.write(text)
-
     packages = {}
-    cur_pkg = {}
-    for line in text.splitlines():
-        if not line.strip():
-            if "Package" in cur_pkg and "Filename" in cur_pkg:
+    for label, repository, url in DEBIAN_REPOSITORIES:
+        suffix = label.split("-", 1)[1]
+        index_file = cache_file.with_name(f"Packages-{DEBIAN_SUITE}-{suffix}.txt")
+        text = _read_packages_text(index_file, url)
+        cur_pkg = {}
+        for line in text.splitlines():
+            if not line.strip():
+                if "Package" in cur_pkg and "Filename" in cur_pkg:
+                    cur_pkg["Repository"] = repository
+                    previous = packages.get(cur_pkg["Package"])
+                    if previous is None or debian_version_compare(cur_pkg.get("Version", "0"), previous.get("Version", "0")) > 0:
+                        packages[cur_pkg["Package"]] = cur_pkg
+                cur_pkg = {}
+            elif ":" in line and not line.startswith(" "):
+                k, v = line.split(":", 1)
+                cur_pkg[k.strip()] = v.strip()
+        if "Package" in cur_pkg and "Filename" in cur_pkg:
+            cur_pkg["Repository"] = repository
+            previous = packages.get(cur_pkg["Package"])
+            if previous is None or debian_version_compare(cur_pkg.get("Version", "0"), previous.get("Version", "0")) > 0:
                 packages[cur_pkg["Package"]] = cur_pkg
-            cur_pkg = {}
-        elif ":" in line and not line.startswith(" "):
-            k, v = line.split(":", 1)
-            cur_pkg[k.strip()] = v.strip()
-    if "Package" in cur_pkg and "Filename" in cur_pkg:
-        packages[cur_pkg["Package"]] = cur_pkg
 
-    print(f"Indexed {len(packages)} binary packages from Trixie main.")
+    print(f"Indexed {len(packages)} binary packages from Debian {DEBIAN_SUITE} main, updates, and security.")
     return packages
 
 def resolve_dependencies(packages: dict, seeds: list) -> list:
+    # Debian KDE packages use versioned virtual packages (for example
+    # `plasma-version-base-6.7`).  A raw package-name walk silently omitted
+    # those providers and produced an archive whose dpkg status was not
+    # internally installable.  Resolve each virtual name to a real package so
+    # the extracted status database remains apt-consistent.
+    providers: dict[str, list[str]] = {}
+    for package_name, package in packages.items():
+        for provided in package.get("Provides", "").split(","):
+            virtual_name = re.split(r"[\s(]", provided.strip(), maxsplit=1)[0]
+            if virtual_name:
+                providers.setdefault(virtual_name, []).append(package_name)
+    for provider_names in providers.values():
+        provider_names.sort()
+
     resolved = set()
     queue = list(seeds)
 
@@ -216,8 +314,15 @@ def resolve_dependencies(packages: dict, seeds: list) -> list:
             continue
 
         if clean not in packages:
-            # Check virtual package or provider
-            continue
+            provider_names = providers.get(clean, [])
+            if not provider_names:
+                # Keep the existing minimal-closure behaviour for genuinely
+                # unavailable optional dependencies; apt will report those
+                # explicitly if a seed is later made mandatory.
+                continue
+            clean = provider_names[0]
+            if clean in resolved or clean in EXCLUDE_PACKAGES:
+                continue
 
         resolved.add(clean)
         pkg = packages[clean]
@@ -452,7 +557,8 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked
         for pkg_name in pkg_list:
             pkg = packages[pkg_name]
             rel_path = pkg["Filename"]
-            url = f"{DEBIAN_MIRROR}/{rel_path}"
+            repository = pkg.get("Repository", DEBIAN_MIRROR)
+            url = f"{repository}/{rel_path}"
             dest = deb_cache_dir / os.path.basename(rel_path)
             download_tasks.append(executor.submit(download_file, url, dest))
 
@@ -540,9 +646,9 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked
     sources_list = output_dir / "etc" / "apt" / "sources.list"
     with open(sources_list, "w", newline="\n", encoding="utf-8") as f:
         f.write(
-            "deb http://deb.debian.org/debian trixie main\n"
-            "deb http://deb.debian.org/debian trixie-updates main\n"
-            "deb http://security.debian.org/debian-security trixie-security main\n"
+            f"deb {DEBIAN_MIRROR} {DEBIAN_SUITE} main\n"
+            f"deb {DEBIAN_MIRROR} {DEBIAN_SUITE}-updates main\n"
+            f"deb {DEBIAN_SECURITY_MIRROR} {DEBIAN_SUITE}-security main\n"
         )
 
     # Write /etc/apt/apt.conf.d/01no-sandbox: tells apt not to drop privileges to _apt in PRoot
@@ -659,7 +765,7 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked
         with open(konsole_profile, "w", newline="\n", encoding="utf-8") as f:
             f.write("[General]\nCommand=/bin/bash\nName=Profile 1\nParent=FALLBACK/\n\n[Appearance]\nColorScheme=Breeze\n")
 
-    print("Debian 13 rootfs pre-provisioning completed successfully!")
+    print(f"Debian {DEBIAN_VERSION} ({DEBIAN_SUITE.title()}) rootfs pre-provisioning completed successfully!")
 
 # ---------------------------------------------------------------------------
 # Official lfdevs Anland Termux KWin/XWayland stack (Debian 13, ARM64).
@@ -923,6 +1029,6 @@ def prepare_locked_packages_with_anland(base_locked: dict, cache_dir: Path) -> d
 
 if __name__ == "__main__":
     base_dir = Path(__file__).resolve().parent.parent
-    target_rootfs = base_dir / "target" / "debian-13-rootfs"
+    target_rootfs = base_dir / "target" / "debian-14-rootfs"
     deb_cache = base_dir / "target" / "deb_cache"
     build_rootfs(target_rootfs, deb_cache)

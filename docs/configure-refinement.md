@@ -3,7 +3,7 @@
 Based on `46b20f036df35e3a239953270d3d8300b46ed504`, branch
 `spike/game-activity-host`. Only setup UI/model code changed.
 
-- Header: Install Portal Desktop / Powered by Debian 13 · KDE Plasma.
+- Header: Install Portal Desktop / Powered by Debian 14 (Forky) · KDE Plasma.
   Minimal install names bundled functional tools once, without repeating the OS.
 - Three blurred canonical-path fragments move in independent 13/17/23-second
   reverse cycles. Only outer graphics-layer transforms animate; warm upper-right

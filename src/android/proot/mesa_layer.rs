@@ -40,11 +40,13 @@ use std::{
 };
 
 /// Pinned upstream release (lfdevs mesa-for-android-container). Every byte
-/// is hard-pinned; any mismatch fails closed and retries later.
-pub const LAYER_VERSION: &str = "26.3.0-20260824";
-pub const LAYER_URL: &str = "https://github.com/lfdevs/mesa-for-android-container/releases/download/mesa-26.3.0-devel-20260824/mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz";
-pub const LAYER_COMPRESSED_BYTES: u64 = 11648933;
-pub const LAYER_SHA256: &str = "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf";
+/// is hard-pinned; any mismatch fails closed and retries later. Forky ships
+/// LLVM 21, so use the release's Ubuntu Resolute build rather than the older
+/// Debian Trixie artifact, which requires LLVM 19 and cannot load here.
+pub const LAYER_VERSION: &str = "26.3.0-20260824-ubuntu-resolute";
+pub const LAYER_URL: &str = "https://github.com/lfdevs/mesa-for-android-container/releases/download/mesa-26.3.0-devel-20260824/mesa-for-android-container_26.3.0-devel-20260824_ubuntu_resolute_arm64.tar.gz";
+pub const LAYER_COMPRESSED_BYTES: u64 = 12069639;
+pub const LAYER_SHA256: &str = "ee762f0855c47f9a245df3ce53a46d40b2240ede9b5c9ddf7606e724362fec77";
 /// Completion marker beside the layer (version + sha, exact match required).
 pub const LAYER_MARKER: &str = "mesa-kgsl-layer.complete";
 

@@ -54,7 +54,7 @@ export LOCALDESKTOP_ATTEMPT_ID="$attempt_id"
 rm -f "$ready_marker" "$failure_marker" "$crash_marker"
 
 started=$(date +%s)
-printf 'stage=launch timestamp=%s attempt=%s distro=debian13 mode=classic-dbus-run-session\\n' \\
+printf 'stage=launch timestamp=%s attempt=%s distro=debian14 mode=classic-dbus-run-session\\n' \\
     "$started" "$attempt_id" > "$session_log"
 
 home_dir="${HOME:-/home/desktop}"

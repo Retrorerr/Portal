@@ -16,17 +16,16 @@ from pathlib import Path
 from build_debian_rootfs import (
     build_rootfs,
     fetch_package_index,
-    prepare_locked_packages_with_anland,
     resolve_dependencies,
     SEED_PACKAGES,
 )
 
 REPO = Path(__file__).resolve().parent.parent
 LOCK = REPO / "assets/debian-runtime-packages.json"
-# New canonical runtime: Debian base plus the pinned lfdevs Anland KWin/XWayland
-# stack. Older versions (e.g. debian13-arm64-2026.09.05.3) are never rebuilt or
+# New canonical runtime: Debian Forky base plus the pinned Portal Anland KWin
+# integration. Older versions are never rebuilt or
 # replaced; pass --version explicitly to target a different image.
-VERSION = "debian13-arm64-2026.09.10.1"
+VERSION = "debian14-arm64-2026.09.14.2"
 
 
 def add_bytes(archive, name, data, mode=0o644):
@@ -36,23 +35,30 @@ def add_bytes(archive, name, data, mode=0o644):
     archive.addfile(info, io.BytesIO(data))
 
 
-def build(output, refresh_lock=False, version=VERSION, with_anland=True):
+def refresh_package_lock() -> list[str]:
     cache = REPO / "target/deb_cache"
-    if refresh_lock:
-        packages = fetch_package_index(cache / "Packages.txt")
-        names = resolve_dependencies(packages, SEED_PACKAGES)
-        missing = set(SEED_PACKAGES) - set(names)
-        if missing:
-            raise ValueError(f"Missing seed packages: {missing}")
-        LOCK.write_text(json.dumps({name: {key: packages[name][key] for key in
-            ("Version", "Filename", "SHA256", "Size")} for name in names}, indent=2) + "\n")
+    packages = fetch_package_index(cache / "Packages.txt")
+    names = resolve_dependencies(packages, SEED_PACKAGES)
+    missing = set(SEED_PACKAGES) - set(names)
+    if missing:
+        raise ValueError(f"Missing seed packages: {missing}")
+    LOCK.write_text(json.dumps({name: {key: packages[name][key] for key in
+        ("Version", "Filename", "SHA256", "Size", "Repository")} for name in names}, indent=2) + "\n")
+    print(f"Wrote {len(names)} Forky package locks to {LOCK}.")
+    return names
+
+
+def build(output, refresh_lock_requested=False, version=VERSION, with_anland=True):
+    cache = REPO / "target/deb_cache"
+    if refresh_lock_requested:
+        refresh_package_lock()
     packages = json.loads(LOCK.read_text())
-    if with_anland:
-        # Deterministic overlay: stock KWin/XWayland entries are replaced by
-        # the verified lfdevs bundle (plus kwin-x11). The shipped
-        # runtime-packages.json below records the effective set, so the
-        # archive always describes exactly what was installed.
-        packages = prepare_locked_packages_with_anland(packages, cache)
+    # Forky supplies the desktop packages.  Anland is Portal's active runtime
+    # integration and is installed by the APK-owned KWin assets; never replace
+    # current Debian KWin/XWayland packages with the old lfdevs/Trixie bundle.
+    # Keep the parameter for callers of the historical builder, but make it a
+    # no-op so an old --no-anland invocation cannot select obsolete packages.
+    del with_anland
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="portal-runtime-") as temporary:
         config = Path(temporary)
@@ -108,10 +114,14 @@ def build(output, refresh_lock=False, version=VERSION, with_anland=True):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--refresh-lock", action="store_true", help="Explicitly select new package versions")
+    parser.add_argument("--lock-only", action="store_true", help="Refresh the package lock without building a rootfs archive")
     parser.add_argument("--version", default=VERSION, help="Runtime version marker (never reuse a published version)")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--no-anland", action="store_true", help="Build the pure Debian base without the lfdevs overlay")
     args = parser.parse_args()
+    if args.lock_only:
+        refresh_package_lock()
+        raise SystemExit(0)
     output = args.output or (REPO / f"target/portal-{args.version}.tar.xz")
     manifest = build(output, args.refresh_lock, args.version, not args.no_anland)
     # NOTE: assets/debian-runtime.json is only rewritten by

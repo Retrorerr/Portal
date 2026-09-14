@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Portal maintainers <portal@example.invalid>
+Date: Mon, 14 Sep 2026 17:10:00 +0100
+Subject: [PATCH] opengl: guard null EGL device query results
+
+The KGSL Mesa EGL implementation can report a successful
+EGL_DEVICE_EXT display query while returning no device handle. Treat that
+case as an unknown, non-software device instead of passing EGL_NO_DEVICE_EXT
+to eglQueryDeviceStringEXT during KWin startup.  The same guard is needed in
+the render-node discovery path, which runs before the context is created.
+
+This is required only by Portal's Anland surfaceless path; it does not select
+or add another renderer.
+---
+ src/opengl/egldisplay.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/opengl/egldisplay.cpp b/src/opengl/egldisplay.cpp
+--- a/src/opengl/egldisplay.cpp
++++ b/src/opengl/egldisplay.cpp
+@@ -113,5 +113,9 @@ static bool checkSoftwareDevice(::EGLDisplay display)
+         return false;
+     }
+     EGLDeviceEXT device = reinterpret_cast<EGLDeviceEXT>(deviceValue);
+-    return QByteArrayView(eglQueryDeviceStringEXT(device, EGL_EXTENSIONS)).contains("EGL_MESA_device_software");
++    if (!device) {
++        return false;
++    }
++    const char *extensions = eglQueryDeviceStringEXT(device, EGL_EXTENSIONS);
++    return extensions && QByteArrayView(extensions).contains("EGL_MESA_device_software");
+ }
+
+@@ -354,6 +358,12 @@ QString EglDisplay::determineRenderNode() const
+         if (eglQueryDisplayAttribEXT(m_handle, EGL_DEVICE_EXT, &eglDeviceAttrib)) {
+             EGLDeviceEXT eglDevice = reinterpret_cast<EGLDeviceEXT>(eglDeviceAttrib);
++            if (!eglDevice) {
++                qCWarning(KWIN_OPENGL) << "EGL display returned no device handle";
++                return {};
++            }
+
+             const char *deviceExtensions = eglQueryDeviceStringEXT(eglDevice, EGL_EXTENSIONS);
+             if (checkExtension(deviceExtensions, "EGL_EXT_device_drm_render_node")) {

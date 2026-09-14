@@ -213,14 +213,22 @@ impl RuntimeArtifact {
         format!("{}\n{}\n", self.version, self.sha256)
     }
 
-    fn validate_debian_layout(root: &Path) -> anyhow::Result<()> {
+    fn validate_debian_layout_for_version(root: &Path, version: &str) -> anyhow::Result<()> {
         let os = fs::read_to_string(root.join("usr/lib/os-release"))?;
+        let has_expected_version = os.lines().any(|line| {
+            line == format!("VERSION_ID=\"{version}\"")
+                || line == format!("VERSION_ID={version}")
+        });
+        // Current Forky images identify themselves by codename and may omit
+        // VERSION_ID while still reporting the authoritative Debian release.
+        // Keep the older numeric form for other Debian layouts and accept
+        // only the exact Forky codename for the Debian 14 artifact.
+        let has_expected_forky_codename = version == "14"
+            && os.lines().any(|line| line == "VERSION_CODENAME=forky");
         anyhow::ensure!(
             os.lines().any(|l| l == "ID=debian")
-                && os
-                    .lines()
-                    .any(|l| l == "VERSION_ID=\"13\"" || l == "VERSION_ID=13"),
-            "Expected Debian 13"
+                && (has_expected_version || has_expected_forky_codename),
+            "Expected Debian {version}"
         );
         for path in [
             "usr/bin/dpkg",
@@ -238,6 +246,10 @@ impl RuntimeArtifact {
             "Unexpected package manager in runtime"
         );
         Ok(())
+    }
+
+    fn validate_debian_layout(root: &Path) -> anyhow::Result<()> {
+        Self::validate_debian_layout_for_version(root, "14")
     }
 
     /// Validate an extracted archive against this exact release artifact.
@@ -297,6 +309,17 @@ impl RuntimeArtifact {
     /// can migrate it in place without downloading or replacing user data.
     pub fn is_legacy_complete(&self, root: &Path) -> bool {
         self.is_legacy_runtime(root)
+    }
+
+    /// A completed Debian 13 Portal runtime is a supported migration source,
+    /// not a disposable tree. Its mutable state is copied into the Forky
+    /// image before promotion; an arbitrary marked or malformed tree still
+    /// follows the normal refusal path.
+    fn is_migratable_debian13(&self, root: &Path) -> bool {
+        matches!(
+            Self::read_completion_marker(root),
+            Ok((_, _, CompletionMarkerKind::Legacy | CompletionMarkerKind::Installation))
+        ) && Self::validate_debian_layout_for_version(root, "13").is_ok()
     }
 
     /// Validate a persistent Debian 13 runtime whose required setup stages
@@ -494,17 +517,19 @@ impl RuntimeArtifact {
             return Ok(());
         }
 
+        let migrate_debian13 = self.is_migratable_debian13(&root);
+
         // An image that was promoted before setup finished is safe to reuse;
         // the setup coordinator will rerun its idempotent stages and write the
         // final marker last.
-        if self.is_image_ready(&root) || self.is_legacy_runtime(&root) {
+        if self.is_image_ready(&root) || (self.is_legacy_runtime(&root) && !migrate_debian13) {
             return Ok(());
         }
 
         // A marked-but-corrupt runtime may contain user packages/configuration.
         // Never silently replace it. An unmarked/invalid image can be safely
         // replaced only after a fresh staging tree validates.
-        if fs::symlink_metadata(root.join(READY_MARKER)).is_ok() {
+        if fs::symlink_metadata(root.join(READY_MARKER)).is_ok() && !migrate_debian13 {
             anyhow::bail!(
                 "Existing Debian runtime is marked complete but failed validation; refusing to replace user data"
             );
@@ -542,6 +567,9 @@ impl RuntimeArtifact {
                 68,
                 "Recovering the validated Debian runtime…",
             );
+            if migrate_debian13 {
+                self.preserve_guest_state(&root, &staging)?;
+            }
             self.promote_staging(base, &root, &staging)?;
             if let Err(error) = remove_path_synced(&base.join("portal-runtime.tar.xz")) {
                 log::warn!("Could not remove verified Portal runtime archive: {error}");
@@ -634,6 +662,9 @@ impl RuntimeArtifact {
                     self.emit(&report, ProvisioningPhase::Extracting, 55, message);
                 };
                 self.extract_inner(&archive, &staging, &extract_report)?;
+                if migrate_debian13 {
+                    self.preserve_guest_state(&root, &staging)?;
+                }
                 self.emit(
                     &report,
                     ProvisioningPhase::Promoting,
@@ -672,6 +703,20 @@ impl RuntimeArtifact {
             }
         }
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Debian runtime provisioning failed")))
+    }
+
+    /// Preserve mutable guest state while replacing the OS image. The new
+    /// Forky package tree owns `/usr` and `/etc`; user homes, Portal's local
+    /// state, and conventional local application prefixes remain intact.
+    fn preserve_guest_state(&self, old_root: &Path, new_root: &Path) -> anyhow::Result<()> {
+        for relative in ["root", "home", "opt", "usr/local", "var/lib/localdesktop"] {
+            let source = old_root.join(relative);
+            if !source.exists() {
+                continue;
+            }
+            copy_guest_tree(&source, &new_root.join(relative))?;
+        }
+        Ok(())
     }
 
     fn emit(
@@ -1221,6 +1266,68 @@ fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
 }
 
+fn copy_guest_tree(source: &Path, destination: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        remove_copy_destination(destination)?;
+        let target = fs::read_link(source)?;
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        create_guest_symlink(&target, destination)?;
+        return Ok(());
+    }
+
+    if file_type.is_dir() {
+        if let Ok(existing) = fs::symlink_metadata(destination) {
+            if !existing.file_type().is_dir() || existing.file_type().is_symlink() {
+                remove_copy_destination(destination)?;
+            }
+        }
+        fs::create_dir_all(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_guest_tree(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        let _ = fs::set_permissions(destination, metadata.permissions());
+        return Ok(());
+    }
+
+    remove_copy_destination(destination)?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(source, destination)?;
+    let _ = fs::set_permissions(destination, metadata.permissions());
+    Ok(())
+}
+
+fn remove_copy_destination(path: &Path) -> io::Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+#[cfg(unix)]
+fn create_guest_symlink(target: &Path, destination: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, destination)
+}
+
+#[cfg(windows)]
+fn create_guest_symlink(target: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+    // Guest user trees contain both kinds of links. Windows does not expose
+    // the source type through the link itself, so try a directory link first
+    // and fall back to a file link for the common file-link case.
+    symlink_dir(target, destination).or_else(|_| symlink_file(target, destination))
+}
+
 fn path_exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
@@ -1364,7 +1471,7 @@ mod tests {
         let mut tar = tar::Builder::new(encoder);
         for (path, value) in [
             (IMAGE_MARKER, version),
-            ("usr/lib/os-release", "ID=debian\nVERSION_ID=\"13\"\n"),
+            ("usr/lib/os-release", "ID=debian\nVERSION_CODENAME=forky\n"),
             ("usr/bin/dpkg", "binary"),
             ("usr/bin/apt", "binary"),
             ("usr/bin/bash", "binary"),

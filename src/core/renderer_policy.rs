@@ -1,11 +1,9 @@
 //! Durable renderer selection policy shared by Android startup and host tests.
 //!
 //! The renderer flag is app-private state, not an accidental side effect of
-//! Mesa provisioning. A missing flag on fresh/image-only state is initialized
-//! to Anland; a completed Portal marker without a flag is kept on the old
-//! QPainter compatibility path. Legacy two-line markers are migrated with an
-//! explicit QPainter value so older installations retain their behavior.
-//! Once a value exists it is never silently rewritten.
+//! Mesa provisioning. A missing flag is initialized to Anland. Historical
+//! renderer values remain parseable for migration, but they never select the
+//! retired Smithay/QPainter path.
 
 use crate::core::provisioning::RuntimeClassification;
 use std::{fs, io::ErrorKind, path::Path};
@@ -38,16 +36,12 @@ pub enum ParsedRendererMode {
 
 impl ParsedRendererMode {
     pub const fn selection(self) -> RendererSelection {
-        match self {
-            Self::Anland => RendererSelection::Anland,
-            Self::QPainter | Self::Malformed => RendererSelection::QPainter,
-        }
+        RendererSelection::Anland
     }
 }
 
-/// Parse only documented renderer values. Malformed/unknown values retain the
-/// safe historical QPainter path and are never rewritten, so a recovery/debug
-/// choice cannot be silently changed by a later launch.
+/// Parse historical renderer values without allowing them to reactivate the
+/// retired graphics path. Unknown values are handled as Anland too.
 pub fn parse_renderer_mode(raw: &str) -> ParsedRendererMode {
     match raw.trim().to_ascii_lowercase().as_str() {
         ANLAND_MODE => ParsedRendererMode::Anland,
@@ -59,15 +53,8 @@ pub fn parse_renderer_mode(raw: &str) -> ParsedRendererMode {
 }
 
 fn missing_mode_selection(runtime: RuntimeClassification) -> RendererSelection {
-    if runtime.is_trusted_recovery() {
-        // A completed runtime predates (or lost) renderer-mode state. Older
-        // Portal releases used QPainter when this file did not exist. Record
-        // that compatibility decision instead of changing an existing user's
-        // renderer merely because the new flag was never present.
-        RendererSelection::QPainter
-    } else {
-        RendererSelection::Anland
-    }
+    let _ = runtime;
+    RendererSelection::Anland
 }
 
 fn read_existing_mode(path: &Path) -> anyhow::Result<Option<RendererSelection>> {
@@ -76,7 +63,7 @@ fn read_existing_mode(path: &Path) -> anyhow::Result<Option<RendererSelection>> 
             let parsed = parse_renderer_mode(&raw);
             if parsed == ParsedRendererMode::Malformed {
                 log::warn!(
-                    "renderer-mode is malformed at {}; preserving it and using QPainter recovery",
+                    "renderer-mode is malformed at {}; using Anland",
                     path.display()
                 );
             }
@@ -97,10 +84,8 @@ pub fn resolve_renderer_mode(
     Ok(read_existing_mode(path)?.unwrap_or_else(|| missing_mode_selection(runtime)))
 }
 
-/// Ensure a renderer choice is durable and then return the exact choice that
-/// startup must use. A completed legacy/modern marker gets an explicit
-/// QPainter compatibility value when the flag is absent; fresh/image-only
-/// state gets Anland. Existing valid or malformed files are preserved.
+/// Ensure an Anland renderer choice is durable and return the exact choice
+/// that startup must use. Existing historical values resolve to Anland.
 pub fn ensure_renderer_mode(
     path: &Path,
     runtime: RuntimeClassification,
@@ -112,12 +97,9 @@ pub fn ensure_renderer_mode(
 
 /// Explicitly replace the durable renderer choice.
 ///
-/// Normal startup must use [`ensure_renderer_mode`] so a missing flag on an
-/// older completed installation keeps its historical QPainter behavior. An
-/// explicit repair/migration action is the one caller allowed to override
-/// that compatibility policy. It still uses the same atomic writer and
-/// read-after-write validation, so a crash can leave either the old choice or
-/// the new complete choice, never a partially written value.
+/// It uses the same atomic writer and read-after-write validation, so a crash
+/// can leave either the old choice or the new complete choice, never a
+/// partially written value.
 pub fn set_renderer_mode(
     path: &Path,
     selection: RendererSelection,
@@ -223,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_qpainter_and_smithay_values_are_preserved() {
+    fn historical_qpainter_and_smithay_values_never_reactivate_retired_path() {
         for value in ["qpainter\n", "smithay\n", "smithay-qpainter\n"] {
             let temp = tempdir().unwrap();
             let path = mode_path(temp.path());
@@ -231,53 +213,51 @@ mod tests {
 
             assert_eq!(
                 ensure_renderer_mode(&path, RuntimeClassification::Absent).unwrap(),
-                RendererSelection::QPainter
+                RendererSelection::Anland
             );
             assert_eq!(fs::read_to_string(&path).unwrap(), value);
         }
     }
 
     #[test]
-    fn legacy_missing_mode_is_migrated_to_explicit_qpainter() {
+    fn legacy_missing_mode_is_migrated_to_explicit_anland() {
         let temp = tempdir().unwrap();
         let path = mode_path(temp.path());
 
         assert_eq!(
             resolve_renderer_mode(&path, RuntimeClassification::LegacyPortal).unwrap(),
-            RendererSelection::QPainter
+            RendererSelection::Anland
         );
         assert!(!path.exists());
         assert_eq!(
             ensure_renderer_mode(&path, RuntimeClassification::LegacyPortal).unwrap(),
-            RendererSelection::QPainter
+            RendererSelection::Anland
         );
-        assert_eq!(fs::read_to_string(&path).unwrap(), "qpainter\n");
-        // Once the legacy choice is explicit, a later modern classification
-        // cannot silently migrate it to Anland.
+        assert_eq!(fs::read_to_string(&path).unwrap(), "anland\n");
         assert_eq!(
             ensure_renderer_mode(&path, RuntimeClassification::BootablePortal).unwrap(),
-            RendererSelection::QPainter
+            RendererSelection::Anland
         );
     }
 
     #[test]
-    fn completed_modern_missing_mode_preserves_qpainter_compatibility() {
+    fn completed_modern_missing_mode_uses_anland() {
         let temp = tempdir().unwrap();
         let path = mode_path(temp.path());
 
         assert_eq!(
             resolve_renderer_mode(&path, RuntimeClassification::BootablePortal).unwrap(),
-            RendererSelection::QPainter
+            RendererSelection::Anland
         );
         assert_eq!(
             ensure_renderer_mode(&path, RuntimeClassification::BootablePortal).unwrap(),
-            RendererSelection::QPainter
+            RendererSelection::Anland
         );
-        assert_eq!(fs::read_to_string(path).unwrap(), "qpainter\n");
+        assert_eq!(fs::read_to_string(path).unwrap(), "anland\n");
     }
 
     #[test]
-    fn malformed_mode_is_deterministic_safe_qpainter_and_is_not_rewritten() {
+    fn malformed_mode_is_deterministic_safe_anland_and_is_not_rewritten() {
         let temp = tempdir().unwrap();
         let path = mode_path(temp.path());
         fs::write(&path, "not-a-renderer\n").unwrap();
@@ -288,7 +268,7 @@ mod tests {
         );
         assert_eq!(
             ensure_renderer_mode(&path, RuntimeClassification::ValidatedImageOnly).unwrap(),
-            RendererSelection::QPainter
+            RendererSelection::Anland
         );
         assert_eq!(fs::read_to_string(path).unwrap(), "not-a-renderer\n");
     }
@@ -337,11 +317,11 @@ mod tests {
 
         assert_eq!(
             resolve_renderer_mode(&path, RuntimeClassification::BootablePortal).unwrap(),
-            RendererSelection::QPainter
+            RendererSelection::Anland
         );
         assert_eq!(
             resolve_renderer_mode(&path, RuntimeClassification::Absent).unwrap(),
-            RendererSelection::QPainter
+            RendererSelection::Anland
         );
     }
 

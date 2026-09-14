@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Portal maintainers <portal@example.invalid>
+Date: Mon, 14 Sep 2026 19:20:00 +0100
+Subject: [PATCH] compositor: tolerate Anland surfaceless backend without DRM
+
+Portal's Anland backend intentionally uses surfaceless EGL and has no KWin
+DrmDevice. KWin's generic OpenGL crash-reporting helper queried the PCI data
+through that null device during startup, after EGL had initialized. Keep the
+GPU metadata that is available and omit only the unavailable PCI fields.
+
+This is required for the active Portal Anland path; it does not add a second
+renderer or change presentation.
+---
+ src/compositor.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/compositor.cpp b/src/compositor.cpp
+--- a/src/compositor.cpp
++++ b/src/compositor.cpp
+@@ -131,8 +131,12 @@ static QVariantHash collectCrashInformation(const EglBackend *backend)
+     gpuInformation[QStringLiteral("api_type")] = QStringLiteral("OpenGL");
+     gpuInformation[QStringLiteral("name")] = QString::fromUtf8(glPlatform->glRendererString());
+-    if (const auto pciInfo = backend->drmDevice()->pciDeviceInfo()) {
+-        gpuInformation[QStringLiteral("id")] = QString::number(pciInfo->device_id, 16);
+-        gpuInformation[QStringLiteral("vendor_id")] = QString::number(pciInfo->vendor_id, 16);
++    if (const auto drmDevice = backend->drmDevice()) {
++        if (const auto pciInfo = drmDevice->pciDeviceInfo()) {
++            gpuInformation[QStringLiteral("id")] = QString::number(pciInfo->device_id, 16);
++            gpuInformation[QStringLiteral("vendor_id")] = QString::number(pciInfo->vendor_id, 16);
++        }
+     }
+-- 
+2.45.2

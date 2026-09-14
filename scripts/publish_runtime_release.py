@@ -42,34 +42,10 @@ FORBIDDEN_FILES = [
     "usr/bin/pacman",
 ]
 
-# Versions published before the lfdevs Anland overlay existed. Every other
-# version must prove Anland capability below; a future runtime that silently
-# falls back to stock non-Anland KWin fails validation and cannot publish.
-LEGACY_STOCK_VERSIONS = {
-    "debian13-arm64-2026.09.05.3",
-}
-
-# Exact identity of the pinned lfdevs Anland Termux 5.13.3 payloads. The -95
-# kwin_wayland advertises `--anland` ("Render to the anland display daemon")
-# and libkwin6 carries KWin::AnlandBackend; matching these bytes proves the
-# deployed files are the Anland-capable ones, not stock Debian rebuilds.
-ANLAND_KWIN_WAYLAND_SHA256 = "4ad23a5aefbde02dae70ec270423b75205906be8ef8b0fd473fd32a11424bdbf"
-ANLAND_KWIN_WAYLAND_OPTION_MARKER = b"Render to the anland display daemon"
-ANLAND_LIBKWIN_SHA256 = "ea784ec5ed66d2114e5bbd6813e9fef4f2a9baec67c695c2841762e57d0505c6"
-ANLAND_LIBKWIN_BACKEND_MARKER = b"AnlandBackend"
-ANLAND_XWAYLAND_SHA256 = "3a25266671b7615740a7da602bd6a645bc8966be04d1a69c3536f09e67df2f87"
-ANLAND_KWIN_VERSION = "4:6.3.6-95"
-ANLAND_XWAYLAND_VERSION = "2:24.1.6-91"
-ANLAND_OVERLAY_PACKAGES = ("kwin-common", "kwin-data", "kwin-wayland", "kwin-x11", "libkwin6")
-# Stock versions that must NOT appear for the overlaid packages. Their
-# presence means the builder silently fell back to Debian KWin/XWayland.
-STOCK_FALLBACK_VERSIONS = {
-    "kwin-common": {"4:6.3.6-1"},
-    "kwin-data": {"4:6.3.6-1"},
-    "kwin-wayland": {"4:6.3.6-1"},
-    "kwin-x11": {"4:6.3.6-1"},
-    "libkwin6": {"4:6.3.6-1"},
-    "xwayland": {"2:24.1.6-1"},
+FORKY_REQUIRED_PACKAGE_PREFIXES = {
+    "plasma-desktop": "4:6.7.",
+    "kwin-wayland": "4:6.7.",
+    "xwayland": "2:24.",
 }
 
 
@@ -103,7 +79,7 @@ def validate_archive(archive_path: Path, expected_version: str) -> None:
                 f"Version marker mismatch in archive: found '{archived_version}', expected '{expected_version}'"
             )
 
-        # 2. OS release check (Debian 13)
+        # 2. OS release check (Debian 14 / Forky)
         os_release_name = "usr/lib/os-release"
         if os_release_name not in found_members:
             raise RuntimeError(f"Archive missing {os_release_name}")
@@ -112,8 +88,11 @@ def validate_archive(archive_path: Path, expected_version: str) -> None:
             raise RuntimeError(f"Unable to read {os_release_name}")
         os_release_text = os_release_file.read().decode("utf-8")
         lines = [line.strip() for line in os_release_text.splitlines()]
-        if not ("ID=debian" in lines and any(l in lines for l in ('VERSION_ID="13"', 'VERSION_ID=13'))):
-            raise RuntimeError(f"{os_release_name} does not match Debian 13 specifications")
+        has_forky_identity = any(
+            line in lines for line in ('VERSION_ID="14"', 'VERSION_ID=14', 'VERSION_CODENAME=forky')
+        )
+        if not ("ID=debian" in lines and has_forky_identity):
+            raise RuntimeError(f"{os_release_name} does not match Debian 14/Forky specifications")
 
         # 3. Required files
         for req in REQUIRED_FILES:
@@ -129,11 +108,10 @@ def validate_archive(archive_path: Path, expected_version: str) -> None:
             if forb in found_members:
                 raise RuntimeError(f"Archive contains forbidden entry: {forb}")
 
-        # 5. Anland capability (every version after the legacy stock ones).
-        # This is the fail-closed gate: a runtime whose KWin silently fell
-        # back to stock Debian cannot be published as canonical.
-        if archived_version not in LEGACY_STOCK_VERSIONS:
-            validate_anland_capable(tar, found_members)
+        # 5. Current Forky desktop package versions. The Portal-specific
+        # Anland binary is installed by the APK, not substituted into the
+        # Debian package archive.
+        validate_forky_packages(tar, found_members)
 
     print("Archive layout and required components successfully validated.")
 
@@ -156,76 +134,17 @@ def parse_dpkg_status_versions(tar: tarfile.TarFile, found_members: dict) -> dic
     return versions
 
 
-def validate_anland_capable(tar: tarfile.TarFile, found_members: dict) -> None:
-    print("Validating Anland capability (lfdevs KWin/XWayland stack)...")
+def validate_forky_packages(tar: tarfile.TarFile, found_members: dict) -> None:
+    print("Validating Forky desktop package versions...")
     versions = parse_dpkg_status_versions(tar, found_members)
-
-    # 5a. Overlay packages must report the lfdevs revisions.
-    for package in ANLAND_OVERLAY_PACKAGES:
-        version = versions.get(package)
-        if version != ANLAND_KWIN_VERSION:
+    for package, prefix in FORKY_REQUIRED_PACKAGE_PREFIXES.items():
+        version = versions.get(package, "")
+        if not version.startswith(prefix):
             raise RuntimeError(
-                f"Anland validation failed: {package} version is '{version}', "
-                f"expected lfdevs '{ANLAND_KWIN_VERSION}' (stock fallback?)"
+                f"Forky validation failed: {package} version is {version!r}, "
+                f"expected a current Forky {prefix} release"
             )
-    xwayland_version = versions.get("xwayland")
-    if xwayland_version != ANLAND_XWAYLAND_VERSION:
-        raise RuntimeError(
-            f"Anland validation failed: xwayland version is '{xwayland_version}', "
-            f"expected patched '{ANLAND_XWAYLAND_VERSION}' (stock fallback?)"
-        )
-
-    # 5b. Stock fallback versions must be absent for the overlaid packages.
-    for package, forbidden in STOCK_FALLBACK_VERSIONS.items():
-        if versions.get(package) in forbidden:
-            raise RuntimeError(
-                f"Anland validation failed: {package} carries stock version "
-                f"'{versions.get(package)}'; the lfdevs overlay did not apply"
-            )
-
-    # 5c. Exact binary identity plus capability markers. Hash equality with
-    # the pinned lfdevs payloads proves these are the Anland-capable files;
-    # the markers prove the capability itself (--anland option, backend).
-    def read_member(name: str) -> bytes:
-        if name not in found_members:
-            raise RuntimeError(f"Anland validation failed: archive missing {name}")
-        member_file = tar.extractfile(found_members[name])
-        if member_file is None:
-            raise RuntimeError(f"Anland validation failed: unable to read {name}")
-        return member_file.read()
-
-    kwin_bytes = read_member("usr/bin/kwin_wayland")
-    if hashlib.sha256(kwin_bytes).hexdigest() != ANLAND_KWIN_WAYLAND_SHA256:
-        raise RuntimeError(
-            "Anland validation failed: usr/bin/kwin_wayland bytes do not match "
-            "the pinned lfdevs -95 binary"
-        )
-    if ANLAND_KWIN_WAYLAND_OPTION_MARKER not in kwin_bytes:
-        raise RuntimeError(
-            "Anland validation failed: kwin_wayland does not advertise the "
-            "--anland option (stock binary?)"
-        )
-
-    libkwin_bytes = read_member("usr/lib/aarch64-linux-gnu/libkwin.so.6.3.6")
-    if hashlib.sha256(libkwin_bytes).hexdigest() != ANLAND_LIBKWIN_SHA256:
-        raise RuntimeError(
-            "Anland validation failed: libkwin.so.6.3.6 bytes do not match "
-            "the pinned lfdevs -95 library"
-        )
-    if ANLAND_LIBKWIN_BACKEND_MARKER not in libkwin_bytes:
-        raise RuntimeError(
-            "Anland validation failed: libkwin.so.6.3.6 lacks the AnlandBackend "
-            "implementation (stock library?)"
-        )
-
-    xwayland_bytes = read_member("usr/bin/Xwayland")
-    if hashlib.sha256(xwayland_bytes).hexdigest() != ANLAND_XWAYLAND_SHA256:
-        raise RuntimeError(
-            "Anland validation failed: usr/bin/Xwayland bytes do not match "
-            "the pinned patched 24.1.6-91 binary"
-        )
-
-    print("Anland capability validated: lfdevs -95 KWin + patched XWayland present.")
+    print("Forky desktop package versions validated; Anland is supplied by Portal assets.")
 
 
 class ReleaseLookupError(RuntimeError):
@@ -432,7 +351,7 @@ def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | N
 
     # Determine version and tag
     if not version:
-        match = re.search(r"portal-(debian13-arm64-[0-9.]+)\.tar\.xz", archive_path.name)
+        match = re.search(r"portal-(debian14-arm64-[0-9.]+)\.tar\.xz", archive_path.name)
         if match:
             version = match.group(1)
         elif MANIFEST_PATH.exists():
@@ -501,7 +420,7 @@ def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | N
             "--repo", repo,
             "--title", tag,
             "--target", source_sha,
-            "--notes", f"Canonical Debian 13 ARM64 runtime {version} for Portal.",
+            "--notes", f"Canonical Debian 14/Forky ARM64 runtime {version} for Portal.",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -547,7 +466,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", nargs="?", type=Path, help="Path to runtime .tar.xz archive")
     parser.add_argument("--repo", default="Retrorerr/Portal", help="GitHub repo (default: Retrorerr/Portal)")
-    parser.add_argument("--version", help="Runtime version (e.g. debian13-arm64-2026.09.05.3)")
+    parser.add_argument("--version", help="Runtime version (e.g. debian14-arm64-2026.09.14.2)")
     parser.add_argument("--tag", help="Release tag (default: runtime-<version>)")
     parser.add_argument("--skip-validation", action="store_true", help="Skip inspecting archive internals")
     parser.add_argument("--dry-run", action="store_true", help="Validate and check status without publishing")
@@ -564,7 +483,7 @@ def main():
                 archive_path = default_path
 
     if not archive_path or not archive_path.exists():
-        candidates = list((REPO_ROOT / "target").glob("portal-debian13-arm64-*.tar.xz"))
+        candidates = list((REPO_ROOT / "target").glob("portal-debian14-arm64-*.tar.xz"))
         if len(candidates) == 1:
             archive_path = candidates[0]
         else:

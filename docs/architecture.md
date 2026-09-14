@@ -12,7 +12,7 @@ Android
    ├─ setup and diagnostics WebView
    ├─ Android integration bridges
    └─ PRoot supervisor
-      └─ Debian 13 guest
+      └─ Debian Forky guest
          ├─ KDE Plasma 6 / KWin
          ├─ PipeWire and Pulse compatibility
          └─ user applications

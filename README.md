@@ -5,7 +5,7 @@
 <h1 align="center">Portal</h1>
 
 <p align="center">
-  Debian 13 and KDE Plasma 6 on Android, without root or a remote machine.
+  Debian Forky and KDE Plasma 6 on Android, without root or a remote machine.
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@ This is development software. The current hardware target is the **OnePlus Pad 3
 
 | Area | Current path |
 | --- | --- |
-| Linux guest | Debian GNU/Linux 13 (Trixie) |
+| Linux guest | Debian GNU/Linux 14 (Forky) |
 | Desktop | KDE Plasma 6 on native Wayland |
 | Host | Rust, Smithay, Android NativeActivity |
 | Runtime | Rootless PRoot with recoverable A/B slots |
@@ -41,7 +41,7 @@ Android activity and hardware
         │
 Portal host (Rust / Smithay)
         │ native Wayland
-Debian 13 guest (PRoot)
+Debian 14/Forky guest (PRoot)
         │
 KDE Plasma 6 and Linux applications
 ```

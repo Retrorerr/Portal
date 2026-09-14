@@ -80,43 +80,13 @@ const CLIPBOARD_SYNC: &str = include_str!("../../../assets/localdesktop-clipboar
 const CLIPBOARD_PUSH: &str = include_str!("../../../assets/localdesktop-clipboard-push.sh");
 const WL_COPY_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-copy");
 const WL_PASTE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-paste");
-const KWIN_LIBRARY: &[u8] = include_bytes!("../../../assets/kwin-debian-arm64/libkwin.so.6.3.6");
-/// Project Anland unified KWin library: on-device build of Debian KWin 6.3.6
-/// with the Anland backend plus the Portal Touchpad port (NaturalScroll /
-/// ScrollFactor over D-Bus + kcminputrc, Finger source, axis-stop). Served
-/// ONLY to Anland GPU sessions from `/usr/local/lib/portal-anland` so the
-/// QPainter overlay path is untouched; the stock distro libkwin is never
-/// modified. Synced idempotently on every launch (restart/reinstall persist).
+/// Forky KWin rebuilt from Debian's 6.7.4 source with only the current
+/// Anland backend integration. It is kept beside the stock Debian packages
+/// so the runtime can use Anland without replacing the distro KWin files.
+const KWIN_ANLAND_BINARY: &[u8] =
+    include_bytes!("../../../assets/kwin-forky-anland-arm64/kwin_wayland");
 const KWIN_ANLAND_LIBRARY: &[u8] =
-    include_bytes!("../../../assets/kwin-anland-arm64/libkwin.so.6.3.6");
-/// Phase B XWayland touchpad-source candidate: CI build of pinned lfdevs
-/// 461772ae (2:24.1.6-91) plus Portal 0005 (package 2:24.1.6-91portal1),
-/// served ONLY from `/usr/local/lib/portal-xwayland` when the session
-/// explicitly selects `xwayland-variant=candidate`. `/usr/bin/Xwayland`
-/// (stock) is never overwritten; the KWin wrapper falls back to stock on
-/// any staging problem. Pins: `assets/xwayland-candidate/SHA256SUMS`.
-const XWAYLAND_CANDIDATE_BINARY: &[u8] =
-    include_bytes!("../../../assets/xwayland-candidate/Xwayland");
-/// Expected SHA-256 of the staged candidate Xwayland (guest-side selection
-/// gate refuses anything else; mirrors SHA256SUMS).
-const XWAYLAND_CANDIDATE_SHA256: &str =
-    "b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d";
-/// Stock Debian trixie arm64 xinput (diagnostic tool for the XI2 proof;
-/// same overlay staging, never in the default loader path).
-const XWAYLAND_XINPUT_BINARY: &[u8] = include_bytes!("../../../assets/xwayland-candidate/xinput");
-/// Project Anland load-time stub: satisfies the lfdevs kwin_wayland binary's
-/// AnlandBackend reference when QPainter sessions run the overlay libkwin
-/// (which has no Anland backend). Preloaded ONLY in QPainter mode; traps if
-/// ever called. Recipe: `assets/guest-arm64/anland-stub-recipe.txt`.
-/// A unified overlay build (single libkwin with Anland backend + damage fix)
-/// will retire this stub.
-const ANLAND_STUB_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/libanland-stub.so");
-/// Project Anland DRM render-device shim: fakes the open()+version probe so
-/// KWin's Anland backend initializes OpenGL on devices where the app sandbox
-/// cannot open /dev/dri/renderD128. Preloaded ONLY in Anland sessions.
-/// Source: `assets/guest-arm64/drmshim.c` (recipe: `drmshim-recipe.txt`).
-const DRMSHIM_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/drmshim.so");
-
+    include_bytes!("../../../assets/kwin-forky-anland-arm64/libkwin.so.6.7.4");
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
 /// Each stage is a function that takes the `SetupOptions` and returns a `StageOutput`.
@@ -406,10 +376,9 @@ impl AnlandRepairAvailability {
     }
 }
 
-/// Return the current process-lifetime repair state and its real native
-/// progress snapshot. The normal renderer policy remains conservative: a
-/// completed runtime is merely *eligible* when it still resolves to QPainter;
-/// this query never changes renderer-mode or starts repair work.
+/// Return the current process-lifetime repair state and its native progress
+/// snapshot. The legacy repair affordance remains inert now that Anland is the
+/// only supported renderer.
 pub fn anland_repair_ui_snapshot() -> (AnlandRepairAvailability, ProvisioningSnapshot) {
     let (state, snapshot) = anland_repair_coordinator()
         .lock()
@@ -430,22 +399,7 @@ pub fn anland_repair_ui_snapshot() -> (AnlandRepairAvailability, ProvisioningSna
         AnlandRepairState::Running => AnlandRepairAvailability::Running,
         AnlandRepairState::Failed => AnlandRepairAvailability::Failed,
         AnlandRepairState::Complete => AnlandRepairAvailability::Complete,
-        AnlandRepairState::Idle => {
-            let artifact = crate::core::provisioning::RuntimeArtifact::production();
-            let root = Path::new(PRODUCTION_FS_ROOT);
-            let eligible = artifact
-                .classify_runtime(root)
-                .is_trusted_recovery()
-                && matches!(
-                    crate::android::anland::active_renderer(),
-                    crate::android::anland::RendererKind::Smithay
-                );
-            if eligible {
-                AnlandRepairAvailability::Available
-            } else {
-                AnlandRepairAvailability::Unavailable
-            }
-        }
+        AnlandRepairState::Idle => AnlandRepairAvailability::Unavailable,
     };
     (availability, snapshot)
 }
@@ -502,9 +456,8 @@ fn setup_debian_runtime(options: &SetupOptions) -> StageOutput {
 /// Establish renderer selection before Mesa and Plasma stages inspect it.
 /// This is a small durable config transaction, not a renderer probe: fresh
 /// and image-only installs get Anland, while a completed legacy/older v1
-/// Portal marker gets an explicit QPainter compatibility value. A write
-/// failure is a retryable setup error and therefore cannot be hidden by the
-/// final marker.
+/// Portal marker gets an explicit Anland value. A write failure is a retryable
+/// setup error and therefore cannot be hidden by the final marker.
 fn setup_renderer_mode(_options: &SetupOptions) -> StageOutput {
     match crate::android::anland::ensure_renderer_mode() {
         Ok(_) => None,
@@ -647,15 +600,6 @@ defaultPref("media.cubeb.sandbox", false);
 defaultPref("security.sandbox.content.level", 0);
 defaultPref("media.allow-audio-non-utility", true);
 defaultPref("media.rdd-process.enabled", false);
-// Project Anland GPU compositing (see src/android/anland/mod.rs): there is
-// no DRM render node in PRoot, so Firefox's gfxInfo concludes SOFTWARE_GL
-// and blocklists hardware compositing — even though real Adreno contexts
-// work (proven: WebGL freedreno, glxtest EGL freedreno). These prefs force
-// the GPU path back on for the X11/XWayland backend (KGSL glamor), where
-// basic compositing needs no GBM allocation. Native Wayland stays SWGL
-// until a render node exists (dmabuf-GBM is unavoidable there).
-defaultPref("gfx.webrender.all", true);
-defaultPref("layers.acceleration.force-enabled", true);
 
 "#;
 
@@ -691,15 +635,12 @@ fn validate_firefox_anland_config(fs_root: &Path) -> anyhow::Result<()> {
         );
         let config = fs::read_to_string(dir.join("localdesktop.cfg"))
             .map_err(|error| anyhow::anyhow!("Firefox Portal config is unreadable: {error}"))?;
-        for required in [
-            "defaultPref(\"gfx.webrender.all\", true);",
-            "defaultPref(\"layers.acceleration.force-enabled\", true);",
-        ] {
-            anyhow::ensure!(
-                config.contains(required),
-                "Firefox Portal GPU preference is missing: {required}"
-            );
-        }
+        anyhow::ensure!(
+            !config.contains("MOZ_ENABLE_WAYLAND")
+                && !config.contains("gfx.webrender.all")
+                && !config.contains("layers.acceleration.force-enabled"),
+            "Firefox config still contains a Portal-specific XWayland/GPU override"
+        );
     }
     anyhow::ensure!(checked > 0, "Firefox configuration directory is missing");
     Ok(())
@@ -755,10 +696,9 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/localdesktop-clipboard-push"),
         CLIPBOARD_PUSH,
     );
-    // Debian Trixie's locked runtime still carries wl-clipboard 2.2.1,
-    // which predates KWin's ext-data-control support. Bundle the matching
-    // ARM64 2.3 clients into /usr/local/bin so the helper is authoritative
-    // across existing and newly provisioned runtime slots.
+    // Bundle the matching ARM64 wl-clipboard clients into /usr/local/bin so
+    // the helper remains authoritative across existing and newly provisioned
+    // runtime slots.
     write_guest_binary(&fs_root.join("usr/local/bin/wl-copy"), WL_COPY_BINARY);
     write_guest_binary(&fs_root.join("usr/local/bin/wl-paste"), WL_PASTE_BINARY);
     // ABI-matched optional backend, reproduced by build_canberra_backend.py.
@@ -805,8 +745,8 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
-    // Keep the QPainter overlay present and the default loader path free of
-    // shadows on every launch (idempotent; see sync_kwin_overlay).
+    // Keep the Forky Anland KWin assets present on every launch (idempotent;
+    // see sync_kwin_overlay).
     sync_kwin_overlay(fs_root);
 }
 
@@ -851,13 +791,6 @@ fn sync_anland_required_session_files(
     // Normal launch keeps size-gated overlay checks cheap. An explicit repair
     // is the point where same-size corruption must also be replaced.
     sync_kwin_anland_overlay_for_repair(fs_root)?;
-    let drmshim = fs_root.join("usr/local/lib/portal/drmshim.so");
-    if !fs::read(&drmshim)
-        .map(|bytes| bytes == DRMSHIM_BINARY)
-        .unwrap_or(false)
-    {
-        write_guest_binary_result(&drmshim, DRMSHIM_BINARY)?;
-    }
     sync_crash_handler(fs_root)?;
     validate_required_session_files(fs_root)
 }
@@ -1689,9 +1622,9 @@ fn sync_debian_package_management(fs_root: &Path) {
         }
         fs::write(
             &sources_list,
-            "deb http://deb.debian.org/debian trixie main\n\
-             deb http://deb.debian.org/debian trixie-updates main\n\
-             deb http://security.debian.org/debian-security trixie-security main\n",
+            "deb https://deb.debian.org/debian forky main\n\
+             deb https://deb.debian.org/debian forky-updates main\n\
+             deb https://security.debian.org/debian-security forky-security main\n",
         )
         .expect("Failed to seed Debian package sources");
     }
@@ -1930,41 +1863,27 @@ fn validate_required_session_files(fs_root: &Path) -> anyhow::Result<()> {
         );
     }
 
-    let kwin_dir = fs_root.join("usr/local/lib/portal");
+    let anland_dir = fs_root.join("usr/local/lib/portal-anland");
     anyhow::ensure!(
-        fs::metadata(kwin_dir.join("libkwin.so.6.3.6"))
-            .map(|metadata| metadata.len() == KWIN_LIBRARY.len() as u64)
+        fs::metadata(anland_dir.join("kwin_wayland"))
+            .map(|metadata| metadata.len() == KWIN_ANLAND_BINARY.len() as u64)
             .unwrap_or(false),
-        "Required Portal KWin overlay is incomplete"
+        "Required Forky Anland KWin binary is incomplete"
+    );
+    anyhow::ensure!(
+        fs::metadata(anland_dir.join("libkwin.so.6.7.4"))
+            .map(|metadata| metadata.len() == KWIN_ANLAND_LIBRARY.len() as u64)
+            .unwrap_or(false),
+        "Required Forky Anland KWin library is incomplete"
     );
     for (link, target) in [
-        ("libkwin.so.6", "libkwin.so.6.3.6"),
+        ("libkwin.so.6", "libkwin.so.6.7.4"),
         ("libkwin.so", "libkwin.so.6"),
     ] {
         anyhow::ensure!(
-            fs::read_link(kwin_dir.join(link)).ok().as_deref() == Some(Path::new(target)),
-            "Required Portal KWin symlink is incomplete: {link}"
+            fs::read_link(anland_dir.join(link)).ok().as_deref() == Some(Path::new(target)),
+            "Required Forky Anland KWin symlink is incomplete: {link}"
         );
-    }
-
-    if crate::android::anland::is_anland_requested() {
-        let anland_dir = fs_root.join("usr/local/lib/portal-anland");
-        anyhow::ensure!(
-            fs::metadata(anland_dir.join("libkwin.so.6.3.6"))
-                .map(|metadata| metadata.len() == KWIN_ANLAND_LIBRARY.len() as u64)
-                .unwrap_or(false),
-            "Required Anland KWin library is incomplete"
-        );
-        for (link, target) in [
-            ("libkwin.so.6", "libkwin.so.6.3.6"),
-            ("libkwin.so", "libkwin.so.6"),
-        ] {
-            anyhow::ensure!(
-                fs::read_link(anland_dir.join(link)).ok().as_deref()
-                    == Some(Path::new(target)),
-                "Required Anland KWin symlink is incomplete: {link}"
-            );
-        }
     }
     Ok(())
 }
@@ -1991,19 +1910,19 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
     validate_required_session_files(fs_root)?;
     validate_firefox_anland_config(fs_root)?;
 
-    let anland_library = fs_root.join("usr/local/lib/portal-anland/libkwin.so.6.3.6");
+    let anland_binary = fs_root.join("usr/local/lib/portal-anland/kwin_wayland");
+    anyhow::ensure!(
+        fs::read(&anland_binary)
+            .map(|bytes| bytes == KWIN_ANLAND_BINARY)
+            .unwrap_or(false),
+        "Forky Anland KWin binary does not match the Portal asset"
+    );
+    let anland_library = fs_root.join("usr/local/lib/portal-anland/libkwin.so.6.7.4");
     anyhow::ensure!(
         fs::read(&anland_library)
             .map(|bytes| bytes == KWIN_ANLAND_LIBRARY)
             .unwrap_or(false),
-        "Anland KWin overlay does not match the pinned Portal asset"
-    );
-    let drmshim = fs_root.join("usr/local/lib/portal/drmshim.so");
-    anyhow::ensure!(
-        fs::read(&drmshim)
-            .map(|bytes| bytes == DRMSHIM_BINARY)
-            .unwrap_or(false),
-        "Portal drmshim is missing or corrupt"
+        "Forky Anland KWin library does not match the Portal asset"
     );
     for relative in [
         "usr/local/lib/localdesktop-crash-handler.so",
@@ -2020,104 +1939,19 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Install Portal's ABI-matched Debian KWin overlay and migrate the
-/// pre-Anland layout. Runs on every provisioning pass AND every session
-/// launch (via `sync_session_runtime_files`), so existing runtimes converge
-/// without re-provisioning.
-///
-/// Project Anland layout: the overlay lives in `/usr/local/lib/portal` (NOT
-/// `/usr/local/lib`) so it can never shadow the distro libkwin through the
-/// default loader path. The kwin wrapper adds the portal dir to
-/// LD_LIBRARY_PATH only for QPainter sessions; Anland sessions resolve the
-/// unified Anland libkwin from `/usr/local/lib/portal-anland`
-/// (see `sync_kwin_anland_overlay`).
+/// Install Portal's Forky Anland KWin assets. Runs on every provisioning pass
+/// and every session launch so existing runtimes converge without
+/// re-provisioning. Compare the library bytes, not only its length: a rebuilt
+/// KWin can legitimately retain the same size while changing its behaviour.
 fn sync_kwin_overlay(fs_root: &Path) {
-    let kwin_dir = fs_root.join("usr/local/lib/portal");
-    let _ = fs::create_dir_all(&kwin_dir);
-    let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
-    let fresh = fs::metadata(&kwin_library)
-        .map(|m| m.len() == KWIN_LIBRARY.len() as u64)
-        .unwrap_or(false);
-    if !fresh {
-        let kwin_temporary = kwin_library.with_extension("6.3.6.tmp");
-        if fs::write(&kwin_temporary, KWIN_LIBRARY).is_ok() {
-            let _ = fs::set_permissions(&kwin_temporary, fs::Permissions::from_mode(0o755));
-            let _ = fs::rename(&kwin_temporary, &kwin_library);
-        }
-    }
-    // Repair the soname chain even when the binary itself is already the
-    // expected size. A process death after the binary rename must not leave a
-    // same-size library with missing links and a permanently failed retry.
-    for (link, target) in [
-        ("libkwin.so.6", "libkwin.so.6.3.6"),
-        ("libkwin.so", "libkwin.so.6"),
-    ] {
-        let path = kwin_dir.join(link);
-        let tmp = kwin_dir.join(format!("{link}.tmp"));
-        let _ = fs::remove_file(&tmp);
-        if symlink(target, &tmp).is_ok() {
-            let _ = fs::rename(&tmp, &path);
-        }
-    }
-    // Migration: remove pre-Anland overlay links that shadowed libkwin.so.6
-    // from the default loader path. Only our overlay ever lived at these
-    // paths (the distro libkwin lives under /usr/lib).
-    for legacy in ["libkwin.so.6.3.6", "libkwin.so.6", "libkwin.so"] {
-        let path = fs_root.join("usr/local/lib").join(legacy);
-        if path.is_symlink() || path.is_file() {
-            let _ = fs::remove_file(&path);
-        }
-    }
-    // Project Anland load-time stub for QPainter sessions (see ANLAND_STUB_BINARY).
-    let stub_path = kwin_dir.join("libanland-stub.so");
-    let stub_fresh = fs::metadata(&stub_path)
-        .map(|m| m.len() == ANLAND_STUB_BINARY.len() as u64)
-        .unwrap_or(false);
-    if !stub_fresh {
-        let stub_tmp = stub_path.with_extension("so.tmp");
-        if fs::write(&stub_tmp, ANLAND_STUB_BINARY).is_ok() {
-            let _ = fs::set_permissions(&stub_tmp, fs::Permissions::from_mode(0o755));
-            let _ = fs::rename(&stub_tmp, &stub_path);
-        }
-    }
-    // Project Anland DRM shim for Anland sessions (see DRMSHIM_BINARY).
-    let shim_path = kwin_dir.join("drmshim.so");
-    let shim_fresh = fs::metadata(&shim_path)
-        .map(|m| m.len() == DRMSHIM_BINARY.len() as u64)
-        .unwrap_or(false);
-    if !shim_fresh {
-        let shim_tmp = shim_path.with_extension("so.tmp");
-        if fs::write(&shim_tmp, DRMSHIM_BINARY).is_ok() {
-            let _ = fs::set_permissions(&shim_tmp, fs::Permissions::from_mode(0o755));
-            let _ = fs::rename(&shim_tmp, &shim_path);
-        }
-    }
-    // Project Anland unified KWin library (Anland backend + Portal Touchpad).
-    // Served from its own dir so the QPainter overlay above is never shadowed.
-    sync_kwin_anland_overlay(fs_root);
-    // Phase B XWayland touchpad-source candidate (own dir, stock default).
-    sync_xwayland_candidate_overlay(fs_root);
-}
-
-/// Install Portal's Anland-unified KWin library for GPU sessions. Runs on
-/// every provisioning pass AND every session launch (via
-/// `sync_session_runtime_files`), so existing runtimes converge without
-/// re-provisioning and the setting survives restarts and reinstalls.
-///
-/// Layout: `/usr/local/lib/portal-anland` (NOT `/usr/local/lib/portal`, NOT
-/// `/usr/lib`) so neither the QPainter overlay nor the distro libkwin is
-/// shadowed. The kwin wrapper puts this dir first on LD_LIBRARY_PATH only
-/// for Anland sessions; the AnlandBackend symbol resolves from the unified
-/// lib, so the load-time stub must never be preloaded there.
-fn sync_kwin_anland_overlay(fs_root: &Path) {
-    if let Err(error) = sync_kwin_anland_overlay_inner(fs_root, false) {
+    if let Err(error) = sync_kwin_anland_overlay_inner(fs_root, true) {
         log::warn!("Could not refresh Anland KWin overlay: {error:#}");
     }
 }
 
-/// Strict variant used by the explicit migration. Normal launch only needs a
-/// cheap size check, but an intentional repair must replace same-size
-/// corruption instead of merely reporting it during final validation.
+/// Exact-byte variant used by the explicit migration. Both normal launches
+/// and repair replace same-size KWin changes instead of trusting a length
+/// check.
 fn sync_kwin_anland_overlay_for_repair(fs_root: &Path) -> anyhow::Result<()> {
     sync_kwin_anland_overlay_inner(fs_root, true)
 }
@@ -2125,7 +1959,21 @@ fn sync_kwin_anland_overlay_for_repair(fs_root: &Path) -> anyhow::Result<()> {
 fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow::Result<()> {
     let kwin_dir = fs_root.join("usr/local/lib/portal-anland");
     fs::create_dir_all(&kwin_dir)?;
-    let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
+    let kwin_binary = kwin_dir.join("kwin_wayland");
+    let binary_fresh = if verify_bytes {
+        fs::read(&kwin_binary)
+            .map(|bytes| bytes == KWIN_ANLAND_BINARY)
+            .unwrap_or(false)
+    } else {
+        fs::metadata(&kwin_binary)
+            .map(|m| m.len() == KWIN_ANLAND_BINARY.len() as u64)
+            .unwrap_or(false)
+    };
+    if !binary_fresh {
+        write_guest_binary_result(&kwin_binary, KWIN_ANLAND_BINARY)?;
+    }
+
+    let kwin_library = kwin_dir.join("libkwin.so.6.7.4");
     let fresh = if verify_bytes {
         fs::read(&kwin_library)
             .map(|bytes| bytes == KWIN_ANLAND_LIBRARY)
@@ -2142,7 +1990,7 @@ fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow:
     // half-deployed soname chain if a launch races a previous update. This
     // also repairs links after a process death following the library rename.
     for (link, target) in [
-        ("libkwin.so.6", "libkwin.so.6.3.6"),
+        ("libkwin.so.6", "libkwin.so.6.7.4"),
         ("libkwin.so", "libkwin.so.6"),
     ] {
         let path = kwin_dir.join(link);
@@ -2162,37 +2010,6 @@ fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow:
         }
     }
     Ok(())
-}
-
-/// Stage the Phase B XWayland touchpad-source candidate plus the xinput
-/// diagnostic into `/usr/local/lib/portal-xwayland` (NOT `/usr/bin`, NOT
-/// the default loader path). Runs on every provisioning pass AND every
-/// session launch, so existing runtimes converge without re-provisioning.
-///
-/// Staging is inert by itself: the KWin wrapper only puts this dir on PATH
-/// when the session explicitly selects `xwayland-variant=candidate`, and it
-/// SHA-validates the binary there first (falling back to stock otherwise).
-/// Sync is idempotent (size-freshness, atomic temp+rename, 0755) mirroring
-/// the KWin overlay above.
-fn sync_xwayland_candidate_overlay(fs_root: &Path) {
-    let candidate_dir = fs_root.join("usr/local/lib/portal-xwayland");
-    let _ = fs::create_dir_all(&candidate_dir);
-    for (name, payload) in [
-        ("Xwayland", XWAYLAND_CANDIDATE_BINARY),
-        ("xinput", XWAYLAND_XINPUT_BINARY),
-    ] {
-        let target = candidate_dir.join(name);
-        let fresh = fs::metadata(&target)
-            .map(|m| m.len() == payload.len() as u64)
-            .unwrap_or(false);
-        if !fresh {
-            let tmp = candidate_dir.join(format!("{name}.tmp"));
-            if fs::write(&tmp, payload).is_ok() {
-                let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755));
-                let _ = fs::rename(&tmp, &target);
-            }
-        }
-    }
 }
 
 /// Select Portal's profile once for runtimes that previously defaulted to the
@@ -2430,7 +2247,6 @@ fn provision_ibus_packages(fs_root: &Path) {
 }
 
 fn setup_mesa_layer(options: &SetupOptions) -> StageOutput {
-    // QPainter sessions must avoid Mesa provisioning entirely.
     if !crate::android::anland::is_anland_requested() {
         return None;
     }
@@ -2481,7 +2297,7 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
     // setup stage (spawned thread with progress). Never download inline
     // here: Plasma setup only verifies presence and fails closed at GBM
     // setup with a diagnosable log when the layer is absent.
-    if crate::android::anland::is_anland_requested() && !super::mesa_layer::is_provisioned() {
+    if !super::mesa_layer::is_provisioned() {
         log::error!("mesa KGSL layer missing at Plasma setup; Anland GPU boot will fail at GBM setup (will retry on next launch)");
     }
 
@@ -3322,9 +3138,8 @@ pub fn build_committed_wayland_backend(
     );
     // The completion marker is not enough to choose a renderer: a process
     // could have died after an older install committed but before this config
-    // was initialized. Repair/validate the durable choice at the handoff
-    // boundary so a fresh Anland-capable install can never silently take the
-    // QPainter path because the flag is absent.
+    // was initialized. Repair/validate the durable Anland choice at the
+    // handoff boundary before constructing Wayland.
     crate::android::anland::ensure_renderer_mode()
         .map_err(|error| anyhow::anyhow!("renderer-mode is not durable: {error:#}"))?;
     build_wayland_backend(android_app)

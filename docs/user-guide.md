@@ -1,6 +1,6 @@
 # Portal user guide
 
-Portal runs a Debian 13 desktop directly on a supported ARM64 Android device. It does not require root, a remote server, or a second computer after installation.
+Portal runs a Debian Forky desktop directly on a supported ARM64 Android device. It does not require root, a remote server, or a second computer after installation.
 
 ## Before installing
 

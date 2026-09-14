@@ -1,6 +1,6 @@
 # Project Anland — upstream source attribution & license boundary
 
-Portal branch `gpu-anland` integrates the *concepts and wire protocol* of
+Portal's Forky upgrade integrates the *concepts and wire protocol* of
 upstream Anland. This directory vendors the minimal stable contract needed to
 keep Portal's clean-room Rust implementation byte-compatible with the
 reference C implementation and the prebuilt guest binaries.
@@ -22,13 +22,14 @@ Full C implementations (`display_consumer.c`, `display_producer.c`,
 Portal; Portal reimplements the consumer/broker in Rust
 (`src/android/anland/`). Fetch them from the URLs above for audit.
 
-## Guest binaries (prebuilt, device-side for the milestone)
+## Guest binaries (current Forky runtime)
 
 | Binary | Origin | URL |
 |---|---|---|
-| `kwin_anland-5.13-debian-4_6.3.6-95.zip` (KWin 6.3.6 + Anland backend) | `lfdevs/anland-termux` release `5.13.3` | `https://github.com/lfdevs/anland-termux/releases/download/5.13.3/kwin_anland-5.13-debian-4_6.3.6-95.zip` |
-| `xwayland_24.1.6-91_arm64.deb` (KGSL surfaceless XWayland) | `lfdevs/anland-termux` release `5.13.3` | `https://github.com/lfdevs/anland-termux/releases/download/5.13.3/xwayland_24.1.6-91_arm64.deb` |
-| `mesa-for-android-container_26.2.0-devel-20260709_debian_trixie_arm64.tar.gz` (freedreno/KGSL Mesa 26.2) | `lfdevs/mesa-for-android-container` | `https://github.com/lfdevs/mesa-for-android-container/releases/download/mesa-26.2.0-devel-20260709/mesa-for-android-container_26.2.0-devel-20260709_debian_trixie_arm64.tar.gz` |
+| `kwin_wayland`, `libkwin.so.6.7.4` | Portal ARM64 build from Debian KWin `4:6.7.4-2` source with the current Anland backend | staged as `assets/kwin-forky-anland-arm64/` |
+| Debian `xwayland` | Debian Forky package `2:24.1.13-1` | stock package from the locked Forky repositories |
+| Debian Mesa desktop packages | Debian Forky package set (for example `libgl1-mesa-dri 26.1.6-1`) | stock packages from the locked Forky repositories |
+| KGSL Mesa layer | `lfdevs/mesa-for-android-container` | Portal's existing verified KGSL layer remains the Android-container integration |
 
 ## Licenses
 
@@ -41,8 +42,9 @@ Portal; Portal reimplements the consumer/broker in Rust
 - `lfdevs/anland-termux` (incl. `anw_hidden.h`, `native_consumer.c` design):
   **GPL-3.0**. Concepts reimplemented, not copied; `anw_hidden.h` vendored
   verbatim as the ABI reference with its origin header.
-- KWin backend reference: **GPL-2.0-or-later** (KDE). Guest uses lfdevs
-  prebuilt binaries; no KWin source vendored.
+- KWin backend reference: **GPL-2.0-or-later** (KDE). The Forky KWin source
+  is built in the disposable ARM64 guest; only the stripped deployment assets
+  are shipped in Portal.
 - `lfdevs/mesa-for-android-container`: Mesa terms (**MIT** plus per-file
   Apache-2.0/BSL/SGI-B-2.0/GPL bits, see Mesa `licenses/`). Guest uses the
   prebuilt tarball; no Mesa source vendored.

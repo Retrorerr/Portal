@@ -8,7 +8,7 @@ set -o pipefail
 export PIPEWIRE_RUNTIME_DIR=/tmp
 export PULSE_SERVER=unix:/tmp/pulse/native
 export XDG_RUNTIME_DIR=/tmp
-export WAYLAND_DISPLAY=wayland-0
+export WAYLAND_DISPLAY=wayland-1
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=KDE
 export XDG_MENU_PREFIX=plasma-
@@ -37,19 +37,10 @@ export LOCALDESKTOP_GDB_BACKTRACE=${LOCALDESKTOP_GDB_BACKTRACE:-@GDB_BACKTRACE@}
 # diagnosis. Set WAYLAND_DEBUG=1 explicitly when tracing protocols.
 export WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}
 
-# Project Anland: the host exports ANLAND_SOCKET for GPU sessions. KWin then
-# selects its Anland backend (see the kwin_wayland wrapper) and must NOT use
-# Smithay's wayland-0: it serves its own clients on wayland-1, exactly like
-# the nested QPainter KWin does today.
-if [ -n "${ANLAND_SOCKET:-}" ]; then
-    export WAYLAND_DISPLAY=wayland-1
-    # Force Plasma/KDE Qt clients onto the Wayland QPA backend on the Anland
-    # path: without this, ksmserver/plasmashell can fall back to xcb, fail to
-    # start, and plasma_session waits forever for org.kde.ksmserver. DISPLAY
-    # stays set for XWayland/Firefox (X11), which select xcb explicitly.
-    export QT_QPA_PLATFORM=wayland
-    export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
-fi
+# Portal's only supported desktop path is Anland. Keep Plasma/KDE clients on
+# native Wayland; XWayland remains available to applications that need X11.
+export QT_QPA_PLATFORM=wayland
+export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
 
 state_dir=/var/lib/localdesktop
 mkdir -p "$state_dir"

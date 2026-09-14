@@ -166,7 +166,7 @@ impl RuntimeLayout {
         RuntimeSlot {
             id: "slot-b".to_string(),
             rootfs_path: self.base_dir.join("runtime-B"),
-            distro_name: "Debian 13 (Trixie) ARM64".to_string(),
+            distro_name: "Debian 14 (Forky) ARM64".to_string(),
             is_active: false,
         }
     }
@@ -223,7 +223,7 @@ mod tests {
         let layout = RuntimeLayout::new(&temp_dir);
         let active = layout.active_slot();
         assert_eq!(active.id, "slot-b");
-        assert_eq!(active.distro_name, "Debian 13 (Trixie) ARM64");
+        assert_eq!(active.distro_name, "Debian 14 (Forky) ARM64");
 
         let binds = layout.standard_bind_mounts();
         assert_eq!(binds.len(), 1);
@@ -241,7 +241,7 @@ mod tests {
             .expect("Failed to write active slot");
         let active = layout.active_slot();
         assert_eq!(active.id, "slot-b");
-        assert_eq!(active.distro_name, "Debian 13 (Trixie) ARM64");
+        assert_eq!(active.distro_name, "Debian 14 (Forky) ARM64");
         assert!(active.is_active);
 
         let _ = std::fs::remove_dir_all(&temp_dir);

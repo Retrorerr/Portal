@@ -1,11 +1,23 @@
 # KWin 6.7.4 Android/PRoot source patches
 
-This directory contains two independent source patches for the pinned KWin
-6.7.4 build used by Local Desktop. Apply both to the same pristine source,
-in numeric order. The first patch keeps the already-validated Android/PRoot
-udev guard. The second hardens the QPA raster backing-store failure path
-observed during the edge-maximize preview crash; it does not change output
-scale policy, compositing backend, or maximize behavior.
+This directory contains the five small source patches applied to Portal's
+pinned KWin 6.7.4 ARM64 build. Apply all four to the same pristine source,
+in numeric order:
+
+* `0001` tolerates an unavailable udev monitor in the Android/PRoot guest.
+* `0002` hardens the QPA raster backing-store failure path.
+* `0003` normalizes CRLF shader-resource lines before KWin's GLSL include
+  lookup.
+* `0004` guards KGSL's successful-but-null EGL device query in both software
+  detection and render-node discovery.
+* `0005` lets the generic OpenGL crash-reporting path tolerate Anland's
+  intentional surfaceless backend without a KWin DRM device.
+
+The patches do not change output scale policy or add a second compositor.
+Portal's active graphics path remains Anland plus KWin's surfaceless EGL
+context: the app UID cannot open Android's DRM render node, so
+`ANLAND_NO_DRM_DEVICE=1` is intentional. Anland owns Android dmabuf
+presentation while KWin supplies the accelerated desktop rendering context.
 
 This is a source patch for the confirmed Android/PRoot KWin crash.  The
 captured stack is:
@@ -35,7 +47,11 @@ kwin_source=/var/lib/localdesktop/build-kwin/kwin-9d1e43932d6799254350403279dc55
 kwin_patch_dir=/path/to/Portal/patches/kwin
 
 cd "$kwin_source"
-for kwin_patch in "$kwin_patch_dir"/0001-*.patch "$kwin_patch_dir"/0002-*.patch; do
+for kwin_patch in "$kwin_patch_dir"/0001-*.patch \
+                  "$kwin_patch_dir"/0002-*.patch \
+                  "$kwin_patch_dir"/0003-*.patch \
+                  "$kwin_patch_dir"/0004-*.patch \
+                  "$kwin_patch_dir"/0005-*.patch; do
   patch -p1 --dry-run < "$kwin_patch"
   patch -p1 < "$kwin_patch"
 done
