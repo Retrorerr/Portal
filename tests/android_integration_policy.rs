@@ -29,6 +29,11 @@ const PORTAL_IBUS_LAZY_SOURCE: &str = include_str!("../assets/portal-ibus-lazy.s
 const ANLAND_ENV_SOURCE: &str = include_str!("../src/android/anland/mod.rs");
 const RENDERER_POLICY_SOURCE: &str = include_str!("../src/core/renderer_policy.rs");
 const MESA_LAYER_SOURCE: &str = include_str!("../src/android/proot/mesa_layer.rs");
+const ANDROID_SETUP_RUN_SOURCE: &str = include_str!("../src/android/app/run.rs");
+const COMPOSE_OVERLAY_RUST_SOURCE: &str =
+    include_str!("../src/android/utils/compose_overlay.rs");
+const COMPOSE_OVERLAY_KOTLIN_SOURCE: &str =
+    include_str!("../src/android/kotlin/app/polarbear/ComposeOverlay.kt");
 const XWAYLAND_SHA256SUMS_SOURCE: &str =
     include_str!("../assets/xwayland-candidate/SHA256SUMS");
 
@@ -707,4 +712,165 @@ fn fresh_renderer_selection_is_initialized_before_mesa_and_handoff() {
     assert!(run.contains("is_anland_requested()"));
     assert!(ANLAND_ENV_SOURCE.contains("resolve_renderer_mode"));
     assert!(!ANLAND_ENV_SOURCE.contains("unwrap_or(RendererKind::Smithay)"));
+}
+
+#[test]
+fn explicit_anland_repair_is_native_and_does_not_reprovision_debian() {
+    let repair = ANDROID_SETUP_SOURCE
+        .split("fn run_anland_repair_inner")
+        .nth(1)
+        .and_then(|source| source.split("fn run_anland_repair(").next())
+        .expect("targeted Anland repair worker must exist");
+    assert!(ANDROID_SETUP_SOURCE.contains("pub fn repair_enable_anland()"));
+    assert!(ANDROID_SETUP_SOURCE.contains("pub fn take_anland_repair_result()"));
+    assert!(ANDROID_SETUP_SOURCE.contains("force_anland_renderer()"));
+    assert!(repair.contains("crate::android::proot::launch::stop()"));
+    assert!(repair.contains("RuntimeClassification"));
+    assert!(repair.contains("sync_anland_required_session_files"));
+    assert!(repair.contains("validate_anland_repair_state"));
+    assert!(repair.contains("mesa_layer::is_provisioned"));
+    assert!(repair.contains("mesa_layer::provision_with_progress"));
+    assert!(!repair.contains("RuntimeArtifact::provision"));
+    assert!(!repair.contains("extract_inner"));
+    // A legacy marker may be upgraded after the graphics transaction succeeds;
+    // the repair path never marks a modern install incomplete or invalidates
+    // its existing completion marker.
+    assert!(repair.contains("initial_classification == crate::core::provisioning::RuntimeClassification::LegacyPortal"));
+    assert!(repair.contains("artifact.mark_installation_complete(root)"));
+}
+
+#[test]
+fn anland_repair_only_refreshes_portal_owned_session_assets() {
+    let helper = ANDROID_SETUP_SOURCE
+        .split("fn sync_anland_required_session_files")
+        .nth(1)
+        .and_then(|source| source.split("fn setup_firefox_config").next())
+        .expect("narrow Anland session sync helper must exist");
+    for required in [
+        "sync_guest_session_directories",
+        "sync_firefox_config",
+        "sync_portal_runtime_assets",
+        "sync_crash_handler",
+        "validate_required_session_files",
+    ] {
+        assert!(helper.contains(required), "repair helper missing {required}");
+    }
+    for forbidden in [
+        "sync_debian_package_management",
+        "sync_base_files_defaults",
+        "migrate_konsole_profile",
+        "upsert_kv_file",
+        "panel-launchers-v2",
+        "xresources",
+    ] {
+        assert!(
+            !helper.contains(forbidden),
+            "repair helper must not replay user setup: {forbidden}"
+        );
+    }
+    // The one-shot token prevents launch() from immediately replaying the
+    // broad normal sync. The next launch still takes the normal branch.
+    let launch = include_str!("../src/android/proot/launch.rs");
+    assert!(launch.contains("take_prepared_anland_launch()"));
+    assert!(launch.contains("try_sync_session_runtime_files"));
+}
+
+#[test]
+fn anland_repair_revalidates_mesa_kwin_drmshim_firefox_and_session_contract() {
+    assert!(ANDROID_SETUP_SOURCE.contains("validate_launch_contract()"));
+    assert!(ANDROID_SETUP_SOURCE.contains("KWIN_ANLAND_LIBRARY"));
+    assert!(ANDROID_SETUP_SOURCE.contains("DRMSHIM_BINARY"));
+    assert!(ANDROID_SETUP_SOURCE.contains("sync_kwin_anland_overlay_for_repair"));
+    assert!(ANDROID_SETUP_SOURCE.contains("bytes == KWIN_ANLAND_LIBRARY"));
+    assert!(ANDROID_SETUP_SOURCE.contains("bytes == DRMSHIM_BINARY"));
+    assert!(ANDROID_SETUP_SOURCE.contains("validate_firefox_anland_config"));
+    for required in [
+        "gfx.webrender.all",
+        "layers.acceleration.force-enabled",
+        "Firefox Portal autoconfig is incomplete",
+        "Firefox Portal GPU preference is missing",
+    ] {
+        assert!(ANDROID_SETUP_SOURCE.contains(required));
+    }
+    for required in [
+        "MESA_LOADER_DRIVER_OVERRIDE",
+        "GALLIUM_DRIVER",
+        "FD_FORCE_KGSL",
+        "MOZ_ENABLE_WAYLAND",
+        "ANLAND_SOCKET",
+        "validate_launch_contract",
+    ] {
+        assert!(ANLAND_ENV_SOURCE.contains(required));
+    }
+    for required in [
+        "usr/local/lib/portal-anland/libkwin.so.6.3.6",
+        "usr/local/lib/portal/drmshim.so",
+        "localdesktop-crash-handler.so",
+        "portal-ibus-engine",
+        "portal-ibus-lazy",
+    ] {
+        assert!(ANDROID_SETUP_SOURCE.contains(required));
+    }
+}
+
+#[test]
+fn anland_repair_handoff_restarts_the_session_and_routes_failures_to_runtime_recovery() {
+    assert!(COMPOSE_OVERLAY_RUST_SOURCE.contains("nativeRepairEnableAnland"));
+    assert!(COMPOSE_OVERLAY_KOTLIN_SOURCE.contains("nativeRepairEnableAnland"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("handle_anland_repair_result"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("take_anland_repair_result"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("build_committed_wayland_backend"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("!resume_wayland"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("cancel_prepared_anland_launch"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("mark_anland_repair_handoff_active"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("anland_repair_handoff_active"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("enter_committed_install_runtime_error"));
+    // The worker result is consumed by the event loop, not by a setup/UI
+    // coroutine, and the repair worker never publishes installation Complete.
+    let repair = ANDROID_SETUP_SOURCE
+        .split("fn publish_repair_success")
+        .nth(1)
+        .and_then(|source| source.split("fn run_anland_repair_inner").next())
+        .expect("repair completion publisher must exist");
+    assert!(repair.contains("ProvisioningPhase::Finalising"));
+    assert!(!repair.contains("ProvisioningSnapshot::complete"));
+}
+
+#[test]
+fn anland_repair_recreation_attaches_before_completed_setup_replay() {
+    assert!(ANDROID_SETUP_SOURCE.contains("fn attach_to_anland_repair"));
+    assert!(ANDROID_SETUP_SOURCE.contains("attach_to_anland_repair(&registration, &progress)"));
+    let setup = ANDROID_SETUP_SOURCE
+        .split("pub fn setup_with_completion")
+        .nth(1)
+        .and_then(|source| source.split("pub fn setup(").next())
+        .expect("setup_with_completion must exist");
+    let attach = setup
+        .find("attach_to_anland_repair(&registration, &progress)")
+        .expect("recreated setup must attach to an active repair");
+    let completed_runtime = setup
+        .find("if artifact.is_bootable(root) || artifact.is_legacy_complete(root)")
+        .expect("completed-runtime setup branch must exist");
+    assert!(
+        attach < completed_runtime,
+        "repair attachment must precede the normal completed-runtime setup replay"
+    );
+    assert!(ANDROID_SETUP_SOURCE.contains("active_registration.rebind_from(registration)"));
+}
+
+#[test]
+fn normal_renderer_policy_still_preserves_legacy_fallback_until_explicit_repair() {
+    assert!(RENDERER_POLICY_SOURCE.contains("missing_mode_selection"));
+    assert!(RENDERER_POLICY_SOURCE.contains("RuntimeClassification::BootablePortal"));
+    assert!(RENDERER_POLICY_SOURCE.contains("RendererSelection::QPainter"));
+    assert!(RENDERER_POLICY_SOURCE.contains("pub fn set_renderer_mode"));
+    // The explicit override is kept at the separate Anland repair boundary,
+    // not in automatic startup resolution.
+    assert!(ANLAND_ENV_SOURCE.contains("pub fn force_anland_renderer"));
+    let active = ANLAND_ENV_SOURCE
+        .split("pub fn active_renderer")
+        .nth(1)
+        .and_then(|source| source.split("pub fn ensure_renderer_mode").next())
+        .expect("active renderer policy must exist");
+    assert!(!active.contains("force_anland_renderer"));
 }

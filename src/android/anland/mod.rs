@@ -91,6 +91,22 @@ pub fn ensure_renderer_mode() -> anyhow::Result<RendererKind> {
     })
 }
 
+/// Explicit repair action: select Anland even when an existing Portal install
+/// previously chose (or implicitly fell back to) QPainter. Normal startup
+/// must continue through [`ensure_renderer_mode`]; only the user-requested
+/// graphics repair is allowed to intentionally change an existing choice.
+pub fn force_anland_renderer() -> anyhow::Result<RendererKind> {
+    let selection = crate::core::renderer_policy::set_renderer_mode(
+        &mode_flag_path(),
+        crate::core::renderer_policy::RendererSelection::Anland,
+    )?;
+    anyhow::ensure!(
+        selection == crate::core::renderer_policy::RendererSelection::Anland,
+        "explicit Anland renderer selection did not persist"
+    );
+    Ok(RendererKind::Anland)
+}
+
 pub fn is_anland_requested() -> bool {
     matches!(active_renderer(), RendererKind::Anland)
 }
@@ -175,6 +191,59 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         ("ANLAND_DISABLE_AUDIO".into(), "1".into()),
         ("KWIN_GL_DEBUG".into(), "1".into()),
     ]
+}
+
+/// Validate the host-side Anland launch contract without probing or starting
+/// a guest session. The actual Mesa bytes are checked by `mesa_layer`; this
+/// function makes sure the environment and bind targets that `launch()` will
+/// use still describe the accelerated X11/XWayland path.
+pub fn validate_launch_contract() -> anyhow::Result<()> {
+    let environment = guest_mesa_env();
+    for (name, value) in [
+        ("MESA_LOADER_DRIVER_OVERRIDE", "kgsl"),
+        ("GALLIUM_DRIVER", "freedreno"),
+        ("FD_FORCE_KGSL", "1"),
+        ("FD_KGSL_ENABLE_DMABUF", "1"),
+        ("TURNIP_KMD", "kgsl"),
+        ("XWAYLAND_FORCE_KGSL_SURFACELESS", "1"),
+        // Firefox intentionally uses X11/XWayland on the accelerated path;
+        // native Firefox Wayland requires a GBM render node that PRoot does
+        // not expose on the supported Android devices.
+        ("MOZ_ENABLE_WAYLAND", "0"),
+        ("ANLAND", "1"),
+        ("ANLAND_SOCKET", guest_socket_path()),
+    ] {
+        anyhow::ensure!(
+            environment.iter().any(|(actual_name, actual_value)| {
+                actual_name == name && actual_value == value
+            }),
+            "Anland launch environment is missing {name}={value}"
+        );
+    }
+
+    let binds = session_binds();
+    for guest_path in [
+        "/usr/lib/aarch64-linux-gnu/dri",
+        "/usr/lib/aarch64-linux-gnu/gbm",
+        "/usr/lib/aarch64-linux-gnu/libgallium-26.3.0-devel.so",
+        "/usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so",
+        "/usr/lib/aarch64-linux-gnu/libEGL_mesa.so.0.0.0",
+        "/usr/lib/aarch64-linux-gnu/libEGL_mesa.so.0",
+        "/usr/lib/aarch64-linux-gnu/libGLX_mesa.so.0.0.0",
+        "/usr/lib/aarch64-linux-gnu/libGLX_mesa.so.0",
+        "/usr/lib/aarch64-linux-gnu/libgbm.so.1.0.0",
+        "/usr/lib/aarch64-linux-gnu/libgbm.so.1",
+        "/usr/share/vulkan/icd.d",
+        "/usr/share/drirc.d",
+    ] {
+        anyhow::ensure!(
+            binds
+                .iter()
+                .any(|bind| bind.guest_path == std::path::Path::new(guest_path)),
+            "Anland Mesa bind is missing for {guest_path}"
+        );
+    }
+    Ok(())
 }
 
 /// Guest flag selecting the emergency software-GL fallback (`sw`) instead of

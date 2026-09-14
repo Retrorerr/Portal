@@ -163,7 +163,15 @@ pub fn launch() {
         return;
     }
     log::info!("launch: active runtime rootfs is {}", rootfs.display());
-    if let Err(error) = crate::android::proot::setup::try_sync_session_runtime_files(&rootfs, 1)
+    if crate::android::proot::setup::take_prepared_anland_launch() {
+        // The explicit Anland repair worker just completed the narrow,
+        // checked Portal-owned session sync. Do not immediately replay the
+        // broad normal-launch migration against the user's home/configuration
+        // before starting the session. Future launches intentionally take the
+        // normal path below.
+        log::info!("launch: using validated Anland repair handoff assets");
+    } else if let Err(error) =
+        crate::android::proot::setup::try_sync_session_runtime_files(&rootfs, 1)
     {
         log::error!("Portal session integration repair failed: {error:#}");
         LAUNCH_RUNNING.store(false, Ordering::Release);

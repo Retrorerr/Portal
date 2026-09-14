@@ -720,6 +720,68 @@ impl PolarBearApp {
         }
     }
 
+    /// Complete the explicit Anland migration after its native worker has
+    /// repaired and revalidated the graphics contract. Installation remains
+    /// committed throughout this path; a Wayland/Anland failure is therefore
+    /// a runtime launch failure and must use the existing Retry Plasma page.
+    fn handle_anland_repair_result(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let Some(result) = crate::android::proot::setup::take_anland_repair_result() else {
+            return false;
+        };
+        match result {
+            crate::android::proot::setup::AnlandRepairResult::Failed(reason) => {
+                log::error!("Anland repair did not complete: {reason}");
+                self.enter_committed_install_runtime_error(reason);
+                true
+            }
+            crate::android::proot::setup::AnlandRepairResult::Succeeded => {
+                self.pending_runtime_retry = false;
+                let android_app = self.frontend.android_app.clone();
+                let backend = match crate::android::proot::setup::build_committed_wayland_backend(
+                    android_app,
+                ) {
+                    Ok(backend) => backend,
+                    Err(error) => {
+                        crate::android::proot::setup::cancel_prepared_anland_launch();
+                        log::error!(
+                            "Repaired Anland installation could not build the Wayland backend: {error:#}"
+                        );
+                        self.enter_committed_install_runtime_error(
+                            "Portal is installed, but Anland graphics could not start. Tap Retry Plasma.",
+                        );
+                        return true;
+                    }
+                };
+                self.backend = backend;
+                let runtime = crate::android::runtime::proot::PRootRuntime::active();
+                crate::android::proot::setup::sync_guest_network_config(runtime.rootfs_path());
+                crate::android::proot::setup::mark_anland_repair_handoff_active();
+                let resume_failed = if let PolarBearBackend::Wayland(backend) = &mut self.backend
+                {
+                    !resume_wayland(backend, event_loop, &self.frontend.android_app)
+                } else {
+                    true
+                };
+                if resume_failed {
+                    crate::android::proot::setup::cancel_prepared_anland_launch();
+                    log::error!(
+                        "Anland graphics repair committed, but Wayland could not be resumed"
+                    );
+                    self.enter_committed_install_runtime_error(
+                        "Portal is installed, but Anland graphics could not start. Tap Retry Plasma.",
+                    );
+                    return true;
+                }
+                if let PolarBearBackend::Wayland(_) = &mut self.backend {
+                    crate::android::tablet_mode_manager::apply_kwin_tablet_mode(
+                        ime::is_desktop_input_present(),
+                    );
+                }
+                true
+            }
+        }
+    }
+
     /// Transition from completed provisioning WebView to Wayland backend in-process.
     /// Returns true if a transition occurred.
     fn handle_setup_complete(&mut self, event_loop: &ActiveEventLoop) -> bool {
@@ -778,6 +840,9 @@ impl PolarBearApp {
 
 impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.handle_anland_repair_result(event_loop) {
+            return;
+        }
         // SPIKE compose-setup: on the first process resume, show the Compose veil,
         // then immediately continue the normal native resume path underneath it.
         // The Activity is never recreated; later resumes use the same paths below.
@@ -826,7 +891,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         }
         if let Some(reason) = take_failure() {
             if matches!(&self.backend, PolarBearBackend::Wayland(_)) {
-                self.enter_runtime_error(reason);
+                if crate::android::proot::setup::anland_repair_handoff_active() {
+                    self.enter_committed_install_runtime_error(reason);
+                } else {
+                    self.enter_runtime_error(reason);
+                }
                 return;
             }
         }
@@ -868,9 +937,16 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: AppUserEvent) {
+        if self.handle_anland_repair_result(event_loop) {
+            return;
+        }
         if let Some(reason) = take_failure() {
             if matches!(&self.backend, PolarBearBackend::Wayland(_)) {
-                self.enter_runtime_error(reason);
+                if crate::android::proot::setup::anland_repair_handoff_active() {
+                    self.enter_committed_install_runtime_error(reason);
+                } else {
+                    self.enter_runtime_error(reason);
+                }
                 return;
             }
         }
@@ -1144,7 +1220,7 @@ fn anland_key(session: &crate::android::anland::AnlandSession, scancode: u32, pr
 ///   method (`commitText`), same destination as the bridge's commit_string;
 /// - otherwise (X11/unknown): ASCII via evdev keys (existing mapping),
 ///   non-ASCII via Android clipboard + deferred Ctrl+V (the guest sync
-///   daemon serves it into the Wayland/X selection; benign on failure —
+///   process serves it into the Wayland/X selection; benign on failure —
 ///   text stays pasted-ready in the clipboard).
 /// Preedit has no backend channel (KWin exposes only commitText) and stays
 /// dropped; commits are never duplicated (exactly one branch runs).

@@ -110,6 +110,41 @@ pub fn ensure_renderer_mode(
     })
 }
 
+/// Explicitly replace the durable renderer choice.
+///
+/// Normal startup must use [`ensure_renderer_mode`] so a missing flag on an
+/// older completed installation keeps its historical QPainter behavior. An
+/// explicit repair/migration action is the one caller allowed to override
+/// that compatibility policy. It still uses the same atomic writer and
+/// read-after-write validation, so a crash can leave either the old choice or
+/// the new complete choice, never a partially written value.
+pub fn set_renderer_mode(
+    path: &Path,
+    selection: RendererSelection,
+) -> anyhow::Result<RendererSelection> {
+    set_renderer_mode_with_writer(path, selection, |path, contents| {
+        crate::core::provisioning::write_atomic(path, contents)
+    })
+}
+
+fn set_renderer_mode_with_writer<F>(
+    path: &Path,
+    selection: RendererSelection,
+    write: F,
+) -> anyhow::Result<RendererSelection>
+where
+    F: FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
+{
+    write(path, selection.persisted_value())?;
+    let persisted = fs::read_to_string(path)?;
+    let parsed = parse_renderer_mode(&persisted);
+    anyhow::ensure!(
+        parsed != ParsedRendererMode::Malformed && parsed.selection() == selection,
+        "renderer-mode did not persist the requested selection"
+    );
+    Ok(selection)
+}
+
 fn ensure_renderer_mode_with_writer<F>(
     path: &Path,
     runtime: RuntimeClassification,
@@ -307,6 +342,54 @@ mod tests {
         assert_eq!(
             resolve_renderer_mode(&path, RuntimeClassification::Absent).unwrap(),
             RendererSelection::QPainter
+        );
+    }
+
+    #[test]
+    fn explicit_repair_overrides_qpainter_and_is_idempotent() {
+        let temp = tempdir().unwrap();
+        let path = mode_path(temp.path());
+        fs::write(&path, "qpainter\n").unwrap();
+
+        assert_eq!(
+            set_renderer_mode(&path, RendererSelection::Anland).unwrap(),
+            RendererSelection::Anland
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "anland\n");
+        assert_eq!(
+            set_renderer_mode(&path, RendererSelection::Anland).unwrap(),
+            RendererSelection::Anland
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "anland\n");
+    }
+
+    #[test]
+    fn explicit_repair_failure_before_or_after_atomic_replace_is_retryable() {
+        let temp = tempdir().unwrap();
+        let path = mode_path(temp.path());
+        fs::write(&path, "qpainter\n").unwrap();
+
+        let error = set_renderer_mode_with_writer(
+            &path,
+            RendererSelection::Anland,
+            |_path, _contents| Err(anyhow::anyhow!("simulated process death before rename")),
+        );
+        assert!(error.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "qpainter\n");
+
+        let error = set_renderer_mode_with_writer(
+            &path,
+            RendererSelection::Anland,
+            |path, contents| {
+                crate::core::provisioning::write_atomic(path, contents)?;
+                Err(anyhow::anyhow!("simulated process death after atomic rename"))
+            },
+        );
+        assert!(error.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "anland\n");
+        assert_eq!(
+            set_renderer_mode(&path, RendererSelection::Anland).unwrap(),
+            RendererSelection::Anland
         );
     }
 }

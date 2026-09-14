@@ -58,6 +58,8 @@ object ComposeOverlay {
     @JvmStatic external fun nativeOnOverlayShown()
     @JvmStatic external fun nativeOnOverlayShowFailed(reason: String)
     @JvmStatic external fun nativeBeginInstall(): Boolean
+    /** Explicit repair action for an already-installed QPainter/legacy runtime. */
+    @JvmStatic external fun nativeRepairEnableAnland(): Boolean
 
     // Native readiness is independent of installation progress. A KWin frame
     // can latch this before the Compose hierarchy has finished presenting.
@@ -198,6 +200,17 @@ object ComposeOverlay {
         false
     } catch (e: Exception) {
         Log.e(TAG, "nativeBeginInstall failed", e)
+        false
+    }
+
+    /** Ask the process-lifetime native coordinator to migrate graphics only. */
+    @JvmStatic fun repairEnableAnland(): Boolean = try {
+        nativeRepairEnableAnland()
+    } catch (_: UnsatisfiedLinkError) {
+        Log.e(TAG, "nativeRepairEnableAnland unavailable")
+        false
+    } catch (e: Exception) {
+        Log.e(TAG, "nativeRepairEnableAnland failed", e)
         false
     }
 

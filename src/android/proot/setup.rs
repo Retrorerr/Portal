@@ -28,6 +28,7 @@ use std::{
     process,
     sync::{
         mpsc::{self, Sender},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
@@ -339,6 +340,75 @@ fn setup_coordinator() -> &'static Mutex<SetupCoordinator> {
     COORDINATOR.get_or_init(|| Mutex::new(SetupCoordinator::default()))
 }
 
+/// Result of the explicit, existing-install Anland graphics migration. This
+/// is intentionally separate from installation completion: a successful
+/// repair never changes the Debian installation truth.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AnlandRepairResult {
+    Succeeded,
+    Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnlandRepairState {
+    Idle,
+    Running,
+    Failed,
+    Complete,
+}
+
+struct AnlandRepairCoordinator {
+    state: AnlandRepairState,
+    snapshot: ProvisioningSnapshot,
+    result: Option<AnlandRepairResult>,
+}
+
+impl Default for AnlandRepairCoordinator {
+    fn default() -> Self {
+        Self {
+            state: AnlandRepairState::Idle,
+            snapshot: ProvisioningSnapshot::update(
+                ProvisioningPhase::Idle,
+                0,
+                "Anland graphics repair is ready.",
+            ),
+            result: None,
+        }
+    }
+}
+
+fn anland_repair_coordinator() -> &'static Mutex<AnlandRepairCoordinator> {
+    static COORDINATOR: OnceLock<Mutex<AnlandRepairCoordinator>> = OnceLock::new();
+    COORDINATOR.get_or_init(|| Mutex::new(AnlandRepairCoordinator::default()))
+}
+
+/// One-shot handoff token set only after targeted repair validation. It keeps
+/// the immediately following `launch()` from replaying the broad normal
+/// per-launch sync; the token is consumed before the guest starts, and every
+/// later launch uses the normal repair path again.
+static PREPARED_ANLAND_LAUNCH: AtomicBool = AtomicBool::new(false);
+static ANLAND_REPAIR_HANDOFF_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn take_prepared_anland_launch() -> bool {
+    PREPARED_ANLAND_LAUNCH.swap(false, Ordering::AcqRel)
+}
+
+pub fn cancel_prepared_anland_launch() {
+    PREPARED_ANLAND_LAUNCH.store(false, Ordering::Release);
+}
+
+/// Mark the first Plasma launch after a successful repair as a committed
+/// runtime launch. If the guest exits asynchronously after `resume_wayland`
+/// has returned, the event loop must still use the committed-install Retry
+/// Plasma page rather than the unfinished-setup path.
+pub fn mark_anland_repair_handoff_active() {
+    ANLAND_REPAIR_HANDOFF_ACTIVE.store(true, Ordering::Release);
+}
+
+pub fn anland_repair_handoff_active() -> bool {
+    ANLAND_REPAIR_HANDOFF_ACTIVE.load(Ordering::Acquire)
+}
+
 fn setup_debian_runtime(options: &SetupOptions) -> StageOutput {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
     if artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)) {
@@ -522,6 +592,199 @@ defaultPref("layers.acceleration.force-enabled", true);
             let _ = fs::write(dir.join("localdesktop.cfg"), firefox_cfg);
         }
     }
+}
+
+fn validate_firefox_anland_config(fs_root: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        ["usr/bin/firefox", "usr/bin/firefox-esr"]
+            .iter()
+            .any(|relative| fs_root.join(relative).is_file()),
+        "Firefox is not installed in the Portal runtime"
+    );
+
+    let mut checked = 0usize;
+    for dir in [fs_root.join("usr/lib/firefox"), fs_root.join("usr/lib/firefox-esr")] {
+        if !dir.is_dir() {
+            continue;
+        }
+        checked += 1;
+        let autoconfig = fs::read_to_string(dir.join("defaults/pref/autoconfig.js"))
+            .map_err(|error| anyhow::anyhow!("Firefox autoconfig is unreadable: {error}"))?;
+        anyhow::ensure!(
+            autoconfig.contains("pref(\"general.config.filename\", \"localdesktop.cfg\");"),
+            "Firefox Portal autoconfig is incomplete"
+        );
+        let config = fs::read_to_string(dir.join("localdesktop.cfg"))
+            .map_err(|error| anyhow::anyhow!("Firefox Portal config is unreadable: {error}"))?;
+        for required in [
+            "defaultPref(\"gfx.webrender.all\", true);",
+            "defaultPref(\"layers.acceleration.force-enabled\", true);",
+        ] {
+            anyhow::ensure!(
+                config.contains(required),
+                "Firefox Portal GPU preference is missing: {required}"
+            );
+        }
+    }
+    anyhow::ensure!(checked > 0, "Firefox configuration directory is missing");
+    Ok(())
+}
+
+fn sync_guest_session_directories(fs_root: &Path) -> anyhow::Result<()> {
+    // Normally created by systemd-tmpfiles, which does not run in PRoot.
+    // KWin refuses to start Xwayland without this socket directory, and
+    // Debian's ksmserver still needs that X connection in a Wayland session.
+    // `tmp` itself must also be world-writable: the image ships it as 0755,
+    // which breaks the Pulse native socket and wayland-0 in the guest.
+    for relative in ["tmp", "tmp/.X11-unix", "tmp/.ICE-unix", "var/tmp"] {
+        let directory = fs_root.join(relative);
+        fs::create_dir_all(&directory)?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o1777))?;
+    }
+    Ok(())
+}
+
+/// Refresh only Portal-owned files needed by the running session. This is
+/// shared by normal launch repair and the explicit Anland migration. It never
+/// touches Debian packages or user home/configuration state.
+fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
+    // The guest scripts are versioned assets so the classic startup contract,
+    // KWin crash capture and graphical recovery UI cannot drift apart. The
+    // launcher substitutes only the device-specific scale factor.
+    // Debugger capture stays off in all builds: running every KWin instance
+    // under gdb changes startup timing and ptrace is commonly denied by
+    // Android's sandbox. It remains opt-in via the environment override.
+    let gdb_backtrace = "0";
+    let launcher = PLASMA_LAUNCHER
+        .replace("@UI_SCALE@", &ui_scale.to_string())
+        .replace("@GDB_BACKTRACE@", gdb_backtrace);
+    write_executable(
+        &fs_root.join("usr/local/bin/startplasma-localdesktop"),
+        &launcher,
+    );
+    write_executable(&fs_root.join("usr/local/bin/kwin_wayland"), KWIN_WRAPPER);
+    let recovery_launcher = RECOVERY_LAUNCHER.replace("@UI_SCALE@", &ui_scale.to_string());
+    write_executable(
+        &fs_root.join("usr/local/bin/start-localdesktop-recovery"),
+        &recovery_launcher,
+    );
+    write_executable(
+        &fs_root.join("usr/local/bin/localdesktop-retry-plasma"),
+        RETRY_PLASMA,
+    );
+    write_executable(
+        &fs_root.join("usr/local/bin/localdesktop-clipboard-sync"),
+        CLIPBOARD_SYNC,
+    );
+    write_executable(
+        &fs_root.join("usr/local/bin/localdesktop-clipboard-push"),
+        CLIPBOARD_PUSH,
+    );
+    // Debian Trixie's locked runtime still carries wl-clipboard 2.2.1,
+    // which predates KWin's ext-data-control support. Bundle the matching
+    // ARM64 2.3 clients into /usr/local/bin so the helper is authoritative
+    // across existing and newly provisioned runtime slots.
+    write_guest_binary(&fs_root.join("usr/local/bin/wl-copy"), WL_COPY_BINARY);
+    write_guest_binary(&fs_root.join("usr/local/bin/wl-paste"), WL_PASTE_BINARY);
+    // ABI-matched optional backend, reproduced by build_canberra_backend.py.
+    // libcanberra discovers modules here; no package manager runs at startup.
+    write_guest_binary(
+        &fs_root.join("usr/lib/aarch64-linux-gnu/libcanberra-0.30/libcanberra-pulse.so"),
+        include_bytes!("../../../assets/guest-arm64/libcanberra-pulse.so"),
+    );
+    let canberra_notice = fs_root.join("usr/share/doc/portal-canberra-backend");
+    fs::create_dir_all(&canberra_notice).expect("Failed to create backend license directory");
+    fs::write(
+        canberra_notice.join("copyright"),
+        include_bytes!("../../../assets/guest-arm64/libcanberra-copyright"),
+    )
+    .expect("Failed to install backend license");
+    // Migrate older APKs that shadowed the distribution's splash executables.
+    let _ = fs::remove_file(fs_root.join("usr/local/bin/ksplashqml"));
+    let _ = fs::remove_file(fs_root.join("usr/local/bin/plasma_waitforname"));
+    write_executable(
+        &fs_root.join("usr/local/bin/portal-ime-bridge"),
+        PORTAL_IME_BRIDGE,
+    );
+    // Project Anland X11/GTK input-method bridge: IBus engine routing X11
+    // editable focus and host commits into GTK clients (proven: Firefox URL
+    // bar/input/textarea/contenteditable, exact Unicode). Synced idempotently
+    // like the ime bridge (size-gated rewrite).
+    write_executable(
+        &fs_root.join("usr/local/bin/portal-ibus-engine"),
+        PORTAL_IBUS_ENGINE,
+    );
+    // Non-blocking autostart launcher for the IBus daemon/engine (see
+    // assets/portal-ibus-lazy.sh). Deployed idempotently like the engine.
+    write_executable(
+        &fs_root.join("usr/local/bin/portal-ibus-lazy"),
+        PORTAL_IBUS_LAZY,
+    );
+    let ibus_component_path = fs_root.join("usr/share/ibus/component/portal.xml");
+    if let Some(parent) = ibus_component_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(ibus_component_path, PORTAL_IBUS_COMPONENT);
+    let ime_desktop_path = fs_root.join("usr/share/applications/portal-ime.desktop");
+    if let Some(parent) = ime_desktop_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
+    // Keep the QPainter overlay present and the default loader path free of
+    // shadows on every launch (idempotent; see sync_kwin_overlay).
+    sync_kwin_overlay(fs_root);
+}
+
+fn sync_crash_handler(fs_root: &Path) -> anyhow::Result<()> {
+    // All builds need the socket fstat fix in this existing library. A
+    // nested gdb frequently dies before it can attach under Android's PRoot;
+    // this preload still records the fault PC/LR/SP, loader maps and a
+    // best-effort glibc backtrace from inside KWin.
+    let crash_handler_source = fs_root.join("usr/local/lib/localdesktop-crash-handler.c");
+    if let Some(parent) = crash_handler_source.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &crash_handler_source,
+        normalize_guest_text(CRASH_HANDLER_SOURCE),
+    )?;
+    fs::set_permissions(&crash_handler_source, fs::Permissions::from_mode(0o644))?;
+
+    let handler = fs_root.join("usr/local/lib/localdesktop-crash-handler.so");
+    let temporary = handler.with_extension("so.tmp");
+    fs::write(&temporary, CRASH_HANDLER_BINARY)?;
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))?;
+    fs::rename(&temporary, &handler)?;
+    diagnostics::guest_event(
+        "guest-support",
+        "installed bundled ARM64 glibc socket-stat shim",
+    );
+    Ok(())
+}
+
+/// The explicit Anland migration deliberately avoids the broad normal-launch
+/// repair routine. It refreshes only root-owned session assets and graphics
+/// integration; Debian package state and all user home/configuration files
+/// remain untouched.
+fn sync_anland_required_session_files(
+    fs_root: &Path,
+    ui_scale: i32,
+) -> anyhow::Result<()> {
+    sync_guest_session_directories(fs_root)?;
+    sync_firefox_config(fs_root);
+    sync_portal_runtime_assets(fs_root, ui_scale);
+    // Normal launch keeps size-gated overlay checks cheap. An explicit repair
+    // is the point where same-size corruption must also be replaced.
+    sync_kwin_anland_overlay_for_repair(fs_root)?;
+    let drmshim = fs_root.join("usr/local/lib/portal/drmshim.so");
+    if !fs::read(&drmshim)
+        .map(|bytes| bytes == DRMSHIM_BINARY)
+        .unwrap_or(false)
+    {
+        write_guest_binary_result(&drmshim, DRMSHIM_BINARY)?;
+    }
+    sync_crash_handler(fs_root)?;
+    validate_required_session_files(fs_root)
 }
 
 fn setup_firefox_config(_: &SetupOptions) -> StageOutput {
@@ -817,14 +1080,22 @@ fn write_executable(path: &Path, contents: &str) {
 }
 
 fn write_guest_binary(path: &Path, contents: &[u8]) {
+    write_guest_binary_result(path, contents).expect("Failed to install guest binary");
+}
+
+fn write_guest_binary_result(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)?;
     }
     let temporary = path.with_extension("portal-tmp");
-    fs::write(&temporary, contents).expect("Failed to write guest binary");
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
-        .expect("Failed to mark guest binary executable");
-    fs::rename(&temporary, path).expect("Failed to install guest binary");
+    fs::write(&temporary, contents)?;
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))?;
+    fs::File::open(&temporary)?.sync_all()?;
+    fs::rename(&temporary, path)?;
+    if let Some(parent) = path.parent() {
+        crate::core::mesa_layer::sync_dir_best_effort(parent);
+    }
+    Ok(())
 }
 
 /// Install a shipped configuration without clobbering a user's later edits.
@@ -1356,17 +1627,7 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     let home_dir = chroot_home_dir(fs_root, &username);
     let xft_dpi = ui_scale * 96;
 
-    // Normally created by systemd-tmpfiles, which does not run in PRoot.
-    // KWin refuses to start Xwayland without this socket directory, and
-    // Debian's ksmserver still needs that X connection in a Wayland session.
-    // `tmp` itself must also be world-writable: the image ships it as 0755,
-    // which breaks the Pulse native socket and wayland-0 in the guest.
-    for relative in ["tmp", "tmp/.X11-unix", "tmp/.ICE-unix", "var/tmp"] {
-        let directory = fs_root.join(relative);
-        fs::create_dir_all(&directory).expect("Failed to create guest session directory");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o1777))
-            .expect("Failed to set guest session directory permissions");
-    }
+    sync_guest_session_directories(fs_root).expect("Failed to create guest session directories");
 
     sync_android_timezone(fs_root);
     // Small, verified Debian tools needed for triggers skipped by image extraction.
@@ -1551,91 +1812,7 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         ],
     );
 
-    // The guest scripts are versioned assets so the classic startup contract,
-    // KWin crash capture and graphical recovery UI cannot drift apart. The
-    // launcher substitutes only the device-specific scale factor.
-    // Debugger capture stays off in all builds: running every KWin instance
-    // under gdb changes startup timing and ptrace is commonly denied by
-    // Android's sandbox. It remains opt-in via the environment override.
-    let gdb_backtrace = "0";
-    let launcher = PLASMA_LAUNCHER
-        .replace("@UI_SCALE@", &ui_scale.to_string())
-        .replace("@GDB_BACKTRACE@", gdb_backtrace);
-    write_executable(
-        &fs_root.join("usr/local/bin/startplasma-localdesktop"),
-        &launcher,
-    );
-    write_executable(&fs_root.join("usr/local/bin/kwin_wayland"), KWIN_WRAPPER);
-    let recovery_launcher = RECOVERY_LAUNCHER.replace("@UI_SCALE@", &ui_scale.to_string());
-    write_executable(
-        &fs_root.join("usr/local/bin/start-localdesktop-recovery"),
-        &recovery_launcher,
-    );
-    write_executable(
-        &fs_root.join("usr/local/bin/localdesktop-retry-plasma"),
-        RETRY_PLASMA,
-    );
-    write_executable(
-        &fs_root.join("usr/local/bin/localdesktop-clipboard-sync"),
-        CLIPBOARD_SYNC,
-    );
-    write_executable(
-        &fs_root.join("usr/local/bin/localdesktop-clipboard-push"),
-        CLIPBOARD_PUSH,
-    );
-    // Debian Trixie's locked runtime still carries wl-clipboard 2.2.1,
-    // which predates KWin's ext-data-control support. Bundle the matching
-    // ARM64 2.3 clients into /usr/local/bin so the helper is authoritative
-    // across existing and newly provisioned runtime slots.
-    write_guest_binary(&fs_root.join("usr/local/bin/wl-copy"), WL_COPY_BINARY);
-    write_guest_binary(&fs_root.join("usr/local/bin/wl-paste"), WL_PASTE_BINARY);
-    // ABI-matched optional backend, reproduced by build_canberra_backend.py.
-    // libcanberra discovers modules here; no package manager runs at startup.
-    write_guest_binary(
-        &fs_root.join("usr/lib/aarch64-linux-gnu/libcanberra-0.30/libcanberra-pulse.so"),
-        include_bytes!("../../../assets/guest-arm64/libcanberra-pulse.so"),
-    );
-    let canberra_notice = fs_root.join("usr/share/doc/portal-canberra-backend");
-    fs::create_dir_all(&canberra_notice).expect("Failed to create backend license directory");
-    fs::write(
-        canberra_notice.join("copyright"),
-        include_bytes!("../../../assets/guest-arm64/libcanberra-copyright"),
-    )
-    .expect("Failed to install backend license");
-    // Migrate older APKs that shadowed the distribution's splash executables.
-    let _ = fs::remove_file(fs_root.join("usr/local/bin/ksplashqml"));
-    let _ = fs::remove_file(fs_root.join("usr/local/bin/plasma_waitforname"));
-    write_executable(
-        &fs_root.join("usr/local/bin/portal-ime-bridge"),
-        PORTAL_IME_BRIDGE,
-    );
-    // Project Anland X11/GTK input-method bridge: IBus engine routing X11
-    // editable focus and host commits into GTK clients (proven: Firefox URL
-    // bar/input/textarea/contenteditable, exact Unicode). Synced idempotently
-    // like the ime bridge (size-gated rewrite).
-    write_executable(
-        &fs_root.join("usr/local/bin/portal-ibus-engine"),
-        PORTAL_IBUS_ENGINE,
-    );
-    // Non-blocking autostart launcher for the IBus daemon/engine (see
-    // assets/portal-ibus-lazy.sh). Deployed idempotently like the engine.
-    write_executable(
-        &fs_root.join("usr/local/bin/portal-ibus-lazy"),
-        PORTAL_IBUS_LAZY,
-    );
-    let ibus_component_path = fs_root.join("usr/share/ibus/component/portal.xml");
-    if let Some(parent) = ibus_component_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(ibus_component_path, PORTAL_IBUS_COMPONENT);
-    let ime_desktop_path = fs_root.join("usr/share/applications/portal-ime.desktop");
-    if let Some(parent) = ime_desktop_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
-    // Keep the QPainter overlay present and the default loader path free of
-    // shadows on every launch (idempotent; see sync_kwin_overlay).
-    sync_kwin_overlay(fs_root);
+    sync_portal_runtime_assets(fs_root, ui_scale);
 
     sync_guest_network_config(fs_root);
 }
@@ -1713,6 +1890,57 @@ fn validate_required_session_files(fs_root: &Path) -> anyhow::Result<()> {
                 "Required Anland KWin symlink is incomplete: {link}"
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
+    let artifact = crate::core::provisioning::RuntimeArtifact::production();
+    let classification = artifact.classify_runtime(fs_root);
+    anyhow::ensure!(
+        classification.is_trusted_recovery(),
+        "Portal runtime lost its completion marker during Anland repair"
+    );
+    anyhow::ensure!(
+        matches!(
+            crate::android::anland::active_renderer(),
+            crate::android::anland::RendererKind::Anland
+        ),
+        "Anland renderer selection is not active after repair"
+    );
+    anyhow::ensure!(
+        super::mesa_layer::is_provisioned(),
+        "Mesa KGSL layer is not provisioned after Anland repair"
+    );
+    crate::android::anland::validate_launch_contract()?;
+    validate_required_session_files(fs_root)?;
+    validate_firefox_anland_config(fs_root)?;
+
+    let anland_library = fs_root.join("usr/local/lib/portal-anland/libkwin.so.6.3.6");
+    anyhow::ensure!(
+        fs::read(&anland_library)
+            .map(|bytes| bytes == KWIN_ANLAND_LIBRARY)
+            .unwrap_or(false),
+        "Anland KWin overlay does not match the pinned Portal asset"
+    );
+    let drmshim = fs_root.join("usr/local/lib/portal/drmshim.so");
+    anyhow::ensure!(
+        fs::read(&drmshim)
+            .map(|bytes| bytes == DRMSHIM_BINARY)
+            .unwrap_or(false),
+        "Portal drmshim is missing or corrupt"
+    );
+    for relative in [
+        "usr/local/lib/localdesktop-crash-handler.so",
+        "usr/local/bin/portal-ibus-engine",
+        "usr/local/bin/portal-ibus-lazy",
+        "usr/share/ibus/component/portal.xml",
+        "usr/share/applications/portal-ime.desktop",
+    ] {
+        anyhow::ensure!(
+            fs_root.join(relative).is_file(),
+            "Required Anland session integration is missing: {relative}"
+        );
     }
     Ok(())
 }
@@ -1807,18 +2035,33 @@ fn sync_kwin_overlay(fs_root: &Path) {
 /// for Anland sessions; the AnlandBackend symbol resolves from the unified
 /// lib, so the load-time stub must never be preloaded there.
 fn sync_kwin_anland_overlay(fs_root: &Path) {
+    if let Err(error) = sync_kwin_anland_overlay_inner(fs_root, false) {
+        log::warn!("Could not refresh Anland KWin overlay: {error:#}");
+    }
+}
+
+/// Strict variant used by the explicit migration. Normal launch only needs a
+/// cheap size check, but an intentional repair must replace same-size
+/// corruption instead of merely reporting it during final validation.
+fn sync_kwin_anland_overlay_for_repair(fs_root: &Path) -> anyhow::Result<()> {
+    sync_kwin_anland_overlay_inner(fs_root, true)
+}
+
+fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow::Result<()> {
     let kwin_dir = fs_root.join("usr/local/lib/portal-anland");
-    let _ = fs::create_dir_all(&kwin_dir);
+    fs::create_dir_all(&kwin_dir)?;
     let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
-    let fresh = fs::metadata(&kwin_library)
-        .map(|m| m.len() == KWIN_ANLAND_LIBRARY.len() as u64)
-        .unwrap_or(false);
+    let fresh = if verify_bytes {
+        fs::read(&kwin_library)
+            .map(|bytes| bytes == KWIN_ANLAND_LIBRARY)
+            .unwrap_or(false)
+    } else {
+        fs::metadata(&kwin_library)
+            .map(|m| m.len() == KWIN_ANLAND_LIBRARY.len() as u64)
+            .unwrap_or(false)
+    };
     if !fresh {
-        let kwin_temporary = kwin_library.with_extension("6.3.6.tmp");
-        if fs::write(&kwin_temporary, KWIN_ANLAND_LIBRARY).is_ok() {
-            let _ = fs::set_permissions(&kwin_temporary, fs::Permissions::from_mode(0o755));
-            let _ = fs::rename(&kwin_temporary, &kwin_library);
-        }
+        write_guest_binary_result(&kwin_library, KWIN_ANLAND_LIBRARY)?;
     }
     // Atomic symlink swap (temp + rename): KWin must never observe a
     // half-deployed soname chain if a launch races a previous update. This
@@ -1829,11 +2072,21 @@ fn sync_kwin_anland_overlay(fs_root: &Path) {
     ] {
         let path = kwin_dir.join(link);
         let tmp = kwin_dir.join(format!("{link}.tmp"));
-        let _ = fs::remove_file(&tmp);
-        if symlink(target, &tmp).is_ok() {
-            let _ = fs::rename(&tmp, &path);
+        let link_is_valid = fs::read_link(&path).ok().as_deref() == Some(Path::new(target));
+        if !link_is_valid {
+            match fs::remove_file(&tmp) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            symlink(target, &tmp)?;
+            fs::rename(&tmp, &path)?;
+            if let Some(parent) = path.parent() {
+                crate::core::mesa_layer::sync_dir_best_effort(parent);
+            }
         }
     }
+    Ok(())
 }
 
 /// Stage the Phase B XWayland touchpad-source candidate plus the xinput
@@ -2157,34 +2410,7 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
         log::error!("mesa KGSL layer missing at Plasma setup; Anland GPU boot will fail at GBM setup (will retry on next launch)");
     }
 
-    // All builds need the socket fstat fix in this existing library. A
-    // nested gdb frequently dies before it can attach under Android's PRoot;
-    // this preload still records the fault PC/LR/SP, loader maps and a best-
-    // effort glibc backtrace from inside KWin.  Keep the source in the guest
-    // so the archive identifies exactly which handler produced the trace.
-    let crash_handler_source = fs_root.join("usr/local/lib/localdesktop-crash-handler.c");
-    if let Some(parent) = crash_handler_source.parent() {
-        fs::create_dir_all(parent).expect("Failed to create crash handler directory");
-    }
-    fs::write(
-        &crash_handler_source,
-        normalize_guest_text(CRASH_HANDLER_SOURCE),
-    )
-    .expect("Failed to write crash handler source");
-    fs::set_permissions(&crash_handler_source, fs::Permissions::from_mode(0o644))
-        .expect("Failed to set crash handler source permissions");
-
-    let handler = fs_root.join("usr/local/lib/localdesktop-crash-handler.so");
-    let temporary = handler.with_extension("so.tmp");
-    fs::write(&temporary, CRASH_HANDLER_BINARY)
-        .expect("Failed to stage required guest support library");
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
-        .expect("Failed to set guest support library permissions");
-    fs::rename(&temporary, &handler).expect("Failed to install required guest support library");
-    diagnostics::guest_event(
-        "guest-support",
-        "installed bundled ARM64 glibc socket-stat shim",
-    );
+    sync_crash_handler(fs_root).expect("Failed to install crash handler support files");
 
     // Recovery creates its labwc autostart at runtime, after writing the
     // actionable kdialog message. Do not pre-seed an autostart that launches
@@ -2355,6 +2581,184 @@ fn publish_failure(registration: &SetupRegistration, failure: &SetupFailure) {
         registration.publish(SetupMessage::Error(failure.user_message.clone()))
     {
         crate::android::utils::compose_overlay::publish_install_state(&android_app, &snapshot);
+    }
+}
+
+fn publish_repair_snapshot(registration: &SetupRegistration, snapshot: ProvisioningSnapshot) {
+    if let Ok(mut coordinator) = anland_repair_coordinator().lock() {
+        coordinator.snapshot = snapshot.clone();
+    }
+    let message = if snapshot.error.is_some() {
+        SetupMessage::Error(snapshot.message.clone())
+    } else {
+        SetupMessage::Progress(snapshot.message.clone())
+    };
+    if let Some(android_app) = registration.publish(message) {
+        crate::android::utils::compose_overlay::publish_install_state(&android_app, &snapshot);
+    }
+}
+
+const ANLAND_REPAIR_ERROR_MESSAGE: &str =
+    "Portal is installed, but Anland graphics repair could not complete. Tap Retry Plasma.";
+
+fn publish_repair_failure(registration: &SetupRegistration, diagnostic: impl Into<String>) {
+    PREPARED_ANLAND_LAUNCH.store(false, Ordering::Release);
+    let diagnostic = diagnostic.into();
+    log::error!("Anland graphics repair failed: {diagnostic}");
+    diagnostics::host_event("anland-repair-failed", &diagnostic);
+    if let Ok(mut coordinator) = anland_repair_coordinator().lock() {
+        coordinator.state = AnlandRepairState::Failed;
+        coordinator.result = Some(AnlandRepairResult::Failed(
+            ANLAND_REPAIR_ERROR_MESSAGE.to_string(),
+        ));
+    }
+    publish_repair_snapshot(
+        registration,
+        ProvisioningSnapshot::failed(ANLAND_REPAIR_ERROR_MESSAGE),
+    );
+    crate::android::utils::webview_handoff::wake_event_loop();
+}
+
+fn publish_repair_success(registration: &SetupRegistration) {
+    PREPARED_ANLAND_LAUNCH.store(true, Ordering::Release);
+    if let Ok(mut coordinator) = anland_repair_coordinator().lock() {
+        coordinator.state = AnlandRepairState::Complete;
+        coordinator.result = Some(AnlandRepairResult::Succeeded);
+    }
+    // Do not publish ProvisioningPhase::Complete here. The Debian install
+    // marker is intentionally unchanged by modern-runtime repair; this is a
+    // graphics-repair result, not a second installation commit.
+    publish_repair_snapshot(
+        registration,
+        ProvisioningSnapshot::update(
+            ProvisioningPhase::Finalising,
+            99,
+            "Anland graphics ready. Restarting Plasma…",
+        ),
+    );
+    diagnostics::host_event("anland-repair-complete", "targeted graphics repair committed");
+    crate::android::utils::webview_handoff::wake_event_loop();
+}
+
+fn run_anland_repair_inner(registration: &SetupRegistration) -> anyhow::Result<()> {
+    let artifact = crate::core::provisioning::RuntimeArtifact::production();
+    let root = Path::new(PRODUCTION_FS_ROOT);
+    let initial_classification = artifact.classify_runtime(root);
+    anyhow::ensure!(
+        initial_classification.is_trusted_recovery(),
+        "explicit Anland repair requires an existing Portal completion marker (found {initial_classification:?})"
+    );
+
+    publish_repair_snapshot(
+        registration,
+        ProvisioningSnapshot::update(
+            ProvisioningPhase::Preparing,
+            70,
+            "Preparing targeted Anland graphics repair…",
+        ),
+    );
+    // The worker, rather than a JNI/UI caller, owns the bounded stop/reap so
+    // an explicit repair action never blocks the Android main thread.
+    crate::android::proot::launch::stop();
+
+    publish_repair_snapshot(
+        registration,
+        ProvisioningSnapshot::update(
+            ProvisioningPhase::Configuring,
+            73,
+            "Enabling the Anland renderer…",
+        ),
+    );
+    crate::android::anland::force_anland_renderer()?;
+
+    publish_repair_snapshot(
+        registration,
+        ProvisioningSnapshot::update(
+            ProvisioningPhase::Configuring,
+            76,
+            "Checking Portal's Mesa/KGSL graphics layer…",
+        ),
+    );
+    if super::mesa_layer::is_provisioned() {
+        diagnostics::host_event("anland-repair", "Mesa KGSL layer already provisioned");
+        publish_repair_snapshot(
+            registration,
+            ProvisioningSnapshot::update(
+                ProvisioningPhase::Configuring,
+                82,
+                "Mesa/KGSL layer is already ready.",
+            ),
+        );
+    } else {
+        let progress_registration = registration.clone();
+        super::mesa_layer::provision_with_progress(move |message| {
+            diagnostics::host_event("mesa-provisioning", &message);
+            let display_message = if message.starts_with("Mesa layer unavailable:")
+                || message.to_ascii_lowercase().contains("failed")
+            {
+                "Preparing Portal graphics…".to_string()
+            } else {
+                message
+            };
+            publish_repair_snapshot(
+                &progress_registration,
+                ProvisioningSnapshot::update(
+                    ProvisioningPhase::Configuring,
+                    82,
+                    display_message,
+                ),
+            );
+        })?;
+    }
+
+    publish_repair_snapshot(
+        registration,
+        ProvisioningSnapshot::update(
+            ProvisioningPhase::Configuring,
+            88,
+            "Refreshing Anland session integration…",
+        ),
+    );
+    // This scoped helper writes only Portal-owned runtime assets. In
+    // particular it does not call the broad normal-launch sync that edits
+    // Plasma defaults, package metadata, or files in the user's home.
+    sync_anland_required_session_files(root, 1)?;
+
+    publish_repair_snapshot(
+        registration,
+        ProvisioningSnapshot::update(
+            ProvisioningPhase::Finalising,
+            96,
+            "Verifying Anland graphics and Firefox acceleration…",
+        ),
+    );
+    validate_anland_repair_state(root)?;
+
+    // A legacy two-line Portal marker is already an installed runtime. Once
+    // the targeted repair has succeeded, upgrade only that marker to the
+    // modern durable form so the normal committed handoff can use it. The
+    // Debian tree itself is never reprovisioned or replaced.
+    if initial_classification == crate::core::provisioning::RuntimeClassification::LegacyPortal {
+        artifact.mark_installation_complete(root)?;
+        anyhow::ensure!(
+            artifact.is_bootable(root),
+            "legacy Portal marker did not migrate after Anland repair"
+        );
+    } else {
+        artifact.validate_compatible(root)?;
+    }
+    validate_anland_repair_state(root)?;
+    Ok(())
+}
+
+fn run_anland_repair(registration: SetupRegistration) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_anland_repair_inner(&registration)
+    }));
+    match result {
+        Ok(Ok(())) => publish_repair_success(&registration),
+        Ok(Err(error)) => publish_repair_failure(&registration, format!("{error:#}")),
+        Err(payload) => publish_repair_failure(&registration, panic_text(payload.as_ref())),
     }
 }
 
@@ -2625,6 +3029,111 @@ pub fn begin_install() -> bool {
     }
 }
 
+/// Start or attach to the one explicit existing-install Anland repair.
+///
+/// This is intentionally a native action rather than a Compose coroutine.
+/// It is accepted only for a currently marked Portal runtime, never invokes
+/// Debian provisioning/extraction, and leaves the installation coordinator
+/// and completion marker alone. A caller may invoke it again after a consumed
+/// failure/result; while the worker is active all callers attach to it.
+pub fn repair_enable_anland() -> bool {
+    let registration = {
+        let Ok(coordinator) = setup_coordinator().lock() else {
+            return false;
+        };
+        if coordinator.state == InstallOperationState::Running {
+            log::warn!("Ignoring Anland repair while Portal installation is running");
+            return false;
+        }
+        let Some(registration) = coordinator.registration.clone() else {
+            log::warn!("Ignoring Anland repair because native setup registration is unavailable");
+            return false;
+        };
+        let artifact = crate::core::provisioning::RuntimeArtifact::production();
+        let classification = artifact.classify_runtime(Path::new(PRODUCTION_FS_ROOT));
+        if !classification.is_trusted_recovery() {
+            log::warn!(
+                "Ignoring Anland repair because the runtime is not a completed Portal install: {classification:?}"
+            );
+            return false;
+        }
+        registration
+    };
+
+    let (start, snapshot) = {
+        let Ok(mut coordinator) = anland_repair_coordinator().lock() else {
+            return false;
+        };
+        if coordinator.state == AnlandRepairState::Running
+            || coordinator.result.is_some()
+        {
+            (false, coordinator.snapshot.clone())
+        } else {
+            coordinator.state = AnlandRepairState::Running;
+            coordinator.snapshot = ProvisioningSnapshot::update(
+                ProvisioningPhase::Preparing,
+                70,
+                "Preparing targeted Anland graphics repair…",
+            );
+            (true, coordinator.snapshot.clone())
+        }
+    };
+
+    publish_repair_snapshot(&registration, snapshot);
+    if !start {
+        return true;
+    }
+
+    let worker_registration = registration.clone();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        thread::spawn(move || run_anland_repair(worker_registration))
+    })) {
+        Ok(_) => true,
+        Err(payload) => {
+            publish_repair_failure(&registration, panic_text(payload.as_ref()));
+            false
+        }
+    }
+}
+
+/// Consume the completion edge of the explicit repair operation. The result
+/// is consumed only by the event-loop owner; the coordinator state remains
+/// Complete/Failed so a later explicit request can retry after this edge.
+pub fn take_anland_repair_result() -> Option<AnlandRepairResult> {
+    anland_repair_coordinator()
+        .lock()
+        .ok()
+        .and_then(|mut coordinator| coordinator.result.take())
+}
+
+/// Rebind a recreated Activity to an existing repair worker before the normal
+/// completed-runtime path can synchronously replay setup. The worker keeps its
+/// original registration handle, so the handle is rebound in place rather than
+/// replaced underneath it. A pending result is included too: the event-loop
+/// owner still consumes that result and performs the single Wayland handoff.
+fn attach_to_anland_repair(
+    registration: &SetupRegistration,
+    progress: &Arc<Mutex<u16>>,
+) -> Option<ProvisioningSnapshot> {
+    let snapshot = anland_repair_coordinator().lock().ok().and_then(|coordinator| {
+        if coordinator.state == AnlandRepairState::Running || coordinator.result.is_some() {
+            Some(coordinator.snapshot.clone())
+        } else {
+            None
+        }
+    })?;
+    let active_registration = setup_coordinator()
+        .lock()
+        .ok()
+        .and_then(|coordinator| coordinator.registration.clone())?;
+    active_registration.rebind_from(registration);
+    if let Ok(mut current) = progress.lock() {
+        *current = snapshot.progress;
+    }
+    publish_repair_snapshot(&active_registration, snapshot.clone());
+    Some(snapshot)
+}
+
 /// The HTML fallback may auto-start only a never-started operation. A failed
 /// operation is deliberately user-driven so an Activity resume cannot turn a
 /// transient network/storage error into an uncontrolled retry loop.
@@ -2771,6 +3280,13 @@ pub fn setup_with_completion(
         progress.clone(),
         on_complete,
     );
+
+    // An explicit Anland migration is a separate process-lifetime operation.
+    // Activity/Compose recreation must attach to it before the completed
+    // runtime branch below has a chance to replay the broad setup pipeline.
+    if attach_to_anland_repair(&registration, &progress).is_some() {
+        return PolarBearBackend::WebView(WebviewBackend::build(receiver, progress));
+    }
 
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
     let root = Path::new(PRODUCTION_FS_ROOT);
