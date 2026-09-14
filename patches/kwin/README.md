@@ -1,7 +1,7 @@
 # KWin 6.7.4 Android/PRoot source patches
 
 This directory contains the five small source patches applied to Portal's
-pinned KWin 6.7.4 ARM64 build. Apply all four to the same pristine source,
+pinned KWin 6.7.4 ARM64 build. Apply all five to the same pristine source,
 in numeric order:
 
 * `0001` tolerates an unavailable udev monitor in the Android/PRoot guest.
