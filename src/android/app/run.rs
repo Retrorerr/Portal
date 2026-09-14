@@ -273,18 +273,32 @@ fn resume_wayland(
 }
 
 /// Project Anland resume: take over the window for zero-copy GPU
-/// presentation instead of binding the Smithay EGL renderer. The guest
-/// session launched below picks up the Anland broker socket, Mesa overlay
-/// and KWin environment from `launch()`; KWin selects its Anland backend via
-/// `$ANLAND_SOCKET` and renders with OpenGL/freedreno into our buffers.
+/// presentation instead of binding the Smithay EGL renderer. The first
+/// attachment creates the persistent broker/session and launches Plasma.
+/// Later Android resumes only attach a fresh surface generation to that
+/// existing session; they never launch a second guest desktop.
 fn resume_anland(
     backend: &mut crate::android::backend::wayland::WaylandBackend,
     event_loop: &ActiveEventLoop,
     android_app: &winit::platform::android::activity::AndroidApp,
 ) -> bool {
-    if backend.anland.is_some() {
-        log::info!("Ignoring redundant Anland resume while GPU session is active");
+    let existing_session = backend.anland.is_some();
+    if existing_session
+        && backend
+            .anland
+            .as_ref()
+            .is_some_and(crate::android::anland::AnlandSession::surface_healthy)
+    {
+        log::info!("Ignoring redundant Anland resume while surface session is healthy");
         return true;
+    }
+    if existing_session {
+        // A normal suspend leaves no surface. If a surface-bound worker or
+        // the broker died unexpectedly while the surface still existed,
+        // retire that attachment first so resume can rebuild it safely.
+        if let Some(session) = backend.anland.as_mut() {
+            session.suspend_surface();
+        }
     }
     if backend.graphic_renderer.is_some() {
         log::warn!(
@@ -327,41 +341,75 @@ fn resume_anland(
         refresh_mhz,
         socket_path: crate::android::anland::host_socket_path(),
     };
-    match crate::android::anland::AnlandSession::start(raw, window, &config) {
-        Ok(session) => {
-            log::info!(
-                "anland.session=active compositor=kwin-opengl(expected) driver=freedreno(expected) window={}x{} refresh_mhz={}",
-                size.width,
-                size.height,
-                refresh_mhz
-            );
-            backend.anland = Some(session);
-            // Re-base rotation convergence onto this native window: delayed
-            // resize events from a previous window carry the old epoch and
-            // are rejected as stale. The start itself is surface gen 1.
-            if let Some(session) = backend.anland.as_ref() {
-                let (w, h) = session.screen_size();
-                backend.surface_convergence.begin_epoch(
-                    session.surface_epoch(),
-                    crate::core::surface_geometry::SurfaceSize { w, h },
-                );
-                log::info!(
-                    "anland.rotate session-start epoch={} sgen=1 screen={w}x{h} ptr={:p}",
-                    session.surface_epoch(),
-                    session.native_window_ptr(),
-                );
-            }
-        }
-        Err(error) => {
-            log::error!("anland.session=start failed (stable QPainter path untouched): {error}");
+    if existing_session {
+        let Some(session) = backend.anland.as_mut() else {
+            return false;
+        };
+        if let Err(error) = session.resume_surface(raw, window, &config) {
+            log::error!("anland.surface resume failed (guest session preserved): {error}");
             accessibility::set_runtime_active(false);
             event_loop.set_control_flow(ControlFlow::Wait);
             return false;
         }
+        log::info!(
+            "anland.session=reattached compositor=kwin-opengl(expected) driver=freedreno(expected) window={}x{} refresh_mhz={} guest=preserved",
+            size.width,
+            size.height,
+            refresh_mhz
+        );
+    } else {
+        match crate::android::anland::AnlandSession::start(raw, window, &config) {
+            Ok(session) => {
+                log::info!(
+                    "anland.session=active compositor=kwin-opengl(expected) driver=freedreno(expected) window={}x{} refresh_mhz={}",
+                    size.width,
+                    size.height,
+                    refresh_mhz
+                );
+                backend.anland = Some(session);
+            }
+            Err(error) => {
+                log::error!("anland.session=start failed (stable QPainter path untouched): {error}");
+                accessibility::set_runtime_active(false);
+                event_loop.set_control_flow(ControlFlow::Wait);
+                return false;
+            }
+        }
+    }
+
+    // Re-base rotation convergence onto this fresh native window: delayed
+    // resize events from the destroyed surface carry the old epoch and are
+    // rejected as stale. Each epoch starts at surface generation 1.
+    if let Some(session) = backend.anland.as_ref() {
+        let (w, h) = session.screen_size();
+        backend.surface_convergence.begin_epoch(
+            session.surface_epoch(),
+            crate::core::surface_geometry::SurfaceSize { w, h },
+        );
+        log::info!(
+            "anland.rotate surface-attach epoch={} sgen=1 screen={w}x{h} ptr={:p} guest={}",
+            session.surface_epoch(),
+            session.native_window_ptr(),
+            if existing_session { "preserved" } else { "launch" },
+        );
     }
     accessibility::set_runtime_active(true);
     pipewire_standalone_aaudio::spawn_after_ready(android_app.clone());
-    launch();
+    if existing_session {
+        // A normal Android resume must not call launch(): the tracked Plasma
+        // process and KWin producer are still alive and reconnect through the
+        // persistent broker. A missing worker is a runtime failure, not a
+        // reason to create a second desktop session.
+        if !is_running() {
+            log::error!("anland.surface resumed but the tracked guest session is not running");
+            accessibility::set_runtime_active(false);
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return false;
+        }
+        log::info!("anland.session guest Plasma preserved; launch() skipped on surface resume");
+    } else {
+        launch();
+    }
     crate::android::utils::frame_pacing::prioritize_current_render_thread();
     true
 }
@@ -716,7 +764,9 @@ impl PolarBearApp {
             false
         };
         if resume_failed {
-            self.enter_runtime_error("Wayland could not be resumed after Retry Plasma");
+            self.enter_committed_install_runtime_error(
+                "Portal is installed, but Plasma could not be resumed after Retry Plasma.",
+            );
         }
     }
 
@@ -922,11 +972,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         }
         if let Some(reason) = take_failure() {
             if matches!(&self.backend, PolarBearBackend::Wayland(_)) {
-                if crate::android::proot::setup::anland_repair_handoff_active() {
-                    self.enter_committed_install_runtime_error(reason);
-                } else {
-                    self.enter_runtime_error(reason);
-                }
+                // A Wayland backend is only built from a bootable committed
+                // runtime. Any producer/guest failure here is therefore a
+                // runtime-launch failure, including ordinary Anland resume,
+                // not an incomplete installation.
+                self.enter_committed_install_runtime_error(reason);
                 return;
             }
         }
@@ -947,6 +997,10 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             return;
         }
 
+        let anland_resume = matches!(
+            &self.backend,
+            PolarBearBackend::Wayland(backend) if backend.anland.is_some()
+        );
         let resume_failed = if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             ime::reset();
             let runtime = crate::android::runtime::proot::PRootRuntime::active();
@@ -963,7 +1017,15 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             false
         };
         if resume_failed {
-            self.enter_runtime_error("Wayland could not be initialized after the Activity resumed");
+            if anland_resume {
+                self.enter_committed_install_runtime_error(
+                    "Portal is installed, but Anland could not reattach to the Android surface. Tap Retry Plasma.",
+                );
+            } else {
+                self.enter_runtime_error(
+                    "Wayland could not be initialized after the Activity resumed",
+                );
+            }
         }
     }
 
@@ -976,11 +1038,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         }
         if let Some(reason) = take_failure() {
             if matches!(&self.backend, PolarBearBackend::Wayland(_)) {
-                if crate::android::proot::setup::anland_repair_handoff_active() {
-                    self.enter_committed_install_runtime_error(reason);
-                } else {
-                    self.enter_runtime_error(reason);
-                }
+                self.enter_committed_install_runtime_error(reason);
                 return;
             }
         }
@@ -1112,6 +1170,23 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 }
                 return;
             }
+            if backend.graphic_renderer.is_none()
+                && backend
+                    .anland
+                    .as_ref()
+                    .is_some_and(|session| !session.surface_active())
+            {
+                // Delayed events from the destroyed winit window must not
+                // enter input, convergence, or redraw code while no native
+                // surface is attached. The persistent broker/guest continue
+                // independently until resumed() supplies the new surface.
+                if matches!(event, WindowEvent::CloseRequested) {
+                    event_loop.exit();
+                } else {
+                    log::debug!("Ignoring Anland window event while surface is suspended: {event:?}");
+                }
+                return;
+            }
 
             // Project Anland: mirror raw input to the GPU producer. The
             // Smithay handlers below stay warm (state machines, gesture
@@ -1155,7 +1230,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             runtime_failed = backend.graphic_renderer.is_none() && backend.anland.is_none();
         }
         if runtime_failed {
-            self.enter_runtime_error("Wayland lost its renderer while handling a window event");
+            self.enter_committed_install_runtime_error(
+                "Portal is installed, but Wayland lost its renderer. Tap Retry Plasma.",
+            );
         }
     }
 
@@ -1169,10 +1246,13 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             if let Err(error) = ime::hide(&backend.android_app) {
                 log::debug!("Software keyboard bridge could not be hidden on suspend: {error}");
             }
-            // Project Anland: stop the GPU session first, while the
-            // ANativeWindow is still valid (bounded joins, then disconnect).
-            if let Some(session) = backend.anland.take() {
-                session.stop();
+            // End input streams before the surface-owned producer generation
+            // is withdrawn. The Anland session itself remains in the backend:
+            // its broker and the guest Plasma/KWin process survive this
+            // temporary Android surface loss.
+            backend.suspend_input_and_presentation();
+            if let Some(session) = backend.anland.as_mut() {
+                session.suspend_surface();
             }
             backend.socket_watcher = None;
             // Drop child layers while this lifecycle generation's parent
@@ -1181,7 +1261,6 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             backend.graphic_renderer = None;
             backend.output_damage_tracker = None;
             backend.output_damage_signature = None;
-            backend.suspend_input_and_presentation();
             backend.frame_timeline = None;
             backend.frame_timeline_stats = Default::default();
             // The ANativeWindow is destroyed on suspend; the preferred-rate hint
@@ -1199,7 +1278,12 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             // desire (winit and native disagreed mid-rotation), the native
             // surface may have caught up silently without a new event.
             // Event-driven (no sleeps): converges on the next loop turn.
-            if backend.anland.is_some() && backend.surface_convergence.has_pending() {
+            if backend
+                .anland
+                .as_ref()
+                .is_some_and(|session| session.surface_active())
+                && backend.surface_convergence.has_pending()
+            {
                 crate::android::backend::wayland::poll_anland_convergence(backend, None);
             }
             if let Ok(dirty) = crate::android::backend::wayland::dispatch_wayland(backend) {

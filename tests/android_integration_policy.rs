@@ -30,6 +30,10 @@ const ANLAND_ENV_SOURCE: &str = include_str!("../src/android/anland/mod.rs");
 const RENDERER_POLICY_SOURCE: &str = include_str!("../src/core/renderer_policy.rs");
 const MESA_LAYER_SOURCE: &str = include_str!("../src/android/proot/mesa_layer.rs");
 const ANDROID_SETUP_RUN_SOURCE: &str = include_str!("../src/android/app/run.rs");
+const ANLAND_CONSUMER_SOURCE: &str = include_str!("../src/android/anland/consumer.rs");
+const ANLAND_BROKER_SOURCE: &str = include_str!("../src/android/anland/broker.rs");
+const ANLAND_EVENT_HANDLER_SOURCE: &str =
+    include_str!("../src/android/backend/wayland/event_handler.rs");
 const COMPOSE_OVERLAY_RUST_SOURCE: &str =
     include_str!("../src/android/utils/compose_overlay.rs");
 const COMPOSE_OVERLAY_KOTLIN_SOURCE: &str =
@@ -860,6 +864,178 @@ fn anland_repair_recreation_attaches_before_completed_setup_replay() {
         "repair attachment must precede the normal completed-runtime setup replay"
     );
     assert!(ANDROID_SETUP_SOURCE.contains("active_registration.rebind_from(registration)"));
+}
+
+#[test]
+fn anland_suspend_retires_only_the_surface_and_preserves_the_guest_session() {
+    let suspended = ANDROID_SETUP_RUN_SOURCE
+        .split("fn suspended")
+        .nth(1)
+        .and_then(|source| source.split("fn about_to_wait").next())
+        .expect("Android suspended handler must exist");
+    assert!(suspended.contains("backend.suspend_input_and_presentation()"));
+    assert!(suspended.contains("session.suspend_surface()"));
+    assert!(!suspended.contains("backend.anland.take()"));
+    assert!(suspended.contains("pipewire_standalone_aaudio::shutdown()"));
+
+    let suspend = ANLAND_CONSUMER_SOURCE
+        .split("pub fn suspend_surface")
+        .nth(1)
+        .and_then(|source| source.split("/// Forward one fixed-size input").next())
+        .expect("surface suspend operation must exist");
+    for required in [
+        "window_live.store(false",
+        "release_surface_inputs",
+        "join_surface_thread(handle, \"render\")",
+        "pump.stop()",
+        "teardown_generation",
+        "join_surface_thread(handle, \"event\")",
+        "release_window",
+        "window_holder.take()",
+        "surface_epoch.store(0",
+        "broker=preserved guest=preserved",
+    ] {
+        assert!(suspend.contains(required), "surface suspend missing {required}");
+    }
+
+    let stop = ANLAND_CONSUMER_SOURCE
+        .split("pub fn stop(mut self)")
+        .nth(1)
+        .and_then(|source| source.split("/// Surface-bound threads").next())
+        .expect("permanent Anland stop operation must exist");
+    assert!(stop.contains("self.suspend_surface()"));
+    assert!(stop.contains("inner.broker_stop.store(true"));
+    assert!(stop.contains("join_surface_thread(h, \"broker\")"));
+
+    // The broker/listener is session-scoped. Suspend withdraws a deposit but
+    // does not stop the listener; permanent stop is the only broker teardown.
+    assert!(ANLAND_BROKER_SOURCE.contains("pub fn serve"));
+    assert!(ANLAND_BROKER_SOURCE.contains("pub fn withdraw"));
+    assert!(ANLAND_BROKER_SOURCE.contains("pub fn deposit"));
+}
+
+#[test]
+fn anland_resume_rebinds_a_fresh_surface_without_relaunching_plasma() {
+    let resume = ANDROID_SETUP_RUN_SOURCE
+        .split("fn resume_anland")
+        .nth(1)
+        .and_then(|source| source.split("/// Forward raw window input").next())
+        .expect("Anland resume operation must exist");
+    for required in [
+        "let existing_session = backend.anland.is_some()",
+        "surface_healthy",
+        "session.resume_surface(raw, window, &config)",
+        "surface_convergence.begin_epoch",
+        "if !is_running()",
+        "guest Plasma preserved; launch() skipped on surface resume",
+        "launch();",
+    ] {
+        assert!(resume.contains(required), "resume path missing {required}");
+    }
+    let preserved = resume
+        .split("// A normal Android resume must not call launch()")
+        .nth(1)
+        .and_then(|source| source.split("} else {").next())
+        .expect("existing-session resume branch must exist");
+    assert!(!preserved.contains("launch();"));
+    assert!(resume.contains("AnlandSession::start"));
+
+    let session_resume = ANLAND_CONSUMER_SOURCE
+        .split("pub fn resume_surface")
+        .nth(1)
+        .and_then(|source| source.split("fn release_surface_inputs").next())
+        .expect("surface resume operation must exist");
+    for required in [
+        "configure_window",
+        "ensure_broker_thread",
+        "mint_surface_epoch",
+        "surface_epoch.store(epoch",
+        "VsyncPump::start",
+        "collect_buffers",
+        "deposit_generation",
+        "start_surface_threads",
+        "guest session preserved",
+    ] {
+        assert!(
+            session_resume.contains(required),
+            "surface resume missing {required}"
+        );
+    }
+    assert!(ANLAND_CONSUMER_SOURCE.contains("thread.is_finished()"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("pub fn surface_healthy"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("broker listener restarted before surface resume"));
+}
+
+#[test]
+fn anland_generation_and_readiness_are_scoped_to_the_current_surface() {
+    let suspend = ANLAND_CONSUMER_SOURCE
+        .split("pub fn suspend_surface")
+        .nth(1)
+        .and_then(|source| source.split("/// Forward one fixed-size input").next())
+        .expect("surface suspend operation must exist");
+    let resume = ANLAND_CONSUMER_SOURCE
+        .split("pub fn resume_surface")
+        .nth(1)
+        .and_then(|source| source.split("fn release_surface_inputs").next())
+        .expect("surface resume operation must exist");
+    for source in [suspend, resume] {
+        assert!(source.contains("ready_surface_gen"));
+        assert!(source.contains("last_pointer"));
+        assert!(source.contains("finger_axes"));
+    }
+    assert!(ANLAND_CONSUMER_SOURCE.contains("generation_completion_allowed"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("stale-generation cancel-back"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("notify_desktop_ready_cached"));
+    assert!(ANLAND_EVENT_HANDLER_SOURCE.contains("if !session.surface_active()"));
+    assert!(ANLAND_EVENT_HANDLER_SOURCE.contains("confirm_converged(gen)"));
+    // New lifecycle epochs are explicitly rebased; delayed observations from
+    // the old winit/native window cannot complete the new epoch.
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("surface-attach epoch="));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("begin_epoch("));
+}
+
+#[test]
+fn anland_surface_resume_failures_use_committed_runtime_recovery() {
+    let resume = ANDROID_SETUP_RUN_SOURCE
+        .split("fn resume_anland")
+        .nth(1)
+        .and_then(|source| source.split("/// Forward raw window input").next())
+        .expect("Anland resume operation must exist");
+    assert!(resume.contains("anland.surface resume failed (guest session preserved)"));
+    assert!(resume.contains("return false"));
+    // The surrounding lifecycle handler classifies an Anland failure as a
+    // runtime failure after installation, never as setup-incomplete state.
+    let resumed = ANDROID_SETUP_RUN_SOURCE
+        .split("fn resumed(&mut self")
+        .nth(1)
+        .and_then(|source| source.split("fn user_event").next())
+        .expect("resumed handler must exist");
+    assert!(resumed.contains("let anland_resume = matches!"));
+    assert!(resumed.contains("enter_committed_install_runtime_error"));
+    assert!(resumed.contains("Anland could not reattach"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains(
+        "Portal is installed, but Wayland lost its renderer. Tap Retry Plasma."
+    ));
+    // The recovery helper stops/reaps the session and swaps to the existing
+    // runtime-error page; it contains no provisioning-marker mutation.
+    let recovery = ANDROID_SETUP_RUN_SOURCE
+        .split("fn enter_committed_install_runtime_error")
+        .nth(1)
+        .and_then(|source| source.split("fn enter_runtime_error_with_mode").next())
+        .expect("committed runtime recovery helper must exist");
+    assert!(recovery.contains("enter_runtime_error_with_mode(reason.into(), true)"));
+}
+
+#[test]
+fn qpainter_lifecycle_remains_the_non_anland_path() {
+    let resume = ANDROID_SETUP_RUN_SOURCE
+        .split("fn resume_wayland")
+        .nth(1)
+        .and_then(|source| source.split("/// Project Anland resume").next())
+        .expect("Smithay resume operation must exist");
+    assert!(resume.contains("match bind(event_loop)"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("backend.graphic_renderer = None"));
+    assert!(ANDROID_SETUP_RUN_SOURCE.contains("backend.anland.as_mut()"));
 }
 
 #[test]
