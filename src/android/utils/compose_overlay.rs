@@ -522,6 +522,21 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeBeginInstall(
     }
 }
 
+/// JNI bridge for the explicit existing-install Anland graphics repair. The
+/// native coordinator owns the worker and the event-loop handoff; this call
+/// never performs Debian or graphics filesystem work on the Android UI thread.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRepairEnableAnland(
+    _env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jboolean {
+    if crate::android::proot::setup::repair_enable_anland() {
+        1
+    } else {
+        0
+    }
+}
+
 fn on_overlay_show_failed(reason: &str) {
     log::error!("compose-spike: overlay show failed: {reason}");
     crate::android::diagnostics::host_event(
