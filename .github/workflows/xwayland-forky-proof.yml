@@ -1,0 +1,106 @@
+# Forky-native XWayland 24.1.13 KGSL proof/build (Phase C) — MANUAL ONLY.
+#
+# Context: Portal's active graphics lock pins stock Forky XWayland
+# 2:24.1.13-1 with hardware_proof=blocked (see assets/graphics-stack-lock.json).
+# Previous lfdevs Anland XWayland carried custom KGSL surfaceless/DRI3 work
+# because Portal has no usable /dev/dri render node. Do NOT restore the old
+# lfdevs 24.1.6 package: run scripts/xwayland_forky_proof.sh on Pad 3 first.
+#
+# This workflow exists for the second step ONLY: if stock 24.1.13 proof shows
+# llvmpipe/softpipe/software EGL, forward-port the minimal lfdevs KGSL patches
+# to the EXACT Forky 24.1.13 source and build a reproducible ARM64 .deb.
+# Until that proof exists, this workflow must stay disabled (see `if:` gate
+# below) and the release gate
+# `scripts/verify_graphics_stack.py --require-xwayland-proof` stays RED.
+#
+# Safety properties (do not weaken without review):
+# - permissions: contents:read; no secrets, no releases, no ref updates,
+#   no commits, no ADB/Android, no runtime artifacts.
+# - Only build outputs (.deb/.buildinfo/.changes + proof report) are uploaded
+#   as run artifacts for inspection. Nothing is published or staged.
+# - Pinned inputs: Forky source package SHA, container image digest. Any
+#   mismatch fails the run closed.
+
+name: Forky XWayland 24.1.13 KGSL proof build (Phase C)
+
+on:
+  workflow_dispatch:
+    inputs:
+      forky_version:
+        description: Exact Forky XWayland version (must match graphics lock)
+        required: true
+        default: 2:24.1.13-1
+      patches_sha:
+        description: SHA-256 of the forward-ported patch bundle (pins minimal KGSL delta)
+        required: true
+        default: UNPROVEN
+      proof_run_id:
+        description: Pad 3 stock-proof run evidencing software fallback (links scripts/xwayland_forky_proof.sh output)
+        required: true
+        default: UNPROVEN
+
+permissions:
+  contents: read
+
+env:
+  # FORKY container userspace for a native ARM64 build. Manifest-list digest;
+  # the arm64 runner resolves it to the arm64 image. Never depend on the tag.
+  # NOTE: refresh this digest from the live registry when enabling Phase C.
+  FORKY_IMAGE: debian:forky@sha256:UNPINNED-REQUIRES-PROOF
+  EXPECTED_FORKY_VERSION: 2:24.1.13-1
+
+jobs:
+  gate:
+    name: Refuse until stock proof + pins exist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail closed without proof and pins
+        run: |
+          set -eu
+          test "${{ inputs.forky_version }}" = "$EXPECTED_FORKY_VERSION"
+          test "${{ inputs.patches_sha }}" != "UNPROVEN"
+          test "${{ inputs.proof_run_id }}" != "UNPROVEN"
+          case "$FORKY_IMAGE" in
+            *UNPINNED*) echo "FORKY_IMAGE digest is not pinned; refusing" >&2; exit 1;;
+          esac
+          echo "gate inputs present (build still requires Pad 3 PASS proof before staging)"
+
+  build:
+    name: Build Forky XWayland 24.1.13 KGSL candidate (ARM64)
+    needs: gate
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    container:
+      image: debian:forky
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out Portal (pins + proof script source)
+        uses: actions/checkout@v4
+        with:
+          path: portal
+          ref: ${{ github.sha }}
+
+      - name: Fetch exact Forky source package
+        run: |
+          set -eu
+          apt-get update
+          apt-get install -y --no-install-recommends devscripts equivs dpkg-dev curl ca-certificates
+          cd /tmp
+          apt-get source xwayland=${{ inputs.forky_version }}
+          ls -la
+
+      - name: Apply minimal KGSL forward-port (pinned bundle only)
+        run: |
+          set -eu
+          echo "patches_sha=${{ inputs.patches_sha }} proof_run=${{ inputs.proof_run_id }}"
+          echo "REQUIRED: unpack the pinned patch bundle, verify its SHA-256, apply with quilt, and record patch hashes."
+          echo "No patch bundle is staged until stock-proof FAIL is evidenced; this step is intentionally unimplemented."
+          exit 1
+
+      - name: Build binary package
+        run: |
+          set -eu
+          echo "Unimplemented until the gate above passes with real pins."
+          exit 1

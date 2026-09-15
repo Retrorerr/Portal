@@ -33,6 +33,11 @@ const ANDROID_SETUP_RUN_SOURCE: &str = include_str!("../src/android/app/run.rs")
 const ANLAND_CONSUMER_SOURCE: &str = include_str!("../src/android/anland/consumer.rs");
 const ANLAND_SYS_SOURCE: &str = include_str!("../src/android/anland/sys.rs");
 const ANLAND_BROKER_SOURCE: &str = include_str!("../src/android/anland/broker.rs");
+const ANLAND_PROTOCOL_SOURCE: &str = include_str!("../src/android/anland/protocol.rs");
+const KWIN_ANLAND_PROTOCOL_SOURCE: &str =
+    include_str!("../patches/kwin/anland-6.7.4/src/backends/anland/protocol.h");
+const KWIN_ANLAND_BACKEND_SOURCE: &str =
+    include_str!("../patches/kwin/anland-6.7.4/src/backends/anland/anland_backend.cpp");
 const ANLAND_EVENT_HANDLER_SOURCE: &str =
     include_str!("../src/android/backend/wayland/event_handler.rs");
 const COMPOSE_OVERLAY_RUST_SOURCE: &str = include_str!("../src/android/utils/compose_overlay.rs");
@@ -458,6 +463,71 @@ fn anland_presentation_is_work_driven_and_vsync_cannot_invent_work() {
         assert!(
             !ANLAND_CONSUMER_SOURCE.contains(obsolete),
             "obsolete Anland demand gate remains: {obsolete}"
+        );
+    }
+}
+
+#[test]
+fn anland_diagnostics_cover_demand_damage_and_pacing() {
+    // Inexpensive Stable counters plus Debug detail must exist for every
+    // load-bearing outcome: requests, renders, queues, NO_DAMAGE, drops,
+    // timeouts, deadline misses, generations, and stage latencies. Noisy
+    // per-frame info logging is forbidden; the 10s alive line carries Stable.
+    for counter in [
+        "work_requested",
+        "work_rejected",
+        "work_consumed",
+        "frames_no_damage",
+        "unknown_slot_cancels",
+        "gen_mismatch_cancels",
+        "stale_gen_cancels",
+        "dequeue_failures",
+        "acquire_timeouts",
+        "render_timeouts",
+        "queue_failures",
+        "cancel_failures",
+        "timeline_hit",
+        "timeline_miss",
+        "deadline_misses",
+        "rebinds_completed",
+        "dequeue_us_total",
+        "acquire_us_total",
+        "render_us_total",
+        "anland.render alive",
+        "anland.lat",
+        "anland.timeline",
+    ] {
+        assert!(
+            ANLAND_CONSUMER_SOURCE.contains(counter),
+            "Anland diagnostics are missing Stable/Debug coverage for: {counter}"
+        );
+    }
+    assert!(ANLAND_CONSUMER_SOURCE.contains("pub struct AnlandDiagnostics"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("pub fn diagnostics"));
+}
+
+#[test]
+fn anland_finger_scroll_protocol_matches_kwin_backend() {
+    // The Android sender and the Forky KWin producer must agree on the
+    // finger-scroll wire contract; otherwise touchpad scroll is silently
+    // dropped on the default path.
+    for token in [
+        "INPUT_TYPE_POINTER_AXIS_FINGER",
+        "INPUT_TYPE_POINTER_AXIS_STOP",
+    ] {
+        assert!(
+            ANLAND_PROTOCOL_SOURCE.contains(token),
+            "Rust Anland protocol is missing {token}"
+        );
+        assert!(
+            KWIN_ANLAND_PROTOCOL_SOURCE.contains(token),
+            "KWin Anland protocol.h is missing {token}"
+        );
+    }
+    for token in ["pointerAxisFinger", "pointerAxisStop"] {
+        assert!(
+            KWIN_ANLAND_BACKEND_SOURCE.contains(token),
+            "KWin Anland backend does not handle finger scroll ({token})"
         );
     }
 }

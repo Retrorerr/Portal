@@ -388,6 +388,31 @@ struct Inner {
     frames_fenced: AtomicU64,
     frames_bare: AtomicU64,
     fallback_count: AtomicU64,
+    /// Demand/damage pacing counters (all inexpensive relaxed atomics).
+    /// Stable surfaces read them via `diagnostics()` and the 10s alive line;
+    /// per-frame detail stays at debug level.
+    work_requested: AtomicU64,
+    work_rejected: AtomicU64,
+    work_consumed: AtomicU64,
+    frames_no_damage: AtomicU64,
+    unknown_slot_cancels: AtomicU64,
+    gen_mismatch_cancels: AtomicU64,
+    stale_gen_cancels: AtomicU64,
+    dequeue_failures: AtomicU64,
+    acquire_timeouts: AtomicU64,
+    render_timeouts: AtomicU64,
+    queue_failures: AtomicU64,
+    cancel_failures: AtomicU64,
+    timeline_hit: AtomicU64,
+    timeline_miss: AtomicU64,
+    deadline_misses: AtomicU64,
+    rebinds_completed: AtomicU64,
+    dequeue_us_total: AtomicU64,
+    dequeue_us_max: AtomicU64,
+    acquire_us_total: AtomicU64,
+    acquire_us_max: AtomicU64,
+    render_us_total: AtomicU64,
+    render_us_max: AtomicU64,
     /// Surface generation the plasma-ready marker + Compose latch were
     /// recorded for. Reset on every rebind: readiness re-latches only after
     /// a valid frame from the new generation is actually presented (an old
@@ -425,6 +450,39 @@ struct Inner {
 unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
 
+impl Inner {
+    fn diagnostics_snapshot(&self) -> AnlandDiagnostics {
+        AnlandDiagnostics {
+            queued: self.frames_queued.load(Ordering::Relaxed),
+            fenced: self.frames_fenced.load(Ordering::Relaxed),
+            bare: self.frames_bare.load(Ordering::Relaxed),
+            fallbacks: self.fallback_count.load(Ordering::Relaxed),
+            requested: self.work_requested.load(Ordering::Relaxed),
+            rejected: self.work_rejected.load(Ordering::Relaxed),
+            consumed: self.work_consumed.load(Ordering::Relaxed),
+            no_damage: self.frames_no_damage.load(Ordering::Relaxed),
+            unknown_slot: self.unknown_slot_cancels.load(Ordering::Relaxed),
+            gen_mismatch: self.gen_mismatch_cancels.load(Ordering::Relaxed),
+            stale_gen: self.stale_gen_cancels.load(Ordering::Relaxed),
+            dequeue_failures: self.dequeue_failures.load(Ordering::Relaxed),
+            acquire_timeouts: self.acquire_timeouts.load(Ordering::Relaxed),
+            render_timeouts: self.render_timeouts.load(Ordering::Relaxed),
+            queue_failures: self.queue_failures.load(Ordering::Relaxed),
+            cancel_failures: self.cancel_failures.load(Ordering::Relaxed),
+            timeline_hit: self.timeline_hit.load(Ordering::Relaxed),
+            timeline_miss: self.timeline_miss.load(Ordering::Relaxed),
+            deadline_misses: self.deadline_misses.load(Ordering::Relaxed),
+            rebinds: self.rebinds_completed.load(Ordering::Relaxed),
+            dequeue_us_total: self.dequeue_us_total.load(Ordering::Relaxed),
+            dequeue_us_max: self.dequeue_us_max.load(Ordering::Relaxed),
+            acquire_us_total: self.acquire_us_total.load(Ordering::Relaxed),
+            acquire_us_max: self.acquire_us_max.load(Ordering::Relaxed),
+            render_us_total: self.render_us_total.load(Ordering::Relaxed),
+            render_us_max: self.render_us_max.load(Ordering::Relaxed),
+        }
+    }
+}
+
 pub struct AnlandSession {
     inner: Arc<Inner>,
     render_thread: Option<JoinHandle<()>>,
@@ -440,6 +498,55 @@ pub struct AnlandConfig {
     pub height: u32,
     pub refresh_mhz: u32,
     pub socket_path: std::path::PathBuf,
+}
+
+/// Inexpensive demand/damage/pacing counter snapshot.
+///
+/// Counts are cumulative since session start; latency totals are in
+/// microseconds (divide by the matching count for an average, max is the
+/// worst observed). Damage-region/area detail lives on the KWin side
+/// (`anland.damage` logs); this side proves the transport stayed idle on a
+/// static desktop and that overload degrades to drops, never to sync
+/// shortcuts.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AnlandDiagnostics {
+    pub queued: u64,
+    pub fenced: u64,
+    pub bare: u64,
+    pub fallbacks: u64,
+    pub requested: u64,
+    pub rejected: u64,
+    pub consumed: u64,
+    pub no_damage: u64,
+    pub unknown_slot: u64,
+    pub gen_mismatch: u64,
+    pub stale_gen: u64,
+    pub dequeue_failures: u64,
+    pub acquire_timeouts: u64,
+    pub render_timeouts: u64,
+    pub queue_failures: u64,
+    pub cancel_failures: u64,
+    pub timeline_hit: u64,
+    pub timeline_miss: u64,
+    pub deadline_misses: u64,
+    pub rebinds: u64,
+    pub dequeue_us_total: u64,
+    pub dequeue_us_max: u64,
+    pub acquire_us_total: u64,
+    pub acquire_us_max: u64,
+    pub render_us_total: u64,
+    pub render_us_max: u64,
+}
+
+fn record_latency(total: &AtomicU64, max: &AtomicU64, us: u64) {
+    total.fetch_add(us, Ordering::Relaxed);
+    let mut prev = max.load(Ordering::Relaxed);
+    while us > prev {
+        match max.compare_exchange_weak(prev, us, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => prev = next,
+        }
+    }
 }
 
 fn dup_owned(fd: &OwnedFd) -> std::io::Result<OwnedFd> {
@@ -657,6 +764,28 @@ impl AnlandSession {
             frames_fenced: AtomicU64::new(0),
             frames_bare: AtomicU64::new(0),
             fallback_count: AtomicU64::new(0),
+            work_requested: AtomicU64::new(0),
+            work_rejected: AtomicU64::new(0),
+            work_consumed: AtomicU64::new(0),
+            frames_no_damage: AtomicU64::new(0),
+            unknown_slot_cancels: AtomicU64::new(0),
+            gen_mismatch_cancels: AtomicU64::new(0),
+            stale_gen_cancels: AtomicU64::new(0),
+            dequeue_failures: AtomicU64::new(0),
+            acquire_timeouts: AtomicU64::new(0),
+            render_timeouts: AtomicU64::new(0),
+            queue_failures: AtomicU64::new(0),
+            cancel_failures: AtomicU64::new(0),
+            timeline_hit: AtomicU64::new(0),
+            timeline_miss: AtomicU64::new(0),
+            deadline_misses: AtomicU64::new(0),
+            rebinds_completed: AtomicU64::new(0),
+            dequeue_us_total: AtomicU64::new(0),
+            dequeue_us_max: AtomicU64::new(0),
+            acquire_us_total: AtomicU64::new(0),
+            acquire_us_max: AtomicU64::new(0),
+            render_us_total: AtomicU64::new(0),
+            render_us_max: AtomicU64::new(0),
             ready_surface_gen: Mutex::new(None),
             software_gl: super::software_gl_fallback_requested(),
             wake,
@@ -1088,6 +1217,11 @@ impl AnlandSession {
         )
     }
 
+    /// Full demand/damage/pacing counter snapshot (inexpensive relaxed loads).
+    pub fn diagnostics(&self) -> AnlandDiagnostics {
+        self.inner.diagnostics_snapshot()
+    }
+
     pub fn screen_size(&self) -> (u32, u32) {
         *self.inner.screen.lock().unwrap()
     }
@@ -1298,6 +1432,7 @@ impl AnlandSession {
         *inner.ready_surface_gen.lock().unwrap() = None;
         *inner.motion_logged_gen.lock().unwrap() = 0;
         deposit_generation(inner).map_err(|e| format!("re-deposit generation: {e}"))?;
+        inner.rebinds_completed.fetch_add(1, Ordering::Relaxed);
         let bufs = inner.buffers.lock().map(|b| b.len()).unwrap_or(0);
         log::info!(
             "anland.rotate sgen={gen} bound bufs={bufs} screen={w}x{h}; awaiting producer attach + first frame"
@@ -1322,7 +1457,19 @@ impl AnlandSession {
             inner.frames_bare.load(Ordering::Relaxed),
             inner.fallback_count.load(Ordering::Relaxed),
         );
-        log::info!("anland.session=stop queued={q} fenced={f} bare={b} fallbacks={fb}");
+        let d = (
+            inner.work_requested.load(Ordering::Relaxed),
+            inner.work_consumed.load(Ordering::Relaxed),
+            inner.frames_no_damage.load(Ordering::Relaxed),
+            inner.acquire_timeouts.load(Ordering::Relaxed),
+            inner.render_timeouts.load(Ordering::Relaxed),
+            inner.deadline_misses.load(Ordering::Relaxed),
+            inner.rebinds_completed.load(Ordering::Relaxed),
+        );
+        log::info!(
+            "anland.session=stop queued={q} fenced={f} bare={b} fallbacks={fb} requested={} consumed={} no_damage={} acquire_timeouts={} render_timeouts={} deadline_misses={} rebinds={}",
+            d.0, d.1, d.2, d.3, d.4, d.5, d.6
+        );
     }
 }
 
@@ -1859,14 +2006,23 @@ fn render_loop(inner: Arc<Inner>) {
             log::info!("anland.work wake={wake_ready} vsync_telemetry={tick_ready}");
         }
         if now.wrapping_sub(alive_ns) >= 10_000_000_000 {
-            let (q, f, b, fb) = (
-                inner.frames_queued.load(Ordering::Relaxed),
-                inner.frames_fenced.load(Ordering::Relaxed),
-                inner.frames_bare.load(Ordering::Relaxed),
-                inner.fallback_count.load(Ordering::Relaxed),
-            );
+            let d = inner.diagnostics_snapshot();
             log::info!(
-                "anland.render alive iters={iters} selects={selects} queued={q} fenced={f} bare={b} fallbacks={fb}"
+                "anland.render alive iters={iters} selects={selects} queued={} fenced={} bare={} fallbacks={} requested={} consumed={} no_damage={} dequeue_fail={} acquire_timeouts={} render_timeouts={} queue_fail={} cancel_fail={} deadline_miss={} rebinds={}",
+                d.queued,
+                d.fenced,
+                d.bare,
+                d.fallbacks,
+                d.requested,
+                d.consumed,
+                d.no_damage,
+                d.dequeue_failures,
+                d.acquire_timeouts,
+                d.render_timeouts,
+                d.queue_failures,
+                d.cancel_failures,
+                d.deadline_misses,
+                d.rebinds,
             );
             alive_ns = now;
         }
@@ -1941,6 +2097,7 @@ fn render_loop(inner: Arc<Inner>) {
             continue;
         };
         idle_logged = false;
+        inner.work_consumed.fetch_add(1, Ordering::Relaxed);
         // Consume timing data only for a real work item. A telemetry tick
         // arriving while the desktop is static must not be mistaken for a
         // presentation or cause its timing to be reused by later work.
@@ -1950,6 +2107,7 @@ fn render_loop(inner: Arc<Inner>) {
             .ok()
             .and_then(|pump| pump.as_ref().and_then(sys::VsyncPump::take_timeline));
         if let Some(timeline) = tick_timeline {
+            inner.timeline_hit.fetch_add(1, Ordering::Relaxed);
             let work_sequence = work.sequence;
             let work_generation = work.generation;
             let late_ns = if timeline.deadline_ns > 0 && now > timeline.deadline_ns {
@@ -1957,6 +2115,9 @@ fn render_loop(inner: Arc<Inner>) {
             } else {
                 0
             };
+            if late_ns > 0 {
+                inner.deadline_misses.fetch_add(1, Ordering::Relaxed);
+            }
             log::debug!(
                 "anland.timeline work sequence={} producer_generation={} frame_time_ns={} deadline_ns={} expected_present_ns={} vsync_id={} late_ns={}",
                 work_sequence,
@@ -1967,6 +2128,8 @@ fn render_loop(inner: Arc<Inner>) {
                 timeline.vsync_id,
                 late_ns,
             );
+        } else {
+            inner.timeline_miss.fetch_add(1, Ordering::Relaxed);
         }
         if iters <= 30 {
             let sequence = work.sequence;
@@ -1977,9 +2140,11 @@ fn render_loop(inner: Arc<Inner>) {
         }
         // Selected: this dequeue hands us the slot KWin will render into.
         // (BufferQueue backpressure still applies when all slots are live.)
+        let t_dequeue_ns = sys::now_ns();
         let (anb, acquire) = match unsafe { inner.anw.dequeue(window) } {
             Ok(v) => v,
             Err(r) => {
+                inner.dequeue_failures.fetch_add(1, Ordering::Relaxed);
                 if inner.running.load(Ordering::Acquire) {
                     log::warn!("anland.render dequeue failed: {r}");
                     thread::sleep(Duration::from_millis(100));
@@ -1987,6 +2152,11 @@ fn render_loop(inner: Arc<Inner>) {
                 continue;
             }
         };
+        record_latency(
+            &inner.dequeue_us_total,
+            &inner.dequeue_us_max,
+            sys::now_ns().wrapping_sub(t_dequeue_ns) / 1000,
+        );
         let queue = NativeBufferQueue {
             window,
             api: &inner.anw,
@@ -2004,16 +2174,30 @@ fn render_loop(inner: Arc<Inner>) {
         // presenting a buffer SF hasn't released invites KWin to render
         // into scanout-active memory (GPU hang, proven). On timeout the
         // lease retains the unsignalled fd and transfers it to cancelBuffer.
+        let t_acquire_ns = sys::now_ns();
         if slot.wait_for_acquire(ACQUIRE_WAIT_MS).is_err() {
+            inner.acquire_timeouts.fetch_add(1, Ordering::Relaxed);
+            record_latency(
+                &inner.acquire_us_total,
+                &inner.acquire_us_max,
+                sys::now_ns().wrapping_sub(t_acquire_ns) / 1000,
+            );
             win_stalls += 1;
             let now = sys::now_ns();
             if now.wrapping_sub(log_stall_ns) >= 1_000_000_000 {
                 log::warn!("anland.sink acquire-stall (SF release pending >1s); cancelling");
                 log_stall_ns = now;
             }
-            let _ = slot.cancel(None);
+            if slot.cancel(None) != 0 {
+                inner.cancel_failures.fetch_add(1, Ordering::Relaxed);
+            }
             continue;
         }
+        record_latency(
+            &inner.acquire_us_total,
+            &inner.acquire_us_max,
+            sys::now_ns().wrapping_sub(t_acquire_ns) / 1000,
+        );
         if !inner.window_live.load(Ordering::Acquire) {
             let _ = slot.cancel(None);
             break;
@@ -2029,12 +2213,15 @@ fn render_loop(inner: Arc<Inner>) {
             // Unknown slot (e.g. the held spare surfaced, or SF reallocated
             // buffers): CANCEL back to the free pool, never present — it was
             // not rendered by KWin (see ACQUIRE_WAIT_MS invariant).
+            inner.unknown_slot_cancels.fetch_add(1, Ordering::Relaxed);
             let now = sys::now_ns();
             if iters <= 30 || now.wrapping_sub(log_unknown_ns) >= 1_000_000_000 {
                 log::info!("anland.sink unknown-slot cancel-back (SF may have reallocated)");
                 log_unknown_ns = now;
             }
-            let _ = slot.cancel(None);
+            if slot.cancel(None) != 0 {
+                inner.cancel_failures.fetch_add(1, Ordering::Relaxed);
+            }
             continue;
         };
         // select_dmabuf: shm write + eventfd signal under io_lock.
@@ -2055,12 +2242,15 @@ fn render_loop(inner: Arc<Inner>) {
                     }
                 }
                 _ => {
+                    inner.gen_mismatch_cancels.fetch_add(1, Ordering::Relaxed);
                     let now = sys::now_ns();
                     if iters <= 60 || now.wrapping_sub(log_mismatch_ns) >= 1_000_000_000 {
                         log::info!("anland.sink gen-mismatch cancel-back cur={cur_gen}");
                         log_mismatch_ns = now;
                     }
-                    let _ = slot.cancel(None);
+                    if slot.cancel(None) != 0 {
+                        inner.cancel_failures.fetch_add(1, Ordering::Relaxed);
+                    }
                     continue;
                 }
             }
@@ -2071,8 +2261,10 @@ fn render_loop(inner: Arc<Inner>) {
         // fence that was already satisfied above.
         slot.begin_render();
         // refresh_done: 5s poll on our fence dup, then non-blocking recvmsg.
+        let t_render_ns = sys::now_ns();
         let rfence = refresh_done(&inner, cur_fence.as_ref(), work);
         if rfence == FENCE_LOST {
+            inner.render_timeouts.fetch_add(1, Ordering::Relaxed);
             log::warn!(
                 "anland.render fence lost (generation died); retiring surface without cancelBuffer"
             );
@@ -2096,11 +2288,13 @@ fn render_loop(inner: Arc<Inner>) {
             break;
         }
         if rfence == FENCE_NO_DAMAGE {
+            inner.frames_no_damage.fetch_add(1, Ordering::Relaxed);
             selects += 1;
             let cur_sgen = *inner.surface_gen.lock().unwrap();
             if inner.rebind_active.load(Ordering::Acquire)
                 || !surface_geometry::generation_completion_allowed(frame_sgen, cur_sgen)
             {
+                inner.stale_gen_cancels.fetch_add(1, Ordering::Relaxed);
                 log::info!(
                     "anland.render stale-generation cancel-back no-damage frame_sgen={frame_sgen} sgen={cur_sgen}"
                 );
@@ -2117,6 +2311,7 @@ fn render_loop(inner: Arc<Inner>) {
             // was acquire-satisfied above, so -1 is the only valid cancel fd.
             let c = slot.cancel(None);
             if c != 0 {
+                inner.cancel_failures.fetch_add(1, Ordering::Relaxed);
                 log::warn!("anland.render no-damage cancelBuffer failed: {c}");
             }
             log_fps_window(
@@ -2150,15 +2345,25 @@ fn render_loop(inner: Arc<Inner>) {
         if inner.rebind_active.load(Ordering::Acquire)
             || !surface_geometry::generation_completion_allowed(frame_sgen, cur_sgen)
         {
+            inner.stale_gen_cancels.fetch_add(1, Ordering::Relaxed);
             log::info!(
                 "anland.render stale-generation cancel-back frame_sgen={frame_sgen} sgen={cur_sgen}"
             );
-            let _ = slot.cancel(rfence_owned);
+            if slot.cancel(rfence_owned) != 0 {
+                inner.cancel_failures.fetch_add(1, Ordering::Relaxed);
+            }
             continue;
         }
         slot.complete_render();
+        let t_queue_ns = sys::now_ns();
         let q = slot.queue_rendered(rfence_owned);
+        record_latency(
+            &inner.render_us_total,
+            &inner.render_us_max,
+            t_queue_ns.wrapping_sub(t_render_ns) / 1000,
+        );
         if q != 0 {
+            inner.queue_failures.fetch_add(1, Ordering::Relaxed);
             log::warn!("anland.render queueBuffer failed: {q}");
         } else {
             inner.frames_queued.fetch_add(1, Ordering::Relaxed);
@@ -2234,6 +2439,13 @@ fn render_loop(inner: Arc<Inner>) {
             // Anland backend requested this work explicitly; presentation is
             // not invented by a VSYNC tick.
             let comp_ns = sys::now_ns().wrapping_sub(t_select_ns);
+            log::debug!(
+                "anland.lat sequence={} producer_generation={} comp_us={} fenced={}",
+                work.sequence,
+                work.generation,
+                comp_ns / 1000,
+                rfence >= 0,
+            );
             win_frames += 1;
             win_comp_us += comp_ns / 1000;
             win_comp_max_us = win_comp_max_us.max(comp_ns / 1000);
@@ -2501,6 +2713,7 @@ fn event_loop(inner: Arc<Inner>) {
                 let generation = wanted.generation;
                 let accepted = inner.work.lock().unwrap().accept(cur_gen, wanted);
                 if accepted {
+                    inner.work_requested.fetch_add(1, Ordering::Relaxed);
                     log::debug!(
                         "anland.event FRAME_WANTED sequence={} generation={}",
                         sequence,
@@ -2516,6 +2729,7 @@ fn event_loop(inner: Arc<Inner>) {
                     }
                     let _ = sys::eventfd_write(&inner.wake, 1);
                 } else {
+                    inner.work_rejected.fetch_add(1, Ordering::Relaxed);
                     log::warn!(
                         "anland.event stale/invalid FRAME_WANTED sequence={} generation={}",
                         sequence,
@@ -2853,5 +3067,26 @@ mod tests {
                 generation: 1,
             }
         ));
+    }
+
+    #[test]
+    fn latency_recorder_accumulates_total_and_max() {
+        let total = AtomicU64::new(0);
+        let max = AtomicU64::new(0);
+        record_latency(&total, &max, 10);
+        record_latency(&total, &max, 30);
+        record_latency(&total, &max, 20);
+        assert_eq!(total.load(Ordering::Relaxed), 60);
+        assert_eq!(max.load(Ordering::Relaxed), 30);
+    }
+
+    #[test]
+    fn diagnostics_snapshot_starts_at_zero() {
+        let snapshot = AnlandDiagnostics::default();
+        assert_eq!(snapshot.queued, 0);
+        assert_eq!(snapshot.requested, 0);
+        assert_eq!(snapshot.no_damage, 0);
+        assert_eq!(snapshot.deadline_misses, 0);
+        assert_eq!(snapshot.dequeue_us_max, 0);
     }
 }
