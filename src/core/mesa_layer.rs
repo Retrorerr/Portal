@@ -14,8 +14,7 @@
 //! validity alone never relabels an old tree as a new pin.
 
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -264,14 +263,22 @@ fn require_file_or_in_layer_symlink(layer: &Path, rel: &str) -> anyhow::Result<(
 /// validate AND the internal identity file must exactly match the expected
 /// version + SHA. A structurally valid tree from any other pin is invalid
 /// here and must never be relabelled by rewriting the external marker.
-pub fn validate_layer_dir(layer: &Path, expected_version: &str, expected_sha: &str) -> anyhow::Result<()> {
+pub fn validate_layer_dir(
+    layer: &Path,
+    expected_version: &str,
+    expected_sha: &str,
+) -> anyhow::Result<()> {
     validate_structure(layer)?;
     validate_identity(layer, expected_version, expected_sha)?;
     Ok(())
 }
 
 /// Check the internal identity file against the expected pin.
-pub fn validate_identity(layer: &Path, expected_version: &str, expected_sha: &str) -> anyhow::Result<()> {
+pub fn validate_identity(
+    layer: &Path,
+    expected_version: &str,
+    expected_sha: &str,
+) -> anyhow::Result<()> {
     let path = layer.join(IDENTITY_REL);
     let content = fs::read_to_string(&path)
         .map_err(|_| anyhow::anyhow!("mesa layer missing internal identity ({IDENTITY_REL})"))?;
@@ -734,7 +741,11 @@ mod tests {
         // structure: an old pin must never validate as the current one.
         fs::write(root.join(IDENTITY_REL), identity_content("99.9", S)).unwrap();
         assert!(validate_layer_dir(&root, V, S).is_err());
-        fs::write(root.join(IDENTITY_REL), identity_content(V, "0".repeat(64).as_str())).unwrap();
+        fs::write(
+            root.join(IDENTITY_REL),
+            identity_content(V, "0".repeat(64).as_str()),
+        )
+        .unwrap();
         assert!(validate_layer_dir(&root, V, S).is_err());
         fs::remove_file(root.join(IDENTITY_REL)).unwrap();
         assert!(validate_layer_dir(&root, V, S).is_err());
@@ -750,9 +761,9 @@ mod tests {
         // layer; in-layer symlinks must validate.
         let t = tempfile::tempdir().unwrap();
         valid_tree(t.path(), "mesa-kgsl-layer");
-        let kgsl = t.path().join(
-            "mesa-kgsl-layer/usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so",
-        );
+        let kgsl = t
+            .path()
+            .join("mesa-kgsl-layer/usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so");
         assert!(kgsl.exists());
         validate_layer_dir(&t.path().join("mesa-kgsl-layer"), V, S).unwrap();
         // An escaping symlink must still be rejected.

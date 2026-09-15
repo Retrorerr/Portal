@@ -27,8 +27,8 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        mpsc::{self, Sender},
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Sender},
         Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
@@ -170,7 +170,9 @@ impl SetupFailure {
             SetupFailureKind::Storage => "Free some storage and tap Retry.",
             SetupFailureKind::Verification => "The download could not be verified. Tap Retry.",
             SetupFailureKind::Extraction => "Debian could not be unpacked safely. Tap Retry.",
-            SetupFailureKind::Graphics => "Portal's graphics support could not be prepared. Tap Retry.",
+            SetupFailureKind::Graphics => {
+                "Portal's graphics support could not be prepared. Tap Retry."
+            }
             SetupFailureKind::Filesystem => "Portal could not write its setup files. Tap Retry.",
             SetupFailureKind::Unsupported => "This device cannot run Portal.",
             SetupFailureKind::Stage => "Portal could not finish setup. Tap Retry.",
@@ -280,7 +282,8 @@ impl SetupRegistration {
         let Ok(mut sink) = self.sink.lock() else {
             return None;
         };
-        sink.senders.retain(|sender| sender.send(message.clone()).is_ok());
+        sink.senders
+            .retain(|sender| sender.send(message.clone()).is_ok());
         Some(sink.android_app.clone())
     }
 }
@@ -461,9 +464,7 @@ fn setup_debian_runtime(options: &SetupOptions) -> StageOutput {
 fn setup_renderer_mode(_options: &SetupOptions) -> StageOutput {
     match crate::android::anland::ensure_renderer_mode() {
         Ok(_) => None,
-        Err(error) => Some(thread::spawn(move || -> anyhow::Result<()> {
-            Err(error)
-        })),
+        Err(error) => Some(thread::spawn(move || -> anyhow::Result<()> { Err(error) })),
     }
 }
 
@@ -622,7 +623,10 @@ fn validate_firefox_anland_config(fs_root: &Path) -> anyhow::Result<()> {
     );
 
     let mut checked = 0usize;
-    for dir in [fs_root.join("usr/lib/firefox"), fs_root.join("usr/lib/firefox-esr")] {
+    for dir in [
+        fs_root.join("usr/lib/firefox"),
+        fs_root.join("usr/lib/firefox-esr"),
+    ] {
         if !dir.is_dir() {
             continue;
         }
@@ -781,10 +785,7 @@ fn sync_crash_handler(fs_root: &Path) -> anyhow::Result<()> {
 /// repair routine. It refreshes only root-owned session assets and graphics
 /// integration; Debian package state and all user home/configuration files
 /// remain untouched.
-fn sync_anland_required_session_files(
-    fs_root: &Path,
-    ui_scale: i32,
-) -> anyhow::Result<()> {
+fn sync_anland_required_session_files(fs_root: &Path, ui_scale: i32) -> anyhow::Result<()> {
     sync_guest_session_directories(fs_root)?;
     sync_firefox_config(fs_root);
     sync_portal_runtime_assets(fs_root, ui_scale);
@@ -2382,11 +2383,9 @@ fn fix_xkb_symlink(_options: &SetupOptions) -> StageOutput {
                     // Both are inside the chroot, so strip the fs_root prefix
                     let xkb_inside = Path::new("/usr/share/X11/xkb");
                     let target_inside = Path::new("/usr/share/xkeyboard-config-2");
-                    let rel_target = diff_paths(
-                        target_inside,
-                        xkb_inside.parent().unwrap_or(Path::new("/")),
-                    )
-                        .unwrap_or_else(|| target_inside.to_path_buf());
+                    let rel_target =
+                        diff_paths(target_inside, xkb_inside.parent().unwrap_or(Path::new("/")))
+                            .unwrap_or_else(|| target_inside.to_path_buf());
                     log::info!(
                         "Fixing with new relative symlink: {} -> {}",
                         xkb_path.display(),
@@ -2404,7 +2403,8 @@ fn fix_xkb_symlink(_options: &SetupOptions) -> StageOutput {
                     }
                     if let Err(error) = fs::rename(&temporary, &xkb_path) {
                         let _ = fs::remove_file(&temporary);
-                        let message = format!("Failed to install relative symlink for xkb: {error}");
+                        let message =
+                            format!("Failed to install relative symlink for xkb: {error}");
                         return Some(thread::spawn(move || Err(anyhow::anyhow!(message))));
                     }
                 }
@@ -2532,7 +2532,10 @@ fn publish_repair_success(registration: &SetupRegistration) {
             "Anland graphics ready. Restarting Plasma…",
         ),
     );
-    diagnostics::host_event("anland-repair-complete", "targeted graphics repair committed");
+    diagnostics::host_event(
+        "anland-repair-complete",
+        "targeted graphics repair committed",
+    );
     crate::android::utils::webview_handoff::wake_event_loop();
 }
 
@@ -2598,11 +2601,7 @@ fn run_anland_repair_inner(registration: &SetupRegistration) -> anyhow::Result<(
             };
             publish_repair_snapshot(
                 &progress_registration,
-                ProvisioningSnapshot::update(
-                    ProvisioningPhase::Configuring,
-                    82,
-                    display_message,
-                ),
+                ProvisioningSnapshot::update(ProvisioningPhase::Configuring, 82, display_message),
             );
         })?;
     }
@@ -2667,8 +2666,7 @@ fn invoke_stage(
     name: &'static str,
     stage: &SetupStage,
     options: &SetupOptions,
-)
-    -> Result<StageOutput, SetupFailure> {
+) -> Result<StageOutput, SetupFailure> {
     diagnostics::setup_stage(index, name, "start");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage(options)));
     match result {
@@ -2759,9 +2757,8 @@ fn finalise_installation(registration: &SetupRegistration) -> Result<(), SetupFa
             "Finalising Portal installation…",
         ),
     );
-    let renderer = crate::android::anland::ensure_renderer_mode().map_err(|error| {
-        SetupFailure::from_detail(2, "renderer-mode", format!("{error:#}"))
-    })?;
+    let renderer = crate::android::anland::ensure_renderer_mode()
+        .map_err(|error| SetupFailure::from_detail(2, "renderer-mode", format!("{error:#}")))?;
     if matches!(renderer, crate::android::anland::RendererKind::Anland)
         && !super::mesa_layer::is_provisioned()
     {
@@ -2774,7 +2771,9 @@ fn finalise_installation(registration: &SetupRegistration) -> Result<(), SetupFa
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
     artifact
         .mark_installation_complete(Path::new(PRODUCTION_FS_ROOT))
-        .map_err(|error| SetupFailure::from_detail(11, "installation-marker", format!("{error:#}")))?;
+        .map_err(|error| {
+            SetupFailure::from_detail(11, "installation-marker", format!("{error:#}"))
+        })?;
     if !artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)) {
         return Err(SetupFailure::from_detail(
             11,
@@ -2823,11 +2822,9 @@ fn run_installation(registration: SetupRegistration) {
             publish_snapshot(&registration, snapshot);
             diagnostics::host_event("setup-complete", "all guest provisioning stages completed");
             if let Some(on_complete) = registration.completion_callback() {
-                if let Err(payload) =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        on_complete();
-                    }))
-                {
+                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    on_complete();
+                })) {
                     log::error!(
                         "Portal setup handoff callback panicked after installation commit: {}",
                         panic_text(payload.as_ref())
@@ -2848,12 +2845,18 @@ fn set_registration(
     state: InstallOperationState,
     snapshot: ProvisioningSnapshot,
 ) {
-    let (active_registration, active_snapshot) = if let Ok(mut coordinator) = setup_coordinator().lock()
-    {
-        if coordinator.state == InstallOperationState::Running {
-            if let Some(active_registration) = coordinator.registration.clone() {
-                active_registration.rebind_from(&registration);
-                (active_registration, coordinator.snapshot.clone())
+    let (active_registration, active_snapshot) =
+        if let Ok(mut coordinator) = setup_coordinator().lock() {
+            if coordinator.state == InstallOperationState::Running {
+                if let Some(active_registration) = coordinator.registration.clone() {
+                    active_registration.rebind_from(&registration);
+                    (active_registration, coordinator.snapshot.clone())
+                } else {
+                    coordinator.registration = Some(registration.clone());
+                    coordinator.state = state;
+                    coordinator.snapshot = snapshot.clone();
+                    (registration, snapshot)
+                }
             } else {
                 coordinator.registration = Some(registration.clone());
                 coordinator.state = state;
@@ -2861,14 +2864,8 @@ fn set_registration(
                 (registration, snapshot)
             }
         } else {
-            coordinator.registration = Some(registration.clone());
-            coordinator.state = state;
-            coordinator.snapshot = snapshot.clone();
             (registration, snapshot)
-        }
-    } else {
-        (registration, snapshot)
-    };
+        };
     publish_snapshot(&active_registration, active_snapshot);
 }
 
@@ -2912,7 +2909,8 @@ pub fn begin_install() -> bool {
             })) {
                 Ok(_) => true,
                 Err(payload) => {
-                    let failure = SetupFailure::from_panic(0, "setup-coordinator", payload.as_ref());
+                    let failure =
+                        SetupFailure::from_panic(0, "setup-coordinator", payload.as_ref());
                     publish_failure(&registration, &failure);
                     false
                 }
@@ -2960,9 +2958,7 @@ pub fn repair_enable_anland() -> bool {
         let Ok(mut coordinator) = anland_repair_coordinator().lock() else {
             return false;
         };
-        if coordinator.state == AnlandRepairState::Running
-            || coordinator.result.is_some()
-        {
+        if coordinator.state == AnlandRepairState::Running || coordinator.result.is_some() {
             (false, coordinator.snapshot.clone())
         } else {
             coordinator.state = AnlandRepairState::Running;
@@ -3011,13 +3007,16 @@ fn attach_to_anland_repair(
     registration: &SetupRegistration,
     progress: &Arc<Mutex<u16>>,
 ) -> Option<ProvisioningSnapshot> {
-    let snapshot = anland_repair_coordinator().lock().ok().and_then(|coordinator| {
-        if coordinator.state == AnlandRepairState::Running || coordinator.result.is_some() {
-            Some(coordinator.snapshot.clone())
-        } else {
-            None
-        }
-    })?;
+    let snapshot = anland_repair_coordinator()
+        .lock()
+        .ok()
+        .and_then(|coordinator| {
+            if coordinator.state == AnlandRepairState::Running || coordinator.result.is_some() {
+                Some(coordinator.snapshot.clone())
+            } else {
+                None
+            }
+        })?;
     let active_registration = setup_coordinator()
         .lock()
         .ok()
@@ -3167,7 +3166,9 @@ pub fn setup_with_completion(
         diagnostics::host_event("setup-unsupported", "PRoot support probe failed");
         return PolarBearBackend::WebView(WebviewBackend::unsupported(android_app));
     }
-    let _ = sender.send(SetupMessage::Progress("✅ Your device is supported!".to_string()));
+    let _ = sender.send(SetupMessage::Progress(
+        "✅ Your device is supported!".to_string(),
+    ));
 
     let registration = SetupRegistration::new(
         android_app.clone(),
@@ -3196,8 +3197,7 @@ pub fn setup_with_completion(
     if matches!(
         existing_operation,
         Some((InstallOperationState::Running, _))
-    )
-    {
+    ) {
         let _ = set_registration(
             registration,
             InstallOperationState::Running,
@@ -3266,11 +3266,8 @@ pub fn setup_with_completion(
                 match build_wayland_backend(android_app) {
                     Ok(backend) => return backend,
                     Err(error) => {
-                        let failure = SetupFailure::from_detail(
-                            12,
-                            "wayland-backend",
-                            format!("{error:#}"),
-                        );
+                        let failure =
+                            SetupFailure::from_detail(12, "wayland-backend", format!("{error:#}"));
                         publish_failure(&registration, &failure);
                         let mut backend = WebviewBackend::build(receiver, progress);
                         backend.error = ErrorVariant::Setup(failure.user_message);

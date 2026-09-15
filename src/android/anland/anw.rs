@@ -209,7 +209,9 @@ impl AnwApi {
             // Avoid turning a corrupt platform out-param into an unbounded
             // memset while still allowing the largest supported Pad 3 mode.
             if bytes > 512 * 1024 * 1024 {
-                return Err(format!("black-buffer mapping is implausibly large: {bytes} bytes"));
+                return Err(format!(
+                    "black-buffer mapping is implausibly large: {bytes} bytes"
+                ));
             }
             std::ptr::write_bytes(out.bits.cast::<u8>(), 0, bytes);
             Ok(())

@@ -155,12 +155,7 @@ fn overlay_class<'local>(
     activity: &JObject,
 ) -> jni::errors::Result<JClass<'local>> {
     let loader = env
-        .call_method(
-            activity,
-            "getClassLoader",
-            "()Ljava/lang/ClassLoader;",
-            &[],
-        )?
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
         .l()?;
     let name = env.new_string(OVERLAY_DOTTED_CLASS)?;
     let class = env

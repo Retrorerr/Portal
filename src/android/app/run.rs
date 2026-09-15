@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
 use super::build::{PolarBearApp, PolarBearBackend};
 use crate::android::{
     accessibility::{self, AppUserEvent},
@@ -27,6 +25,8 @@ use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::Transform;
 use smithay::wayland::shell::xdg::ToplevelSurface;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
@@ -369,7 +369,9 @@ fn resume_anland(
                 backend.anland = Some(session);
             }
             Err(error) => {
-                log::error!("anland.session=start failed (stable QPainter path untouched): {error}");
+                log::error!(
+                    "anland.session=start failed (stable QPainter path untouched): {error}"
+                );
                 accessibility::set_runtime_active(false);
                 event_loop.set_control_flow(ControlFlow::Wait);
                 return false;
@@ -390,7 +392,11 @@ fn resume_anland(
             "anland.rotate surface-attach epoch={} sgen=1 screen={w}x{h} ptr={:p} guest={}",
             session.surface_epoch(),
             session.native_window_ptr(),
-            if existing_session { "preserved" } else { "launch" },
+            if existing_session {
+                "preserved"
+            } else {
+                "launch"
+            },
         );
     }
     accessibility::set_runtime_active(true);
@@ -494,9 +500,7 @@ fn forward_anland_input(
             log::info!("anland.input button code={code:#x} pressed={pressed}");
             session.send_input(&AnlandInput::pointer_button(code, pressed));
         }
-        WindowEvent::MouseWheel {
-            delta, phase, ..
-        } => {
+        WindowEvent::MouseWheel { delta, phase, .. } => {
             // Scroll-stop terminates live finger streams so KWin emits
             // axis-stop and kinetic scrolling settles (phase arrives with
             // zero deltas from the touchpad state machine).
@@ -517,11 +521,7 @@ fn forward_anland_input(
                     // (kinetic) and applies the Portal Touchpad kcminputrc
                     // settings; the host sends raw buffer-px deltas and must
                     // not scale or invert (no double application).
-                    log::debug!(
-                        "anland.input finger scroll x={:.1} y={:.1}",
-                        pos.x,
-                        pos.y
-                    );
+                    log::debug!("anland.input finger scroll x={:.1} y={:.1}", pos.x, pos.y);
                     if pos.y != 0.0 {
                         session.send_finger_axis(0, pos.y as f32);
                     }
@@ -547,9 +547,7 @@ fn forward_anland_input(
                 ElementState::Pressed => crate::android::anland::protocol::INPUT_ACTION_DOWN,
                 ElementState::Released => crate::android::anland::protocol::INPUT_ACTION_UP,
             };
-            log::info!(
-                "anland.input key action={action} scancode={scancode}"
-            );
+            log::info!("anland.input key action={action} scancode={scancode}");
             session.send_input(&AnlandInput::key(action, scancode as i32));
         }
         _ => {}
@@ -581,7 +579,9 @@ impl PolarBearApp {
         backend.attach_android_app(self.frontend.android_app.clone());
         let token = backend.auth_token();
         let url = match &backend.error {
-            ErrorVariant::None | ErrorVariant::Setup(_) => setup_page_url(backend.socket_port, &token),
+            ErrorVariant::None | ErrorVariant::Setup(_) => {
+                setup_page_url(backend.socket_port, &token)
+            }
             ErrorVariant::Unsupported => runtime_error_page_url(
                 backend.socket_port,
                 &token,
@@ -676,9 +676,7 @@ impl PolarBearApp {
                 // the event loop, which then opens the existing Runtime /
                 // Retry Plasma page.
                 self.pending_runtime_error_page = true;
-                compose_overlay::dismiss_for_runtime_recovery(
-                    &self.frontend.android_app,
-                );
+                compose_overlay::dismiss_for_runtime_recovery(&self.frontend.android_app);
                 if compose_overlay::is_hidden() {
                     self.finish_pending_runtime_error_page();
                 }
@@ -705,7 +703,9 @@ impl PolarBearApp {
                 ErrorVariant::None | ErrorVariant::Setup(_) => {
                     (backend.take_action(WebviewAction::RetrySetup), false)
                 }
-                ErrorVariant::Runtime(_) => (false, backend.take_action(WebviewAction::RetryPlasma)),
+                ErrorVariant::Runtime(_) => {
+                    (false, backend.take_action(WebviewAction::RetryPlasma))
+                }
                 ErrorVariant::Unsupported => (false, false),
             },
             PolarBearBackend::Wayland(_) => (false, false),
@@ -834,8 +834,7 @@ impl PolarBearApp {
                 let runtime = crate::android::runtime::proot::PRootRuntime::active();
                 crate::android::proot::setup::sync_guest_network_config(runtime.rootfs_path());
                 crate::android::proot::setup::mark_anland_repair_handoff_active();
-                let resume_failed = if let PolarBearBackend::Wayland(backend) = &mut self.backend
-                {
+                let resume_failed = if let PolarBearBackend::Wayland(backend) = &mut self.backend {
                     !resume_wayland(backend, event_loop, &self.frontend.android_app)
                 } else {
                     true
@@ -881,19 +880,20 @@ impl PolarBearApp {
         // replaying setup() would turn a successful durable install into a
         // second, failure-prone setup pass.
         let android_app = self.frontend.android_app.clone();
-        let backend =
-            match crate::android::proot::setup::build_committed_wayland_backend(android_app) {
-                Ok(backend) => backend,
-                Err(error) => {
-                    log::error!(
-                        "Committed Portal installation could not build the Wayland backend: {error:#}"
-                    );
-                    self.enter_committed_install_runtime_error(
-                        "Portal is installed, but Plasma could not start. Tap Retry Plasma.",
-                    );
-                    return true;
-                }
-            };
+        let backend = match crate::android::proot::setup::build_committed_wayland_backend(
+            android_app,
+        ) {
+            Ok(backend) => backend,
+            Err(error) => {
+                log::error!(
+                    "Committed Portal installation could not build the Wayland backend: {error:#}"
+                );
+                self.enter_committed_install_runtime_error(
+                    "Portal is installed, but Plasma could not start. Tap Retry Plasma.",
+                );
+                return true;
+            }
+        };
         self.backend = backend;
         let resume_failed = if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             !resume_wayland(backend, event_loop, &self.frontend.android_app)
@@ -960,7 +960,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                     _ => compose_overlay::STATE_IDLE,
                 };
                 compose_overlay::set_compose_state(&app, initial);
-                let target = if is_webview { "setup-pending" } else { "wayland" };
+                let target = if is_webview {
+                    "setup-pending"
+                } else {
+                    "wayland"
+                };
                 log::info!(
                     "compose-spike: eager native startup requested exactly once target={target}; overlay retained"
                 );
@@ -1183,7 +1187,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 if matches!(event, WindowEvent::CloseRequested) {
                     event_loop.exit();
                 } else {
-                    log::debug!("Ignoring Anland window event while surface is suspended: {event:?}");
+                    log::debug!(
+                        "Ignoring Anland window event while surface is suspended: {event:?}"
+                    );
                 }
                 return;
             }

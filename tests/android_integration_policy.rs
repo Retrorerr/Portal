@@ -35,8 +35,7 @@ const ANLAND_SYS_SOURCE: &str = include_str!("../src/android/anland/sys.rs");
 const ANLAND_BROKER_SOURCE: &str = include_str!("../src/android/anland/broker.rs");
 const ANLAND_EVENT_HANDLER_SOURCE: &str =
     include_str!("../src/android/backend/wayland/event_handler.rs");
-const COMPOSE_OVERLAY_RUST_SOURCE: &str =
-    include_str!("../src/android/utils/compose_overlay.rs");
+const COMPOSE_OVERLAY_RUST_SOURCE: &str = include_str!("../src/android/utils/compose_overlay.rs");
 const COMPOSE_OVERLAY_KOTLIN_SOURCE: &str =
     include_str!("../src/android/kotlin/app/polarbear/ComposeOverlay.kt");
 const PORTAL_RETURN_SCREEN_SOURCE: &str =
@@ -738,7 +737,9 @@ fn explicit_anland_repair_is_native_and_does_not_reprovision_debian() {
     // A legacy marker may be upgraded after the graphics transaction succeeds;
     // the repair path never marks a modern install incomplete or invalidates
     // its existing completion marker.
-    assert!(repair.contains("initial_classification == crate::core::provisioning::RuntimeClassification::LegacyPortal"));
+    assert!(repair.contains(
+        "initial_classification == crate::core::provisioning::RuntimeClassification::LegacyPortal"
+    ));
     assert!(repair.contains("artifact.mark_installation_complete(root)"));
 }
 
@@ -756,7 +757,10 @@ fn anland_repair_only_refreshes_portal_owned_session_assets() {
         "sync_crash_handler",
         "validate_required_session_files",
     ] {
-        assert!(helper.contains(required), "repair helper missing {required}");
+        assert!(
+            helper.contains(required),
+            "repair helper missing {required}"
+        );
     }
     for forbidden in [
         "sync_debian_package_management",
@@ -786,11 +790,14 @@ fn anland_repair_revalidates_mesa_kwin_firefox_and_session_contract() {
     assert!(ANDROID_SETUP_SOURCE.contains("sync_kwin_anland_overlay_for_repair"));
     assert!(ANDROID_SETUP_SOURCE.contains("bytes == KWIN_ANLAND_LIBRARY"));
     assert!(ANDROID_SETUP_SOURCE.contains("validate_firefox_anland_config"));
-    assert!(ANDROID_SETUP_SOURCE.contains(
-        "Firefox config still contains a Portal-specific XWayland/GPU override"
-    ));
+    assert!(ANDROID_SETUP_SOURCE
+        .contains("Firefox config still contains a Portal-specific XWayland/GPU override"));
     assert!(!ANDROID_SETUP_SOURCE.contains("Firefox Portal GPU preference is missing"));
-    for required in ["MOZ_ENABLE_WAYLAND", "GTK_IM_MODULE", "validate_launch_contract"] {
+    for required in [
+        "MOZ_ENABLE_WAYLAND",
+        "GTK_IM_MODULE",
+        "validate_launch_contract",
+    ] {
         assert!(ANLAND_ENV_SOURCE.contains(required));
     }
     // KWin-only acceleration overrides are scoped at the compositor wrapper,
@@ -890,7 +897,10 @@ fn anland_suspend_retires_only_the_surface_and_preserves_the_guest_session() {
         "surface_epoch.store(0",
         "broker=preserved guest=preserved",
     ] {
-        assert!(suspend.contains(required), "surface suspend missing {required}");
+        assert!(
+            suspend.contains(required),
+            "surface suspend missing {required}"
+        );
     }
 
     let stop = ANLAND_CONSUMER_SOURCE
@@ -1008,9 +1018,8 @@ fn anland_surface_resume_failures_use_committed_runtime_recovery() {
     assert!(resumed.contains("let anland_resume = matches!"));
     assert!(resumed.contains("enter_committed_install_runtime_error"));
     assert!(resumed.contains("Anland could not reattach"));
-    assert!(ANDROID_SETUP_RUN_SOURCE.contains(
-        "Portal is installed, but Wayland lost its renderer. Tap Retry Plasma."
-    ));
+    assert!(ANDROID_SETUP_RUN_SOURCE
+        .contains("Portal is installed, but Wayland lost its renderer. Tap Retry Plasma."));
     // The recovery helper stops/reaps the session and swaps to the existing
     // runtime-error page; it contains no provisioning-marker mutation.
     let recovery = ANDROID_SETUP_RUN_SOURCE
@@ -1079,20 +1088,23 @@ fn return_to_plasma_anland_affordance_is_inline_and_native_state_driven() {
 
 #[test]
 fn return_repair_morph_gates_only_the_shared_reveal_and_reuses_runtime_recovery() {
-    assert!(PORTAL_LAUNCH_TRANSITION_SOURCE.contains(
-        "eligible = resolved && setupReady && desktopReady && !returnRepairBlocked"
-    ));
+    assert!(PORTAL_LAUNCH_TRANSITION_SOURCE
+        .contains("eligible = resolved && setupReady && desktopReady && !returnRepairBlocked"));
     assert!(PORTAL_LAUNCH_TRANSITION_SOURCE.contains("onRepairBlockedChanged"));
     assert!(PORTAL_RETURN_SCREEN_SOURCE.contains("requestAnlandRepairRecovery()"));
     assert!(COMPOSE_OVERLAY_KOTLIN_SOURCE.contains("nativeRequestAnlandRepairRecovery"));
     assert!(COMPOSE_OVERLAY_RUST_SOURCE.contains("take_anland_repair_recovery_request"));
     assert!(ANDROID_SETUP_RUN_SOURCE.contains("handle_anland_repair_recovery_request"));
-    assert!(ANDROID_SETUP_RUN_SOURCE.contains(
-        "Portal is installed, but Anland graphics repair failed. Tap Retry Plasma."
-    ));
+    assert!(ANDROID_SETUP_RUN_SOURCE
+        .contains("Portal is installed, but Anland graphics repair failed. Tap Retry Plasma."));
     // There is one shared PortalRevealVeil: repair does not create a second
     // dismissal/reveal animation or bypass the real desktop-ready latch.
-    assert_eq!(PORTAL_LAUNCH_TRANSITION_SOURCE.matches("PortalRevealVeil(").count(), 1);
+    assert_eq!(
+        PORTAL_LAUNCH_TRANSITION_SOURCE
+            .matches("PortalRevealVeil(")
+            .count(),
+        1
+    );
     assert!(PORTAL_LAUNCH_TRANSITION_SOURCE.contains("desktopReady"));
 }
 

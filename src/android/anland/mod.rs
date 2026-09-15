@@ -144,10 +144,7 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
 /// use still describe the accelerated Anland/Wayland path.
 pub fn validate_launch_contract() -> anyhow::Result<()> {
     let environment = guest_mesa_env();
-    for (name, value) in [
-        ("MOZ_ENABLE_WAYLAND", "1"),
-        ("GTK_IM_MODULE", "ibus"),
-    ] {
+    for (name, value) in [("MOZ_ENABLE_WAYLAND", "1"), ("GTK_IM_MODULE", "ibus")] {
         anyhow::ensure!(
             environment.iter().any(|(actual_name, actual_value)| {
                 actual_name == name && actual_value == value

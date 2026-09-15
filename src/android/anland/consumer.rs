@@ -114,11 +114,7 @@ struct DequeuedBuffer<'a, Q: BufferQueueOps + ?Sized> {
 }
 
 impl<'a, Q: BufferQueueOps + ?Sized> DequeuedBuffer<'a, Q> {
-    fn new(
-        anb: *mut ANativeWindowBuffer,
-        acquire_fence: i32,
-        queue: &'a Q,
-    ) -> Self {
+    fn new(anb: *mut ANativeWindowBuffer, acquire_fence: i32, queue: &'a Q) -> Self {
         let acquire_fence = if acquire_fence >= 0 {
             // SAFETY: ANativeWindow returned ownership of this fence fd with
             // the successful dequeue call.
@@ -477,7 +473,11 @@ fn install_window(inner: &Arc<Inner>, window: *mut c_void) -> Result<(), String>
 }
 
 fn remove_window(inner: &Arc<Inner>) -> Option<*mut c_void> {
-    inner.window.lock().ok().and_then(|mut window| window.take())
+    inner
+        .window
+        .lock()
+        .ok()
+        .and_then(|mut window| window.take())
 }
 
 fn release_window(inner: &Arc<Inner>) {
@@ -802,11 +802,15 @@ impl AnlandSession {
         // BufferQueue without another launch() call.
         if let Err(error) = collect_buffers(&inner, total, w, h) {
             self.suspend_surface();
-            return Err(format!("collect buffers after Android surface resume: {error}"));
+            return Err(format!(
+                "collect buffers after Android surface resume: {error}"
+            ));
         }
         if let Err(error) = deposit_generation(&inner) {
             self.suspend_surface();
-            return Err(format!("deposit Anland generation after surface resume: {error}"));
+            return Err(format!(
+                "deposit Anland generation after surface resume: {error}"
+            ));
         }
         if let Err(error) = self.start_surface_threads() {
             self.suspend_surface();
@@ -1541,7 +1545,7 @@ fn deposit_generation(inner: &Arc<Inner>) -> Result<(), String> {
             _shm_fd: shm_fd,
             shm_ptr: shm_ptr as usize,
             _audio: audio_ours,
-            });
+        });
     }
     inner.work.lock().unwrap().reset_for_connection(id);
     // Move producer ends into the deposit (buf_ready + shm are dup'd here so
@@ -1655,9 +1659,7 @@ fn retire_surface_for_recovery(inner: &Arc<Inner>, expected: u64, reason: &str) 
 fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receiver<u64>) {
     // Wait for the broker to serve our generation (producer picked up fds).
     loop {
-        if !inner.running.load(Ordering::Acquire)
-            || !inner.window_live.load(Ordering::Acquire)
-        {
+        if !inner.running.load(Ordering::Acquire) || !inner.window_live.load(Ordering::Acquire) {
             return;
         }
         match attach_rx.recv_timeout(Duration::from_millis(200)) {
@@ -2296,11 +2298,7 @@ const FENCE_NO_DAMAGE: i32 = -3;
 /// NO_DAMAGE returns FENCE_NO_DAMAGE and is handled by cancelBuffer. Any
 /// sequence/generation mismatch is a fatal protocol loss, never an implicit
 /// "ready" result.
-fn refresh_done(
-    inner: &Arc<Inner>,
-    fence: Option<&OwnedFd>,
-    work: FrameWanted,
-) -> i32 {
+fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, work: FrameWanted) -> i32 {
     let Some(fence) = fence else { return -1 };
     // Emergency software fallback only: cold sessions (nothing ever queued)
     // get a long interruptible budget, because tearing down the generation
@@ -2560,10 +2558,14 @@ fn event_loop(inner: Arc<Inner>) {
                         log::info!("anland.event resources request (camera): unanswered, producer treats as disabled");
                     }
                     OUTPUT_TYPE_SET_CONSUMER_VAR => {
-                        log::info!("anland.event set-consumer-var (pointer capture tracking pending)");
+                        log::info!(
+                            "anland.event set-consumer-var (pointer capture tracking pending)"
+                        );
                     }
                     OUTPUT_TYPE_SCHEDULING => {
-                        log::info!("anland.event scheduling hint (cgroup boost needs root; ignored)");
+                        log::info!(
+                            "anland.event scheduling hint (cgroup boost needs root; ignored)"
+                        );
                     }
                     other => {
                         log::info!("anland.event unknown output type={other}");

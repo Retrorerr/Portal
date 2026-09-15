@@ -349,22 +349,20 @@ mod tests {
         let path = mode_path(temp.path());
         fs::write(&path, "qpainter\n").unwrap();
 
-        let error = set_renderer_mode_with_writer(
-            &path,
-            RendererSelection::Anland,
-            |_path, _contents| Err(anyhow::anyhow!("simulated process death before rename")),
-        );
+        let error =
+            set_renderer_mode_with_writer(&path, RendererSelection::Anland, |_path, _contents| {
+                Err(anyhow::anyhow!("simulated process death before rename"))
+            });
         assert!(error.is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "qpainter\n");
 
-        let error = set_renderer_mode_with_writer(
-            &path,
-            RendererSelection::Anland,
-            |path, contents| {
+        let error =
+            set_renderer_mode_with_writer(&path, RendererSelection::Anland, |path, contents| {
                 crate::core::provisioning::write_atomic(path, contents)?;
-                Err(anyhow::anyhow!("simulated process death after atomic rename"))
-            },
-        );
+                Err(anyhow::anyhow!(
+                    "simulated process death after atomic rename"
+                ))
+            });
         assert!(error.is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "anland\n");
         assert_eq!(

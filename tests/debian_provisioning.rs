@@ -3,8 +3,9 @@ mod provisioning;
 #[path = "../src/core/runtime.rs"]
 mod runtime;
 use provisioning::{
-    begin_installation, InstallOperationState, InstallStart, RuntimeArtifact, IMAGE_MARKER,
-    ProvisioningPhase, ProvisioningSnapshot, IMAGE_READY_MARKER, PARTIAL_ARCHIVE, READY_MARKER,
+    begin_installation, InstallOperationState, InstallStart, ProvisioningPhase,
+    ProvisioningSnapshot, RuntimeArtifact, IMAGE_MARKER, IMAGE_READY_MARKER, PARTIAL_ARCHIVE,
+    READY_MARKER,
 };
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::Path};
@@ -521,7 +522,8 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
     let provisioning = include_str!("../src/core/provisioning.rs");
     let run = include_str!("../src/android/app/run.rs");
     let compose = include_str!("../src/android/kotlin/app/polarbear/ComposeOverlay.kt");
-    let setup_screen = include_str!("../src/android/kotlin/app/polarbear/setup/PortalSetupScreen.kt");
+    let setup_screen =
+        include_str!("../src/android/kotlin/app/polarbear/setup/PortalSetupScreen.kt");
     let config_full = include_str!("../src/core/config.rs");
     // Production defaults live above the unit-test module; legacy migration
     // fixtures below `#[cfg(test)]` intentionally mention old managers.
@@ -613,7 +615,8 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
 }
 
 #[test]
-fn production_runtime_artifact_matches_manifest_and_archive_verification() {    let artifact = RuntimeArtifact::production();
+fn production_runtime_artifact_matches_manifest_and_archive_verification() {
+    let artifact = RuntimeArtifact::production();
     assert_eq!(artifact.version, "debian14-arm64-2026.09.14.2");
     assert_eq!(
         artifact.sha256,
@@ -635,10 +638,9 @@ fn runtime_manifest_provenance_is_optional_and_forward_compatible() {
     // Older manifests without `source_commit` must still parse, newer ones
     // with provenance (and unknown future fields) must be accepted: the
     // serde model has no `deny_unknown_fields` and `source_commit` defaults.
-    let legacy: RuntimeArtifact = serde_json::from_str(
-        r#"{"version":"v","url":"u","sha256":"s","compressed_bytes":1}"#,
-    )
-    .unwrap();
+    let legacy: RuntimeArtifact =
+        serde_json::from_str(r#"{"version":"v","url":"u","sha256":"s","compressed_bytes":1}"#)
+            .unwrap();
     assert_eq!(legacy.source_commit, None);
     let modern: RuntimeArtifact = serde_json::from_str(
         r#"{"version":"v","url":"u","sha256":"s","compressed_bytes":1,"source_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","future_field":42}"#,
@@ -662,7 +664,10 @@ fn runtime_builder_uses_forky_packages_and_publisher_validates_them() {
         "forky-updates",
         "forky-security",
     ] {
-        assert!(builder.contains(pin), "builder missing Forky repository: {pin}");
+        assert!(
+            builder.contains(pin),
+            "builder missing Forky repository: {pin}"
+        );
     }
     let publisher = include_str!("../scripts/publish_runtime_release.py");
     for guard in [
@@ -676,4 +681,3 @@ fn runtime_builder_uses_forky_packages_and_publisher_validates_them() {
         );
     }
 }
-

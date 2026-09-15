@@ -18,7 +18,9 @@ pub use output_state::{read_kwin_output_scale, sync_kwin_output_scale, write_gue
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
-pub use event_handler::{dispatch_wayland, handle, log_presentation_state, poll_anland_convergence};
+pub use event_handler::{
+    dispatch_wayland, handle, log_presentation_state, poll_anland_convergence,
+};
 pub use socket_watcher::WaylandSocketWatcher;
 pub use winit_backend::{
     bind, AndroidFrameTimestampSample, AndroidFrameTimestampSupport, WinitGraphicsBackend,

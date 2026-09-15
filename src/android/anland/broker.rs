@@ -266,7 +266,12 @@ impl Broker {
                 }
                 duped[i] = dup;
             }
-            (deposit.generation, duped, slot.screen.width, slot.screen.height)
+            (
+                deposit.generation,
+                duped,
+                slot.screen.width,
+                slot.screen.height,
+            )
         };
         let hdr = {
             let mut h = [0u8; 8];

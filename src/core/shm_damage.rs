@@ -1645,11 +1645,12 @@ mod tests {
             }
             .clamp_to(buffer)
             .unwrap();
-            let old_cov =
-                old_buffer_to_buffer_verbatim((old_rect.0, old_rect.1, old_rect.2, old_rect.3), buffer)
-                    .unwrap();
-            let misses = !(old_cov.x <= ideal.x
-                && old_cov.x + old_cov.w >= ideal.x + ideal.w);
+            let old_cov = old_buffer_to_buffer_verbatim(
+                (old_rect.0, old_rect.1, old_rect.2, old_rect.3),
+                buffer,
+            )
+            .unwrap();
+            let misses = !(old_cov.x <= ideal.x && old_cov.x + old_cov.w >= ideal.x + ideal.w);
             assert!(
                 misses,
                 "1.25 far-edge thin must expose old verbatim miss (old {old_cov:?} vs ideal {ideal:?})"

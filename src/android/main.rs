@@ -4,10 +4,8 @@ use crate::{
         app::build::PolarBearApp,
         diagnostics, ime,
         utils::{
-            application_context::ApplicationContext,
-            fullscreen_immersive::keep_screen_on,
-            ndk::run_in_jvm,
-            webview_handoff,
+            application_context::ApplicationContext, fullscreen_immersive::keep_screen_on,
+            ndk::run_in_jvm, webview_handoff,
         },
     },
     core::config,

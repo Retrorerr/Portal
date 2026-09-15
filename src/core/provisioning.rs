@@ -216,15 +216,14 @@ impl RuntimeArtifact {
     fn validate_debian_layout_for_version(root: &Path, version: &str) -> anyhow::Result<()> {
         let os = fs::read_to_string(root.join("usr/lib/os-release"))?;
         let has_expected_version = os.lines().any(|line| {
-            line == format!("VERSION_ID=\"{version}\"")
-                || line == format!("VERSION_ID={version}")
+            line == format!("VERSION_ID=\"{version}\"") || line == format!("VERSION_ID={version}")
         });
         // Current Forky images identify themselves by codename and may omit
         // VERSION_ID while still reporting the authoritative Debian release.
         // Keep the older numeric form for other Debian layouts and accept
         // only the exact Forky codename for the Debian 14 artifact.
-        let has_expected_forky_codename = version == "14"
-            && os.lines().any(|line| line == "VERSION_CODENAME=forky");
+        let has_expected_forky_codename =
+            version == "14" && os.lines().any(|line| line == "VERSION_CODENAME=forky");
         anyhow::ensure!(
             os.lines().any(|l| l == "ID=debian")
                 && (has_expected_version || has_expected_forky_codename),
@@ -318,7 +317,11 @@ impl RuntimeArtifact {
     fn is_migratable_debian13(&self, root: &Path) -> bool {
         matches!(
             Self::read_completion_marker(root),
-            Ok((_, _, CompletionMarkerKind::Legacy | CompletionMarkerKind::Installation))
+            Ok((
+                _,
+                _,
+                CompletionMarkerKind::Legacy | CompletionMarkerKind::Installation
+            ))
         ) && Self::validate_debian_layout_for_version(root, "13").is_ok()
     }
 
@@ -337,7 +340,9 @@ impl RuntimeArtifact {
     /// Whether this exact artifact is fully extracted and safe to promote.
     /// This does not mean that Portal setup is complete.
     pub fn is_image_ready(&self, root: &Path) -> bool {
-        fs::read_to_string(root.join(IMAGE_READY_MARKER)).ok().as_deref()
+        fs::read_to_string(root.join(IMAGE_READY_MARKER))
+            .ok()
+            .as_deref()
             == Some(self.identity().as_str())
             && self.validate_image(root).is_ok()
     }
@@ -784,9 +789,7 @@ impl RuntimeArtifact {
     ) -> Option<&'static str> {
         match (classification, previous) {
             (RuntimeClassification::ValidatedImageOnly, false) => Some(IMAGE_ONLY_RUNTIME_PREFIX),
-            (RuntimeClassification::ValidatedImageOnly, true) => {
-                Some(IMAGE_ONLY_PREVIOUS_PREFIX)
-            }
+            (RuntimeClassification::ValidatedImageOnly, true) => Some(IMAGE_ONLY_PREVIOUS_PREFIX),
             (RuntimeClassification::Unknown, false) => Some(UNKNOWN_RUNTIME_PREFIX),
             (RuntimeClassification::Unknown, true) => Some(UNKNOWN_PREVIOUS_PREFIX),
             (RuntimeClassification::Invalid, false) => Some(INVALID_RUNTIME_PREFIX),
@@ -851,21 +854,13 @@ impl RuntimeArtifact {
 
         let mut previous_classification = self.classify_runtime(&previous);
         if path_exists(&previous) && !previous_classification.is_trusted_recovery() {
-            Self::quarantine_untrusted_runtime(
-                base,
-                &previous,
-                previous_classification,
-                true,
-            )?;
+            Self::quarantine_untrusted_runtime(base, &previous, previous_classification, true)?;
             previous_classification = RuntimeClassification::Absent;
         }
 
         let valid_pending = pending
             .iter()
-            .find(|path| {
-                self.classify_runtime(path.as_path())
-                    .is_trusted_recovery()
-            })
+            .find(|path| self.classify_runtime(path.as_path()).is_trusted_recovery())
             .cloned();
         let mut restored_pending = false;
         if !previous_classification.is_trusted_recovery() {
@@ -944,12 +939,7 @@ impl RuntimeArtifact {
         // backup.
         let previous_classification = self.classify_runtime(&previous);
         if path_exists(&previous) && !previous_classification.is_trusted_recovery() {
-            Self::quarantine_untrusted_runtime(
-                base,
-                &previous,
-                previous_classification,
-                true,
-            )?;
+            Self::quarantine_untrusted_runtime(base, &previous, previous_classification, true)?;
         }
 
         let current_classification = self.classify_runtime(root);
@@ -989,12 +979,7 @@ impl RuntimeArtifact {
                 // a non-bootable quarantine name because they may contain
                 // user data; disposable image/invalid debris is cleaned only
                 // after a safe replacement exists.
-                Self::quarantine_untrusted_runtime(
-                    base,
-                    root,
-                    current_classification,
-                    false,
-                )?;
+                Self::quarantine_untrusted_runtime(base, root, current_classification, false)?;
             }
             RuntimeClassification::Absent => {}
         }
@@ -1163,7 +1148,10 @@ impl RuntimeArtifact {
 
         if let Some(length) = response.content_length() {
             anyhow::ensure!(
-                length <= self.compressed_bytes.saturating_sub(if resume { offset } else { 0 }),
+                length
+                    <= self
+                        .compressed_bytes
+                        .saturating_sub(if resume { offset } else { 0 }),
                 "Runtime response exceeds the pinned expected size"
             );
         }
@@ -1416,11 +1404,7 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     write_atomic_with(path, contents, replace_atomic)
 }
 
-fn write_atomic_with<F>(
-    path: &Path,
-    contents: &[u8],
-    replace: F,
-) -> anyhow::Result<()>
+fn write_atomic_with<F>(path: &Path, contents: &[u8], replace: F) -> anyhow::Result<()>
 where
     F: FnOnce(&Path, &Path) -> io::Result<()>,
 {
@@ -1484,7 +1468,8 @@ mod tests {
             header.set_size(value.len() as u64);
             header.set_mode(0o755);
             header.set_cksum();
-            tar.append_data(&mut header, path, value.as_bytes()).unwrap();
+            tar.append_data(&mut header, path, value.as_bytes())
+                .unwrap();
         }
         tar.into_inner().unwrap().finish().unwrap();
         let bytes = fs::read(&archive).unwrap();
@@ -1542,7 +1527,9 @@ mod tests {
 
         write_atomic(&marker, new).unwrap();
         assert_eq!(fs::read(&marker).unwrap(), new);
-        assert!(!path_exists(&temp.path().join(".portal-runtime-complete.tmp")));
+        assert!(!path_exists(
+            &temp.path().join(".portal-runtime-complete.tmp")
+        ));
     }
 
     #[cfg(not(windows))]
@@ -1645,7 +1632,9 @@ mod tests {
         fs::write(previous.join("previous-only"), "proven-good").unwrap();
         extract_image(&artifact, &archive, &staging);
 
-        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+        artifact
+            .promote_staging(temp.path(), &root, &staging)
+            .unwrap();
 
         assert!(artifact.is_image_ready(&root));
         assert_eq!(
@@ -1691,7 +1680,9 @@ mod tests {
         fs::write(previous.join("modern-recovery"), "keep modern recovery").unwrap();
         extract_image(&artifact, &archive, &staging);
 
-        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+        artifact
+            .promote_staging(temp.path(), &root, &staging)
+            .unwrap();
 
         assert!(artifact.is_image_ready(&root));
         assert!(artifact.is_bootable(&previous));
@@ -1733,7 +1724,9 @@ mod tests {
         fs::write(previous.join("previous-only"), "proven-good").unwrap();
         extract_image(&artifact, &archive, &staging);
 
-        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+        artifact
+            .promote_staging(temp.path(), &root, &staging)
+            .unwrap();
 
         assert!(artifact.is_image_ready(&root));
         assert!(artifact.is_bootable(&previous));
@@ -1763,7 +1756,9 @@ mod tests {
         fs::write(pending.join("pending-only"), "proven-pending").unwrap();
         extract_image(&artifact, &archive, &staging);
 
-        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+        artifact
+            .promote_staging(temp.path(), &root, &staging)
+            .unwrap();
 
         assert!(artifact.is_image_ready(&root));
         assert!(artifact.is_bootable(&previous));
@@ -1792,7 +1787,9 @@ mod tests {
         fs::write(previous.join("previous-only"), "known-good").unwrap();
         extract_image(&artifact, &archive, &staging);
 
-        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+        artifact
+            .promote_staging(temp.path(), &root, &staging)
+            .unwrap();
 
         assert!(artifact.is_image_ready(&root));
         assert!(artifact.is_bootable(&previous));
@@ -1801,13 +1798,11 @@ mod tests {
             "known-good"
         );
         assert!(!root.join("untrusted-current").exists());
-        assert!(!fs::read_dir(temp.path())
+        assert!(!fs::read_dir(temp.path()).unwrap().any(|entry| entry
             .unwrap()
-            .any(|entry| entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(INVALID_RUNTIME_PREFIX)));
+            .file_name()
+            .to_string_lossy()
+            .starts_with(INVALID_RUNTIME_PREFIX)));
     }
 
     #[test]
@@ -1824,7 +1819,9 @@ mod tests {
         fs::write(previous.join("previous-only"), "previous").unwrap();
         extract_image(&artifact, &archive, &staging);
 
-        artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+        artifact
+            .promote_staging(temp.path(), &root, &staging)
+            .unwrap();
 
         assert!(artifact.is_image_ready(&root));
         assert!(artifact.is_bootable(&previous));
@@ -1852,7 +1849,9 @@ mod tests {
             fs::rename(&previous, pending_name(temp.path())).unwrap();
             extract_image(&artifact, &archive, &staging);
 
-            artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+            artifact
+                .promote_staging(temp.path(), &root, &staging)
+                .unwrap();
             assert!(artifact.is_image_ready(&root));
             assert!(artifact.is_bootable(&previous));
             assert!(path_exists(&pending_name(temp.path())));
@@ -1874,7 +1873,9 @@ mod tests {
             extract_image(&artifact, &archive, &staging);
             // The current root is valid, the old valid backup is pending, and
             // the next promotion must keep both until the staged image lands.
-            artifact.promote_staging(temp.path(), &root, &staging).unwrap();
+            artifact
+                .promote_staging(temp.path(), &root, &staging)
+                .unwrap();
             assert!(artifact.is_image_ready(&root));
             assert!(artifact.is_bootable(&previous));
             assert!(path_exists(&pending));
@@ -1901,7 +1902,9 @@ mod tests {
             // This is the next-launch recovery path: provision checks the
             // pending rotation before accepting the image-ready live root.
             artifact
-                .provision(temp.path(), |_| panic!("committed staging must not download"))
+                .provision(temp.path(), |_| {
+                    panic!("committed staging must not download")
+                })
                 .unwrap();
             assert!(artifact.is_image_ready(&root));
             assert!(artifact.is_bootable(&previous));

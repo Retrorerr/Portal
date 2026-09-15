@@ -335,21 +335,14 @@ type LooperCallback = unsafe extern "C" fn(
     events: libc::c_int,
     data: *mut libc::c_void,
 ) -> libc::c_int;
-type VsyncCallback = unsafe extern "C" fn(
-    data: *const FrameCallbackData,
-    callback_data: *mut libc::c_void,
-);
-type PostVsyncCallback = unsafe extern "C" fn(
-    *mut libc::c_void,
-    VsyncCallback,
-    *mut libc::c_void,
-);
+type VsyncCallback =
+    unsafe extern "C" fn(data: *const FrameCallbackData, callback_data: *mut libc::c_void);
+type PostVsyncCallback = unsafe extern "C" fn(*mut libc::c_void, VsyncCallback, *mut libc::c_void);
 type GetFrameTime = unsafe extern "C" fn(*const FrameCallbackData) -> i64;
 type GetPreferredTimeline = unsafe extern "C" fn(*const FrameCallbackData) -> usize;
 type GetTimelineCount = unsafe extern "C" fn(*const FrameCallbackData) -> usize;
 type GetTimelineDeadline = unsafe extern "C" fn(*const FrameCallbackData, usize) -> i64;
-type GetTimelineExpectedPresent =
-    unsafe extern "C" fn(*const FrameCallbackData, usize) -> i64;
+type GetTimelineExpectedPresent = unsafe extern "C" fn(*const FrameCallbackData, usize) -> i64;
 type GetTimelineVsyncId = unsafe extern "C" fn(*const FrameCallbackData, usize) -> i64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -426,15 +419,11 @@ fn load_choreo() -> Option<ChoreoApi> {
         }
         macro_rules! load_optional {
             ($name:expr, $ty:ty) => {
-                sym(lib, $name)
-                    .map(|p| std::mem::transmute::<*mut libc::c_void, $ty>(p))
+                sym(lib, $name).map(|p| std::mem::transmute::<*mut libc::c_void, $ty>(p))
             };
         }
         let timeline = match (
-            load_optional!(
-                b"AChoreographer_postVsyncCallback\0",
-                PostVsyncCallback
-            ),
+            load_optional!(b"AChoreographer_postVsyncCallback\0", PostVsyncCallback),
             load_optional!(
                 b"AChoreographerFrameCallbackData_getFrameTimeNanos\0",
                 GetFrameTime
@@ -550,24 +539,14 @@ unsafe extern "C" fn frame_trampoline(_when_ns: i64, data: *mut libc::c_void) {
     holder.count += 1;
     let one: u64 = 1;
     unsafe {
-        libc::write(
-            holder.tick_fd,
-            &one as *const u64 as *const libc::c_void,
-            8,
-        );
+        libc::write(holder.tick_fd, &one as *const u64 as *const libc::c_void, 8);
     }
 }
 
 fn read_eventfd_raw(fd: libc::c_int) -> io::Result<u64> {
     let mut bytes = [0u8; 8];
     loop {
-        let n = unsafe {
-            libc::read(
-                fd,
-                bytes.as_mut_ptr() as *mut libc::c_void,
-                bytes.len(),
-            )
-        };
+        let n = unsafe { libc::read(fd, bytes.as_mut_ptr() as *mut libc::c_void, bytes.len()) };
         if n == bytes.len() as isize {
             return Ok(u64::from_ne_bytes(bytes));
         }
@@ -667,12 +646,7 @@ fn pump_thread_choreo(
             let mut out_fd = 0;
             let mut out_events = 0;
             let mut out_data = std::ptr::null_mut();
-            let r = (api.looper_poll_once)(
-                -1,
-                &mut out_fd,
-                &mut out_events,
-                &mut out_data,
-            );
+            let r = (api.looper_poll_once)(-1, &mut out_fd, &mut out_events, &mut out_data);
             if r == REQUEST_IDENT {
                 let _ = read_eventfd_raw(request_fd);
                 if request_pending.load(Ordering::Acquire)
@@ -775,11 +749,7 @@ fn pump_thread_timer(
         }
         let one: u64 = 1;
         unsafe {
-            libc::write(
-                tick_fd,
-                &one as *const u64 as *const libc::c_void,
-                8,
-            );
+            libc::write(tick_fd, &one as *const u64 as *const libc::c_void, 8);
         }
         // A late wake produces one tick, then skips directly to the next
         // future deadline. Never burst stale ticks and never accumulate drift.
@@ -817,8 +787,7 @@ unsafe extern "C" fn vsync_trampoline(
     let timeline = VsyncTimeline {
         frame_time_ns: unsafe { (functions.frame_time)(data) }.max(0) as u64,
         deadline_ns: unsafe { (functions.deadline)(data, preferred) }.max(0) as u64,
-        expected_present_ns: unsafe { (functions.expected_present)(data, preferred) }
-            .max(0) as u64,
+        expected_present_ns: unsafe { (functions.expected_present)(data, preferred) }.max(0) as u64,
         vsync_id: unsafe { (functions.vsync_id)(data, preferred) },
     };
     if let Ok(mut target) = holder.timeline.lock() {
@@ -827,11 +796,7 @@ unsafe extern "C" fn vsync_trampoline(
     holder.count += 1;
     let one: u64 = 1;
     unsafe {
-        libc::write(
-            holder.tick_fd,
-            &one as *const u64 as *const libc::c_void,
-            8,
-        );
+        libc::write(holder.tick_fd, &one as *const u64 as *const libc::c_void, 8);
     }
 }
 
@@ -841,9 +806,7 @@ fn advance_timer_deadline(next_deadline: &mut u64, now: u64, period_ns: u64) {
         return;
     }
     let elapsed_periods = now.saturating_sub(*next_deadline) / period_ns + 1;
-    *next_deadline = next_deadline.saturating_add(
-        period_ns.saturating_mul(elapsed_periods),
-    );
+    *next_deadline = next_deadline.saturating_add(period_ns.saturating_mul(elapsed_periods));
 }
 
 /// On-demand display-VSYNC telemetry source for producer pacing.
