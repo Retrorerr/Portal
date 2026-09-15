@@ -31,6 +31,7 @@ const RENDERER_POLICY_SOURCE: &str = include_str!("../src/core/renderer_policy.r
 const MESA_LAYER_SOURCE: &str = include_str!("../src/android/proot/mesa_layer.rs");
 const ANDROID_SETUP_RUN_SOURCE: &str = include_str!("../src/android/app/run.rs");
 const ANLAND_CONSUMER_SOURCE: &str = include_str!("../src/android/anland/consumer.rs");
+const ANLAND_SYS_SOURCE: &str = include_str!("../src/android/anland/sys.rs");
 const ANLAND_BROKER_SOURCE: &str = include_str!("../src/android/anland/broker.rs");
 const ANLAND_EVENT_HANDLER_SOURCE: &str =
     include_str!("../src/android/backend/wayland/event_handler.rs");
@@ -354,12 +355,16 @@ fn anland_hardware_acceleration_is_the_only_active_graphics_path() {
     // old software/QPainter graphics stack is not active.
     assert!(ANLAND_ENV_SOURCE.contains("libgallium-26.3.0-devel.so"));
     assert!(!ANLAND_ENV_SOURCE.contains("libgallium-26.2.0-devel.so"));
-    assert!(!KWIN_WRAPPER_SOURCE.contains("kwin-glmode"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("kwin-glmode"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("mode=sw"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("LOCALDESKTOP_KWIN_GL_DEBUG"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("unset KWIN_GL_DEBUG"));
     assert!(KWIN_WRAPPER_SOURCE.contains("export ANLAND_NO_DRM_DEVICE=1"));
     assert!(!KWIN_WRAPPER_SOURCE.contains("unset ANLAND_NO_DRM_DEVICE"));
     // No software-forcing default in the session environment: the env
-    // constructor body (up to the next item) must be free of it; docs and
-    // fallback plumbing elsewhere may still mention it.
+    // constructor body (up to the next item) must be free of it. The explicit
+    // troubleshooting marker is interpreted only by the KWin wrapper and
+    // mirrored by the Anland consumer.
     let env_fn = ANLAND_ENV_SOURCE
         .find("pub fn guest_mesa_env()")
         .expect("guest_mesa_env must exist");
@@ -418,16 +423,30 @@ fn anland_session_forces_wayland_qpa_for_plasma_clients() {
 }
 
 #[test]
-fn anland_presentation_is_vsync_driven_while_surface_is_live() {
-    // Presentation must follow every display tick while the Android surface
-    // is active. The control fd can interrupt lifecycle/rebind waits, but it
-    // must never become an alternate presentation clock.
+fn anland_presentation_is_work_driven_and_vsync_cannot_invent_work() {
+    // A producer request is the only presentation source. The Android VSYNC
+    // fd remains available for optional timeline telemetry, while the control
+    // wake can authorize rendering as soon as FRAME_WANTED is accepted.
     assert!(ANLAND_CONSUMER_SOURCE.contains("sys::poll_two(&tick, &wake, -1)"));
-    assert!(ANLAND_CONSUMER_SOURCE.contains("if !tick_ready"));
-    assert!(ANLAND_CONSUMER_SOURCE.contains("control wake only"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("if !tick_ready && !wake_ready"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("FRAME_WANTED"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("inner.work.lock().unwrap().take(cur_gen)"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("work-driven"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("vsync_telemetry={tick_ready}"));
+    assert!(ANLAND_CONSUMER_SOURCE.contains("pump.request()"));
+    assert!(ANLAND_SYS_SOURCE.contains("VsyncPump::request"));
+    assert!(ANLAND_SYS_SOURCE.contains("ALooper_addFd"));
+    assert!(ANLAND_SYS_SOURCE.contains("request_pending"));
+    assert!(ANLAND_SYS_SOURCE.contains("advance_timer_deadline"));
+    assert!(!ANLAND_SYS_SOURCE.contains("pending_requests"));
+    assert!(!ANLAND_SYS_SOURCE.contains("if !callback_pending.load(Ordering::Acquire)"));
 
-    // The old idle gate is intentionally retired: no CPU heuristic, burst
-    // deadline, or heartbeat may decide whether KWin gets another buffer.
+    // Static desktop: no producer request means no dequeue/select/queue cycle,
+    // regardless of how many display ticks arrive.
+    assert!(ANLAND_CONSUMER_SOURCE.contains("no FRAME_WANTED"));
+
+    // No CPU heuristic, burst deadline, heartbeat, or self-sustaining demand
+    // gate may decide whether KWin gets another buffer.
     for obsolete in [
         "demand_until_ns",
         "HEARTBEAT_NS",
@@ -771,15 +790,20 @@ fn anland_repair_revalidates_mesa_kwin_firefox_and_session_contract() {
         "Firefox config still contains a Portal-specific XWayland/GPU override"
     ));
     assert!(!ANDROID_SETUP_SOURCE.contains("Firefox Portal GPU preference is missing"));
+    for required in ["MOZ_ENABLE_WAYLAND", "GTK_IM_MODULE", "validate_launch_contract"] {
+        assert!(ANLAND_ENV_SOURCE.contains(required));
+    }
+    // KWin-only acceleration overrides are scoped at the compositor wrapper,
+    // not exported to every guest client or treated as XWayland proof.
     for required in [
         "MESA_LOADER_DRIVER_OVERRIDE",
         "GALLIUM_DRIVER",
         "FD_FORCE_KGSL",
-        "MOZ_ENABLE_WAYLAND",
-        "ANLAND_SOCKET",
-        "validate_launch_contract",
+        "FD_KGSL_ENABLE_DMABUF",
+        "TURNIP_KMD",
+        "xwayland_force=unset",
     ] {
-        assert!(ANLAND_ENV_SOURCE.contains(required));
+        assert!(KWIN_WRAPPER_SOURCE.contains(required));
     }
     for required in [
         "usr/local/lib/portal-anland/kwin_wayland",

@@ -558,7 +558,7 @@ private fun SetupHeaderIdentity(
                 )
             }
             Text(
-                text = "Powered by Debian 13 · KDE Plasma",
+                text = "Powered by Debian 14 (Forky) · KDE Plasma",
                 fontSize = 13.sp,
                 color = palette.textMuted,
             )

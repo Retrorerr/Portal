@@ -24,6 +24,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "assets/debian-runtime.json"
+GRAPHICS_STACK_LOCK_PATH = REPO_ROOT / "assets/graphics-stack-lock.json"
 
 REQUIRED_FILES = [
     "usr/lib/os-release",
@@ -41,13 +42,6 @@ REQUIRED_FILES = [
 FORBIDDEN_FILES = [
     "usr/bin/pacman",
 ]
-
-FORKY_REQUIRED_PACKAGE_PREFIXES = {
-    "plasma-desktop": "4:6.7.",
-    "kwin-wayland": "4:6.7.",
-    "xwayland": "2:24.",
-}
-
 
 def compute_sha256_and_size(path: Path) -> tuple[str, int]:
     size = path.stat().st_size
@@ -108,7 +102,7 @@ def validate_archive(archive_path: Path, expected_version: str) -> None:
             if forb in found_members:
                 raise RuntimeError(f"Archive contains forbidden entry: {forb}")
 
-        # 5. Current Forky desktop package versions. The Portal-specific
+        # 5. Exact Forky graphics package versions. The Portal-specific
         # Anland binary is installed by the APK, not substituted into the
         # Debian package archive.
         validate_forky_packages(tar, found_members)
@@ -135,16 +129,39 @@ def parse_dpkg_status_versions(tar: tarfile.TarFile, found_members: dict) -> dic
 
 
 def validate_forky_packages(tar: tarfile.TarFile, found_members: dict) -> None:
-    print("Validating Forky desktop package versions...")
+    print("Validating exact Forky graphics package versions...")
     versions = parse_dpkg_status_versions(tar, found_members)
-    for package, prefix in FORKY_REQUIRED_PACKAGE_PREFIXES.items():
+    try:
+        graphics_lock = json.loads(GRAPHICS_STACK_LOCK_PATH.read_text(encoding="utf-8"))
+        expected_packages = graphics_lock["packages"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise RuntimeError(
+            f"Cannot load exact graphics package lock {GRAPHICS_STACK_LOCK_PATH}: {error}"
+        ) from error
+    for package, expected in expected_packages.items():
         version = versions.get(package, "")
-        if not version.startswith(prefix):
+        expected_version = expected["Version"]
+        if version != expected_version:
             raise RuntimeError(
                 f"Forky validation failed: {package} version is {version!r}, "
-                f"expected a current Forky {prefix} release"
+                f"expected exact locked version {expected_version!r}"
             )
-    print("Forky desktop package versions validated; Anland is supplied by Portal assets.")
+    print("Exact Forky graphics package versions validated; Anland is supplied by Portal assets.")
+
+
+def validate_graphics_stack_lock() -> None:
+    """Fail closed unless every active graphics-stack pin matches its bytes."""
+    verifier = REPO_ROOT / "scripts" / "verify_graphics_stack.py"
+    if not verifier.is_file():
+        raise RuntimeError(f"Missing graphics stack verifier: {verifier}")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("portal_graphics_stack_verifier", verifier)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load graphics stack verifier: {verifier}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.verify(GRAPHICS_STACK_LOCK_PATH, require_xwayland_proof=True)
 
 
 class ReleaseLookupError(RuntimeError):
@@ -373,6 +390,7 @@ def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | N
     print(f"Archive SHA-256:   {digest}")
 
     if not skip_validation:
+        validate_graphics_stack_lock()
         validate_archive(archive_path, version)
 
     # Provenance: pin the exact source commit; never float on `main`.

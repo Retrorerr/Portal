@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "platform": "aarch64-linux-android-host-to-debian-forky-guest",
+  "runtime": {
+    "version": "debian14-arm64-2026.09.14.2",
+    "sha256": "b2e96dda836c62f42bf3e28b799d7bedadcd99f8eb2410654ba0a23c7d750b20",
+    "compressed_bytes": 1129255504
+  },
+  "runtime_manifest_sha256": "c95a33763659791afdf495fe277935deffc5ef66f499faa07df290ec6d5ba0b4",
+  "package_lock_sha256": "1f02188bd4d244e12b186e34798dc25f6ca8962d0fc326fa9a225745f4aa4c8e",
+  "packages": {
+    "kwin-common": {"Version": "4:6.7.4-2", "SHA256": "744d71def52f88a0ada9cb3a7de3827ae172ce37925c1d85b96c5712c67f786e"},
+    "kwin-data": {"Version": "4:6.7.4-2", "SHA256": "1b4a5a54aa018c1944768554ddeab966bf069d140fad74610b5ad2522f7e7c4a"},
+    "kwin-wayland": {"Version": "4:6.7.4-2", "SHA256": "98ba0f0435aa82d8aa479fc7e0f4061a64e9057175fbf91bc903cb834fa5ff14"},
+    "libdrm-common": {"Version": "2.4.134-3", "SHA256": "89127ee70fd643f0f1c1fe294bfda51315ea4e92234500211f9956351706363f"},
+    "libdrm2": {"Version": "2.4.134-3", "SHA256": "1df69d19f0b01148abbd589e80db5b4aa39bf4e0b9409ca1b3fa458acea2baa0"},
+    "libegl1": {"Version": "1.7.0-3+b1", "SHA256": "31f34f7f8759435361bf58393eb43cb302cc374ab2f79a22455ed2fe7b1bc2c1"},
+    "libgbm1": {"Version": "26.1.6-1", "SHA256": "f6b23f5de6abff3893a06f9488fb39f284fc7e0f1065628f578fa38ec5f9acf3"},
+    "libgl1-mesa-dri": {"Version": "26.1.6-1", "SHA256": "788fe0a52f5452715aef785c6212af8ca4fe36a6a2d074e3f698e51554ef03f1"},
+    "libkf6windowsystem6": {"Version": "6.28.0-2", "SHA256": "1a2d70449dd251f978495b4a6b2043e42a3e3e3eaac4a201d81a1005bd052051"},
+    "libkwin6": {"Version": "4:6.7.4-2", "SHA256": "7ccd724a25a890735584cd944cf0f3583f89ed16127482f928b8c90b50fe8872"},
+    "libqt6gui6": {"Version": "6.10.2+dfsg-16", "SHA256": "9d38b97c02b506bd037016490f2c3c9e0c151a7ddc7a6e9996891522d16a2aaa"},
+    "libwayland-server0": {"Version": "1.26.0-1", "SHA256": "0044e695c781228f17e620abd9821fa255a855a6c77d0031f20005ddb8bac715"},
+    "mesa-vulkan-drivers": {"Version": "26.1.6-1", "SHA256": "d1b09ca770457035f374a2e7eea90e034c20b4799fde89e54122fd5bec5d9694"},
+    "plasma-desktop": {"Version": "4:6.7.4-1", "SHA256": "af181f816c11f76c72a7afbcd7ef210b5ca4726057d1fdd35a8ee07730a0824d"},
+    "plasma-workspace": {"Version": "4:6.7.4-1", "SHA256": "fcc2c26af07394c739f1b93f0dcb5713b6133d9ce35478c30d68874cfa1be966"},
+    "xwayland": {"Version": "2:24.1.13-1", "SHA256": "9271669791c586cee4eaa90d50f13b8c5a762873bbe4186f9ee9f7476d0ba8d6"}
+  },
+  "kwin": {
+    "source": {
+      "project": "KDE/kwin",
+      "tag": "v6.7.4",
+      "commit": "8438567a741826da8b7536a8b10eb3af8fc8820d",
+      "archive_sha256": "00a199f8c78407a0630ec2c0873be90bbe4f9e9f31bd0f97c7057cdf224cb180"
+    },
+    "assets": [
+      {"role": "KWin Wayland executable", "path": "assets/kwin-forky-anland-arm64/kwin_wayland", "bytes": 1537392, "sha256": "1b63756a70e57c656b6103ec4faf0a2c6b0fd68d08b3988fce70902e53229e72", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "311650c865dd61274c70ce21e1d3ad745a836153"}},
+      {"role": "Portal Anland KWin library", "path": "assets/kwin-forky-anland-arm64/libkwin.so.6.7.4", "bytes": 10368432, "sha256": "6c0ee844635efd3c7251f7baabb4246867945ec55c7c9ebb6fdd1918d055da56", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "b9c7032e0994c2fe694a3df0fcca27f7ab025f9d"}}
+    ],
+    "patches": [
+      {"role": "KWin patch 0001", "path": "patches/kwin/0001-core-gpumanager-tolerate-missing-udev-monitor.patch", "sha256": "3a037dd3ec62b086c01ab1533ee427bfbc840c2cd9712a9cf326f4932b38dd41"},
+      {"role": "KWin patch 0002", "path": "patches/kwin/0002-qpa-survive-backing-store-allocation-failure.patch", "sha256": "f4df844b8394334a167bef82487498c9cc812799bb46d07c630152c36d9df7b1"},
+      {"role": "KWin patch 0003", "path": "patches/kwin/0003-opengl-accept-crlf-shader-lines.patch", "sha256": "1687ac1d170a293a7dd675feb6bda2b13555d12ce3c19cac2f0e79ba4ecc5ef2"},
+      {"role": "KWin patch 0004", "path": "patches/kwin/0004-opengl-guard-null-egl-device.patch", "sha256": "f774825530e67bdb21931ab58788c0f3d43604ddf797fda53e44afc6081d4e38"},
+      {"role": "KWin patch 0005", "path": "patches/kwin/0005-compositor-tolerate-null-drm-device.patch", "sha256": "01c9ee0f459a182213165c182295ab36163b42eed00bd60dbeb1363b516abdb6"}
+    ]
+    ,"source_overlay": {"path": "patches/kwin/anland-6.7.4", "sha256": "ec9207a23f6564b2c1203b04692f4497ffaed8d8ae10ee0f453fccbdff9a67fc", "protocol_version": 3}
+  },
+  "xwayland": {
+    "active": "debian-package:xwayland",
+    "hardware_proof": {
+      "status": "blocked",
+      "reason": "Pad 3 evidence shows stock Forky XWayland glamor has no GBM Wayland interface and no completed KGSL proof",
+      "release_gate": "require_verified_device_evidence",
+      "required": "Forky-native XWayland KGSL/DRI3 build plus physical Pad 3 proof with no llvmpipe/softpipe/software EGL"
+    },
+    "quarantined_candidate": {"path": "assets/xwayland-candidate/Xwayland", "sha256": "b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d", "active": false}
+  },
+  "mesa_layer": {
+    "origin": "lfdevs/mesa-for-android-container",
+    "version": "26.3.0-20260824-ubuntu-resolute",
+    "url": "https://github.com/lfdevs/mesa-for-android-container/releases/download/mesa-26.3.0-devel-20260824/mesa-for-android-container_26.3.0-devel-20260824_ubuntu_resolute_arm64.tar.gz",
+    "compressed_bytes": 12069639,
+    "sha256": "ee762f0855c47f9a245df3ce53a46d40b2240ede9b5c9ddf7606e724362fec77"
+  },
+  "protocol": {
+    "common_origin": "SuperTurtleDev/anland",
+    "common_commit": "aab290e015ca9e28fa64ad6c4ad127250fc4da1b",
+    "native_consumer_origin": "lfdevs/anland-termux",
+    "native_consumer_commit": "23c77435032e7d9df00f40b90ecee04f1fc4ad9e"
+  }
+}

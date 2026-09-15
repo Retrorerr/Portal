@@ -27,4 +27,7 @@ diff --git a/src/opengl/glshader.cpp b/src/opengl/glshader.cpp
 +        }
          if (line.startsWith("#version")) {
              // this is intentionally ignored!
-         } else if (line.startsWith("#include \"") && line.endsWith("\"")) {
+        } else if (line.startsWith("#include \"") && line.endsWith("\"")) {
+            static constexpr ssize_t includeLength = QByteArrayView("#include \"").size();
+-- 
+2.45.2

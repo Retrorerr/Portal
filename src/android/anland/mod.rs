@@ -106,31 +106,26 @@ pub fn guest_socket_path() -> &'static str {
     "/tmp/anland/display.sock"
 }
 
-/// Mesa freedreno/KGSL environment for the Anland guest session.
+/// Guest-wide client environment for the Anland session.
 ///
-/// This mirrors the upstream `anland-termux` session recipe
-/// (`MESA_LOADER_DRIVER_OVERRIDE=kgsl TURNIP_KMD=kgsl GALLIUM_DRIVER=freedreno
-/// FD_FORCE_KGSL=1 XWAYLAND_FORCE_KGSL_SURFACELESS=1`). `EGL_PLATFORM` is
-/// deliberately NOT set (it forces QtQuick software fallback with
-/// OffscreenQuickView texture failures).
+/// The Mesa/KGSL overrides are exported by the provisioned KWin wrapper at
+/// the compositor boundary, not here. `EGL_PLATFORM` is deliberately NOT set
+/// (it forces QtQuick software fallback with OffscreenQuickView texture
+/// failures).
 ///
 /// The active hardware path needs the Forky Anland KWin assets and the
 /// verified `mesa-kgsl-layer` overlay (the KGSL winsys is not supplied by
 /// stock Debian Mesa). KWin uses KGSL-backed surfaceless EGL while Anland
-/// owns Android dmabuf presentation; the retired drmshim/QPainter path is
-/// not selected.
-/// - `XWAYLAND_FORCE_KGSL_SURFACELESS=1`: keeps XWayland's KGSL glamor path
-///   available for applications that genuinely require X11.
+/// owns Android dmabuf presentation; the retired QPainter path is not
+/// selected.
 /// - `MOZ_ENABLE_WAYLAND=1`: Firefox uses its normal native Wayland backend.
+///
+/// The old lfdevs XWayland-specific force flag is intentionally absent. The
+/// active Forky stock XWayland package has not yet produced a valid KGSL
+/// glamor proof on Pad 3, so exporting that variable globally would only hide
+/// the unresolved P0 XWayland path behind an ignored environment knob.
 pub fn guest_mesa_env() -> Vec<(String, String)> {
     vec![
-        ("MESA_LOADER_DRIVER_OVERRIDE".into(), "kgsl".into()),
-        ("GALLIUM_DRIVER".into(), "freedreno".into()),
-        ("FD_FORCE_KGSL".into(), "1".into()),
-        // PR #85 opt-in: expose linear dma-buf import/export on KGSL.
-        ("FD_KGSL_ENABLE_DMABUF".into(), "1".into()),
-        ("TURNIP_KMD".into(), "kgsl".into()),
-        ("XWAYLAND_FORCE_KGSL_SURFACELESS".into(), "1".into()),
         // Firefox is a normal native Wayland client. XWayland remains
         // installed and available to other applications, but Portal no
         // longer forces the browser through that compatibility path.
@@ -140,12 +135,6 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         // delete, enter). Qt/Wayland clients are unaffected (QT_IM_MODULE
         // unset keeps native Wayland text-input).
         ("GTK_IM_MODULE".into(), "ibus".into()),
-        ("ANLAND_SOCKET".into(), guest_socket_path().into()),
-        ("ANLAND".into(), "1".into()),
-        ("ANLAND_SKIP_IMPLICIT_SYNC_WAIT".into(), "1".into()),
-        // The audio engine has no host counterpart yet; skip it entirely.
-        ("ANLAND_DISABLE_AUDIO".into(), "1".into()),
-        ("KWIN_GL_DEBUG".into(), "1".into()),
     ]
 }
 
@@ -156,15 +145,8 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
 pub fn validate_launch_contract() -> anyhow::Result<()> {
     let environment = guest_mesa_env();
     for (name, value) in [
-        ("MESA_LOADER_DRIVER_OVERRIDE", "kgsl"),
-        ("GALLIUM_DRIVER", "freedreno"),
-        ("FD_FORCE_KGSL", "1"),
-        ("FD_KGSL_ENABLE_DMABUF", "1"),
-        ("TURNIP_KMD", "kgsl"),
-        ("XWAYLAND_FORCE_KGSL_SURFACELESS", "1"),
         ("MOZ_ENABLE_WAYLAND", "1"),
-        ("ANLAND", "1"),
-        ("ANLAND_SOCKET", guest_socket_path()),
+        ("GTK_IM_MODULE", "ibus"),
     ] {
         anyhow::ensure!(
             environment.iter().any(|(actual_name, actual_value)| {
@@ -199,22 +181,23 @@ pub fn validate_launch_contract() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Guest flag selecting the emergency software-GL fallback (`sw`) instead of
-/// the default hardware-accelerated path. Read by the KWin wrapper (which
-/// forces the surfaceless environment) and mirrored host-side so readiness
-/// and watchdog policy match the actual renderer. Absent (or anything else)
-/// means hardware: genuine fenced evidence is required as usual.
+/// Guest flag selecting the explicit software-GL troubleshooting mode (`sw`)
+/// instead of the default hardware-accelerated path. The wrapper and the
+/// Android consumer read the same marker, so readiness/watchdog policy cannot
+/// silently disagree with the renderer actually launched.
 pub fn kwin_glmode_flag_path() -> std::path::PathBuf {
     std::path::Path::new(crate::core::config::PRODUCTION_FS_ROOT)
         .join("var/lib/localdesktop/kwin-glmode")
 }
 
-/// True only when the explicit emergency software fallback is requested.
-/// The hardware path (default) keeps the tight fence watchdog and requires
-/// fenced READY evidence; the software path (llvmpipe, CPU-synchronous)
-/// labels bare frames honestly and allows a long cold first-frame budget.
+/// True only when the explicit `sw` troubleshooting marker is present.
+/// Hardware remains the default and is the only release mode; software mode
+/// labels CPU-synchronous frames honestly and is intentionally visible in the
+/// KWin log and readiness evidence.
 pub fn software_gl_fallback_requested() -> bool {
-    false
+    std::fs::read_to_string(kwin_glmode_flag_path())
+        .map(|value| value.trim() == "sw")
+        .unwrap_or(false)
 }
 
 /// Bind mounts for the Anland guest session: broker socket dir + Mesa overlay.

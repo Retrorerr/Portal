@@ -151,15 +151,47 @@ impl Broker {
     }
 
     fn handshake_loop(&self, fd: &OwnedFd) -> io::Result<()> {
-        // First message must be PRODUCER_HELLO (8 bytes, no fds).
+        // Protocol v3 makes the version/features payload part of the control
+        // handshake. Rejecting here prevents an incompatible producer from
+        // ever receiving the consumer dma-buf fds.
         let mut hdr = [0u8; 8];
         sys::recv_all(fd, &mut hdr)?;
         let msg_type = u32::from_ne_bytes(hdr[0..4].try_into().unwrap());
-        if msg_type != CTRL_MSG_PRODUCER_HELLO {
-            log::warn!("anland.broker unexpected first message type={msg_type}");
+        let size = u32::from_ne_bytes(hdr[4..8].try_into().unwrap()) as usize;
+        let expected_hello_size = std::mem::size_of::<ProtocolHello>();
+        if msg_type != CTRL_MSG_PRODUCER_HELLO || size != expected_hello_size {
+            log::warn!(
+                "anland.broker unexpected first message type={msg_type} size={size}; expected type={} size={expected_hello_size}",
+                CTRL_MSG_PRODUCER_HELLO
+            );
+            Self::send_protocol_reject(fd)?;
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "expected PRODUCER_HELLO",
+            ));
+        }
+        let mut hello_bytes = [0u8; 8];
+        sys::recv_all(fd, &mut hello_bytes)?;
+        let hello = ProtocolHello {
+            version: u32::from_ne_bytes(hello_bytes[0..4].try_into().unwrap()),
+            features: u32::from_ne_bytes(hello_bytes[4..8].try_into().unwrap()),
+        };
+        let hello_version = hello.version;
+        let hello_features = hello.features;
+        if hello_version != PROTOCOL_VERSION
+            || (hello_features & PROTOCOL_REQUIRED_FEATURES) != PROTOCOL_REQUIRED_FEATURES
+        {
+            log::warn!(
+                "anland.broker rejecting protocol version={} features=0x{:x}; required version={} features=0x{:x}",
+                hello_version,
+                hello_features,
+                PROTOCOL_VERSION,
+                PROTOCOL_REQUIRED_FEATURES
+            );
+            Self::send_protocol_reject(fd)?;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "incompatible Anland protocol",
             ));
         }
         let screen = self.slot.lock().map(|s| s.screen).unwrap_or(ScreenInfo {
@@ -178,7 +210,11 @@ impl Broker {
         out[16..20].copy_from_slice(&sfmt.to_ne_bytes());
         out[20..24].copy_from_slice(&sref.to_ne_bytes());
         sys::send_all(fd, &out)?;
-        log::info!("anland.broker producer hello; screen={sw}x{sh} refresh_mhz={sref}");
+        log::info!(
+            "anland.broker producer hello protocol={} features=0x{:x}; screen={sw}x{sh} refresh_mhz={sref}",
+            hello_version,
+            hello_features
+        );
         // Serve PICKUP_FDS until the producer goes away.
         loop {
             let mut hdr = [0u8; 8];
@@ -186,11 +222,27 @@ impl Broker {
                 return Ok(());
             }
             let msg_type = u32::from_ne_bytes(hdr[0..4].try_into().unwrap());
+            let size = u32::from_ne_bytes(hdr[4..8].try_into().unwrap()) as usize;
             if msg_type != CTRL_MSG_PICKUP_FDS {
+                if size > 0 && size <= (1 << 20) {
+                    let mut ignored = vec![0u8; size];
+                    if sys::recv_all(fd, &mut ignored).is_err() {
+                        return Ok(());
+                    }
+                }
                 continue;
             }
             self.serve_pickup(fd)?;
         }
+    }
+
+    fn send_protocol_reject(fd: &OwnedFd) -> io::Result<()> {
+        let mut reject = [0u8; 8 + 8];
+        reject[0..4].copy_from_slice(&CTRL_MSG_REJECT.to_ne_bytes());
+        reject[4..8].copy_from_slice(&8u32.to_ne_bytes());
+        reject[8..12].copy_from_slice(&PROTOCOL_VERSION.to_ne_bytes());
+        reject[12..16].copy_from_slice(&PROTOCOL_REQUIRED_FEATURES.to_ne_bytes());
+        sys::send_all(fd, &reject)
     }
 
     fn serve_pickup(&self, fd: &OwnedFd) -> io::Result<()> {

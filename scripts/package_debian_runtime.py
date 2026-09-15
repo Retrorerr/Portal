@@ -53,11 +53,11 @@ def build(output, refresh_lock_requested=False, version=VERSION, with_anland=Tru
     if refresh_lock_requested:
         refresh_package_lock()
     packages = json.loads(LOCK.read_text())
-    # Forky supplies the desktop packages.  Anland is Portal's active runtime
+    # Forky supplies the desktop packages. Anland is Portal's active runtime
     # integration and is installed by the APK-owned KWin assets; never replace
-    # current Debian KWin/XWayland packages with the old lfdevs/Trixie bundle.
-    # Keep the parameter for callers of the historical builder, but make it a
-    # no-op so an old --no-anland invocation cannot select obsolete packages.
+    # current Debian KWin/XWayland packages with the retired lfdevs/Trixie
+    # bundle. Keep the parameter for compatibility with old callers, but make
+    # it a no-op so it cannot select obsolete packages.
     del with_anland
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="portal-runtime-") as temporary:
@@ -117,7 +117,7 @@ if __name__ == "__main__":
     parser.add_argument("--lock-only", action="store_true", help="Refresh the package lock without building a rootfs archive")
     parser.add_argument("--version", default=VERSION, help="Runtime version marker (never reuse a published version)")
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--no-anland", action="store_true", help="Build the pure Debian base without the lfdevs overlay")
+    parser.add_argument("--no-anland", action="store_true", help="Deprecated compatibility flag; Forky package closure is always used")
     args = parser.parse_args()
     if args.lock_only:
         refresh_package_lock()

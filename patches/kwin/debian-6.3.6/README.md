@@ -1,4 +1,7 @@
-# Debian 13 KWin 6.3.6
+# Archived Debian 13 KWin 6.3.6
+
+This directory is retained for forensic comparison only. It is not part of
+the active Debian 14/Forky build, APK assets, or runtime provisioning path.
 
 Apply `0001` (input provenance/lifecycle) and `0002` (QPainter buffer damage)
 to KWin v6.3.6 (`b8de4329447824b1b1e7a36b3a57acfd069f1423`), in order. Keep Debian's
@@ -34,10 +37,11 @@ The test uses real Qt QPainter rasterization, checks every changed pixel against
 the exported damage, and verifies the former coordinate formulas fail. It covers
 native, reduced, rotated and odd dimensions, six scales, and five positions.
 
-Strip a copy of `build/bin/libkwin.so.6.3.6` and stage it in
-`assets/kwin-debian-arm64/libkwin.so.6.3.6` before building the APK. Portal's
-provisioning installs the packaged library for both existing runtime-B
-and clean provisioning; device-only source edits are not a deployment mechanism.
+Strip a copy of `build/bin/libkwin.so.6.3.6` and, only for historical
+comparison, place it under
+`assets/legacy-graphics/kwin-debian-arm64/libkwin.so.6.3.6` only. The active
+provisioning path never installs this historical library; device-only source
+edits are not a deployment mechanism.
 
 Portal additionally propagates forced full texture synchronization to output
 damage, and acquires the current EGL backbuffer before querying its age. Neither

@@ -1,10 +1,10 @@
 # Anland unified libkwin (Debian KWin 6.3.6 + Anland backend + Portal Touchpad)
 
 The Anland GPU session does NOT use the QPainter overlay
-(`assets/kwin-debian-arm64`, nested backend only). It needs a libkwin that
+(`assets/legacy-graphics/kwin-debian-arm64`, nested backend only). It needs a libkwin that
 contains the Anland backend AND the Portal Touchpad port. That library is
 built on-device (Debian 13 ARM64 guest) and shipped in this repo as
-`assets/kwin-anland-arm64/libkwin.so.6.3.6` (stripped).
+`assets/legacy-graphics/kwin-anland-arm64/libkwin.so.6.3.6` (stripped).
 
 ## On-device source tree (source of truth)
 
@@ -60,12 +60,11 @@ cp build/bin/libkwin.so.6.3.6 /tmp/libkwin-anland.so.6.3.6
 strip --strip-unneeded /tmp/libkwin-anland.so.6.3.6
 ```
 
-Pull `/tmp/libkwin-anland.so.6.3.6` to the host as
-`assets/kwin-anland-arm64/libkwin.so.6.3.6`. Portal syncs it on every
-launch to `/usr/local/lib/portal-anland/` (see `sync_kwin_anland_overlay`
-in `src/android/proot/setup.rs`); the kwin wrapper puts that dir first on
-`LD_LIBRARY_PATH` for Anland sessions only. The QPainter overlay, the
-distro libkwin, and `/usr/lib` symlinks are never touched by this path.
+Pull `/tmp/libkwin-anland.so.6.3.6` to the host only as an audit artifact
+under `assets/legacy-graphics/kwin-anland-arm64/`. Portal no longer syncs
+this retired library; the active setup path stages only the exact Forky pair
+under `assets/kwin-forky-anland-arm64/`. The QPainter overlay, the distro
+libkwin, and `/usr/lib` symlinks are never touched by the active path.
 
 ## Notes
 
@@ -74,15 +73,16 @@ distro libkwin, and `/usr/lib` symlinks are never touched by this path.
 * `INPUT_TYPE_TEXT_INPUT` (9) already reaches `inputMethod()->commitText()`
   in this backend, so Wayland commits have a channel independent of the
   `--inputmethod` bridge.
-* QPainter sessions keep using `assets/kwin-debian-arm64` (damage fix);
+* QPainter sessions historically used `assets/legacy-graphics/kwin-debian-arm64` (damage fix);
   this tree was deliberately NOT given the QPainter damage patch, so the
   unified lib must not serve QPainter sessions.
 
 ## Reproducibility status (A/B validated, sources incomplete)
 
-The shipped `assets/kwin-anland-arm64/libkwin.so.6.3.6` (10,492,360 bytes)
-is the canonical default and is physically validated (fenced GPU frames,
-full touchpad battery — see input parity records). What is proven about it:
+The archived `assets/legacy-graphics/kwin-anland-arm64/libkwin.so.6.3.6`
+(10,492,360 bytes) was the former canonical default and was physically
+validated (fenced GPU frames, full touchpad battery — see input parity
+records). It is not an active release input. What was proven about it:
 
 * contains the lfdevs Anland backend (39 `AnlandBackend` refs, same count
   as the distro `-95` lib; `--anland` works; ABI loads with the pinned
@@ -111,4 +111,5 @@ What is NOT yet checked in (do not silently replace the proven asset):
   ARM64 environment with KWin/Qt6/KF6 development packages, then stripped.
   Until such a rebuild is validated (AnlandBackend present, Portal input
   behavior identical, SONAME `libkwin.so.6`, hardware session green), the
-  shipped binary stays authoritative.
+  archived binary remains audit evidence only and cannot become an active
+  release input.

@@ -1,13 +1,13 @@
-//! Project Anland wire protocol (Portal-native Rust).
+//! Portal Anland protocol v3.
 //!
-//! Byte-compatible reimplementation of `third_party/anland/common/protocol.h`
-//! (SuperTurtleDev/anland, `legacy`). Only the frame steady-state subset is
-//! implemented: handshake, dma-buf set exchange, buffer select, render fence,
-//! fixed-size input events and output-event draining. Audio/camera service fds
-//! are deferred (guest runs with `ANLAND_DISABLE_AUDIO=1`; service requests
-//! are logged and left unanswered, which the producer treats as disabled).
+//! The fixed-size transport was derived from
+//! `third_party/anland/common/protocol.h` (SuperTurtleDev/anland, `legacy`),
+//! then extended by Portal for version negotiation, work-driven presentation,
+//! explicit no-damage completion, and sequence/generation fencing. The
+//! producer and consumer reject incompatible control-protocol versions before
+//! any dma-buf fds are exchanged.
 //!
-//! Layout is verified at compile time against the C header sizes.
+//! Layout is verified at compile time against the active KWin C header.
 
 use std::mem::size_of;
 
@@ -20,6 +20,12 @@ pub const CTRL_MSG_REJECT: u32 = 8;
 pub const CTRL_MSG_PICKUP_FDS: u32 = 9;
 pub const CTRL_MSG_FDS_READY: u32 = 10;
 
+pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_FEATURE_FRAME_WORK: u32 = 1 << 0;
+pub const PROTOCOL_FEATURE_NO_DAMAGE: u32 = 1 << 1;
+pub const PROTOCOL_REQUIRED_FEATURES: u32 =
+    PROTOCOL_FEATURE_FRAME_WORK | PROTOCOL_FEATURE_NO_DAMAGE;
+
 // ---- data channel ----------------------------------------------------------
 
 pub const DATA_MSG_BUF_READY: u32 = 100;
@@ -29,7 +35,15 @@ pub const DATA_MSG_INPUT_EVENT: u32 = 102;
 pub const DATA_MSG_OUTPUT_EVENT: u32 = 103;
 #[allow(dead_code)]
 pub const DATA_MSG_INPUT_EXTEND_FDS: u32 = 104;
+pub const DATA_MSG_FRAME_WANTED: u32 = 105;
 pub const DATA_MSG_BUFS_READY: u32 = 200;
+
+/// Dedicated producer -> consumer fence-channel message types. The message
+/// always carries a sequence and producer generation; only FRAME_DONE may
+/// carry an SCM_RIGHTS render fence. NO_DAMAGE carries no fd and is cancelled
+/// by the consumer rather than queued.
+pub const FENCE_MSG_FRAME_DONE: u32 = 1;
+pub const FENCE_MSG_NO_DAMAGE: u32 = 2;
 
 pub const MAX_BUFS: usize = 8;
 
@@ -92,6 +106,29 @@ pub struct DataMsg {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, Debug)]
+pub struct ProtocolHello {
+    pub version: u32,
+    pub features: u32,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
+pub struct FrameWanted {
+    pub sequence: u64,
+    pub generation: u64,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
+pub struct FenceMsg {
+    pub msg_type: u32,
+    pub reserved: u32,
+    pub sequence: u64,
+    pub generation: u64,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct ScreenInfo {
     pub width: u32,
     pub height: u32,
@@ -129,6 +166,9 @@ pub struct OutputEvent {
 
 const _: [(); 8] = [(); size_of::<CtrlMsg>()];
 const _: [(); 8] = [(); size_of::<DataMsg>()];
+const _: [(); 8] = [(); size_of::<ProtocolHello>()];
+const _: [(); 16] = [(); size_of::<FrameWanted>()];
+const _: [(); 24] = [(); size_of::<FenceMsg>()];
 const _: [(); 16] = [(); size_of::<ScreenInfo>()];
 const _: [(); 28] = [(); size_of::<BufInfo>()];
 const _: [(); 20] = [(); size_of::<InputEvent>()];
@@ -286,6 +326,9 @@ mod tests {
     fn wire_sizes_match_c_header() {
         assert_eq!(size_of::<CtrlMsg>(), 8);
         assert_eq!(size_of::<DataMsg>(), 8);
+        assert_eq!(size_of::<ProtocolHello>(), 8);
+        assert_eq!(size_of::<FrameWanted>(), 16);
+        assert_eq!(size_of::<FenceMsg>(), 24);
         assert_eq!(size_of::<ScreenInfo>(), 16);
         assert_eq!(size_of::<BufInfo>(), 28);
         assert_eq!(size_of::<InputEvent>(), 20);
@@ -344,5 +387,17 @@ mod tests {
     fn hello_slot_count_matches_producer() {
         assert_eq!(HELLO_FD_COUNT, 5);
         assert!(MAX_BUFS <= 8);
+    }
+
+    #[test]
+    fn v3_requires_work_and_no_damage_features() {
+        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(
+            PROTOCOL_REQUIRED_FEATURES,
+            PROTOCOL_FEATURE_FRAME_WORK | PROTOCOL_FEATURE_NO_DAMAGE
+        );
+        assert_eq!(size_of::<ProtocolHello>(), 8);
+        assert_eq!(size_of::<FrameWanted>(), 16);
+        assert_eq!(size_of::<FenceMsg>(), 24);
     }
 }

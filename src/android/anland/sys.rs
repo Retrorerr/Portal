@@ -9,7 +9,7 @@ use std::mem;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock,
 };
 
 // ---------------------------------------------------------------------------
@@ -329,16 +329,66 @@ pub fn now_ns() -> u64 {
 // ---------------------------------------------------------------------------
 
 type FrameCallback64 = unsafe extern "C" fn(frame_time_nanos: i64, data: *mut libc::c_void);
+type FrameCallbackData = libc::c_void;
+type LooperCallback = unsafe extern "C" fn(
+    fd: libc::c_int,
+    events: libc::c_int,
+    data: *mut libc::c_void,
+) -> libc::c_int;
+type VsyncCallback = unsafe extern "C" fn(
+    data: *const FrameCallbackData,
+    callback_data: *mut libc::c_void,
+);
+type PostVsyncCallback = unsafe extern "C" fn(
+    *mut libc::c_void,
+    VsyncCallback,
+    *mut libc::c_void,
+);
+type GetFrameTime = unsafe extern "C" fn(*const FrameCallbackData) -> i64;
+type GetPreferredTimeline = unsafe extern "C" fn(*const FrameCallbackData) -> usize;
+type GetTimelineCount = unsafe extern "C" fn(*const FrameCallbackData) -> usize;
+type GetTimelineDeadline = unsafe extern "C" fn(*const FrameCallbackData, usize) -> i64;
+type GetTimelineExpectedPresent =
+    unsafe extern "C" fn(*const FrameCallbackData, usize) -> i64;
+type GetTimelineVsyncId = unsafe extern "C" fn(*const FrameCallbackData, usize) -> i64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VsyncTimeline {
+    pub frame_time_ns: u64,
+    pub deadline_ns: u64,
+    pub expected_present_ns: u64,
+    pub vsync_id: i64,
+}
+
+#[derive(Clone, Copy)]
+struct TimelineFunctions {
+    post: PostVsyncCallback,
+    frame_time: GetFrameTime,
+    preferred: GetPreferredTimeline,
+    count: GetTimelineCount,
+    deadline: GetTimelineDeadline,
+    expected_present: GetTimelineExpectedPresent,
+    vsync_id: GetTimelineVsyncId,
+}
 
 #[derive(Clone, Copy)]
 struct ChoreoApi {
     _lib: *mut libc::c_void,
     looper_prepare: unsafe extern "C" fn(i32) -> *mut libc::c_void,
+    looper_add_fd: unsafe extern "C" fn(
+        *mut libc::c_void,
+        libc::c_int,
+        libc::c_int,
+        libc::c_int,
+        Option<LooperCallback>,
+        *mut libc::c_void,
+    ) -> libc::c_int,
     looper_poll_once: unsafe extern "C" fn(i32, *mut i32, *mut i32, *mut *mut libc::c_void) -> i32,
     looper_release: unsafe extern "C" fn(*mut libc::c_void),
     get_instance: unsafe extern "C" fn() -> *mut libc::c_void,
     post_frame_callback64:
         unsafe extern "C" fn(*mut libc::c_void, FrameCallback64, *mut libc::c_void),
+    timeline: Option<TimelineFunctions>,
 }
 
 // SAFETY: function pointers loaded once, then only called.
@@ -363,7 +413,7 @@ fn load_choreo() -> Option<ChoreoApi> {
         if lib.is_null() {
             return None;
         }
-        macro_rules! load {
+        macro_rules! load_required {
             ($name:expr, $ty:ty) => {
                 match sym(lib, $name) {
                     Some(p) => std::mem::transmute::<*mut libc::c_void, $ty>(p),
@@ -374,28 +424,95 @@ fn load_choreo() -> Option<ChoreoApi> {
                 }
             };
         }
+        macro_rules! load_optional {
+            ($name:expr, $ty:ty) => {
+                sym(lib, $name)
+                    .map(|p| std::mem::transmute::<*mut libc::c_void, $ty>(p))
+            };
+        }
+        let timeline = match (
+            load_optional!(
+                b"AChoreographer_postVsyncCallback\0",
+                PostVsyncCallback
+            ),
+            load_optional!(
+                b"AChoreographerFrameCallbackData_getFrameTimeNanos\0",
+                GetFrameTime
+            ),
+            load_optional!(
+                b"AChoreographerFrameCallbackData_getPreferredFrameTimelineIndex\0",
+                GetPreferredTimeline
+            ),
+            load_optional!(
+                b"AChoreographerFrameCallbackData_getFrameTimelinesLength\0",
+                GetTimelineCount
+            ),
+            load_optional!(
+                b"AChoreographerFrameCallbackData_getFrameTimelineDeadlineNanos\0",
+                GetTimelineDeadline
+            ),
+            load_optional!(
+                b"AChoreographerFrameCallbackData_getFrameTimelineExpectedPresentationTimeNanos\0",
+                GetTimelineExpectedPresent
+            ),
+            load_optional!(
+                b"AChoreographerFrameCallbackData_getFrameTimelineVsyncId\0",
+                GetTimelineVsyncId
+            ),
+        ) {
+            (
+                Some(post),
+                Some(frame_time),
+                Some(preferred),
+                Some(count),
+                Some(deadline),
+                Some(expected_present),
+                Some(vsync_id),
+            ) => Some(TimelineFunctions {
+                post,
+                frame_time,
+                preferred,
+                count,
+                deadline,
+                expected_present,
+                vsync_id,
+            }),
+            _ => None,
+        };
         Some(ChoreoApi {
             _lib: lib,
-            looper_prepare: load!(
+            looper_prepare: load_required!(
                 b"ALooper_prepare\0",
                 unsafe extern "C" fn(i32) -> *mut libc::c_void
             ),
-            looper_poll_once: load!(
+            looper_add_fd: load_required!(
+                b"ALooper_addFd\0",
+                unsafe extern "C" fn(
+                    *mut libc::c_void,
+                    libc::c_int,
+                    libc::c_int,
+                    libc::c_int,
+                    Option<LooperCallback>,
+                    *mut libc::c_void,
+                ) -> libc::c_int
+            ),
+            looper_poll_once: load_required!(
                 b"ALooper_pollOnce\0",
                 unsafe extern "C" fn(i32, *mut i32, *mut i32, *mut *mut libc::c_void) -> i32
             ),
-            looper_release: load!(
+            looper_release: load_required!(
                 b"ALooper_release\0",
                 unsafe extern "C" fn(*mut libc::c_void)
             ),
-            get_instance: load!(
+            get_instance: load_required!(
                 b"AChoreographer_getInstance\0",
                 unsafe extern "C" fn() -> *mut libc::c_void
             ),
-            post_frame_callback64: load!(
+            post_frame_callback64: load_required!(
                 b"AChoreographer_postFrameCallback64\0",
                 unsafe extern "C" fn(*mut libc::c_void, FrameCallback64, *mut libc::c_void)
             ),
+            timeline,
         })
     }
 }
@@ -414,6 +531,10 @@ fn choreo_api() -> Option<&'static ChoreoApi> {
 struct TickHolder {
     tick_fd: libc::c_int,
     count: u64,
+    callback_pending: Arc<AtomicBool>,
+    request_pending: Arc<AtomicBool>,
+    timeline: Arc<Mutex<Option<VsyncTimeline>>>,
+    timeline_functions: Option<TimelineFunctions>,
 }
 
 unsafe extern "C" fn frame_trampoline(_when_ns: i64, data: *mut libc::c_void) {
@@ -421,6 +542,11 @@ unsafe extern "C" fn frame_trampoline(_when_ns: i64, data: *mut libc::c_void) {
         return;
     }
     let holder = unsafe { &mut *(data as *mut TickHolder) };
+    holder.callback_pending.store(false, Ordering::Release);
+    holder.request_pending.store(false, Ordering::Release);
+    if let Ok(mut timeline) = holder.timeline.lock() {
+        *timeline = None;
+    }
     holder.count += 1;
     let one: u64 = 1;
     unsafe {
@@ -432,45 +558,148 @@ unsafe extern "C" fn frame_trampoline(_when_ns: i64, data: *mut libc::c_void) {
     }
 }
 
-fn pump_thread_choreo(api: ChoreoApi, tick_fd: libc::c_int, running: Arc<AtomicBool>) {
+fn read_eventfd_raw(fd: libc::c_int) -> io::Result<u64> {
+    let mut bytes = [0u8; 8];
+    loop {
+        let n = unsafe {
+            libc::read(
+                fd,
+                bytes.as_mut_ptr() as *mut libc::c_void,
+                bytes.len(),
+            )
+        };
+        if n == bytes.len() as isize {
+            return Ok(u64::from_ne_bytes(bytes));
+        }
+        if n < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "short eventfd read",
+        ));
+    }
+}
+
+fn pump_thread_choreo(
+    api: ChoreoApi,
+    tick_fd: libc::c_int,
+    request_fd: libc::c_int,
+    request_pending: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    period_ns: u64,
+    timeline: Arc<Mutex<Option<VsyncTimeline>>>,
+) {
     unsafe {
         let looper = (api.looper_prepare)(1); // ALOOPER_PREPARE_ALLOW_NON_CALLBACKS
         if looper.is_null() {
             log::warn!("anland.vsync looper_prepare failed; timer fallback");
-            pump_thread_timer(tick_fd, running, 16_666_666);
+            pump_thread_timer(
+                tick_fd,
+                request_fd,
+                request_pending,
+                running,
+                period_ns,
+                timeline,
+            );
             return;
         }
         let choreo = (api.get_instance)();
         if choreo.is_null() {
             log::warn!("anland.vsync choreographer instance null; timer fallback");
             (api.looper_release)(looper);
-            pump_thread_timer(tick_fd, running, 16_666_666);
+            pump_thread_timer(
+                tick_fd,
+                request_fd,
+                request_pending,
+                running,
+                period_ns,
+                timeline,
+            );
             return;
         }
+        const REQUEST_IDENT: libc::c_int = 1;
         // Holder owned by this thread; the callback only ever runs here.
-        let holder = Box::new(TickHolder { tick_fd, count: 0 });
+        let callback_pending = Arc::new(AtomicBool::new(false));
+        let holder = Box::new(TickHolder {
+            tick_fd,
+            count: 0,
+            callback_pending: callback_pending.clone(),
+            request_pending: request_pending.clone(),
+            timeline: timeline.clone(),
+            timeline_functions: api.timeline,
+        });
         let holder_ptr = Box::into_raw(holder) as *mut libc::c_void;
+        let add_result = (api.looper_add_fd)(
+            looper,
+            request_fd,
+            REQUEST_IDENT,
+            1, // ALOOPER_EVENT_INPUT
+            None,
+            std::ptr::null_mut(),
+        );
+        if add_result < 0 {
+            log::warn!("anland.vsync request fd registration failed; timer fallback");
+            let _ = Box::from_raw(holder_ptr as *mut TickHolder);
+            (api.looper_release)(looper);
+            pump_thread_timer(
+                tick_fd,
+                request_fd,
+                request_pending,
+                running,
+                period_ns,
+                timeline,
+            );
+            return;
+        }
+        let mut posts: u64 = 0;
         let mut last_count: u64 = 0;
         let mut last_log_ns = now_ns();
         while running.load(Ordering::Acquire) {
-            (api.post_frame_callback64)(choreo, frame_trampoline, holder_ptr);
-            // Returns on callback dispatch, or after 250ms so stop() stays
-            // bounded without cross-thread looper wakeups.
+            // The request fd is the only wake source while idle. A callback
+            // remains one-shot and at most one callback is outstanding. The
+            // atomic request token coalesces all producer requests received
+            // while that callback is pending.
+            let mut out_fd = 0;
+            let mut out_events = 0;
+            let mut out_data = std::ptr::null_mut();
             let r = (api.looper_poll_once)(
-                250,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                -1,
+                &mut out_fd,
+                &mut out_events,
+                &mut out_data,
             );
-            // r: LOOPER_POLL_WAKE=-1, CALLBACK=1, TIMEOUT=0, ERROR=-2..-4.
+            if r == REQUEST_IDENT {
+                let _ = read_eventfd_raw(request_fd);
+                if request_pending.load(Ordering::Acquire)
+                    && !callback_pending.load(Ordering::Acquire)
+                {
+                    callback_pending.store(true, Ordering::Release);
+                    if let Some(timeline) = api.timeline {
+                        (timeline.post)(choreo, vsync_trampoline, holder_ptr);
+                    } else {
+                        (api.post_frame_callback64)(choreo, frame_trampoline, holder_ptr);
+                    }
+                    posts += 1;
+                }
+            }
+            // The callback itself clears callback_pending. ALooper's callback
+            // return value is not used as proof that a frame was requested.
             let now = now_ns();
             if now.wrapping_sub(last_log_ns) >= 5_000_000_000 {
-                let total = unsafe { (*(holder_ptr as *mut TickHolder)).count };
+                let total = (*(holder_ptr as *mut TickHolder)).count;
                 log::info!(
-                    "anland.vsync alive callbacks_5s={} poll_last={r}",
-                    total.wrapping_sub(last_count)
+                    "anland.vsync alive callbacks_5s={} posts_5s={} pending={} poll_last={r}",
+                    total.wrapping_sub(last_count),
+                    posts,
+                    callback_pending.load(Ordering::Acquire)
                 );
                 last_count = total;
+                posts = 0;
                 last_log_ns = now;
             }
         }
@@ -481,26 +710,80 @@ fn pump_thread_choreo(api: ChoreoApi, tick_fd: libc::c_int, running: Arc<AtomicB
     }
 }
 
-fn pump_thread_timer(tick_fd: libc::c_int, running: Arc<AtomicBool>, period_ns: u64) {
-    let step = std::time::Duration::from_millis(50);
-    let mut acc: u64 = 0;
+fn pump_thread_timer(
+    tick_fd: libc::c_int,
+    request_fd: libc::c_int,
+    request_pending: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    period_ns: u64,
+    timeline: Arc<Mutex<Option<VsyncTimeline>>>,
+) {
+    let period_ns = period_ns.max(1);
+    let mut next_deadline = now_ns().saturating_add(period_ns);
+    let mut requested = false;
     let mut ticks: u64 = 0;
     let mut last_log_ns = now_ns();
     while running.load(Ordering::Acquire) {
-        std::thread::sleep(step);
-        acc += 50_000_000;
-        if acc >= period_ns {
-            acc = 0;
-            ticks += 1;
-            let one: u64 = 1;
-            unsafe {
-                libc::write(
-                    tick_fd,
-                    &one as *const u64 as *const libc::c_void,
-                    8,
-                );
+        if !requested {
+            match poll_raw_readable(request_fd, -1) {
+                Ok(true) => {
+                    let _ = read_eventfd_raw(request_fd);
+                    requested = request_pending.load(Ordering::Acquire);
+                }
+                Ok(false) => continue,
+                Err(error) => {
+                    log::warn!("anland.vsync timer request poll failed: {error}");
+                    break;
+                }
+            }
+            if !running.load(Ordering::Acquire) {
+                break;
             }
         }
+        if !requested {
+            continue;
+        }
+        let now = now_ns();
+        if now < next_deadline {
+            let remaining_ns = next_deadline - now;
+            let timeout_ms = remaining_ns
+                .saturating_add(999_999)
+                .saturating_div(1_000_000)
+                .min(i32::MAX as u64) as i32;
+            match poll_raw_readable(request_fd, timeout_ms) {
+                Ok(true) => {
+                    let _ = read_eventfd_raw(request_fd);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("anland.vsync timer deadline poll failed: {error}");
+                    break;
+                }
+            }
+            continue;
+        }
+        requested = false;
+        request_pending.store(false, Ordering::Release);
+        ticks += 1;
+        if let Ok(mut target) = timeline.lock() {
+            *target = Some(VsyncTimeline {
+                frame_time_ns: now,
+                deadline_ns: 0,
+                expected_present_ns: next_deadline,
+                vsync_id: -1,
+            });
+        }
+        let one: u64 = 1;
+        unsafe {
+            libc::write(
+                tick_fd,
+                &one as *const u64 as *const libc::c_void,
+                8,
+            );
+        }
+        // A late wake produces one tick, then skips directly to the next
+        // future deadline. Never burst stale ticks and never accumulate drift.
+        advance_timer_deadline(&mut next_deadline, now_ns(), period_ns);
         let now = now_ns();
         if now.wrapping_sub(last_log_ns) >= 5_000_000_000 {
             log::info!("anland.vsync alive ticks_5s={ticks} mode=timer");
@@ -510,24 +793,81 @@ fn pump_thread_timer(tick_fd: libc::c_int, running: Arc<AtomicBool>, period_ns: 
     }
 }
 
-/// Display-VSYNC tick source for presentation pacing.
+unsafe extern "C" fn vsync_trampoline(
+    data: *const FrameCallbackData,
+    callback_data: *mut libc::c_void,
+) {
+    if callback_data.is_null() {
+        return;
+    }
+    let holder = unsafe { &mut *(callback_data as *mut TickHolder) };
+    holder.callback_pending.store(false, Ordering::Release);
+    holder.request_pending.store(false, Ordering::Release);
+    let Some(functions) = holder.timeline_functions else {
+        return;
+    };
+    if data.is_null() {
+        return;
+    }
+    let preferred = unsafe { (functions.preferred)(data) };
+    let count = unsafe { (functions.count)(data) };
+    if preferred >= count {
+        return;
+    }
+    let timeline = VsyncTimeline {
+        frame_time_ns: unsafe { (functions.frame_time)(data) }.max(0) as u64,
+        deadline_ns: unsafe { (functions.deadline)(data, preferred) }.max(0) as u64,
+        expected_present_ns: unsafe { (functions.expected_present)(data, preferred) }
+            .max(0) as u64,
+        vsync_id: unsafe { (functions.vsync_id)(data, preferred) },
+    };
+    if let Ok(mut target) = holder.timeline.lock() {
+        *target = Some(timeline);
+    }
+    holder.count += 1;
+    let one: u64 = 1;
+    unsafe {
+        libc::write(
+            holder.tick_fd,
+            &one as *const u64 as *const libc::c_void,
+            8,
+        );
+    }
+}
+
+fn advance_timer_deadline(next_deadline: &mut u64, now: u64, period_ns: u64) {
+    let period_ns = period_ns.max(1);
+    if now < *next_deadline {
+        return;
+    }
+    let elapsed_periods = now.saturating_sub(*next_deadline) / period_ns + 1;
+    *next_deadline = next_deadline.saturating_add(
+        period_ns.saturating_mul(elapsed_periods),
+    );
+}
+
+/// On-demand display-VSYNC telemetry source for producer pacing.
 ///
-/// Preferred mode is Android Choreographer on a dedicated looper thread (one
-/// eventfd write per display vsync, no polling, no timers). When the NDK
-/// symbols are unavailable it degrades to a nanosleep timer at the panel
-/// rate. The render loop polls the tick fd alongside its lifecycle/rebind
-/// control fd; control wakes never authorize a presentation.
+/// A producer request calls [`VsyncPump::request`], which posts at most one
+/// Android Choreographer callback. When the NDK symbols are unavailable it
+/// uses an absolute monotonic timer for the same one-shot telemetry event.
+/// The render loop polls the tick fd alongside its producer/lifecycle wake;
+/// the tick is never required to authorize presentation.
 pub struct VsyncPump {
     tick: OwnedFd,
+    request_fd: OwnedFd,
+    request_pending: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
     mode: &'static str,
     period_ns: u64,
+    timeline: Arc<Mutex<Option<VsyncTimeline>>>,
 }
 
 impl VsyncPump {
     pub fn start(refresh_mhz: u32) -> io::Result<Self> {
         let tick = make_eventfd()?;
+        let request_fd = make_eventfd()?;
         // refresh is millihertz (144000 = 144Hz): period_ns = 1e12/mHz.
         let period_ns = if refresh_mhz > 0 {
             1_000_000_000_000u64 / refresh_mhz.max(1) as u64
@@ -535,22 +875,48 @@ impl VsyncPump {
             16_666_666
         };
         let running = Arc::new(AtomicBool::new(true));
+        let request_pending = Arc::new(AtomicBool::new(false));
+        let timeline = Arc::new(Mutex::new(None));
         let tick_fd = tick.as_raw_fd();
+        let request_fd_raw = request_fd.as_raw_fd();
         let (mode, handle) = match choreo_api() {
             Some(api) => {
                 let api = *api;
+                let request_pending = request_pending.clone();
                 let running = running.clone();
+                let timeline = timeline.clone();
                 let h = std::thread::Builder::new()
                     .name("anland-vsync".into())
-                    .spawn(move || pump_thread_choreo(api, tick_fd, running))
+                    .spawn(move || {
+                        pump_thread_choreo(
+                            api,
+                            tick_fd,
+                            request_fd_raw,
+                            request_pending,
+                            running,
+                            period_ns,
+                            timeline,
+                        )
+                    })
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 ("choreographer", h)
             }
             None => {
+                let request_pending = request_pending.clone();
                 let running = running.clone();
+                let timeline = timeline.clone();
                 let h = std::thread::Builder::new()
                     .name("anland-vsync-timer".into())
-                    .spawn(move || pump_thread_timer(tick_fd, running, period_ns))
+                    .spawn(move || {
+                        pump_thread_timer(
+                            tick_fd,
+                            request_fd_raw,
+                            request_pending,
+                            running,
+                            period_ns,
+                            timeline,
+                        )
+                    })
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 ("timer", h)
             }
@@ -558,10 +924,13 @@ impl VsyncPump {
         log::info!("anland.vsync mode={mode} period_ns={period_ns}");
         Ok(Self {
             tick,
+            request_fd,
+            request_pending,
             running,
             handle: Some(handle),
             mode,
             period_ns,
+            timeline,
         })
     }
 
@@ -577,10 +946,38 @@ impl VsyncPump {
         self.period_ns
     }
 
+    /// Request one timing callback. Duplicate requests are counted by the
+    /// atomic edge token and coalesced to one outstanding Choreographer
+    /// callback.
+    pub fn request(&self) -> io::Result<()> {
+        if self
+            .request_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(());
+        }
+        if let Err(error) = eventfd_write(&self.request_fd, 1) {
+            self.request_pending.store(false, Ordering::Release);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Consume the timeline associated with the most recently delivered tick.
+    /// A work item may use it once; stale timing data must never be reused by
+    /// a later frame.
+    pub fn take_timeline(&self) -> Option<VsyncTimeline> {
+        self.timeline.lock().ok().and_then(|mut value| value.take())
+    }
+
     pub fn stop(mut self) {
         self.running.store(false, Ordering::Release);
+        // Wake either the ALooper or timer poll so stop is independent of the
+        // next display callback/deadline.
+        let _ = eventfd_write(&self.request_fd, 1);
         if let Some(h) = self.handle.take() {
-            // Bounded by construction (250ms looper poll / 50ms timer step).
+            // Bounded by the request-fd wake for both pacing backends.
             let _ = h.join();
         }
     }
@@ -589,8 +986,12 @@ impl VsyncPump {
 /// Poll `fd` for readability with a millisecond timeout.
 /// Returns Ok(true) when readable, Ok(false) on timeout.
 pub fn poll_readable(fd: &OwnedFd, timeout_ms: i32) -> io::Result<bool> {
+    poll_raw_readable(fd.as_raw_fd(), timeout_ms)
+}
+
+fn poll_raw_readable(fd: libc::c_int, timeout_ms: i32) -> io::Result<bool> {
     let mut pfd = libc::pollfd {
-        fd: fd.as_raw_fd(),
+        fd,
         events: libc::POLLIN,
         revents: 0,
     };
@@ -611,10 +1012,14 @@ pub fn poll_readable(fd: &OwnedFd, timeout_ms: i32) -> io::Result<bool> {
     Ok(pfd.revents & libc::POLLIN != 0)
 }
 
-/// Wait (up to `timeout_ms`) for a sync-file fence fd to signal, then close it.
-/// A sync file signals POLLIN when the GPU work completes.
-pub fn wait_fence(fence_fd: OwnedFd, timeout_ms: i32) -> io::Result<()> {
-    let readable = poll_readable(&fence_fd, timeout_ms)?;
+/// Wait (up to `timeout_ms`) for a sync-file fence fd to signal.
+///
+/// The fd is borrowed deliberately.  A timeout or poll error must leave the
+/// acquire fence owned by the dequeued-buffer lease so it can be transferred
+/// to `cancelBuffer`; closing an unsignaled acquire fence and substituting
+/// `-1` would discard SurfaceFlinger's dependency.
+pub fn wait_fence(fence_fd: &OwnedFd, timeout_ms: i32) -> io::Result<()> {
+    let readable = poll_readable(fence_fd, timeout_ms)?;
     if !readable {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -622,4 +1027,31 @@ pub fn wait_fence(fence_fd: OwnedFd, timeout_ms: i32) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::advance_timer_deadline;
+
+    #[test]
+    fn absolute_deadline_timer_covers_common_refresh_rates() {
+        for period in [16_666_666, 11_111_111, 8_333_333, 6_944_444] {
+            let mut deadline = 1_000_000_000u64;
+            let late = deadline + period * 3 + 1;
+            advance_timer_deadline(&mut deadline, late, period);
+            assert_eq!(deadline, 1_000_000_000 + period * 4);
+        }
+    }
+
+    #[test]
+    fn absolute_deadline_timer_does_not_advance_early_or_burst() {
+        let period = 6_944_444;
+        let mut deadline = 1_000_000_000u64;
+        let early = deadline - 1;
+        advance_timer_deadline(&mut deadline, early, period);
+        assert_eq!(deadline, 1_000_000_000);
+        let very_late = deadline + period * 100;
+        advance_timer_deadline(&mut deadline, very_late, period);
+        assert_eq!(deadline, 1_000_000_000 + period * 101);
+    }
 }

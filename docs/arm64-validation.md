@@ -100,7 +100,7 @@ and translated emulator execution do not satisfy the native ARM64 gate.
   - Guard caught null monitor: `kwin_core: udev monitor unavailable; continuing without DRM hotplug events`.
   - QPainter initialization succeeded: `kwin_core: QPainter compositing has been successfully initialized`.
   - Zero crashes: `PASS: KWin survived the injected null udev monitor (status=124)`.
-- **Packaging & Delivery**: Stripped debug symbols (10.7 MB) and embedded into APK assets (`assets/kwin-arm64/libkwin.so.6.7.4`, SHA-256: `7f8b40253eae386da3124ef46e49fff878fbed791ec024a21959f8451a4a5a45`). Wired into `src/android/proot/setup.rs` to deploy directly to guest `/usr/local/lib` and `/usr/lib`.
+- **Packaging & Delivery**: The historical stripped artifact was formerly recorded at `assets/kwin-arm64/libkwin.so.6.7.4` (SHA-256: `7f8b40253eae386da3124ef46e49fff878fbed791ec024a21959f8451a4a5a45`) and is now quarantined under `assets/legacy-graphics/`. It is not the active runtime asset; setup stages only the exact Forky pair under `assets/kwin-forky-anland-arm64/`, which is checked by `scripts/verify_graphics_stack.py`.
 - **Display Sizing & High-DPI Scaling**:
   - Implemented dynamic sizing from `window.inner_size()` in `src/android/backend/wayland/compositor.rs` replacing hardcoded 1920x1080.
   - Set `xdg_toplevel::State::Fullscreen` and `xdg_toplevel::State::Maximized` flags to fill OnePlus Pad 3 native 3392 x 2400 screen.

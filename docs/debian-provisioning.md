@@ -1,6 +1,6 @@
 # Production Debian provisioning
 
-Portal provisions Debian 13 ARM64 into `files/runtime-B` on every fresh install.
+Portal provisions Debian 14 (Forky) ARM64 into `files/runtime-B` on every fresh install.
 The name is retained for compatibility with the established Android integration;
 it no longer denotes an optional developer slot. Existing `arch` data and old
 `active-slot` selections cannot select the production guest.
@@ -9,14 +9,11 @@ it no longer denotes an optional developer slot. Existing `arch` data and old
 
 `assets/debian-runtime.json` pins the public Portal GitHub release URL, image
 version, compressed size and SHA-256. The current image is
-`debian13-arm64-2026.09.10.1`, published in
-[the runtime release](https://github.com/Retrorerr/Portal/releases/tag/runtime-debian13-arm64-2026.09.10.1).
-It contains 1,141 locked Debian packages plus the pinned lfdevs Anland
-KWin/XWayland stack (kwin -95 bundle + XWayland 24.1.6-91, replacing the stock
-Debian KWin/XWayland payloads, which have no Anland backend). The compressed
-archive is 896,140,656 bytes (855 MiB). Bundling that archive in each APK would
-be impractical. The previous stock-KWin image `debian13-arm64-2026.09.05.3`
-remains published untouched; no release asset is ever replaced.
+`debian14-arm64-2026.09.14.2`; its exact package closure is locked in
+`assets/debian-runtime-packages.json`. The active Anland KWin executable and
+`libkwin` are APK-owned Forky-build artifacts, and the complete tuple is
+locked in `assets/graphics-stack-lock.json`. The retired lfdevs/Trixie KWin and
+XWayland overlay is not downloaded or substituted into the runtime.
 
 Build the image from the existing Debian builder, not a copied guest directory:
 

@@ -11,7 +11,7 @@
 //! (see `third_party/anland/ATTRIBUTION.md`).
 
 use std::ffi::c_void;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
@@ -46,7 +46,7 @@ const COLD_FIRST_FRAME_WAIT_MS: i64 = 150_000;
 /// to the free pool, never presented.
 const ACQUIRE_WAIT_MS: i32 = 1000;
 
-/// Instrumentation window for the VSYNC-driven `anland.fps` line.
+/// Instrumentation window for the work-gated `anland.fps` line.
 const FPS_WINDOW_NS: u64 = 2_000_000_000;
 
 /// One collected window slot handed to the producer.
@@ -60,6 +60,214 @@ struct SlotInfo {
 // generation lives, and the spare is cancelled before the window is released.
 unsafe impl Send for SlotInfo {}
 
+/// Ownership state for one successful `dequeueBuffer` call.
+///
+/// The acquire fence remains inside this lease until it has actually
+/// signalled or the lease transfers it to `cancelBuffer`.  In particular,
+/// timeout is not a reason to close the fd: Android must receive the original
+/// unsignalled dependency when the slot is abandoned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DequeuedState {
+    AcquirePending,
+    AcquireSatisfied,
+    Rendering,
+    RenderComplete,
+    Queued,
+    Cancelled,
+    Held,
+    /// The render fence was lost and the native surface is being retired.
+    /// There is no safe fence to pass to cancelBuffer in this state.
+    Abandoned,
+}
+
+trait BufferQueueOps {
+    fn queue(&self, anb: *mut ANativeWindowBuffer, fence: i32) -> i32;
+    fn cancel(&self, anb: *mut ANativeWindowBuffer, fence: i32) -> i32;
+}
+
+struct NativeBufferQueue<'a> {
+    window: *mut c_void,
+    api: &'a AnwApi,
+}
+
+impl BufferQueueOps for NativeBufferQueue<'_> {
+    fn queue(&self, anb: *mut ANativeWindowBuffer, fence: i32) -> i32 {
+        unsafe { self.api.queue(self.window, anb, fence) }
+    }
+
+    fn cancel(&self, anb: *mut ANativeWindowBuffer, fence: i32) -> i32 {
+        unsafe { self.api.cancel(self.window, anb, fence) }
+    }
+}
+
+/// A dequeued ANativeWindow slot with one-owner fence semantics.
+///
+/// The lease borrows the dynamically resolved API for exactly as long as the
+/// dequeued slot can be live.  Dropping an unfinished lease performs the safe
+/// default operation—`cancelBuffer` with the still-owned acquire fence—so an
+/// early return cannot silently strand a BufferQueue slot or lose its fence.
+struct DequeuedBuffer<'a, Q: BufferQueueOps + ?Sized> {
+    anb: *mut ANativeWindowBuffer,
+    queue: &'a Q,
+    acquire_fence: Option<OwnedFd>,
+    state: DequeuedState,
+}
+
+impl<'a, Q: BufferQueueOps + ?Sized> DequeuedBuffer<'a, Q> {
+    fn new(
+        anb: *mut ANativeWindowBuffer,
+        acquire_fence: i32,
+        queue: &'a Q,
+    ) -> Self {
+        let acquire_fence = if acquire_fence >= 0 {
+            // SAFETY: ANativeWindow returned ownership of this fence fd with
+            // the successful dequeue call.
+            Some(unsafe { OwnedFd::from_raw_fd(acquire_fence) })
+        } else {
+            None
+        };
+        let state = if acquire_fence.is_some() {
+            DequeuedState::AcquirePending
+        } else {
+            DequeuedState::AcquireSatisfied
+        };
+        Self {
+            anb,
+            queue,
+            acquire_fence,
+            state,
+        }
+    }
+
+    fn wait_for_acquire(&mut self, timeout_ms: i32) -> std::io::Result<()> {
+        if self.state != DequeuedState::AcquirePending {
+            return Ok(());
+        }
+        let Some(fence) = self.acquire_fence.as_ref() else {
+            self.state = DequeuedState::AcquireSatisfied;
+            return Ok(());
+        };
+        // `wait_fence` borrows the fd.  On timeout/error the lease therefore
+        // still owns the exact fd for a later cancelBuffer transfer.
+        sys::wait_fence(fence, timeout_ms)?;
+        drop(self.acquire_fence.take()); // signalled: close exactly once here
+        self.state = DequeuedState::AcquireSatisfied;
+        Ok(())
+    }
+
+    fn begin_render(&mut self) {
+        debug_assert_eq!(self.state, DequeuedState::AcquireSatisfied);
+        self.state = DequeuedState::Rendering;
+    }
+
+    fn complete_render(&mut self) {
+        debug_assert_eq!(self.state, DequeuedState::Rendering);
+        self.state = DequeuedState::RenderComplete;
+    }
+
+    /// Queue a buffer whose contents were initialized by the synchronous CPU
+    /// black-buffer ritual. This is used only while enumerating BufferQueue
+    /// slots before the producer handshake; it is not a render-loop frame and
+    /// is never counted as a bare presentation.
+    fn queue_initialized(mut self) -> i32 {
+        debug_assert_eq!(self.state, DequeuedState::AcquireSatisfied);
+        self.submit_queue(None)
+    }
+
+    fn queue_rendered(mut self, render_fence: Option<OwnedFd>) -> i32 {
+        debug_assert_eq!(self.state, DequeuedState::RenderComplete);
+        self.submit_queue(render_fence)
+    }
+
+    fn into_held(mut self) -> *mut ANativeWindowBuffer {
+        debug_assert_eq!(self.state, DequeuedState::AcquireSatisfied);
+        self.state = DequeuedState::Held;
+        let anb = self.anb;
+        // The held spare is represented by the existing raw pointer field in
+        // Inner.  Its acquire fence has already been waited and dropped, so
+        // the lifecycle owner later cancels it with -1.  No fd or lease state
+        // is leaked by forgetting this zero-fd value.
+        std::mem::forget(self);
+        anb
+    }
+
+    /// Retire this slot without calling cancelBuffer. This is only valid
+    /// after producer rendering has started and its render-done fence has
+    /// been lost; the caller must stop using this native window and let the
+    /// lifecycle owner release/rebind it.
+    fn abandon_for_surface_reset(mut self) {
+        debug_assert!(matches!(
+            self.state,
+            DequeuedState::Rendering | DequeuedState::RenderComplete
+        ));
+        debug_assert!(self.acquire_fence.is_none());
+        self.state = DequeuedState::Abandoned;
+        std::mem::forget(self);
+    }
+
+    /// Cancel the slot.  With no explicit render fence, the pending acquire
+    /// fence (if any) is transferred.  After a successful acquire wait there
+    /// is intentionally no acquire fd and `-1` is correct.
+    fn cancel(mut self, render_fence: Option<OwnedFd>) -> i32 {
+        let fence = match (render_fence, self.acquire_fence.take()) {
+            (Some(render), None) => Some(render),
+            (None, acquire) => acquire,
+            (Some(render), Some(acquire)) => {
+                // This indicates a caller tried to abandon a slot with a
+                // render fence before satisfying its acquire dependency. Do
+                // not lose the acquire fence; it is the only safe dependency
+                // to pass to cancelBuffer. The render fence is not useful to
+                // Android in this invalid state and is closed by dropping it.
+                log::error!(
+                    "anland.dequeued invalid cancel: render fence with pending acquire; preserving acquire fence"
+                );
+                drop(render);
+                Some(acquire)
+            }
+        };
+        self.submit_cancel(fence)
+    }
+
+    fn submit_queue(&mut self, render_fence: Option<OwnedFd>) -> i32 {
+        debug_assert!(self.acquire_fence.is_none());
+        let raw = render_fence.map_or(-1, IntoRawFd::into_raw_fd);
+        self.state = DequeuedState::Queued;
+        // ANativeWindow's contract transfers ownership at the call boundary;
+        // its implementation closes the fence on both success and error.
+        // Never close `raw` here, or a failed queueBuffer would double-close
+        // the fd that Android already consumed.
+        self.queue.queue(self.anb, raw)
+    }
+
+    fn submit_cancel(&mut self, fence: Option<OwnedFd>) -> i32 {
+        let raw = fence.map_or(-1, IntoRawFd::into_raw_fd);
+        self.state = DequeuedState::Cancelled;
+        // Same ownership rule as queueBuffer: cancelBuffer consumes `raw`.
+        self.queue.cancel(self.anb, raw)
+    }
+}
+
+impl<Q: BufferQueueOps + ?Sized> Drop for DequeuedBuffer<'_, Q> {
+    fn drop(&mut self) {
+        if matches!(self.state, DequeuedState::Queued | DequeuedState::Cancelled) {
+            return;
+        }
+        // An unfinished lease must never just drop its acquire fd.  Transfer
+        // it to cancelBuffer, including on timeout, epoch change, shutdown,
+        // or any other early return.  After an acquire wait this is -1; the
+        // acquire dependency has already been satisfied.
+        let fence = self.acquire_fence.take();
+        let raw = fence.map_or(-1, IntoRawFd::into_raw_fd);
+        self.state = DequeuedState::Cancelled;
+        let result = self.queue.cancel(self.anb, raw);
+        if result != 0 {
+            log::error!("anland.dequeued drop cancelBuffer failed: {result}");
+        } else {
+            log::debug!("anland.dequeued implicit cancel on lease drop");
+        }
+    }
+}
+
 struct ActiveGen {
     id: u64,
     buf_ready: OwnedFd,
@@ -71,6 +279,59 @@ struct ActiveGen {
     /// Audio slot peer (unused while the guest disables its audio engine).
     /// Held open so the producer never sees HUP on hello slot 4.
     _audio: OwnedFd,
+}
+
+/// Work requested by the KWin producer on the current data connection.  The
+/// consumer deliberately coalesces newer requests, but never accepts a
+/// sequence from an older producer generation.  A request is consumed exactly
+/// once by the render thread after an accepted producer wake; VSYNC by itself
+/// cannot create one.
+#[derive(Default)]
+struct FrameWorkState {
+    connection_gen: u64,
+    producer_generation: u64,
+    last_sequence: u64,
+    pending: Option<FrameWanted>,
+}
+
+impl FrameWorkState {
+    fn reset_for_connection(&mut self, connection_gen: u64) {
+        self.connection_gen = connection_gen;
+        self.producer_generation = 0;
+        self.last_sequence = 0;
+        self.pending = None;
+    }
+
+    fn accept(&mut self, connection_gen: u64, wanted: FrameWanted) -> bool {
+        if wanted.sequence == 0 || wanted.generation == 0 {
+            return false;
+        }
+        if self.connection_gen != connection_gen {
+            self.reset_for_connection(connection_gen);
+        }
+        let sequence = wanted.sequence;
+        let generation = wanted.generation;
+        if generation < self.producer_generation
+            || (generation == self.producer_generation && sequence <= self.last_sequence)
+        {
+            return false;
+        }
+        if generation > self.producer_generation {
+            self.pending = None;
+            self.producer_generation = generation;
+            self.last_sequence = 0;
+        }
+        self.last_sequence = sequence;
+        self.pending = Some(wanted);
+        true
+    }
+
+    fn take(&mut self, connection_gen: u64) -> Option<FrameWanted> {
+        if self.connection_gen != connection_gen {
+            return None;
+        }
+        self.pending.take()
+    }
 }
 
 struct Inner {
@@ -118,6 +379,14 @@ struct Inner {
     /// sent for this generation: anything earlier would land in the data
     /// channel ahead of BUFS_READY and desync the producer's handshake.
     connected_gen: Mutex<Option<u64>>,
+    /// Producer work requests received on the current data fd. The render
+    /// thread consumes this state after the producer wake; a display tick is
+    /// optional telemetry only.
+    work: Mutex<FrameWorkState>,
+    /// A render-fence loss makes the current native window unsafe to reuse.
+    /// Surface workers stop and the next Android lifecycle attachment retires
+    /// this surface before creating a fresh one.
+    surface_recovery_requested: AtomicBool,
     // Proof counters.
     frames_queued: AtomicU64,
     frames_fenced: AtomicU64,
@@ -227,11 +496,6 @@ fn configure_window(
 ) -> Result<(u32, u32, usize), String> {
     unsafe { anw::acquire(window, anw) };
     let result = (|| {
-        // Connect to the CPU API via the lock/unlock ritual (see anw.rs):
-        // the in-object perform() slot is not trusted for indirect calls
-        // (its supposed address disagrees with every dlsym'd entry on this
-        // device), while the dlsym'd dequeue/queue path is proven working.
-        unsafe { anw.connect_cpu_ritual(window)? };
         let (win_w, win_h) = unsafe { (anw::get_width(window, anw), anw::get_height(window, anw)) };
         let (w, h) = if win_w > 0 && win_h > 0 {
             (win_w as u32, win_h as u32)
@@ -242,22 +506,46 @@ fn configure_window(
             return Err("Android surface has zero geometry".into());
         }
         log::info!(
-            "anland.renderer=anland-gpu window={w}x{h} requested={}x{}",
+            "anland.renderer=anland-gpu window={w}x{h} requested={}x{} format=RGBA_8888",
             cfg.width,
             cfg.height
         );
+        // Set the format before the first CPU lock. A newly-created
+        // SurfaceView can otherwise expose Android's default RGB_565 format
+        // to ANativeWindow_lock, even though the Anland zero-copy contract is
+        // strictly RGBA_8888. This keeps the CPU black-buffer proof and the
+        // later dequeued-buffer proof on the same format.
         let r = unsafe {
             anw::set_buffers_geometry(window, anw, w as i32, h as i32, anw::FORMAT_RGBA_8888)
         };
         if r != 0 {
             return Err(format!("ANativeWindow_setBuffersGeometry failed: {r}"));
         }
+        let r = unsafe { anw.set_buffers_dataspace(window, anw::DATASPACE_SRGB) };
+        if r != 0 {
+            return Err(format!(
+                "ANativeWindow_setBuffersDataSpace(sRGB) failed: {r}"
+            ));
+        }
+        log::info!(
+            "anland.color contract format=RGBA_8888 dataspace=ADATASPACE_SRGB ({})",
+            anw::DATASPACE_SRGB
+        );
+        // Connect to the CPU API via the lock/unlock ritual (see anw.rs)
+        // only after geometry/format selection. The private in-object
+        // perform() table is deliberately not touched.
+        unsafe { anw.connect_cpu_ritual(window)? };
         let min_undequeued = unsafe { anw.query_min_undequeued(window) }?;
         let total = (min_undequeued + 2).clamp(3, MAX_BUFS as i32) as usize;
         let r = unsafe { anw.set_buffer_count(window, total) };
         if r != 0 {
             return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
         }
+        // The CPU connection ritual above proves the safe connection path.
+        // Clear one buffer again after the final geometry/count configuration
+        // so the first frame held while the producer handshakes is known
+        // black for the actual presentation dimensions.
+        unsafe { anw.clear_cpu_buffer(window)? };
         Ok((w, h, total))
     })();
     if result.is_err() {
@@ -363,6 +651,8 @@ impl AnlandSession {
             rebind_request: Mutex::new(None),
             transition_lock: Mutex::new(()),
             connected_gen: Mutex::new(None),
+            work: Mutex::new(FrameWorkState::default()),
+            surface_recovery_requested: AtomicBool::new(false),
             frames_queued: AtomicU64::new(0),
             frames_fenced: AtomicU64::new(0),
             frames_bare: AtomicU64::new(0),
@@ -445,7 +735,7 @@ impl AnlandSession {
         if let Ok(vsync) = self.inner.vsync.lock() {
             if let Some(pump) = vsync.as_ref() {
                 log::info!(
-                    "anland.pacing vsync-driven vsync={} period_ns={}",
+                    "anland.pacing work-driven vsync={} period_ns={}",
                     pump.mode(),
                     pump.period_ns()
                 );
@@ -476,6 +766,9 @@ impl AnlandSession {
             return Err(error);
         }
         inner.window_live.store(true, Ordering::Release);
+        inner
+            .surface_recovery_requested
+            .store(false, Ordering::Release);
 
         let epoch = surface_geometry::mint_surface_epoch();
         inner.surface_epoch.store(epoch, Ordering::Release);
@@ -619,6 +912,7 @@ impl AnlandSession {
         let inner = &self.inner;
         if !inner.running.load(Ordering::Acquire)
             || !inner.window_live.load(Ordering::Acquire)
+            || inner.surface_recovery_requested.load(Ordering::Acquire)
         {
             return;
         }
@@ -628,8 +922,8 @@ impl AnlandSession {
             log::debug!("anland.input dropped during surface rebind");
             return;
         }
-        // Input is forwarded immediately; presentation remains strictly
-        // VSYNC-gated and is consumed on the next display tick.
+        // Input is forwarded immediately; presentation is independently
+        // authorized by the producer's FRAME_WANTED request.
         let _guard = inner.io_lock.lock().unwrap();
         let gen_guard = inner.gen.lock().unwrap();
         let Some(gen) = gen_guard.as_ref() else {
@@ -668,6 +962,7 @@ impl AnlandSession {
         let inner = &self.inner;
         if !inner.running.load(Ordering::Acquire)
             || !inner.window_live.load(Ordering::Acquire)
+            || inner.surface_recovery_requested.load(Ordering::Acquire)
         {
             return;
         }
@@ -714,6 +1009,7 @@ impl AnlandSession {
         let inner = &self.inner;
         if !inner.running.load(Ordering::Acquire)
             || !inner.window_live.load(Ordering::Acquire)
+            || inner.surface_recovery_requested.load(Ordering::Acquire)
         {
             return false;
         }
@@ -815,6 +1111,10 @@ impl AnlandSession {
     /// make a later resume a no-op and leave a black BufferQueue.
     pub fn surface_healthy(&self) -> bool {
         self.surface_active()
+            && !self
+                .inner
+                .surface_recovery_requested
+                .load(Ordering::Acquire)
             && self
                 .render_thread
                 .as_ref()
@@ -874,6 +1174,7 @@ impl AnlandSession {
             || h == 0
             || !inner.running.load(Ordering::Acquire)
             || !inner.window_live.load(Ordering::Acquire)
+            || inner.surface_recovery_requested.load(Ordering::Acquire)
             || current_window(inner).is_none()
         {
             return Err("invalid geometry or session stopping".into());
@@ -911,7 +1212,9 @@ impl AnlandSession {
         let Some(window) = current_window(inner) else {
             return Err("Android surface is no longer attached".into());
         };
-        if !inner.window_live.load(Ordering::Acquire) {
+        if !inner.window_live.load(Ordering::Acquire)
+            || inner.surface_recovery_requested.load(Ordering::Acquire)
+        {
             return Err("Android surface is suspended".into());
         }
         let (old_w, old_h) = *inner.screen.lock().unwrap();
@@ -964,6 +1267,12 @@ impl AnlandSession {
         if r != 0 {
             return Err(format!(
                 "ANativeWindow_setBuffersGeometry({w}x{h}) failed: {r}"
+            ));
+        }
+        let r = unsafe { inner.anw.set_buffers_dataspace(window, anw::DATASPACE_SRGB) };
+        if r != 0 {
+            return Err(format!(
+                "ANativeWindow_setBuffersDataSpace(sRGB) after resize failed: {r}"
             ));
         }
         let min_undequeued = unsafe { inner.anw.query_min_undequeued(window) }
@@ -1067,6 +1376,10 @@ fn collect_buffers(
     let Some(window) = current_window(inner) else {
         return Err("cannot collect buffers without an Android surface".into());
     };
+    let queue = NativeBufferQueue {
+        window,
+        api: &inner.anw,
+    };
     let need_producer = total.saturating_sub(1).max(2);
     let mut found: Vec<SlotInfo> = Vec::new();
     for attempt in 0..total * 4 + 2 {
@@ -1075,45 +1388,82 @@ fn collect_buffers(
         }
         let (anb, fence) = unsafe { inner.anw.dequeue(window) }
             .map_err(|r| format!("collect dequeueBuffer failed on attempt {attempt}: {r}"))?;
-        close_silently(fence); // enumeration only; no wait needed
-        let Some((dma_fd, stride_px, bw, bh)) = (unsafe { AnwApi::buffer_dma_info(anb) }) else {
-            unsafe { inner.anw.cancel(window, anb, -1) };
-            continue;
+        let mut slot = DequeuedBuffer::new(anb, fence, &queue);
+        if let Err(error) = slot.wait_for_acquire(ACQUIRE_WAIT_MS) {
+            // Enumeration is not allowed to discard an unsignalled acquire
+            // dependency.  The lease transfers the original fence to
+            // cancelBuffer, even when the wait timed out.
+            let _ = slot.cancel(None);
+            return Err(format!(
+                "collect acquire fence failed on attempt {attempt}: {error}"
+            ));
+        }
+        let layout = match unsafe { AnwApi::buffer_dma_info(anb) } {
+            Ok(layout) => layout,
+            Err(reject) => {
+                let _ = slot.cancel(None);
+                log::warn!(
+                    "anland.collect buffer rejected: require one RGBA_8888 linear-plane handle; metadata={reject:?}"
+                );
+                continue;
+            }
         };
+        let dma_fd = layout.fd;
+        let stride_px = layout.stride_px;
+        let bw = layout.width;
+        let bh = layout.height;
         if bw != width as i32 || bh != height as i32 {
-            unsafe { inner.anw.cancel(window, anb, -1) };
+            let _ = slot.cancel(None);
             return Err(format!(
                 "buffer geometry {bw}x{bh} differs from requested {width}x{height}"
             ));
         }
+        let stride_bytes = (stride_px as u32)
+            .checked_mul(4)
+            .ok_or_else(|| format!("buffer stride overflows RGBA byte stride: {stride_px}"))?;
         // Dedup by slot pointer (stable per queue slot).
         if found.iter().any(|s: &SlotInfo| s.anb == anb) {
-            unsafe { inner.anw.queue(window, anb, -1) };
+            let queue_result = slot.queue_initialized();
+            if queue_result != 0 {
+                return Err(format!(
+                    "collect queueBuffer failed while rotating duplicate slot: {queue_result}"
+                ));
+            }
             continue;
         }
-        // Post back so the next dequeue rotates to another slot.
-        unsafe { inner.anw.queue(window, anb, -1) };
         let dup = unsafe { libc::dup(dma_fd) };
         if dup < 0 {
+            let _ = slot.cancel(None);
             continue;
+        }
+        // Post back so the next dequeue rotates to another slot. The slot was
+        // initialized through the synchronous CPU black-buffer ritual before
+        // collection; the acquire fence was waited above, so -1 is correct.
+        let queue_result = slot.queue_initialized();
+        if queue_result != 0 {
+            close_silently(dup);
+            return Err(format!("collect queueBuffer failed: {queue_result}"));
         }
         // SAFETY: dup is a fresh fd.
         let fd = unsafe { OwnedFd::from_raw_fd(dup) };
         let info = BufInfo {
-            stride: (stride_px as u32).wrapping_mul(4),
+            stride: stride_bytes,
             width: bw as u32,
             height: bh as u32,
-            format: PIXEL_FORMAT_RGBA_8888,
-            modifier: 0,
+            format: layout.format as u32,
+            modifier: layout.modifier,
             offset: 0,
         };
         log::info!(
-            "anland.collect buf[{}]: {}x{} stride_px={} fd={}",
+            "anland.collect buf[{}]: {}x{} stride_px={} fd={} handle_fds={} handle_ints={} modifier={:#x}",
             found.len(),
             bw,
             bh,
             stride_px,
-            fd.as_raw_fd()
+            fd.as_raw_fd(),
+            layout.num_fds,
+            layout.num_ints,
+            layout.modifier,
         );
         found.push(SlotInfo { anb, fd, info });
     }
@@ -1131,9 +1481,22 @@ fn collect_buffers(
     // the render loop dequeues it at runtime it is handed straight back.
     let spare = match unsafe { inner.anw.dequeue(window) } {
         Ok((anb, fence)) => {
-            close_silently(fence);
-            log::info!("anland.collect spare held dequeued (stop-time unblock)");
-            Some(anb)
+            let mut slot = DequeuedBuffer::new(anb, fence, &queue);
+            match slot.wait_for_acquire(ACQUIRE_WAIT_MS) {
+                Ok(()) => {
+                    // The held spare is stored as a raw pointer for the
+                    // existing lifecycle handoff.  Its acquire dependency
+                    // has been fully satisfied before the lease is forgotten,
+                    // so later cancelBuffer(..., -1) is correct.
+                    log::info!("anland.collect spare held dequeued (stop-time unblock)");
+                    Some(slot.into_held())
+                }
+                Err(error) => {
+                    let _ = slot.cancel(None);
+                    log::warn!("anland.collect spare acquire fence failed: {error}");
+                    None
+                }
+            }
         }
         Err(r) => {
             log::warn!("anland.collect no spare slot available ({r}); stop may block briefly");
@@ -1149,8 +1512,11 @@ fn collect_buffers(
 /// at the broker, and spawn the one-shot BUFS_READY waiter.
 fn deposit_generation(inner: &Arc<Inner>) -> Result<(), String> {
     let buf_ready = sys::make_eventfd().map_err(|e| format!("eventfd: {e}"))?;
+    // Fence packets carry a fixed header plus optional SCM_RIGHTS. Keep the
+    // packet boundary so a completion can never consume bytes from the next
+    // frame and sequence/generation validation remains exact.
     let (fence_read, fence_write) =
-        sys::socketpair(true).map_err(|e| format!("fence socketpair: {e}"))?;
+        sys::socketpair(false).map_err(|e| format!("fence socketpair: {e}"))?;
     let (data_ours, data_theirs) =
         sys::socketpair(true).map_err(|e| format!("data socketpair: {e}"))?;
     let (audio_ours, audio_theirs) =
@@ -1175,8 +1541,9 @@ fn deposit_generation(inner: &Arc<Inner>) -> Result<(), String> {
             _shm_fd: shm_fd,
             shm_ptr: shm_ptr as usize,
             _audio: audio_ours,
-        });
+            });
     }
+    inner.work.lock().unwrap().reset_for_connection(id);
     // Move producer ends into the deposit (buf_ready + shm are dup'd here so
     // the broker owns independent masters for its per-pickup dup()s).
     let (buf_ready_dup, shm_dup) = {
@@ -1211,6 +1578,7 @@ fn deposit_generation(inner: &Arc<Inner>) -> Result<(), String> {
 fn teardown_generation(inner: &Arc<Inner>) {
     inner.broker.withdraw();
     *inner.connected_gen.lock().unwrap() = None;
+    inner.work.lock().unwrap().reset_for_connection(0);
     let _guard = inner.io_lock.lock().unwrap();
     let mut gen = inner.gen.lock().unwrap();
     if let Some(g) = gen.take() {
@@ -1246,6 +1614,42 @@ fn enter_fallback(inner: &Arc<Inner>, expected: u64, reason: &str) {
             log::error!("anland.fallback re-deposit failed: {e}");
         }
     }
+}
+
+/// Retire a surface after the producer render fence was lost.
+///
+/// Once KWin has been selected for a slot, there is no safe `cancelBuffer`
+/// fence unless KWin sends its render-done fence.  Withdraw the generation,
+/// stop the surface workers, and leave the dequeued slot to the native-window
+/// teardown performed by `suspend_surface`.  The next Android lifecycle
+/// attachment creates a new BufferQueue surface; no old slot is reused.
+fn retire_surface_for_recovery(inner: &Arc<Inner>, expected: u64, reason: &str) {
+    let _transition = inner.transition_lock.lock().unwrap();
+    if inner
+        .gen
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|generation| generation.id)
+        == Some(expected)
+    {
+        inner.fallback_count.fetch_add(1, Ordering::Relaxed);
+        log::error!(
+            "anland.surface recovery required reason={reason}; retiring generation={expected}"
+        );
+        inner
+            .surface_recovery_requested
+            .store(true, Ordering::Release);
+        teardown_generation(inner);
+    } else {
+        log::warn!(
+            "anland.surface recovery requested for stale generation={expected} reason={reason}"
+        );
+        inner
+            .surface_recovery_requested
+            .store(true, Ordering::Release);
+    }
+    let _ = sys::eventfd_write(&inner.wake, 1);
 }
 
 fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receiver<u64>) {
@@ -1331,7 +1735,6 @@ fn render_loop(inner: Arc<Inner>) {
     // Per-generation dups owned by this thread (immune to teardown close).
     let mut cur_gen: u64 = 0;
     let mut cur_fence: Option<OwnedFd> = None;
-    let mut pending: Option<u64> = None; // generation a select was issued on
     let mut idle_logged = false;
     // Thread-local dups of the pacing fds (same immunity rationale).
     let (tick, wake) = {
@@ -1348,7 +1751,9 @@ fn render_loop(inner: Arc<Inner>) {
             }
         }
     };
-    // VSYNC-driven instrumentation state.
+    // Work-driven instrumentation state. VSYNC contributes timing telemetry
+    // when a callback happens to arrive with a real producer request, but it
+    // is never a source of render work.
     let mut win_start_ns = sys::now_ns();
     let mut win_frames: u64 = 0;
     let mut win_comp_us: u64 = 0;
@@ -1364,7 +1769,9 @@ fn render_loop(inner: Arc<Inner>) {
     let mut log_unknown_ns: u64 = 0;
     let mut log_mismatch_ns: u64 = 0;
     let mut log_gen0_ns: u64 = 0;
-    while inner.running.load(Ordering::Acquire) {
+    while inner.running.load(Ordering::Acquire)
+        && !inner.surface_recovery_requested.load(Ordering::Acquire)
+    {
         let Some(window) = current_window(&inner) else {
             break;
         };
@@ -1407,12 +1814,13 @@ fn render_loop(inner: Arc<Inner>) {
         if gen_id != cur_gen {
             cur_gen = gen_id;
             cur_fence = fence_dup;
-            pending = None;
             idle_logged = false;
         }
-        // Presentation is strictly display-VSYNC-driven while the Android
-        // surface is live. The control wake below can interrupt this wait for
-        // lifecycle/rebind handling, but never authorizes a select by itself.
+        // Presentation is producer-work-driven while the Android surface is
+        // live. A FRAME_WANTED control wake authorizes one coalesced render;
+        // an Android VSYNC tick only contributes optional timing telemetry.
+        // Lifecycle/rebind wakes still re-check state without authorizing
+        // work when no request is pending.
         if !inner.window_live.load(Ordering::Acquire) {
             break;
         }
@@ -1438,17 +1846,15 @@ fn render_loop(inner: Arc<Inner>) {
         if wake_ready {
             drain_fd(&wake);
         }
-        if !tick_ready {
-            // A lifecycle/rebind control wake only causes the loop to
-            // re-check state at the top; it cannot present a frame.
+        if !tick_ready && !wake_ready {
+            // poll_two currently cannot return this combination, but retain
+            // the guard so a future pacing backend cannot free-spin.
             continue;
         }
         let now = sys::now_ns();
         iters += 1;
         if iters <= 30 {
-            log::info!(
-                "anland.vsync tick={tick_ready} control_wake={wake_ready} select=true"
-            );
+            log::info!("anland.work wake={wake_ready} vsync_telemetry={tick_ready}");
         }
         if now.wrapping_sub(alive_ns) >= 10_000_000_000 {
             let (q, f, b, fb) = (
@@ -1469,9 +1875,34 @@ fn render_loop(inner: Arc<Inner>) {
         // is still booting — every cold boot paid exactly one fallback this
         // way (generation 1 always died ~5s after deposit, long before kwin
         // could render; the working generation was always 2). Generation 0
-        // (no producer by design) still flows to the idle path below.
+        // (no producer by design) holds the initialized surface frame below.
         if cur_gen != 0 && inner.connected_gen.lock().unwrap().as_ref() != Some(&cur_gen) {
             win_skips += 1;
+            log_fps_window(
+                &mut win_start_ns,
+                &mut win_frames,
+                &mut win_comp_us,
+                &mut win_comp_max_us,
+                &mut win_skips,
+                &mut win_stalls,
+            );
+            continue;
+        }
+        if cur_gen == 0 {
+            // A disconnected generation is a control state, not a render
+            // workload. SurfaceFlinger keeps its already-posted black frame;
+            // do not dequeue/queue unrendered buffers on every VSYNC while
+            // the producer is booting or recovering.
+            win_skips += 1;
+            if !idle_logged {
+                log::info!(
+                    "anland.render producer not connected; holding initialized surface frame"
+                );
+                idle_logged = true;
+            } else if now.wrapping_sub(log_gen0_ns) >= 10_000_000_000 {
+                log::info!("anland.render disconnected generation still holding last frame");
+                log_gen0_ns = now;
+            }
             log_fps_window(
                 &mut win_start_ns,
                 &mut win_frames,
@@ -1485,6 +1916,63 @@ fn render_loop(inner: Arc<Inner>) {
         if inner.rebind_active.load(Ordering::Acquire) {
             continue;
         }
+        // Work is producer-owned. A wake/tick without a pending request is
+        // idle: do not dequeue, select, wait for a fence, or queue a duplicate
+        // frame. This is the static-desktop power/BufferQueue gate.
+        let Some(work) = inner.work.lock().unwrap().take(cur_gen) else {
+            win_skips += 1;
+            if !idle_logged {
+                log::info!("anland.render idle: no FRAME_WANTED; holding last queued frame");
+                idle_logged = true;
+            } else if now.wrapping_sub(log_gen0_ns) >= 10_000_000_000 {
+                log::info!("anland.render idle: no FRAME_WANTED for 10s");
+                log_gen0_ns = now;
+            }
+            log_fps_window(
+                &mut win_start_ns,
+                &mut win_frames,
+                &mut win_comp_us,
+                &mut win_comp_max_us,
+                &mut win_skips,
+                &mut win_stalls,
+            );
+            continue;
+        };
+        idle_logged = false;
+        // Consume timing data only for a real work item. A telemetry tick
+        // arriving while the desktop is static must not be mistaken for a
+        // presentation or cause its timing to be reused by later work.
+        let tick_timeline = inner
+            .vsync
+            .lock()
+            .ok()
+            .and_then(|pump| pump.as_ref().and_then(sys::VsyncPump::take_timeline));
+        if let Some(timeline) = tick_timeline {
+            let work_sequence = work.sequence;
+            let work_generation = work.generation;
+            let late_ns = if timeline.deadline_ns > 0 && now > timeline.deadline_ns {
+                now - timeline.deadline_ns
+            } else {
+                0
+            };
+            log::debug!(
+                "anland.timeline work sequence={} producer_generation={} frame_time_ns={} deadline_ns={} expected_present_ns={} vsync_id={} late_ns={}",
+                work_sequence,
+                work_generation,
+                timeline.frame_time_ns,
+                timeline.deadline_ns,
+                timeline.expected_present_ns,
+                timeline.vsync_id,
+                late_ns,
+            );
+        }
+        if iters <= 30 {
+            let sequence = work.sequence;
+            let generation = work.generation;
+            log::info!(
+                "anland.work render=true sequence={sequence} producer_generation={generation}"
+            );
+        }
         // Selected: this dequeue hands us the slot KWin will render into.
         // (BufferQueue backpressure still applies when all slots are live.)
         let (anb, acquire) = match unsafe { inner.anw.dequeue(window) } {
@@ -1497,32 +1985,35 @@ fn render_loop(inner: Arc<Inner>) {
                 continue;
             }
         };
+        let queue = NativeBufferQueue {
+            window,
+            api: &inner.anw,
+        };
+        let mut slot = DequeuedBuffer::new(anb, acquire, &queue);
         if !inner.window_live.load(Ordering::Acquire) {
-            unsafe { inner.anw.cancel(window, anb, -1) };
+            let _ = slot.cancel(None);
             break;
         }
         // The surface generation this frame belongs to. A rotation that
         // lands between here and queueBuffer must cancel, never present,
         // a buffer produced for the old dimensions.
         let frame_sgen = *inner.surface_gen.lock().unwrap();
-        if acquire >= 0 {
-            // Blocking acquire wait (see ACQUIRE_WAIT_MS). Never queue-back:
-            // presenting a buffer SF hasn't released invites KWin to render
-            // into scanout-active memory (GPU hang, proven). Cancel instead.
-            let fence = unsafe { OwnedFd::from_raw_fd(acquire) };
-            if sys::wait_fence(fence, ACQUIRE_WAIT_MS).is_err() {
-                win_stalls += 1;
-                let now = sys::now_ns();
-                if now.wrapping_sub(log_stall_ns) >= 1_000_000_000 {
-                    log::warn!("anland.sink acquire-stall (SF release pending >1s); cancelling");
-                    log_stall_ns = now;
-                }
-                unsafe { inner.anw.cancel(window, anb, -1) };
-                continue;
+        // Blocking acquire wait (see ACQUIRE_WAIT_MS). Never queue-back:
+        // presenting a buffer SF hasn't released invites KWin to render
+        // into scanout-active memory (GPU hang, proven). On timeout the
+        // lease retains the unsignalled fd and transfers it to cancelBuffer.
+        if slot.wait_for_acquire(ACQUIRE_WAIT_MS).is_err() {
+            win_stalls += 1;
+            let now = sys::now_ns();
+            if now.wrapping_sub(log_stall_ns) >= 1_000_000_000 {
+                log::warn!("anland.sink acquire-stall (SF release pending >1s); cancelling");
+                log_stall_ns = now;
             }
+            let _ = slot.cancel(None);
+            continue;
         }
         if !inner.window_live.load(Ordering::Acquire) {
-            unsafe { inner.anw.cancel(window, anb, -1) };
+            let _ = slot.cancel(None);
             break;
         }
         // Match slot -> producer index.
@@ -1541,27 +2032,9 @@ fn render_loop(inner: Arc<Inner>) {
                 log::info!("anland.sink unknown-slot cancel-back (SF may have reallocated)");
                 log_unknown_ns = now;
             }
-            unsafe { inner.anw.cancel(window, anb, -1) };
+            let _ = slot.cancel(None);
             continue;
         };
-        if cur_gen == 0 {
-            // Fallback: keep the window alive with unrendered frames.
-            unsafe { inner.anw.queue(window, anb, -1) };
-            if !idle_logged {
-                log::info!(
-                    "anland.render fallback: presenting unrendered frames until producer connects"
-                );
-                idle_logged = true;
-            } else {
-                let now = sys::now_ns();
-                if now.wrapping_sub(log_gen0_ns) >= 10_000_000_000 {
-                    log::info!("anland.sink gen0-fallback still unconnected");
-                    log_gen0_ns = now;
-                }
-            }
-            thread::sleep(Duration::from_millis(16));
-            continue;
-        }
         // select_dmabuf: shm write + eventfd signal under io_lock.
         // t_select spans signal -> render fence: KWin's composite latency.
         let t_select_ns = sys::now_ns();
@@ -1575,10 +2048,9 @@ fn render_loop(inner: Arc<Inner>) {
                         drop(gen);
                         drop(_guard);
                         enter_fallback(&inner, cur_gen, "eventfd signal failed");
-                        unsafe { inner.anw.cancel(window, anb, -1) };
+                        let _ = slot.cancel(None);
                         continue;
                     }
-                    pending = Some(cur_gen);
                 }
                 _ => {
                     let now = sys::now_ns();
@@ -1586,33 +2058,88 @@ fn render_loop(inner: Arc<Inner>) {
                         log::info!("anland.sink gen-mismatch cancel-back cur={cur_gen}");
                         log_mismatch_ns = now;
                     }
-                    unsafe { inner.anw.cancel(window, anb, -1) };
+                    let _ = slot.cancel(None);
                     continue;
                 }
             }
         }
+        // The producer has now been notified which slot to render.  From
+        // this point a cancellation without the producer's render fence is a
+        // separate recovery decision; it is never confused with an acquire
+        // fence that was already satisfied above.
+        slot.begin_render();
         // refresh_done: 5s poll on our fence dup, then non-blocking recvmsg.
-        let rfence = refresh_done(
-            &inner,
-            cur_fence.as_ref(),
-            pending == Some(cur_gen),
-            cur_gen,
-        );
-        if pending == Some(cur_gen) && rfence == FENCE_LOST {
+        let rfence = refresh_done(&inner, cur_fence.as_ref(), work);
+        if rfence == FENCE_LOST {
             log::warn!(
-                "anland.render fence lost (generation died); buffer cancelled, not presented"
+                "anland.render fence lost (generation died); retiring surface without cancelBuffer"
             );
-            unsafe { inner.anw.cancel(window, anb, -1) };
+            if inner.window_live.load(Ordering::Acquire) {
+                retire_surface_for_recovery(&inner, cur_gen, "render fence lost");
+            }
+            slot.abandon_for_surface_reset();
+            break;
+        }
+        // NO_DAMAGE is an explicit producer completion, not a missing render
+        // fence.  It has no render dependency and must reach the cancel path
+        // below instead of retiring an otherwise healthy hardware surface.
+        if rfence < 0 && rfence != FENCE_NO_DAMAGE && !inner.software_gl {
+            log::error!(
+                "anland.render producer returned no render fence in hardware mode; retiring surface"
+            );
+            if inner.window_live.load(Ordering::Acquire) {
+                retire_surface_for_recovery(&inner, cur_gen, "hardware frame had no render fence");
+            }
+            slot.abandon_for_surface_reset();
+            break;
+        }
+        if rfence == FENCE_NO_DAMAGE {
+            selects += 1;
+            let cur_sgen = *inner.surface_gen.lock().unwrap();
+            if inner.rebind_active.load(Ordering::Acquire)
+                || !surface_geometry::generation_completion_allowed(frame_sgen, cur_sgen)
+            {
+                log::info!(
+                    "anland.render stale-generation cancel-back no-damage frame_sgen={frame_sgen} sgen={cur_sgen}"
+                );
+            } else {
+                let work_sequence = work.sequence;
+                let work_generation = work.generation;
+                log::debug!(
+                    "anland.render no-damage sequence={} producer_generation={}; cancelBuffer",
+                    work_sequence,
+                    work_generation
+                );
+            }
+            // A NO_DAMAGE message has no render dependency. The selected slot
+            // was acquire-satisfied above, so -1 is the only valid cancel fd.
+            let c = slot.cancel(None);
+            if c != 0 {
+                log::warn!("anland.render no-damage cancelBuffer failed: {c}");
+            }
+            log_fps_window(
+                &mut win_start_ns,
+                &mut win_frames,
+                &mut win_comp_us,
+                &mut win_comp_max_us,
+                &mut win_skips,
+                &mut win_stalls,
+            );
             continue;
         }
+        let rfence_owned = if rfence >= 0 {
+            // SAFETY: refresh_done returns ownership of the SCM_RIGHTS fd.
+            Some(unsafe { OwnedFd::from_raw_fd(rfence) })
+        } else {
+            None
+        };
         if !inner.window_live.load(Ordering::Acquire) {
             // A surface suspend may land while a bare/software frame was
             // selected. Return the slot, never queue or mark readiness after
             // the lifecycle has retired this surface generation.
-            unsafe { inner.anw.cancel(window, anb, rfence) };
+            let _ = slot.cancel(rfence_owned);
             break;
         }
-        pending = None;
         selects += 1;
         // Generation fence: a rotation that landed after this frame's
         // dequeue must cancel, never present, a buffer produced for the old
@@ -1624,13 +2151,13 @@ fn render_loop(inner: Arc<Inner>) {
             log::info!(
                 "anland.render stale-generation cancel-back frame_sgen={frame_sgen} sgen={cur_sgen}"
             );
-            unsafe { inner.anw.cancel(window, anb, rfence) };
+            let _ = slot.cancel(rfence_owned);
             continue;
         }
-        let q = unsafe { inner.anw.queue(window, anb, rfence) };
+        slot.complete_render();
+        let q = slot.queue_rendered(rfence_owned);
         if q != 0 {
             log::warn!("anland.render queueBuffer failed: {q}");
-            close_silently(rfence);
         } else {
             inner.frames_queued.fetch_add(1, Ordering::Relaxed);
             // Readiness contract (mirrors the Smithay path's first-frame
@@ -1702,8 +2229,8 @@ fn render_loop(inner: Arc<Inner>) {
                 );
             }
             // Composite latency is recorded for the fps line only. KWin's
-            // Anland backend re-renders the full scene on every VSYNC select;
-            // presentation is intentionally not gated by client activity.
+            // Anland backend requested this work explicitly; presentation is
+            // not invented by a VSYNC tick.
             let comp_ns = sys::now_ns().wrapping_sub(t_select_ns);
             win_frames += 1;
             win_comp_us += comp_ns / 1000;
@@ -1762,18 +2289,18 @@ fn log_fps_window(
 }
 
 const FENCE_LOST: i32 = -2;
+const FENCE_NO_DAMAGE: i32 = -3;
 
-/// Wait for the producer's render-done message; return its fence fd (>=0),
-/// -1 for ready-now, or FENCE_LOST when the generation died.
+/// Wait for the producer's frame completion message. A valid FRAME_DONE
+/// returns its render fence fd (>=0) or -1 for a synchronous/software frame;
+/// NO_DAMAGE returns FENCE_NO_DAMAGE and is handled by cancelBuffer. Any
+/// sequence/generation mismatch is a fatal protocol loss, never an implicit
+/// "ready" result.
 fn refresh_done(
     inner: &Arc<Inner>,
     fence: Option<&OwnedFd>,
-    selected: bool,
-    generation: u64,
+    work: FrameWanted,
 ) -> i32 {
-    if !selected {
-        return -1;
-    }
     let Some(fence) = fence else { return -1 };
     // Emergency software fallback only: cold sessions (nothing ever queued)
     // get a long interruptible budget, because tearing down the generation
@@ -1803,46 +2330,105 @@ fn refresh_done(
                     return FENCE_LOST;
                 }
                 if waited_ms >= budget_ms {
-                    enter_fallback(inner, generation, "refresh_done timeout (producer stalled)");
                     return FENCE_LOST;
                 }
             }
         }
     }
-    // Non-blocking recvmsg: 1 byte + optional SCM_RIGHTS fence.
-    let mut byte = [0u8; 1];
+    // The fence channel is a SOCK_SEQPACKET transport. Every packet carries
+    // its explicit completion kind plus the exact work sequence/generation;
+    // only FRAME_DONE may carry one SCM_RIGHTS render fence.
+    let mut wire = [0u8; 24];
     let mut iov = libc::iovec {
-        iov_base: byte.as_mut_ptr() as *mut libc::c_void,
-        iov_len: 1,
+        iov_base: wire.as_mut_ptr() as *mut libc::c_void,
+        iov_len: wire.len(),
     };
-    let mut cmsg_buf = [0u8; 32];
+    let mut cmsg_buf = [0u8; 64];
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = cmsg_buf.len() as _;
     let n = unsafe { libc::recvmsg(fence.as_raw_fd(), &mut msg, libc::MSG_DONTWAIT) };
-    if n == 0 {
-        enter_fallback(inner, generation, "fence channel EOF (producer gone)");
-        return FENCE_LOST;
-    }
     if n < 0 {
         // EAGAIN after POLLIN (fd swapped under us) or error: treat as lost.
-        enter_fallback(inner, generation, "fence channel recv failed");
         return FENCE_LOST;
     }
-    let mut rfence = -1;
+    if n != wire.len() as isize
+        || (msg.msg_flags & libc::MSG_TRUNC) != 0
+        || (msg.msg_flags & libc::MSG_CTRUNC) != 0
+    {
+        return FENCE_LOST;
+    }
+    let mut received_fds = [libc::c_int::MIN; 4];
+    let mut received_count = 0usize;
     unsafe {
         let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
         while !cmsg.is_null() {
             if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
-                rfence = *(libc::CMSG_DATA(cmsg) as *const i32);
-                break;
+                let payload_bytes = (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+                let count = (payload_bytes / std::mem::size_of::<libc::c_int>()).min(4);
+                let ptr = libc::CMSG_DATA(cmsg) as *const libc::c_int;
+                for index in 0..count {
+                    if received_count < received_fds.len() {
+                        received_fds[received_count] = *ptr.add(index);
+                        received_count += 1;
+                    } else {
+                        libc::close(*ptr.add(index));
+                    }
+                }
             }
             cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
         }
     }
-    rfence
+    let close_received = |fds: &[libc::c_int], count: usize| {
+        for fd in fds.iter().take(count) {
+            if *fd >= 0 {
+                close_silently(*fd);
+            }
+        }
+    };
+    let msg_type = u32::from_ne_bytes(wire[0..4].try_into().unwrap());
+    let sequence = u64::from_ne_bytes(wire[8..16].try_into().unwrap());
+    let generation = u64::from_ne_bytes(wire[16..24].try_into().unwrap());
+    let work_sequence = work.sequence;
+    let work_generation = work.generation;
+    if sequence != work_sequence || generation != work_generation {
+        close_received(&received_fds, received_count);
+        log::error!(
+            "anland.fence sequence mismatch kind={msg_type} got={sequence}/{generation} expected={work_sequence}/{work_generation}"
+        );
+        return FENCE_LOST;
+    }
+    match msg_type {
+        FENCE_MSG_FRAME_DONE => {
+            if received_count > 1 {
+                close_received(&received_fds[1..], received_count - 1);
+                close_silently(received_fds[0]);
+                log::error!("anland.fence FRAME_DONE carried more than one fd");
+                return FENCE_LOST;
+            }
+            if received_count == 1 {
+                received_fds[0]
+            } else {
+                -1
+            }
+        }
+        FENCE_MSG_NO_DAMAGE => {
+            close_received(&received_fds, received_count);
+            if received_count != 0 {
+                log::error!("anland.fence NO_DAMAGE carried an unexpected fd");
+                FENCE_LOST
+            } else {
+                FENCE_NO_DAMAGE
+            }
+        }
+        _ => {
+            close_received(&received_fds, received_count);
+            log::error!("anland.fence unknown completion kind={msg_type}");
+            FENCE_LOST
+        }
+    }
 }
 
 fn event_loop(inner: Arc<Inner>) {
@@ -1851,6 +2437,7 @@ fn event_loop(inner: Arc<Inner>) {
     let mut cur_data: Option<OwnedFd> = None;
     while inner.running.load(Ordering::Acquire)
         && inner.window_live.load(Ordering::Acquire)
+        && !inner.surface_recovery_requested.load(Ordering::Acquire)
     {
         let gen_id = inner
             .gen
@@ -1862,6 +2449,7 @@ fn event_loop(inner: Arc<Inner>) {
         if gen_id != cur_gen {
             cur_gen = gen_id;
             cur_data = None;
+            inner.work.lock().unwrap().reset_for_connection(gen_id);
             if gen_id != 0 {
                 let dup = inner
                     .gen
@@ -1885,51 +2473,383 @@ fn event_loop(inner: Arc<Inner>) {
                 continue;
             }
         }
-        let mut wire = [0u8; 8 + 20];
-        if sys::recv_all(data, &mut wire).is_err() {
+        let mut header = [0u8; 8];
+        if sys::recv_all(data, &mut header).is_err() {
             cur_gen = 0;
             cur_data = None;
             continue;
         }
-        let msg_type = u32::from_ne_bytes(wire[0..4].try_into().unwrap());
-        if msg_type != DATA_MSG_OUTPUT_EVENT {
-            log::warn!("anland.event unexpected data msg type={msg_type}");
-            continue;
-        }
-        let ev = OutputEvent {
-            ev_type: u32::from_ne_bytes(wire[8..12].try_into().unwrap()),
-            payload: wire[12..28].try_into().unwrap(),
-        };
-        match ev.ev_type {
-            OUTPUT_TYPE_CLIPBOARD => {
-                // Milestone: drain (mandatory for stream health), bridge later.
-                let size = ev.clipboard_size() as usize;
-                log::info!(
-                    "anland.event clipboard from producer: {size} bytes (drained, bridge pending)"
-                );
-                let mut sink = vec![0u8; size.min(1 << 20)];
-                let mut left = size;
-                while left > 0 {
-                    let n = left.min(sink.len());
-                    if sys::recv_all(data, &mut sink[..n]).is_err() {
-                        break;
+        let msg_type = u32::from_ne_bytes(header[0..4].try_into().unwrap());
+        let size = u32::from_ne_bytes(header[4..8].try_into().unwrap()) as usize;
+        match msg_type {
+            DATA_MSG_FRAME_WANTED => {
+                if size != 16 {
+                    log::error!("anland.event invalid FRAME_WANTED size={size}");
+                    cur_gen = 0;
+                    cur_data = None;
+                    continue;
+                }
+                let mut payload = [0u8; 16];
+                if sys::recv_all(data, &mut payload).is_err() {
+                    cur_gen = 0;
+                    cur_data = None;
+                    continue;
+                }
+                let wanted = FrameWanted {
+                    sequence: u64::from_ne_bytes(payload[0..8].try_into().unwrap()),
+                    generation: u64::from_ne_bytes(payload[8..16].try_into().unwrap()),
+                };
+                let sequence = wanted.sequence;
+                let generation = wanted.generation;
+                let accepted = inner.work.lock().unwrap().accept(cur_gen, wanted);
+                if accepted {
+                    log::debug!(
+                        "anland.event FRAME_WANTED sequence={} generation={}",
+                        sequence,
+                        generation
+                    );
+                    // Wake the render thread for this producer-owned piece of
+                    // work. Android VSYNC is timing telemetry/deadline data;
+                    // it must not gate or invent a presentation request.
+                    if let Ok(vsync) = inner.vsync.lock() {
+                        if let Some(pump) = vsync.as_ref() {
+                            let _ = pump.request();
+                        }
                     }
-                    left -= n;
+                    let _ = sys::eventfd_write(&inner.wake, 1);
+                } else {
+                    log::warn!(
+                        "anland.event stale/invalid FRAME_WANTED sequence={} generation={}",
+                        sequence,
+                        generation
+                    );
                 }
             }
-            OUTPUT_TYPE_RESOURCES_REQUEST => {
-                log::info!("anland.event resources request (camera): unanswered, producer treats as disabled");
-            }
-            OUTPUT_TYPE_SET_CONSUMER_VAR => {
-                log::info!("anland.event set-consumer-var (pointer capture tracking pending)");
-            }
-            OUTPUT_TYPE_SCHEDULING => {
-                log::info!("anland.event scheduling hint (cgroup boost needs root; ignored)");
+            DATA_MSG_OUTPUT_EVENT => {
+                if size != 20 {
+                    log::error!("anland.event invalid OUTPUT_EVENT size={size}");
+                    if !drain_data_bytes(data, size) {
+                        cur_gen = 0;
+                        cur_data = None;
+                    }
+                    continue;
+                }
+                let mut wire = [0u8; 20];
+                if sys::recv_all(data, &mut wire).is_err() {
+                    cur_gen = 0;
+                    cur_data = None;
+                    continue;
+                }
+                let ev = OutputEvent {
+                    ev_type: u32::from_ne_bytes(wire[0..4].try_into().unwrap()),
+                    payload: wire[4..20].try_into().unwrap(),
+                };
+                match ev.ev_type {
+                    OUTPUT_TYPE_CLIPBOARD => {
+                        // Milestone: drain (mandatory for stream health), bridge later.
+                        let size = ev.clipboard_size() as usize;
+                        log::info!(
+                            "anland.event clipboard from producer: {size} bytes (drained, bridge pending)"
+                        );
+                        if !drain_data_bytes(data, size) {
+                            cur_gen = 0;
+                            cur_data = None;
+                        }
+                    }
+                    OUTPUT_TYPE_RESOURCES_REQUEST => {
+                        log::info!("anland.event resources request (camera): unanswered, producer treats as disabled");
+                    }
+                    OUTPUT_TYPE_SET_CONSUMER_VAR => {
+                        log::info!("anland.event set-consumer-var (pointer capture tracking pending)");
+                    }
+                    OUTPUT_TYPE_SCHEDULING => {
+                        log::info!("anland.event scheduling hint (cgroup boost needs root; ignored)");
+                    }
+                    other => {
+                        log::info!("anland.event unknown output type={other}");
+                    }
+                }
             }
             other => {
-                log::info!("anland.event unknown output type={other}");
+                log::warn!("anland.event unexpected data msg type={other} size={size}");
+                if !drain_data_bytes(data, size) {
+                    cur_gen = 0;
+                    cur_data = None;
+                }
             }
         }
     }
     log::info!("anland.event thread stopped");
+}
+
+/// Drain a variable-length tail without allocating based on an untrusted wire
+/// length. Returning false means the producer disconnected mid-message.
+fn drain_data_bytes(fd: &OwnedFd, mut remaining: usize) -> bool {
+    let mut sink = [0u8; 4096];
+    while remaining > 0 {
+        let count = remaining.min(sink.len());
+        if sys::recv_all(fd, &mut sink[..count]).is_err() {
+            return false;
+        }
+        remaining -= count;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Call {
+        Queue(i32),
+        Cancel(i32),
+    }
+
+    struct FakeQueue {
+        calls: Mutex<Vec<Call>>,
+        queue_result: i32,
+        cancel_result: i32,
+    }
+
+    impl FakeQueue {
+        fn new(queue_result: i32, cancel_result: i32) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                queue_result,
+                cancel_result,
+            }
+        }
+
+        fn calls(&self) -> Vec<Call> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn consume_on_call(result: i32, fence: i32) -> i32 {
+            // Mirrors ANativeWindow queue/cancel ownership: the callee owns
+            // the fence once the call is made, including an error return.
+            if fence >= 0 {
+                unsafe { libc::close(fence) };
+            }
+            result
+        }
+    }
+
+    impl BufferQueueOps for FakeQueue {
+        fn queue(&self, _anb: *mut ANativeWindowBuffer, fence: i32) -> i32 {
+            self.calls.lock().unwrap().push(Call::Queue(fence));
+            Self::consume_on_call(self.queue_result, fence)
+        }
+
+        fn cancel(&self, _anb: *mut ANativeWindowBuffer, fence: i32) -> i32 {
+            self.calls.lock().unwrap().push(Call::Cancel(fence));
+            Self::consume_on_call(self.cancel_result, fence)
+        }
+    }
+
+    fn new_fence() -> OwnedFd {
+        sys::make_eventfd().expect("eventfd fence")
+    }
+
+    fn assert_closed(fd: i32) {
+        let result = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_eq!(result, -1, "fd {fd} was not closed");
+    }
+
+    fn null_buffer() -> *mut ANativeWindowBuffer {
+        std::ptr::null_mut()
+    }
+
+    #[test]
+    fn pending_acquire_timeout_transfers_original_fence_to_cancel() {
+        let fake = FakeQueue::new(0, 0);
+        let fence = new_fence();
+        let raw = fence.as_raw_fd();
+        let mut slot = DequeuedBuffer::new(null_buffer(), raw, &fake);
+        // The fd is now owned by the lease, not by this local value.
+        std::mem::forget(fence);
+
+        assert!(slot.wait_for_acquire(0).is_err());
+        assert_eq!(slot.cancel(None), 0);
+        assert_eq!(fake.calls(), vec![Call::Cancel(raw)]);
+        assert_closed(raw);
+    }
+
+    #[test]
+    fn already_signalled_acquire_is_closed_before_cancel_uses_minus_one() {
+        let fake = FakeQueue::new(0, 0);
+        let fence = new_fence();
+        let raw = fence.as_raw_fd();
+        sys::eventfd_write(&fence, 1).unwrap();
+        let mut slot = DequeuedBuffer::new(null_buffer(), raw, &fake);
+        std::mem::forget(fence);
+
+        slot.wait_for_acquire(100).unwrap();
+        assert_closed(raw);
+        assert_eq!(slot.cancel(None), 0);
+        assert_eq!(fake.calls(), vec![Call::Cancel(-1)]);
+    }
+
+    #[test]
+    fn delayed_acquire_wait_preserves_state_until_signal() {
+        let fake = FakeQueue::new(0, 0);
+        let fence = new_fence();
+        let raw = fence.as_raw_fd();
+        let writer = unsafe { libc::dup(raw) };
+        assert!(writer >= 0);
+        let signaler = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            let fd = unsafe { OwnedFd::from_raw_fd(writer) };
+            sys::eventfd_write(&fd, 1).unwrap();
+        });
+        let mut slot = DequeuedBuffer::new(null_buffer(), raw, &fake);
+        std::mem::forget(fence);
+
+        slot.wait_for_acquire(250).unwrap();
+        signaler.join().unwrap();
+        assert_eq!(slot.cancel(None), 0);
+        assert_eq!(fake.calls(), vec![Call::Cancel(-1)]);
+        assert_closed(raw);
+    }
+
+    #[test]
+    fn no_acquire_fence_cancels_with_minus_one() {
+        let fake = FakeQueue::new(0, 0);
+        let slot = DequeuedBuffer::new(null_buffer(), -1, &fake);
+        assert_eq!(slot.cancel(None), 0);
+        assert_eq!(fake.calls(), vec![Call::Cancel(-1)]);
+    }
+
+    #[test]
+    fn epoch_or_stop_cancel_keeps_pending_acquire_dependency() {
+        for _reason in ["epoch-change", "stop"] {
+            let fake = FakeQueue::new(0, 0);
+            let fence = new_fence();
+            let raw = fence.as_raw_fd();
+            let slot = DequeuedBuffer::new(null_buffer(), raw, &fake);
+            std::mem::forget(fence);
+            assert_eq!(slot.cancel(None), 0);
+            assert_eq!(fake.calls(), vec![Call::Cancel(raw)]);
+            assert_closed(raw);
+        }
+    }
+
+    #[test]
+    fn render_failure_and_fence_timeout_have_one_terminal_cancel() {
+        let fake = FakeQueue::new(0, 0);
+        let mut slot = DequeuedBuffer::new(null_buffer(), -1, &fake);
+        slot.begin_render();
+        assert_eq!(slot.cancel(None), 0);
+        assert_eq!(fake.calls(), vec![Call::Cancel(-1)]);
+    }
+
+    #[test]
+    fn lost_render_fence_abandons_without_cancel_buffer() {
+        let fake = FakeQueue::new(0, 0);
+        let mut slot = DequeuedBuffer::new(null_buffer(), -1, &fake);
+        slot.begin_render();
+        slot.abandon_for_surface_reset();
+        assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn rendered_queue_transfers_render_fence_once() {
+        let fake = FakeQueue::new(0, 0);
+        let render_fence = new_fence();
+        let raw = render_fence.as_raw_fd();
+        let mut slot = DequeuedBuffer::new(null_buffer(), -1, &fake);
+        slot.begin_render();
+        slot.complete_render();
+        assert_eq!(slot.queue_rendered(Some(render_fence)), 0);
+        assert_eq!(fake.calls(), vec![Call::Queue(raw)]);
+        assert_closed(raw);
+    }
+
+    #[test]
+    fn queue_failure_is_terminal_and_closes_unaccepted_fence() {
+        let fake = FakeQueue::new(-libc::EIO, 0);
+        let render_fence = new_fence();
+        let raw = render_fence.as_raw_fd();
+        let mut slot = DequeuedBuffer::new(null_buffer(), -1, &fake);
+        slot.begin_render();
+        slot.complete_render();
+        assert_ne!(slot.queue_rendered(Some(render_fence)), 0);
+        assert_eq!(fake.calls(), vec![Call::Queue(raw)]);
+        assert_closed(raw);
+    }
+
+    #[test]
+    fn cancel_failure_is_terminal_and_does_not_leak_fence() {
+        let fake = FakeQueue::new(0, -libc::EIO);
+        let fence = new_fence();
+        let raw = fence.as_raw_fd();
+        let slot = DequeuedBuffer::new(null_buffer(), raw, &fake);
+        std::mem::forget(fence);
+        assert_ne!(slot.cancel(None), 0);
+        assert_eq!(fake.calls(), vec![Call::Cancel(raw)]);
+        assert_closed(raw);
+    }
+
+    #[test]
+    fn dropping_an_unresolved_lease_performs_exactly_one_cancel() {
+        let fake = FakeQueue::new(0, 0);
+        let fence = new_fence();
+        let raw = fence.as_raw_fd();
+        let slot = DequeuedBuffer::new(null_buffer(), raw, &fake);
+        std::mem::forget(fence);
+        drop(slot);
+        assert_eq!(fake.calls(), vec![Call::Cancel(raw)]);
+        assert_closed(raw);
+    }
+
+    #[test]
+    fn frame_work_is_monotonic_and_coalesced() {
+        let mut state = FrameWorkState::default();
+        let first = FrameWanted {
+            sequence: 1,
+            generation: 4,
+        };
+        let newer = FrameWanted {
+            sequence: 2,
+            generation: 4,
+        };
+        assert!(state.accept(9, first));
+        assert!(state.accept(9, newer));
+        assert_eq!(state.take(9), Some(newer));
+        assert_eq!(state.take(9), None);
+        assert!(!state.accept(9, first));
+    }
+
+    #[test]
+    fn frame_work_generation_change_discards_old_pending_request() {
+        let mut state = FrameWorkState::default();
+        assert!(state.accept(
+            3,
+            FrameWanted {
+                sequence: 8,
+                generation: 1,
+            }
+        ));
+        assert!(state.accept(
+            3,
+            FrameWanted {
+                sequence: 1,
+                generation: 2,
+            }
+        ));
+        assert_eq!(
+            state.take(3),
+            Some(FrameWanted {
+                sequence: 1,
+                generation: 2,
+            })
+        );
+        assert!(!state.accept(
+            3,
+            FrameWanted {
+                sequence: 1,
+                generation: 1,
+            }
+        ));
+    }
 }

@@ -1,7 +1,14 @@
 #!/bin/sh
-# Run in a Debian 13 ARM64 build guest with the KWin build dependencies.
-# Usage: script PRISTINE_KWIN_6_3_6_SOURCE PORTAL_PATCH_DIR TEST_SOURCE BUILD_DIR
+# RETIRED LEGACY SCRIPT — do not use for the active Forky graphics stack.
+# The old Debian 6.3.6/QPainter experiment is kept only for historical source
+# comparison. Active KWin builds must use patches/kwin/README.md and the exact
+# tuple in assets/graphics-stack-lock.json.
 set -eu
+echo "build-debian-kwin-damage.sh is retired; use the Forky KWin pipeline." >&2
+exit 2
+
+# Historical implementation below is intentionally unreachable.
+# Usage: script PRISTINE_KWIN_6_3_6_SOURCE PORTAL_PATCH_DIR TEST_SOURCE BUILD_DIR
 source_dir=$1
 patch_dir=$2
 test_source=$3
@@ -24,4 +31,4 @@ cmake -S "$source_dir" -B "$build_dir" -G Ninja \
     -DCMAKE_AUTOGEN_PARALLEL="${PORTAL_BUILD_JOBS:-4}" \
     -DCMAKE_INSTALL_LIBDIR=lib/aarch64-linux-gnu -DBUILD_TESTING=OFF
 cmake --build "$build_dir" --target kwin --parallel "${PORTAL_BUILD_JOBS:-4}"
-echo "Stage $build_dir/bin/libkwin.so.6.3.6 in assets/kwin-debian-arm64 before rebuilding the APK."
+echo "If retained for audit, stage $build_dir/bin/libkwin.so.6.3.6 only under assets/legacy-graphics/; it is not an APK input."

@@ -1,6 +1,6 @@
-# XWayland ARM64 candidate build (Phase B) — BUILD ONLY.
+# LEGACY XWayland ARM64 candidate build (Phase B) — MANUAL AUDIT ONLY.
 #
-# Builds the pinned lfdevs 2:24.1.6-91 XWayland source natively on ARM64
+# Builds the archived lfdevs 2:24.1.6-91 XWayland source natively on ARM64
 # inside a digest-pinned Debian 13 (trixie) container, either unmodified
 # (baseline reproduction) or with the Portal 0005 input patch (candidate).
 #
@@ -12,21 +12,13 @@
 # - Pinned inputs: lfdevs source SHA, debian:trixie image digest, canonical
 #   .deb URL+SHA. Any mismatch fails the run closed.
 #
-# Trigger design: while the candidate is developed on wip-splash-ab-save,
-# push builds run here (branch-scoped). After validation, narrow this to
-# workflow_dispatch + path filters (see comment on the push trigger below).
+# This workflow is retained only to reproduce the archived candidate for
+# forensic comparison. It is never part of the active Forky runtime and has
+# no automatic push trigger.
 
-name: XWayland ARM64 build (Phase B)
+name: LEGACY XWayland ARM64 audit (Phase B)
 
 on:
-  # Branch-scoped WIP trigger. TODO(post-validation): replace with
-  # workflow_dispatch + paths filters on patches/xwayland/** and this file.
-  push:
-    branches:
-      - wip-splash-ab-save
-    paths:
-      - .github/workflows/xwayland-arm64.yml
-      - patches/xwayland/**
   workflow_dispatch:
     inputs:
       variant:
@@ -46,9 +38,8 @@ env:
   # Exact lfdevs 2:24.1.6-91 state. Never advance silently; the Portal patch
   # must always be rebased onto this SHA explicitly.
   LFDEVS_XWAYLAND_SHA: 461772ae63c8985fd5671ea85d38d5102590d760
-  # Canonical Portal-pinned binary package (mirrors
-  # scripts/build_debian_rootfs.py LFDEVS_XWAYLAND_DEB). Downloaded only to
-  # compare the reproduced baseline against it; never modified or republished.
+  # Archived candidate binary package. Downloaded only to compare the
+  # reproduced baseline against it; never modified, installed, or republished.
   CANONICAL_DEB_URL: https://github.com/lfdevs/anland-termux/releases/download/5.13.3/xwayland_24.1.6-91_arm64.deb
   CANONICAL_DEB_SHA256: 59f9c7486d6a10ad50a13622bf1d1bbf5accd015d630e4b2b0152a80577dcc64
   # Pinned Debian 13 (trixie) userspace. Manifest-list digest for tag

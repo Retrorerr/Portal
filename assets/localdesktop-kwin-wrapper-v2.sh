@@ -217,13 +217,47 @@ portal_xinput_probe() {
 }
 
 run_real_kwin() {
+    # Scope the graphics overrides to the compositor launch. They used to be
+    # injected into the entire guest session, which made unrelated clients
+    # (and stock XWayland) look like they had a proven KGSL path. XWayland is
+    # still a Debian package child of KWin, but no XWayland-specific force
+    # variable is exported until a Forky build has a real glamor proof.
+    gl_mode=hw
+    if [ "$(cat /var/lib/localdesktop/kwin-glmode 2>/dev/null || true)" = "sw" ]; then
+        gl_mode=sw
+        export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+        export GALLIUM_DRIVER=llvmpipe
+        unset FD_FORCE_KGSL FD_KGSL_ENABLE_DMABUF TURNIP_KMD
+        unset ANLAND_SKIP_IMPLICIT_SYNC_WAIT
+    else
+        export MESA_LOADER_DRIVER_OVERRIDE=kgsl
+        export GALLIUM_DRIVER=freedreno
+        export FD_FORCE_KGSL=1
+        export FD_KGSL_ENABLE_DMABUF=1
+        export TURNIP_KMD=kgsl
+        export ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1
+    fi
+    export ANLAND_SOCKET="${ANLAND_SOCKET:-/tmp/anland/display.sock}"
+    export ANLAND=1
+    export ANLAND_DISABLE_AUDIO=1
+    if [ "${LOCALDESKTOP_KWIN_GL_DEBUG:-0}" = "1" ]; then
+        export KWIN_GL_DEBUG=1
+    else
+        unset KWIN_GL_DEBUG
+    fi
+    printf 'kwin_env mode=%s mesa_override=%s gallium=%s fd_force=%s dmabuf=%s turnip=%s xwayland_force=unset\n' \
+        "$gl_mode" "$MESA_LOADER_DRIVER_OVERRIDE" "$GALLIUM_DRIVER" \
+        "${FD_FORCE_KGSL:-unset}" "${FD_KGSL_ENABLE_DMABUF:-unset}" \
+        "${TURNIP_KMD:-unset}" >> "$log_file"
+    printf 'kwin_debug=%s\n' "${KWIN_GL_DEBUG:-unset}" >> "$log_file"
     export LD_LIBRARY_PATH="$kwin_anland_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export QT_FORCE_STDERR_LOGGING=1
-    # Portal's app UID cannot open Android's /dev/dri node. Current Forky
-    # KWin/Anland uses KGSL-backed surfaceless EGL while Anland owns the
-    # Android dmabuf presentation path; this remains hardware accelerated.
+    # Portal's app UID cannot open Android's /dev/dri node. Hardware mode
+    # uses KGSL-backed surfaceless EGL while Anland owns Android dmabuf
+    # presentation. The explicit sw mode is troubleshooting-only.
     export ANLAND_NO_DRM_DEVICE=1
-    printf 'anland GL mode=hw (KGSL surfaceless EGL; Anland dmabuf path)\n' >> "$log_file"
+    printf 'anland GL mode=%s (%s; Anland dmabuf path)\n' "$gl_mode" \
+        "$( [ "$gl_mode" = sw ] && printf 'llvmpipe software EGL' || printf 'KGSL surfaceless EGL' )" >> "$log_file"
     if [ -n "$segfault_lib" ]; then
         export LD_PRELOAD="$segfault_lib${LD_PRELOAD:+:$LD_PRELOAD}"
         export SEGFAULT_SIGNALS=all

@@ -36,6 +36,14 @@ function Assert-AdaptiveIconResources {
 
 $ndkBin = Join-Path $env:LOCALAPPDATA 'Android\Sdk\ndk\27.2.12479018\toolchains\llvm\prebuilt\windows-x86_64\bin'
 $gradleBin = Join-Path $env:LOCALAPPDATA 'Gradle\gradle-8.14.3\bin'
+$androidSdk = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
+if (Test-Path -LiteralPath $androidSdk -PathType Container) {
+    # xbuild invokes Gradle in a generated directory. Export the SDK location
+    # explicitly so that Gradle does not depend on a user-specific
+    # local.properties file left behind by an earlier build.
+    $env:ANDROID_HOME = $androidSdk
+    $env:ANDROID_SDK_ROOT = $androidSdk
+}
 foreach ($candidate in @($ndkBin, $gradleBin)) {
     if (Test-Path -LiteralPath $candidate) {
         $env:Path = "$candidate;$env:Path"

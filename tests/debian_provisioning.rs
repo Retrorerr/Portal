@@ -666,8 +666,8 @@ fn runtime_builder_uses_forky_packages_and_publisher_validates_them() {
     }
     let publisher = include_str!("../scripts/publish_runtime_release.py");
     for guard in [
-        "FORKY_REQUIRED_PACKAGE_PREFIXES",
         "validate_forky_packages",
+        "validate_graphics_stack_lock",
         "VERSION_CODENAME=forky",
     ] {
         assert!(

@@ -26,9 +26,7 @@ export QT_NO_XDG_DESKTOP_PORTAL=1
 export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
 export ELECTRON_DISABLE_SANDBOX=1
 export LOCALDESKTOP_DIAGNOSTICS=${LOCALDESKTOP_DIAGNOSTICS:-0}
-if [ "$LOCALDESKTOP_DIAGNOSTICS" != 1 ]; then
-    export QT_LOGGING_RULES="*.debug=false;*.info=false${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
-fi
+export LOCALDESKTOP_KWIN_GL_DEBUG=${LOCALDESKTOP_KWIN_GL_DEBUG:-0}
 export SHELL=/bin/bash
 # Debugger capture is opt-in.  Running every KWin instance under gdb changes
 # startup timing and ptrace is commonly denied by Android's sandbox.
@@ -40,7 +38,11 @@ export WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}
 # Portal's only supported desktop path is Anland. Keep Plasma/KDE clients on
 # native Wayland; XWayland remains available to applications that need X11.
 export QT_QPA_PLATFORM=wayland
-export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
+if [ "$LOCALDESKTOP_DIAGNOSTICS" = 1 ] || [ "$LOCALDESKTOP_KWIN_GL_DEBUG" = 1 ]; then
+    export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
+else
+    export QT_LOGGING_RULES="*.debug=false;*.info=false${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
+fi
 
 state_dir=/var/lib/localdesktop
 mkdir -p "$state_dir"
@@ -78,6 +80,7 @@ for name in HOME USER LOGNAME WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
     XDG_CURRENT_DESKTOP DESKTOP_SESSION KDE_FULL_SESSION KDE_SESSION_VERSION \
     KDE_USE_SYSTEMD PLASMA_USE_SYSTEMD QT_NO_XDG_DESKTOP_PORTAL \
     WAYLAND_DEBUG LOCALDESKTOP_CLIPBOARD_HOST LOCALDESKTOP_CLIPBOARD_PORT \
+    LOCALDESKTOP_DIAGNOSTICS LOCALDESKTOP_KWIN_GL_DEBUG \
     ANLAND_SOCKET ANLAND ANLAND_NO_DRM_DEVICE MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER \
     FD_FORCE_KGSL FD_KGSL_ENABLE_DMABUF ANLAND_SKIP_IMPLICIT_SYNC_WAIT \
     ANLAND_DISABLE_AUDIO; do

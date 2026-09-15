@@ -1,8 +1,9 @@
 # KWin 6.7.4 Android/PRoot source patches
 
-This directory contains the five small source patches applied to Portal's
-pinned KWin 6.7.4 ARM64 build. Apply all five to the same pristine source,
-in numeric order:
+This directory contains the five small source patches and the complete Anland
+v3 source overlay applied to Portal's pinned KWin 6.7.4 ARM64 build. Apply all
+five to the same pristine source, in numeric order, then apply
+`anland-6.7.4/`:
 
 * `0001` tolerates an unavailable udev monitor in the Android/PRoot guest.
 * `0002` hardens the QPA raster backing-store failure path.
@@ -12,6 +13,17 @@ in numeric order:
   detection and render-node discovery.
 * `0005` lets the generic OpenGL crash-reporting path tolerate Anland's
   intentional surfaceless backend without a KWin DRM device.
+
+The Anland overlay adds the KWin backend and the producer-side work-driven
+display protocol. Its canonical source application path is:
+
+```sh
+sh /path/to/Portal/scripts/apply_kwin_forky_anland.sh "$kwin_source"
+```
+
+The script verifies the pinned KWin commit, applies 0001--0005 exactly once,
+and copies only the tracked overlay files. The overlay digest is recorded in
+`assets/graphics-stack-lock.json`; it must be checked before staging a binary.
 
 The patches do not change output scale policy or add a second compositor.
 Portal's active graphics path remains Anland plus KWin's surfaceless EGL
@@ -43,45 +55,44 @@ The patch targets KDE KWin tag `v6.7.4`, commit
 checkout or extraction of that source:
 
 ```sh
-kwin_source=/var/lib/localdesktop/build-kwin/kwin-9d1e43932d6799254350403279dc551298911b71
+kwin_source=/var/lib/localdesktop/build-kwin/kwin-v6.7.4-8438567a741826da8b7536a8b10eb3af8fc8820d
 kwin_patch_dir=/path/to/Portal/patches/kwin
 
-cd "$kwin_source"
-for kwin_patch in "$kwin_patch_dir"/0001-*.patch \
-                  "$kwin_patch_dir"/0002-*.patch \
-                  "$kwin_patch_dir"/0003-*.patch \
-                  "$kwin_patch_dir"/0004-*.patch \
-                  "$kwin_patch_dir"/0005-*.patch; do
-  patch -p1 --dry-run < "$kwin_patch"
-  patch -p1 < "$kwin_patch"
-done
+sh /path/to/Portal/scripts/apply_kwin_forky_anland.sh "$kwin_source"
 rg -n "m_udevNotifier\(|udev monitor unavailable|scanForRenderDevices" \
   src/core/gpumanager.cpp
 rg -n "m_usingFallback|SHM allocator (memfd_create|ftruncate|mmap) failed" \
   src/plugins/qpa/backingstore.* src/core/shmgraphicsbufferallocator.cpp
 ```
 
-For a Git checkout, `git apply --check "$kwin_patch"` is equivalent to the
-dry run.  Do not apply the patch twice.  The source archive used for the
+For a Git checkout, the application script performs the equivalent check and
+skips patches that are already applied. The source archive used for the
 OnePlus investigation was KWin v6.7.4 and had SHA-256
 `00a199f8c78407a0630ec2c0873be90bbe4f9e9f31bd0f97c7057cdf224cb180`.
 
-## Native ARM64 build
+## Canonical Debian Forky ARM64 build
 
-Run these commands inside the guest, not on the Windows host.  The installed
-`kwin_wayland` must be from the same 6.7.4 package as the patched library.
+Run these commands in a reproducible Debian 14 (Forky) ARM64 build
+environment. Do not use the retired Arch/pacman or Debian 6.3.6 helper paths.
+The source commit, patch hashes, output hashes, and ELF build IDs must match
+`assets/graphics-stack-lock.json` before anything is staged.
 
 ```sh
 set -eu
 [ "$(uname -m)" = aarch64 ]
-pacman -Q kwin
+[ "$(. /etc/os-release && printf '%s' "$VERSION_CODENAME")" = forky ]
+[ "$(git -C "$kwin_source" rev-parse HEAD)" = 8438567a741826da8b7536a8b10eb3af8fc8820d ]
+sh /path/to/Portal/scripts/apply_kwin_forky_anland.sh "$kwin_source"
+python3 /path/to/Portal/scripts/verify_graphics_stack.py
 
-kwin_build=/var/lib/localdesktop/build-kwin/build-6.7.4
+kwin_build=/var/lib/localdesktop/build-kwin/build-forky-6.7.4
 cmake -S "$kwin_source" -B "$kwin_build" -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_INSTALL_PREFIX=/usr \
-  -DCMAKE_INSTALL_LIBDIR=lib \
-  -DBUILD_TESTING=OFF
+  -DCMAKE_INSTALL_LIBDIR=lib/aarch64-linux-gnu \
+  -DBUILD_TESTING=OFF \
+  -DKWIN_BUILD_X11=ON \
+  -DKWIN_BUILD_KCMS=OFF
 cmake --build "$kwin_build" --target kwin kwin_wayland --parallel 2
 ```
 
@@ -94,14 +105,23 @@ readelf -h "$kwin_library" | rg 'Class:|Machine:'
 kwin_executable="$kwin_build/bin/kwin_wayland"
 [ -x "$kwin_executable" ]
 readelf -h "$kwin_executable" | rg 'Class:|Machine:'
+readelf -n "$kwin_library" | rg 'Build ID:'
+readelf -n "$kwin_executable" | rg 'Build ID:'
 ```
+
+The current Pad 3-built release values are `libkwin.so.6.7.4` SHA-256
+`5f4e085bed2a1b81a72bce80e74a64478e86ad9ff28243f0626d07eec73888e2`,
+build ID `b1812b78494dc6d26290e0d7bafabfa18d47d475`, and `kwin_wayland`
+SHA-256 `193a83d9349f4ae98de30b747f53de6c566e680955813fce6d6808452c9b0cf4`,
+build ID `4c927f0561462df906b59b65c3bad641a68e166c`. Use the repository
+verifier after staging; do not substitute a locally different binary.
 
 Stage the library in an isolated directory first.  Do not overwrite the
 package-managed copy until the null-monitor test has passed and the old copy
 has been backed up by the release owner:
 
 ```sh
-kwin_stage=/var/lib/localdesktop/build-kwin/stage-6.7.4
+kwin_stage=/var/lib/localdesktop/build-kwin/stage-forky-6.7.4
 install -Dm755 "$kwin_library" "$kwin_stage/usr/lib/$(basename "$kwin_library")"
 ln -s "$(basename "$kwin_library")" "$kwin_stage/usr/lib/libkwin.so.6"
 ln -s "libkwin.so.6" "$kwin_stage/usr/lib/libkwin.so"
@@ -213,7 +233,11 @@ submission, or physical presentation.  Those remain separate ARM64 release
 gates and must retain attempt-correlated logs and a native backtrace for any
 new failure.
 
-## Debian 6.3.6 nested touchpad patch
+## Archived Debian 6.3.6 nested touchpad patch
+
+This section is historical only. The 6.3.6 patch and its lfdevs runtime are
+not compatible with the active Forky graphics tuple and are never staged by
+the build or provisioning scripts.
 
 `debian-6.3.6/0001-wayland-portal-touchpad-scroll-settings.patch` targets
 Debian's KWin 6.3.6 source. It preserves the parent Wayland axis source,

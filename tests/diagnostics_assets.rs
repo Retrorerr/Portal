@@ -12,8 +12,6 @@ const GIT_ATTRIBUTES: &str = include_str!("../.gitattributes");
 const SETUP_PAGE: &str = include_str!("../assets/setup-progress-v2.html");
 const ERROR_PAGE: &str = include_str!("../assets/runtime-error.html");
 const ANDROID_MAIN: &str = include_str!("../src/android/main.rs");
-const DRMSHIM_SOURCE: &str = include_str!("../assets/guest-arm64/drmshim.c");
-const DRMSHIM_BINARY: &[u8] = include_bytes!("../assets/guest-arm64/drmshim.so");
 
 #[test]
 fn kwin_wrapper_does_not_make_gdb_a_release_requirement() {
@@ -76,6 +74,14 @@ fn plasma_launcher_waits_for_host_presented_marker() {
 }
 
 #[test]
+fn plasma_launcher_keeps_verbose_graphics_logging_opt_in() {
+    assert!(PLASMA_LAUNCHER.contains("LOCALDESKTOP_KWIN_GL_DEBUG"));
+    assert!(PLASMA_LAUNCHER.contains("LOCALDESKTOP_DIAGNOSTICS\" = 1"));
+    assert!(PLASMA_LAUNCHER.contains("*.debug=false;*.info=false"));
+    assert!(PLASMA_LAUNCHER.contains("kwin_backend_anland.debug=true"));
+}
+
+#[test]
 fn plasma_launcher_leaves_konsole_profile_selection_to_provisioning() {
     assert!(!PLASMA_LAUNCHER.contains("Profile 1.profile"));
     assert!(!PLASMA_LAUNCHER.contains("DefaultProfile"));
@@ -105,7 +111,7 @@ fn electron_desktop_entries_receive_proot_safe_startup_flags() {
 
 #[test]
 fn kwin_wrapper_disables_guest_screenlocker() {
-    assert!(KWIN_WRAPPER.contains("/usr/bin/kwin_wayland --no-lockscreen"));
+    assert!(KWIN_WRAPPER.contains("kwin_bin\" --no-lockscreen"));
 }
 
 #[test]
@@ -200,71 +206,6 @@ fn setup_and_error_pages_offer_one_tap_export() {
     assert!(SETUP_PAGE.contains("export_diagnostics"));
     assert!(ERROR_PAGE.contains("Export diagnostics"));
     assert!(ERROR_PAGE.contains("export_diagnostics"));
-}
-
-#[test]
-fn drmshim_reports_version_with_correct_drm_version_layout() {
-    // struct drm_version is INTERLEAVED (len+pointer per field). A grouped
-    // layout keeps the 64-byte size (ioctl number still matches) but
-    // misplaces every field after name_len, so Mesa's version query fails
-    // and KWin dies at "Failed to create gbm device" (proven on-device).
-    // The checked-in C source may be materialized with CRLF by a Windows
-    // checkout. Normalize only the test view; the source and staged binary
-    // remain byte-for-byte behaviorally unchanged.
-    let source = DRMSHIM_SOURCE.replace("\r\n", "\n");
-    assert!(source.contains("size_t name_len;\n    char *name;"));
-    assert!(source.contains("size_t date_len;\n    char *date;"));
-    assert!(source.contains("size_t desc_len;\n    char *desc;"));
-    assert!(source.contains(
-        "_Static_assert(sizeof(struct drm_version) == 64"
-    ));
-    assert!(source.contains("KGSL-backed DRM node (portal-shimmed)"));
-    // close() must stay uninterposed: a raw-SVC close replacement breaks
-    // processes under PRoot (proven by bisect: EFAULT after successful
-    // reads with close-only interposition).
-    assert!(!source.contains("int close("));
-    assert!(source.contains("close() is deliberately"));
-    assert!(source.contains("register long r0 __asm__(\"x0\")"));
-    // KGSL-backed render node: the fake fd is a real /dev/kgsl-3d0 open so
-    // the kgsl winsys probe succeeds against real hardware; the reported
-    // DRM version name steers Mesa away from the MSM winsys (whose GEM
-    // ioctls need an unobtainable real render node). Dups of fake fds stay
-    // fake (Mesa dups via fcntl64); non-DRM ioctls pass through to the real
-    // device instead of failing.
-    assert!(source.contains("/dev/kgsl-3d0"));
-    assert!(source.contains("version_name[] = \"kgsl\""));
-    assert!(source.contains("int fcntl64("));
-    assert!(source.contains("int dup3("));
-    assert!(source.contains("int openat64("));
-    // The staged binary matches the source contract: AArch64 shared object
-    // exporting exactly open/open64/openat/openat64/ioctl/dup/fcntl-family
-    // (never close).
-    assert_eq!(&DRMSHIM_BINARY[..4], b"\x7fELF");
-    assert_eq!(u16::from_le_bytes([DRMSHIM_BINARY[18], DRMSHIM_BINARY[19]]), 183);
-    for symbol in [
-        b"\x00open\x00".as_slice(),
-        b"\x00open64\x00".as_slice(),
-        b"\x00openat\x00".as_slice(),
-        b"\x00openat64\x00".as_slice(),
-        b"\x00ioctl\x00".as_slice(),
-        b"\x00dup\x00".as_slice(),
-        b"\x00dup3\x00".as_slice(),
-        b"\x00fcntl\x00".as_slice(),
-        b"\x00fcntl64\x00".as_slice(),
-    ] {
-        assert!(
-            DRMSHIM_BINARY.windows(symbol.len()).any(|w| w == symbol),
-            "staged drmshim.so must export {}",
-            String::from_utf8_lossy(symbol)
-        );
-    }
-    assert!(
-        !DRMSHIM_BINARY
-            .windows(7)
-            .any(|w| w == b"\x00close\x00"),
-        "staged drmshim.so must not interpose close()"
-    );
-    assert!(SETUP.contains("DRMSHIM_BINARY"));
 }
 
 #[test]

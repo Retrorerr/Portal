@@ -6,10 +6,10 @@ build pipeline live; Portal 0005 candidate patch authored in-repo.**
 
 ## Provenance of the pinned binary (exact)
 
-- Portal package: `xwayland_24.1.6-91_arm64.deb`
-  (`scripts/build_debian_rootfs.py`: `LFDEVS_XWAYLAND_DEB`, size 825848,
-  SHA-256 `59f9c7486d6a10ad50a13622bf1d1bbf5accd015d630e4b2b0152a80577dcc64`),
-  version `2:24.1.6-91` (`scripts/publish_runtime_release.py`).
+- Archived candidate package: `xwayland_24.1.6-91_arm64.deb`, size 825848,
+  SHA-256 `59f9c7486d6a10ad50a13622bf1d1bbf5accd015d630e4b2b0152a80577dcc64`.
+  The pre-Forky overlay builder that downloaded it was removed; this artifact
+  is now audit-only and is not installed or selected by the active runtime.
 - Upstream/base: xwayland 24.1.6 as released in xorg-server, identical to
   Debian `2:24.1.6-1` (trixie). Verified by downloading
   `xwayland_24.1.6.orig.tar.xz` from a Debian mirror and checking

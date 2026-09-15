@@ -1,6 +1,8 @@
 Project Anland load-time stub — build recipe (guest-native ARM64 glibc).
 
-The lfdevs kwin_wayland binary (Debian rev -95, Anland backend) references
+# ARCHIVED RECIPE — not used by the active Debian 14/Forky Anland stack.
+#
+# The lfdevs kwin_wayland binary (Debian rev -95, Anland backend) references
 KWin::AnlandBackend's constructor. Debian hardens with BIND_NOW, so the
 symbol must resolve at load even for QPainter sessions, which run Portal's
 damage-patched overlay libkwin that has no Anland backend. This one-symbol
