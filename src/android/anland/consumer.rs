@@ -2439,10 +2439,12 @@ fn render_loop(inner: Arc<Inner>) {
             // Anland backend requested this work explicitly; presentation is
             // not invented by a VSYNC tick.
             let comp_ns = sys::now_ns().wrapping_sub(t_select_ns);
+            // Packed struct: copy fields to locals before use (no field borrows).
+            let (lat_sequence, lat_generation) = (work.sequence, work.generation);
             log::debug!(
                 "anland.lat sequence={} producer_generation={} comp_us={} fenced={}",
-                work.sequence,
-                work.generation,
+                lat_sequence,
+                lat_generation,
                 comp_ns / 1000,
                 rfence >= 0,
             );
