@@ -98,6 +98,15 @@ struct buf_info {
  * separate DATA_MSG_INPUT_EXTEND_FDS message (SCM_RIGHTS). */
 #define INPUT_TYPE_RESOURCE       11
 
+/* Touchpad finger-source smooth scroll (buffer-px delta). The consumer sends
+ * raw deltas; the backend emits them with PointerAxisSource::Finger (kinetic
+ * scrolling). Unlike INPUT_TYPE_POINTER_AXIS there is no discrete component.
+ * Wire-identical to src/android/anland/protocol.rs finger_axis/finger_stop. */
+#define INPUT_TYPE_POINTER_AXIS_FINGER 13
+/* Terminates an active finger scroll stream (zero-delta event preserving the
+ * finger source, like the nested backend's axisStopped handler). */
+#define INPUT_TYPE_POINTER_AXIS_STOP 14
+
 /* Service identifiers used by OUTPUT_TYPE_RESOURCES_REQUEST / INPUT_TYPE_RESOURCE. */
 #define SERVICE_TYPE_CAMERA 1
 

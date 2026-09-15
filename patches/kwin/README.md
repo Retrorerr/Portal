@@ -109,11 +109,8 @@ readelf -n "$kwin_library" | rg 'Build ID:'
 readelf -n "$kwin_executable" | rg 'Build ID:'
 ```
 
-The current Pad 3-built release values are `libkwin.so.6.7.4` SHA-256
-`5f4e085bed2a1b81a72bce80e74a64478e86ad9ff28243f0626d07eec73888e2`,
-build ID `b1812b78494dc6d26290e0d7bafabfa18d47d475`, and `kwin_wayland`
-SHA-256 `193a83d9349f4ae98de30b747f53de6c566e680955813fce6d6808452c9b0cf4`,
-build ID `4c927f0561462df906b59b65c3bad641a68e166c`. Use the repository
+The current release values are recorded in `assets/graphics-stack-lock.json`
+(`kwin.assets`: SHA-256, bytes, and ELF build IDs). Use the repository
 verifier after staging; do not substitute a locally different binary.
 
 Stage the library in an isolated directory first.  Do not overwrite the

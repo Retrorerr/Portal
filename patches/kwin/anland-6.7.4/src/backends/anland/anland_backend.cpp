@@ -359,6 +359,23 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
         m_inputDevice->pointerAxis(axis, ev.pointer_axis.value, ev.pointer_axis.discrete * 120);
         break;
     }
+    case INPUT_TYPE_POINTER_AXIS_FINGER: {
+        // Touchpad finger-source smooth scroll (raw buffer-px delta from the
+        // consumer). Emitted with PointerAxisSource::Finger so Wayland clients
+        // get kinetic scrolling; unlike POINTER_AXIS there is no discrete part.
+        const PointerAxis axis =
+            ev.pointer_axis.axis == 0 ? PointerAxis::Vertical : PointerAxis::Horizontal;
+        m_inputDevice->pointerAxisFinger(axis, ev.pointer_axis.value);
+        break;
+    }
+    case INPUT_TYPE_POINTER_AXIS_STOP: {
+        // Terminates the finger scroll stream so KWin emits axis-stop and the
+        // gesture cannot remain active across surfaces or focus changes.
+        const PointerAxis axis =
+            ev.pointer_axis.axis == 0 ? PointerAxis::Vertical : PointerAxis::Horizontal;
+        m_inputDevice->pointerAxisStop(axis);
+        break;
+    }
     case INPUT_TYPE_KEY:
         m_inputDevice->keyboardKey(ev.key.keycode, ev.key.action == INPUT_ACTION_DOWN);
         break;

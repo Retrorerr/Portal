@@ -45,6 +45,12 @@ public:
     void pointerMotion(const QPointF &pos, const QPointF &delta, const QPointF &deltaUnaccel);
     void pointerButton(quint32 button, bool pressed);
     void pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120);
+    // Touchpad finger-source smooth scroll (buffer-px delta, Finger source for
+    // kinetic scrolling). The consumer sends raw deltas; no scaling here.
+    void pointerAxisFinger(PointerAxis axis, qreal delta);
+    // Terminates an active finger scroll stream (zero-delta Finger event so
+    // SeatInterface emits wl_pointer.axis_stop and kinetic scrolling settles).
+    void pointerAxisStop(PointerAxis axis);
     void keyboardKey(quint32 keycode, bool pressed);
     void touchDown(qint32 id, const QPointF &position);
     void touchMotion(qint32 id, const QPointF &position);

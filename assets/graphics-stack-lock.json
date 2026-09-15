@@ -44,7 +44,7 @@
       {"role": "KWin patch 0004", "path": "patches/kwin/0004-opengl-guard-null-egl-device.patch", "sha256": "f774825530e67bdb21931ab58788c0f3d43604ddf797fda53e44afc6081d4e38"},
       {"role": "KWin patch 0005", "path": "patches/kwin/0005-compositor-tolerate-null-drm-device.patch", "sha256": "01c9ee0f459a182213165c182295ab36163b42eed00bd60dbeb1363b516abdb6"}
     ]
-    ,"source_overlay": {"path": "patches/kwin/anland-6.7.4", "sha256": "ec9207a23f6564b2c1203b04692f4497ffaed8d8ae10ee0f453fccbdff9a67fc", "protocol_version": 3}
+    ,"source_overlay": {"path": "patches/kwin/anland-6.7.4", "sha256": "ec318270657910964a6108ac3c2916e2f7f8646f65b3e41a14aca117f8ce13b8", "protocol_version": 3}
   },
   "xwayland": {
     "active": "debian-package:xwayland",

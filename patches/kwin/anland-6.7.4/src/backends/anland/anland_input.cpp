@@ -123,6 +123,18 @@ void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV
     Q_EMIT InputDevice::pointerFrame(this);
 }
 
+void AnlandInputDevice::pointerAxisFinger(PointerAxis axis, qreal delta)
+{
+    Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Finger, false, now(), this);
+    Q_EMIT InputDevice::pointerFrame(this);
+}
+
+void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
+{
+    Q_EMIT pointerAxisChanged(axis, 0, 0, PointerAxisSource::Finger, false, now(), this);
+    Q_EMIT InputDevice::pointerFrame(this);
+}
+
 void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
 {
     Q_EMIT keyChanged(keycode,

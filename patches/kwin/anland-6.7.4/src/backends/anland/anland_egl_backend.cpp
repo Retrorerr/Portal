@@ -221,7 +221,9 @@ std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
                          << "age=" << age
                          << "full=" << full
                          << "stateGap=" << stateGap
-                         << "sequence=" << m_damageSequence;
+                         << "sequence=" << m_damageSequence
+                         << "fullRepaints=" << m_fullRepaintCount
+                         << "journalFallbacks=" << m_journalFallbackCount;
 
     return OutputLayerBeginFrameInfo{
         .renderTarget = *m_renderTargets[m_currentIndex],
@@ -246,7 +248,9 @@ bool AnlandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Region
     m_damageJournal.add(damagedDeviceRegion);
     m_bufferDamageSequence[m_currentIndex] = m_damageSequence;
     qCDebug(KWIN_ANLAND) << "anland.damage commit sequence=" << m_damageSequence
-                         << "buffer=" << m_currentIndex;
+                         << "buffer=" << m_currentIndex
+                         << "damagedRects=" << damagedDeviceRegion.rects().size()
+                         << "bounding=" << damagedDeviceRegion.boundingRect();
 
     // Instead of CPU-blocking on glFinish, create a fence for the just-submitted
     // GPU work and hand it to the consumer (via the transport). The consumer passes
