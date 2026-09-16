@@ -359,6 +359,13 @@ impl AnwApi {
             // Do not infer a modifier from num_fds alone. The UBWC flag and
             // exact allocated byte size below prove that this particular
             // handle is linear before modifier=LINEAR is emitted.
+            //
+            // The QCOM width field carries the gralloc-aligned width, which
+            // equals the ANativeWindow stride. When the logical width is not
+            // a multiple of the alignment (portrait 2400 -> stride 2432),
+            // qcom_width is the stride, not the width; when already aligned
+            // (landscape 3392) all three agree. Accept either, and let the
+            // exact byte-size check below remain the hard linearity proof.
             let ints = &data[QCOM_HANDLE_NUM_FDS as usize..];
             let qcom_flags = ints[QCOM_FLAGS_INDEX];
             let qcom_width = ints[QCOM_WIDTH_INDEX];
@@ -370,7 +377,8 @@ impl AnwApi {
             let qcom_usage = (ints[QCOM_USAGE_HIGH_INDEX] as u64) << 32
                 | ints[QCOM_USAGE_LOW_INDEX] as u32 as u64;
             let qcom_size = ints[QCOM_SIZE_INDEX] as u32 as u64;
-            if qcom_width != b.width
+            let width_matches = qcom_width == b.width || qcom_width == b.stride;
+            if !width_matches
                 || qcom_height != b.height
                 || qcom_unaligned_width != b.width
                 || qcom_unaligned_height != b.height
