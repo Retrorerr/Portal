@@ -34,8 +34,8 @@
       "archive_sha256": "00a199f8c78407a0630ec2c0873be90bbe4f9e9f31bd0f97c7057cdf224cb180"
     },
     "assets": [
-      {"role": "KWin Wayland executable", "path": "assets/kwin-forky-anland-arm64/kwin_wayland", "bytes": 1537392, "sha256": "1b63756a70e57c656b6103ec4faf0a2c6b0fd68d08b3988fce70902e53229e72", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "311650c865dd61274c70ce21e1d3ad745a836153"}},
-      {"role": "Portal Anland KWin library", "path": "assets/kwin-forky-anland-arm64/libkwin.so.6.7.4", "bytes": 10368432, "sha256": "6c0ee844635efd3c7251f7baabb4246867945ec55c7c9ebb6fdd1918d055da56", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "b9c7032e0994c2fe694a3df0fcca27f7ab025f9d"}}
+      {"role": "KWin Wayland executable", "path": "assets/kwin-forky-anland-arm64/kwin_wayland", "bytes": 1537392, "sha256": "d6773b01d79f9a1a2f54417f70525abcf55bde7b4abaaef781a0202e27aa6a65", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "36cee6a677c4f83355e8d39301e6fca310727758"}},
+      {"role": "Portal Anland KWin library", "path": "assets/kwin-forky-anland-arm64/libkwin.so.6.7.4", "bytes": 10368432, "sha256": "e99c8dc0df59a032ef844d27fd1b80f9abf414e16547852cfae528d999176474", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "55c182f79f72c493cd5f0e6a52c9e9c115f37309"}}
     ],
     "patches": [
       {"role": "KWin patch 0001", "path": "patches/kwin/0001-core-gpumanager-tolerate-missing-udev-monitor.patch", "sha256": "3a037dd3ec62b086c01ab1533ee427bfbc840c2cd9712a9cf326f4932b38dd41"},
