@@ -68,9 +68,14 @@ void BackingStore::beginPaint(const QRegion &region)
     }
 
     const auto oldBuffer = m_buffer;
-    m_buffer = swapchain->acquire();
-    if (!m_buffer) {
+    if (auto buffer = swapchain->acquire()) {
+        m_buffer = buffer;
+    } else {
         qCCritical(KWIN_QPA, "Failed to acquire a graphics buffer for the backing store");
+        // Keep presenting the last good buffer (if any) instead of going
+        // blank: painting falls back to the 1x1 image and this frame is
+        // dropped in flush(), while the next beginPaint retries acquisition.
+        m_buffer = oldBuffer;
         m_usingFallback = true;
         return;
     }
@@ -110,8 +115,18 @@ void BackingStore::endPaint()
 void BackingStore::flush(QWindow *window, const QRegion &region, const QPoint &offset)
 {
     Window *platformWindow = static_cast<Window *>(window->handle());
+    if (!platformWindow) {
+        return;
+    }
     InternalWindow *internalWindow = platformWindow->internalWindow();
     if (!internalWindow) {
+        return;
+    }
+    // Allocation/mapping may have failed in beginPaint(): painting went to
+    // the 1x1 fallback image, which cannot be presented. Drop this frame and
+    // keep the last successfully presented buffer on screen; the next
+    // beginPaint() retries. Never dereference or present a null buffer here.
+    if (m_usingFallback || !m_buffer) {
         return;
     }
 

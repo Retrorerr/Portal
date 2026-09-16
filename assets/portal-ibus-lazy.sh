@@ -13,23 +13,25 @@
 #     instead, so a fast daemon is used immediately and a broken one can
 #     never stall startup).
 (
-    # Session bus may not exist yet when autostart fires; wait bounded.
+    # Session bus may not exist yet when autostart fires; poll fast with a
+    # tight bound so a ready bus is used within ~0.25s.
     for _ in $(seq 1 60); do
         if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
             break
         fi
-        sleep 1
+        sleep 0.25
     done
     command -v ibus-daemon >/dev/null 2>&1 || exit 0
     ibus-daemon -s -d >>/tmp/portal-ibus-daemon.log 2>&1 || exit 0
-    # The daemon needs a moment to own org.freedesktop.IBus; poll with a
-    # bound so a fast daemon selects the engine immediately and a broken
-    # one can never stall startup.
-    for _ in $(seq 1 30); do
+    # The daemon needs a moment to own org.freedesktop.IBus; poll fast with
+    # a bound so a ready daemon selects the engine within ~0.25s and a
+    # broken one can never stall startup.
+    for _ in $(seq 1 60); do
         if ibus engine portal >>/tmp/portal-ibus-daemon.log 2>&1; then
+            printf 'portal-ibus: engine selected\n' >>/tmp/portal-ibus-daemon.log 2>&1
             break
         fi
-        sleep 1
+        sleep 0.25
     done
 ) >/dev/null 2>&1 < /dev/null &
 exit 0

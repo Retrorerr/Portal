@@ -170,6 +170,12 @@ void AnlandOutput::resize(const QSize &newSize)
 
     // Invalidate any in-flight frame: the mode just changed, so the buffer that was
     // being presented corresponds to a different layout.
+    // Intentional drop (not presented()): ~OutputFrame() invokes
+    // RenderLoopPrivate::notifyFrameDropped(), balancing prepareNewFrame()'s
+    // pendingFrameCount++. Do NOT call presented() here (it would forge
+    // vblank/renderJournal/presentation-feedback for a stale layout) and do
+    // NOT call notifyFrameDropped() directly (double-decrement). Fence/queue
+    // ownership already transferred in doEndFrame()/notifyFramePresented().
     if (m_awaitingPresent) {
         m_awaitingPresent = false;
         m_frame.reset();
@@ -188,6 +194,8 @@ AnlandEglLayer *AnlandOutput::eglLayer() const
 
 void AnlandOutput::stopRendering()
 {
+    // Same intentional-drop contract as resize(): the destructor balances
+    // pending-frame accounting; fences/queue already handed off.
     if (m_awaitingPresent) {
         m_awaitingPresent = false;
         m_frame.reset();

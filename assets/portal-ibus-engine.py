@@ -80,7 +80,13 @@ def main():
             self.focused = False
 
         def do_focus_in(self):
-            self.do_focus_in_id('', '')
+            # Legacy (non-focus-id) FocusIn is a real editable focus from
+            # GTK/X11 clients such as Firefox-XWayland: arm commits and
+            # summon the keyboard. Only the focus-ID probe path below is
+            # filtered; this legacy entry point is never a daemon probe.
+            log("Legacy FocusIn (editable focused)")
+            self.focused = True
+            notify_portal(True)
 
         def do_focus_in_id(self, object_path, client):
             # The daemon also emits probe FocusIns ('fake' = focus where input

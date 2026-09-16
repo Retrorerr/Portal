@@ -763,6 +763,10 @@ fn anland_touchpad_exposes_scroll_settings() {
         "naturalScrollChanged",
         "scrollFactorChanged",
         "devicesSysNames",
+        // Plasma 6.7 DevicesModel enumerates via ListPointers, not the
+        // devicesSysNames property: without it the KCM shows zero rows.
+        "ListPointers",
+        "ExportScriptableContents",
     ] {
         assert!(
             ANLAND_INPUT_SOURCE.contains(required) || ANLAND_INPUT_HEADER_SOURCE.contains(required),

@@ -274,17 +274,21 @@ AnlandInputBackend::~AnlandInputBackend()
 
 void AnlandInputBackend::initialize()
 {
+    // Register the manager object BEFORE emitting deviceAdded: a
+    // late-starting KCM enumerates via ListPointers() and must find the
+    // object already owned on the bus.
+    const bool managerRegistered = QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice"),
+                                                                                 QStringLiteral("org.kde.KWin.InputDeviceManager"),
+                                                                                 this,
+                                                                                 QDBusConnection::ExportAllProperties | QDBusConnection::ExportAllSignals | QDBusConnection::ExportScriptableContents);
+    qCWarning(KWIN_ANLAND) << "Portal input device manager registered:" << managerRegistered;
+
     if (AnlandInputDevice *device = m_backend->inputDevice()) {
         Q_EMIT deviceAdded(device);
         if (device->isTouchpad()) {
             Q_EMIT deviceAdded(device->sysName());
         }
     }
-
-    QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice"),
-                                                 QStringLiteral("org.kde.KWin.InputDeviceManager"),
-                                                 this,
-                                                 QDBusConnection::ExportAllProperties | QDBusConnection::ExportAllSignals);
 }
 
 QStringList AnlandInputBackend::devicesSysNames() const
@@ -292,6 +296,26 @@ QStringList AnlandInputBackend::devicesSysNames() const
     if (AnlandInputDevice *device = m_backend->inputDevice()) {
         return QStringList{device->sysName()};
     }
+    return QStringList{};
+}
+
+QStringList AnlandInputBackend::ListPointers() const
+{
+    if (AnlandInputDevice *device = m_backend->inputDevice()) {
+        if (device->isPointer()) {
+            return QStringList{device->sysName()};
+        }
+    }
+    return QStringList{};
+}
+
+QStringList AnlandInputBackend::ListKeyboards() const
+{
+    return QStringList{};
+}
+
+QStringList AnlandInputBackend::ListTouch() const
+{
     return QStringList{};
 }
 

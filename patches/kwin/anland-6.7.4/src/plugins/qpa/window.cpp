@@ -73,7 +73,9 @@ Swapchain *Window::swapchain(const std::shared_ptr<EglContext> &context, const F
         return nullptr;
     }
 
-    const bool software = window()->surfaceType() == QSurface::RasterSurface; // RasterGLSurface is unsupported by us
+    // May be upgraded from false to true below when no DRM render device
+    // exists (Anland surfaceless): GL content then uses SHM backing.
+    bool software = window()->surfaceType() == QSurface::RasterSurface; // RasterGLSurface is unsupported by us
     if (!m_swapchain || m_swapchain->size() != nativeSize
         || !formats.contains(m_swapchain->format())
         || m_swapchain->modifiers() != formats[m_swapchain->format()]
@@ -82,8 +84,17 @@ Swapchain *Window::swapchain(const std::shared_ptr<EglContext> &context, const F
         if (software) {
             static ShmGraphicsBufferAllocator shmAllocator;
             allocator = &shmAllocator;
+        } else if (auto drmDevice = Compositor::self()->backend()->drmDevice()) {
+            allocator = drmDevice->allocator();
         } else {
-            allocator = Compositor::self()->backend()->drmDevice()->allocator();
+            // Anland intentionally runs without a DRM RenderDevice (surfaceless
+            // KGSL while Anland owns dmabuf presentation). A GL-surface QPA
+            // window must never dereference the null device; fall back to SHM
+            // backing exactly like a raster surface.
+            qCWarning(KWIN_QPA) << "No DRM render device, using SHM backing store for GL surface";
+            static ShmGraphicsBufferAllocator shmAllocator;
+            allocator = &shmAllocator;
+            software = true;
         }
 
         for (auto it = formats.begin(); it != formats.end(); it++) {

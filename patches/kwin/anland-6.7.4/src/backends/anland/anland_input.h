@@ -35,6 +35,7 @@ class AnlandInputDevice : public InputDevice
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.kde.KWin.InputDevice")
     Q_PROPERTY(bool touchpad READ isTouchpad CONSTANT)
+    Q_PROPERTY(bool pointer READ isPointer CONSTANT)
     Q_PROPERTY(QString name READ name CONSTANT)
     Q_PROPERTY(QString sysName READ sysName CONSTANT)
     Q_PROPERTY(bool supportsDisableEvents READ falseValue CONSTANT)
@@ -168,6 +169,13 @@ public:
 
     void initialize() override;
     QStringList devicesSysNames() const;
+
+    // Plasma 6.7 KWinDevices::DevicesModel enumerates via these scriptable
+    // methods (not the devicesSysNames property): without ListPointers the
+    // touchpad KCM sees zero rows and hides its page entirely.
+    Q_SCRIPTABLE QStringList ListPointers() const;
+    Q_SCRIPTABLE QStringList ListKeyboards() const;
+    Q_SCRIPTABLE QStringList ListTouch() const;
 
 Q_SIGNALS:
     void deviceAdded(const QString &sysName);
