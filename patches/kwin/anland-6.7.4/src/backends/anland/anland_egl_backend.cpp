@@ -18,8 +18,11 @@
 #include "opengl/eglutils_p.h"
 #include "opengl/glutils.h"
 #include "utils/filedescriptor.h"
+#include "wayland/linuxdmabufv1clientbuffer.h"
+#include "wayland_server.h"
 
 #include <drm_fourcc.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #ifndef EGL_PLATFORM_SURFACELESS_MESA
@@ -337,6 +340,13 @@ bool AnlandEglBackend::init()
 
     initWayland();
 
+    // Client dma-buf is best-effort: without it every client silently falls
+    // back to SHM exactly as before, so a failure here must never fail the
+    // session (unlike the presentation EGL setup above).
+    if (!initClientDmabuf()) {
+        qCWarning(KWIN_ANLAND) << "client linux-dmabuf unavailable; clients fall back to SHM";
+    }
+
     const auto outputs = m_backend->outputs();
     for (BackendOutput *output : outputs) {
         addOutput(output);
@@ -357,6 +367,109 @@ void AnlandEglBackend::addOutput(BackendOutput *output)
     m_outputs[output] = std::move(layer);
 }
 
+bool AnlandEglBackend::initClientDmabuf()
+{
+    if (!WaylandServer::self()) {
+        return false;
+    }
+    EglDisplay *display = eglDisplayObject();
+    if (!display) {
+        return false;
+    }
+    // Start conservatively: only layouts the live surfaceless EGL display
+    // reports as importable, restricted to LINEAR 8-bit RGB(A). Anything else
+    // (tiled/UBWC, YUV, vendor modifiers) fails closed to SHM for now.
+    static constexpr uint32_t kClientFormats[] = {
+        DRM_FORMAT_XRGB8888,
+        DRM_FORMAT_ARGB8888,
+        DRM_FORMAT_XBGR8888,
+        DRM_FORMAT_ABGR8888,
+    };
+    const FormatModifierMap &reported = display->nonExternalOnlySupportedDrmFormats();
+    FormatModifierMap advertised;
+    for (const uint32_t format : kClientFormats) {
+        const auto it = reported.find(format);
+        if (it == reported.end()) {
+            continue;
+        }
+        ModifierList linear;
+        for (const uint64_t modifier : std::as_const(*it)) {
+            if (modifier == DRM_FORMAT_MOD_LINEAR) {
+                linear.insert(modifier);
+            }
+        }
+        if (!linear.empty()) {
+            advertised.insert(format, linear);
+        }
+    }
+    if (advertised.empty()) {
+        qCWarning(KWIN_ANLAND) << "surfaceless EGL reports no importable LINEAR RGB(A) layout; client dmabuf disabled";
+        return false;
+    }
+    m_clientFormats = advertised;
+    // No DRM render node exists on this backend (surfaceless KGSL by design),
+    // so there is no device id to advertise. dev 0 keeps every tranche tied
+    // to the single main device instead of fabricating an msm node clients
+    // cannot open; worst case a client ignores the table and uses SHM.
+    m_tranches = QList<LinuxDmaBufV1Feedback::Tranche>{
+        LinuxDmaBufV1Feedback::Tranche{
+            .device = static_cast<dev_t>(0),
+            .flags = LinuxDmaBufV1Feedback::TrancheFlag::Sampling,
+            .formatTable = advertised,
+        },
+    };
+
+    LinuxDmaBufV1ClientBufferIntegration *dmabuf = waylandServer()->linuxDmabuf();
+    dmabuf->setRenderBackend(this);
+    dmabuf->setSupportedFormatsWithModifiers(m_tranches);
+    // Deliberately NOT calling waylandServer()->setRenderBackend(): that enables
+    // the linux-drm-syncobj global by dereferencing backend->drmDevice(), which
+    // is null by design here, and client explicit sync is out of scope (the
+    // client->KWin boundary stays implicit).
+
+    QStringList names;
+    for (auto it = advertised.constBegin(); it != advertised.constEnd(); ++it) {
+        names << QStringLiteral("0x%1").arg(it.key(), 8, 16, QChar::fromLatin1('0'));
+    }
+    qCInfo(KWIN_ANLAND) << "client linux-dmabuf ready:" << advertised.size() << "formats (" << names.join(QStringLiteral(", ")) << "), LINEAR only, device=none";
+    return true;
+}
+
+bool AnlandEglBackend::testImportBuffer(GraphicsBuffer *buffer)
+{
+    const DmaBufAttributes *attrs = buffer ? buffer->dmabufAttributes() : nullptr;
+    if (!attrs) {
+        return false;
+    }
+    const auto it = m_clientFormats.find(attrs->format);
+    if (it == m_clientFormats.end() || !it->contains(attrs->modifier)) {
+        return false;
+    }
+    return importBufferAsImage(buffer) != EGL_NO_IMAGE_KHR;
+}
+
+FormatModifierMap AnlandEglBackend::supportedFormats() const
+{
+    return m_clientFormats;
+}
+
+EGLImageKHR AnlandEglBackend::importBufferAsImage(GraphicsBuffer *buffer)
+{
+    EglDisplay *display = eglDisplayObject();
+    if (!display) {
+        return EGL_NO_IMAGE_KHR;
+    }
+    return display->importBufferAsImage(buffer);
+}
+
+EGLImageKHR AnlandEglBackend::importBufferAsImage(GraphicsBuffer *buffer, int plane, int format, const QSize &size)
+{
+    EglDisplay *display = eglDisplayObject();
+    if (!display) {
+        return EGL_NO_IMAGE_KHR;
+    }
+    return display->importBufferAsImage(buffer, plane, format, size);
+}
 void AnlandEglBackend::removeOutput(BackendOutput *output)
 {
     openglContext()->makeCurrent();

@@ -35,7 +35,7 @@
     },
     "assets": [
       {"role": "KWin Wayland executable", "path": "assets/kwin-forky-anland-arm64/kwin_wayland", "bytes": 1537392, "sha256": "aeb866546f5112a503c02b8d797c5884b3f29bc4dc6504401eadba77e9211d26", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "9d1e2ba1acc96b1472b8a0c56926c1336ab8b396"}},
-      {"role": "Portal Anland KWin library", "path": "assets/kwin-forky-anland-arm64/libkwin.so.6.7.4", "bytes": 10368448, "sha256": "93b6c3e43030d1a6c1da10285c48bca83b35f1ab3c965dad492d473d10cc6121", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "6d0cfce78eddceab6566f78a2f54f1e6f855080f"}}
+      {"role": "Portal Anland KWin library", "path": "assets/kwin-forky-anland-arm64/libkwin.so.6.7.4", "bytes": 10368432, "sha256": "6bb1605ed354fa157431f27f6208a9705c4c98defe589f6c381207eff99dae99", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "d039ff70fc98621884d2200f488531c1a64ba107"}}
     ],
     "patches": [
       {"role": "KWin patch 0001", "path": "patches/kwin/0001-core-gpumanager-tolerate-missing-udev-monitor.patch", "sha256": "3a037dd3ec62b086c01ab1533ee427bfbc840c2cd9712a9cf326f4932b38dd41"},
@@ -44,7 +44,7 @@
       {"role": "KWin patch 0004", "path": "patches/kwin/0004-opengl-guard-null-egl-device.patch", "sha256": "f774825530e67bdb21931ab58788c0f3d43604ddf797fda53e44afc6081d4e38"},
       {"role": "KWin patch 0005", "path": "patches/kwin/0005-compositor-tolerate-null-drm-device.patch", "sha256": "01c9ee0f459a182213165c182295ab36163b42eed00bd60dbeb1363b516abdb6"}
     ]
-    ,"source_overlay": {"path": "patches/kwin/anland-6.7.4", "sha256": "9f54c99f62d8ac7ed5926561762009407dee37f6c457148f5b11190692a7a765", "protocol_version": 3}
+    ,"source_overlay": {"path": "patches/kwin/anland-6.7.4", "sha256": "f17192ae9463a454af49a4f3d88af4c90ee6226848712156beae29e59179a400", "protocol_version": 3}
   },
   "xwayland": {
     "active": "debian-package:xwayland",
