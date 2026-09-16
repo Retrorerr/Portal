@@ -38,6 +38,10 @@ const KWIN_ANLAND_PROTOCOL_SOURCE: &str =
     include_str!("../patches/kwin/anland-6.7.4/src/backends/anland/protocol.h");
 const KWIN_ANLAND_BACKEND_SOURCE: &str =
     include_str!("../patches/kwin/anland-6.7.4/src/backends/anland/anland_backend.cpp");
+const ANLAND_INPUT_SOURCE: &str =
+    include_str!("../patches/kwin/anland-6.7.4/src/backends/anland/anland_input.cpp");
+const ANLAND_INPUT_HEADER_SOURCE: &str =
+    include_str!("../patches/kwin/anland-6.7.4/src/backends/anland/anland_input.h");
 const ANLAND_EVENT_HANDLER_SOURCE: &str =
     include_str!("../src/android/backend/wayland/event_handler.rs");
 const COMPOSE_OVERLAY_RUST_SOURCE: &str = include_str!("../src/android/utils/compose_overlay.rs");
@@ -741,6 +745,39 @@ fn stock_xwayland_and_native_firefox_policy() {
     assert!(!ANLAND_ENV_SOURCE.contains("LOCALDESKTOP_XWAYLAND_VARIANT"));
     assert!(!ANDROID_SETUP_SOURCE.contains("sync_xwayland_candidate_overlay"));
     assert!(ANDROID_SETUP_SOURCE.contains("Firefox Portal GPU preference is missing"));
+}
+
+#[test]
+fn anland_touchpad_exposes_scroll_settings() {
+    // The Portal touchpad must be recognizable as a real touchpad with
+    // NaturalScroll/ScrollFactor over the standard KWin input-device D-Bus
+    // path, persisted in kcminputrc and applied to finger scroll only.
+    for required in [
+        "Portal Touchpad",
+        "portal_touchpad",
+        "org.kde.KWin.InputDevice",
+        "org.kde.KWin.InputDeviceManager",
+        "kcminputrc",
+        "NaturalScroll",
+        "ScrollFactor",
+        "naturalScrollChanged",
+        "scrollFactorChanged",
+        "devicesSysNames",
+    ] {
+        assert!(
+            ANLAND_INPUT_SOURCE.contains(required) || ANLAND_INPUT_HEADER_SOURCE.contains(required),
+            "Anland touchpad is missing {required}"
+        );
+    }
+    assert!(ANLAND_INPUT_SOURCE.contains("return true;"));
+    assert!(!ANLAND_INPUT_SOURCE.contains("anland virtual input"));
+    // Exactly one layer owns each transformation: factor+inversion live in
+    // pointerAxisFinger; wheel/continuous and axis-stop stay raw.
+    let finger = ANLAND_INPUT_SOURCE
+        .find("pointerAxisFinger")
+        .expect("finger scroll handler must exist");
+    assert!(ANLAND_INPUT_SOURCE[finger..].contains("m_scrollFactor"));
+    assert!(ANLAND_INPUT_SOURCE[finger..].contains("m_naturalScroll"));
 }
 
 #[test]

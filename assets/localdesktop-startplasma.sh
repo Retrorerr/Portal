@@ -232,16 +232,9 @@ fi
 # Debian maintainer triggers are not run when extracting the rootfs. GLib's
 # absent schemas leave GTK's DPI unset (-1), yielding negative Firefox UI fonts.
 # GTK's missing module cache also prevents Wayland text-input from loading.
-# These steps are best-effort: a missing/locked database must degrade the
-# session, never abort a clean first install into the recovery loop.
-if command -v glib-compile-schemas >/dev/null 2>&1; then
-    glib-compile-schemas /usr/share/glib-2.0/schemas >> "$session_log" 2>&1 || \
-        printf 'stage=startup-maintenance status=degraded step=glib-schemas\n' >> "$session_log"
-fi
-if [ -x /usr/lib/aarch64-linux-gnu/libgtk-3-0/gtk-query-immodules-3.0 ]; then
-    /usr/lib/aarch64-linux-gnu/libgtk-3-0/gtk-query-immodules-3.0 --update-cache >> "$session_log" 2>&1 || \
-        printf 'stage=startup-maintenance status=degraded step=gtk-immodules\n' >> "$session_log"
-fi
+# These steps are best-effort and run only until the desktop-caches marker
+# below completes: recompiling schemas/immodules on every warm launch adds
+# fork+IO cost to the startup window for zero benefit.
 
 # Android denies host CPU counters and hides other apps' processes. Stock
 # System Monitor must not present fabricated host-wide statistics.
@@ -253,6 +246,12 @@ fi
 cache_marker="$state_dir/desktop-caches-v3"
 if [ ! -e "$cache_marker" ]; then
     cache_failed=0
+    if command -v glib-compile-schemas >/dev/null 2>&1; then
+        glib-compile-schemas /usr/share/glib-2.0/schemas >> "$session_log" 2>&1 || cache_failed=1
+    fi
+    if [ -x /usr/lib/aarch64-linux-gnu/libgtk-3-0/gtk-query-immodules-3.0 ]; then
+        /usr/lib/aarch64-linux-gnu/libgtk-3-0/gtk-query-immodules-3.0 --update-cache >> "$session_log" 2>&1 || cache_failed=1
+    fi
     if command -v update-mime-database >/dev/null 2>&1; then
         update-mime-database /usr/share/mime >> "$session_log" 2>&1 || cache_failed=1
     fi
@@ -309,8 +308,10 @@ if [ ! -f "$state_dir/splash-restored-v1" ]; then
 fi
 
 # The Android audio owner starts asynchronously before this launcher. Wait
-# for its Pulse endpoint before Plasma's startup notification is dispatched.
-for _ in $(seq 1 150); do
+# briefly for its Pulse endpoint before Plasma's startup notification is
+# dispatched; bounded at ~3s so a slow audio owner cannot stall cold start
+# (Plasma proceeds without audio and logs it).
+for _ in $(seq 1 30); do
     [ -S /tmp/pulse/native ] && break
     sleep 0.1
 done
