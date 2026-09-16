@@ -16,6 +16,7 @@
 #include <QByteArray>
 #include <QPointF>
 #include <QVector>
+#include <chrono>
 #include <memory>
 
 extern "C" {
@@ -73,11 +74,48 @@ public:
         return m_inputDevice.get();
     }
 
-    /** Request and synchronously acquire the consumer slot for one real KWin
-     * repaint. This is called from RenderLoop's repaintScheduled signal before
-     * the compositor begins the frame, so doBeginFrame always sees the index
-     * selected for that work item. */
+    /** Request the consumer slot for one real KWin repaint without blocking.
+     *
+     * Frame-slot scheduling state machine (main thread only, never blocks):
+     *
+     *   Idle --repaintScheduled--> WorkRequested --slot selected--> SlotReady
+     *     --frameRequested dispatch--> (compositor traversal) --present-->
+     *     AwaitingPresentation --next slot selected--> Idle
+     *
+     * Encoding (no traversal may start unless a fresh slot was selected):
+     * - Idle:                 !m_workRequested && !m_consumerReady
+     * - WorkRequested:         m_workRequested && !m_consumerReady
+     * - SlotReady:             m_consumerReady (request consumed by selection)
+     * - AwaitingPresentation:  AnlandOutput::m_awaitingPresent (the previous
+     *                          frame completes when the NEXT slot is selected,
+     *                          which is also SurfaceFlinger's latch tick for it;
+     *                          there is no distinct final-present ack in the
+     *                          current protocol)
+     * - Fallback/Rebinding:    m_inFallback (all request state cleared)
+     *
+     * Rendering itself runs synchronously inside the frameRequested dispatch,
+     * so there is no explicit Rendering state visible to the event loop.
+     *
+     * This is called from RenderLoop's repaintScheduled signal before the
+     * compositor timer is armed. It sends exactly one FRAME_WANTED when none
+     * is outstanding (coalesced repaints share it; damage accumulates in the
+     * layers) and returns immediately. The buffer-ready eventfd notifier
+     * records the selection later; Compositor::handleFrameRequested consults
+     * consumeSlotForFrame() and skips the traversal until then, so
+     * doBeginFrame always sees the index selected for that work item. */
     bool requestFrameWork();
+
+    /** Consume one selected slot for the compositor traversal that is being
+     * dispatched right now. Called synchronously from the frameRequested
+     * dispatch (Compositor::handleFrameRequested) on the main thread.
+     *
+     * Returns true when a fresh consumer slot is ready: the caller must run
+     * the traversal immediately (present() consumes the selection). Returns
+     * false when the slot has not arrived yet: the dispatch is recorded
+     * (coalesced) and skipped WITHOUT touching frame accounting, and the
+     * buffer-ready notifier schedules a new dispatch on arrival. Never sends
+     * FRAME_WANTED (repaintScheduled owns that) and never blocks. */
+    bool consumeSlotForFrame();
 
     /** Complete the currently selected work item. Damaged frames are held
      * until the next selected slot proves the previous queue handoff; a
@@ -101,6 +139,15 @@ private:
     void teardownNotifiers();
     void onInputReadable();
     void onBufferReady();
+    /** Wedged-consumer backstop: no slot arrived within kFrameSlotTimeoutMs
+     * of the request. Warns, drops the pending request state and enters
+     * fallback (mirrors the old synchronous-timeout path, minus the block). */
+    void onFrameTimeout();
+    /** Drop all in-flight request state (timeout, request/selection/defer
+     * flags, request timing). Never touches fences or queued buffers. */
+    void cancelPendingFrameWork();
+    /** (Re)arm the single-shot slot-selection watchdog for one request. */
+    void startFrameTimeout();
     void processInputEvent(const InputEvent &ev);
     QPointF mapInputToLogical(const QPointF &devicePoint) const;
     void onReconnectTimer();
@@ -131,6 +178,20 @@ private:
     bool m_consumerReady = false;
     bool m_workRequested = false;
     bool m_inFallback = false;
+    /** A frameRequested dispatch fired while no slot was selected. The next
+     * buffer-ready arrival schedules a replacement dispatch; coalesced (at
+     * most one pending) and cleared on selection, cancel, and fallback. */
+    bool m_dispatchDeferred = false;
+    /** Watchdog for a consumer that accepted FRAME_WANTED but never selects.
+     * Single-shot; armed per request, stopped on selection/cancel/fallback. */
+    QTimer *m_frameTimeout = nullptr;
+    /** m_requestSentAt is valid only while m_requestTimed is set (one
+     * outstanding request). Used for request->select latency telemetry. */
+    std::chrono::steady_clock::time_point m_requestSentAt{};
+    bool m_requestTimed = false;
+    /** Time of the most recent slot selection; valid while m_consumerReady.
+     * Used for select->traversal-start latency telemetry. */
+    std::chrono::steady_clock::time_point m_slotSelectedAt{};
     // Last known clipboard text — used to de-duplicate (KWin changed -> we sent ->
     // consumer sets the same text on Android -> consumer sends back to KWin).
     // QByteArray is trivially sent over the data channel as UTF-8.

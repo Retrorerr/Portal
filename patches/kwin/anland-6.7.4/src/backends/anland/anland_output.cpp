@@ -22,9 +22,12 @@ AnlandOutput::AnlandOutput(AnlandBackend *parent, const QString &name)
     , m_renderLoop(std::make_unique<RenderLoop>(this))
 {
     // This connection is installed while the output is constructed, before
-    // the compositor attaches its frameRequested handler. It requests the
-    // consumer slot at the render-loop scheduling boundary and waits for the
-    // actual display tick, so no frame can begin with an unselected buffer.
+    // the compositor attaches its frameRequested handler. It sends exactly one
+    // FRAME_WANTED per repaint (coalesced) and returns immediately: the
+    // consumer selects the slot asynchronously at its display tick, and the
+    // frameRequested dispatch is gated on that selection (see
+    // AnlandBackend::consumeSlotForFrame), so no frame can begin with an
+    // unselected buffer and the main thread never blocks here.
     connect(m_renderLoop.get(), &RenderLoop::repaintScheduled, this, [this](RenderLoop *) {
         m_backend->requestFrameWork();
     }, Qt::DirectConnection);

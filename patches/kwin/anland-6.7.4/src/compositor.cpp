@@ -10,6 +10,7 @@
 
 #include "config-kwin.h"
 
+#include "backends/anland/anland_backend.h"
 #include "core/backendoutput.h"
 #include "core/brightnessdevice.h"
 #include "core/drmdevice.h"
@@ -116,6 +117,17 @@ void Compositor::reinitialize()
 
 void Compositor::handleFrameRequested(RenderLoop *renderLoop)
 {
+    // Anland selects its render slot asynchronously at the consumer tick (see
+    // AnlandBackend::requestFrameWork); never begin a traversal without a
+    // fresh selection or KWin would render into a stale/scanout-active buffer.
+    // A skipped dispatch is re-driven by the buffer-ready notifier with all
+    // coalesced damage intact, and frame accounting is untouched (it changes
+    // only inside composite()). Other backends are unaffected.
+    if (auto *anland = qobject_cast<AnlandBackend *>(kwinApp()->outputBackend())) {
+        if (!anland->consumeSlotForFrame()) {
+            return;
+        }
+    }
     composite(renderLoop);
 }
 

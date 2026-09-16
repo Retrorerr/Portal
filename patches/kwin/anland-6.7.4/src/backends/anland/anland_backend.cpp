@@ -14,6 +14,7 @@
 
 #include "core/drmdevice.h"
 #include "core/renderdevice.h"
+#include "core/renderloop.h"
 #include "effect/globals.h"
 #include "inputmethod.h"
 #include "main.h"
@@ -43,6 +44,11 @@ namespace KWin
 
 static const QString s_defaultSocketPath = QStringLiteral("/tmp/display_daemon.sock");
 static const int s_reconnectIntervalMs = 200;
+/** Upper bound for a consumer slot selection after FRAME_WANTED was sent.
+ * The consumer's own worst case is its ~1s acquire-fence budget plus dequeue
+ * margin; 5s keeps parity with the old synchronous wait while only ever
+ * delaying one frame (the main thread stays responsive throughout). */
+static constexpr int kFrameSlotTimeoutMs = 5000;
 
 /*
  * KWin needs a DRM render device for the GL/EGL path (syncobj timelines, dmabuf
@@ -154,6 +160,11 @@ bool AnlandBackend::initialize()
     m_reconnectTimer->setInterval(s_reconnectIntervalMs);
     connect(m_reconnectTimer, &QTimer::timeout, this, &AnlandBackend::onReconnectTimer);
 
+    m_frameTimeout = new QTimer(this);
+    m_frameTimeout->setSingleShot(true);
+    m_frameTimeout->setInterval(kFrameSlotTimeoutMs);
+    connect(m_frameTimeout, &QTimer::timeout, this, &AnlandBackend::onFrameTimeout);
+
     // Bring up the audio engine up front: its PipeWire sink-monitor capture and
     // virtual mic Source live for the whole session, independent of the consumer,
     // so Linux apps never see the devices appear/disappear as the consumer comes and
@@ -229,8 +240,15 @@ DrmDevice *AnlandBackend::drmDevice() const
 
 bool AnlandBackend::requestFrameWork()
 {
-    if (m_inFallback || !m_display || m_consumerReady) {
-        return !m_inFallback && m_consumerReady;
+    if (m_inFallback || !m_display) {
+        return false;
+    }
+    // A freshly selected slot is already waiting for the upcoming traversal;
+    // further repaints coalesce into it (damage accumulates in the layers).
+    // In particular this suppresses any new request while a traversal is in
+    // flight, so the selected shm index cannot be overwritten mid-render.
+    if (m_consumerReady) {
+        return true;
     }
     if (m_workRequested) {
         return true;
@@ -239,27 +257,83 @@ bool AnlandBackend::requestFrameWork()
     if (requested != 1) {
         if (requested < 0 && !m_inFallback) {
             enterFallback();
+        } else if (requested == 0) {
+            // The C transport already holds an outstanding request this
+            // backend is not tracking (unreachable in normal flow: every send
+            // pairs with exactly one consume/cancel, and fallback/reconnect
+            // resets both sides). Coalesce rather than stack a duplicate; the
+            // frame timeout still bounds the wait.
+            qCWarning(KWIN_ANLAND) << "anland.frame FRAME_WANTED already outstanding in transport; coalescing";
+            m_workRequested = true;
+            startFrameTimeout();
+        }
+        return requested == 0;
+    }
+    // Exactly one FRAME_WANTED is now outstanding. Return immediately: the
+    // selection arrives via the buffer-ready eventfd (see onBufferReady) and
+    // the compositor traversal is gated on it (see consumeSlotForFrame), so
+    // the main thread never blocks here regardless of consumer timing.
+    m_workRequested = true;
+    m_requestSentAt = std::chrono::steady_clock::now();
+    m_requestTimed = true;
+    startFrameTimeout();
+    qCDebug(KWIN_ANLAND) << "anland.frame work requested (async; awaiting slot selection)";
+    return true;
+}
+
+bool AnlandBackend::consumeSlotForFrame()
+{
+    if (m_inFallback || !m_display) {
+        return false;
+    }
+    if (!m_consumerReady) {
+        // The slot for this repaint has not been selected yet. Record the
+        // deferred dispatch (coalesced: at most one pending) and skip this
+        // traversal WITHOUT touching frame accounting: prepareNewFrame()
+        // runs only inside composite(). The buffer-ready notifier schedules a
+        // replacement dispatch on arrival, which collects all coalesced damage.
+        if (!m_dispatchDeferred) {
+            m_dispatchDeferred = true;
+            qCDebug(KWIN_ANLAND) << "anland.frame dispatch deferred until slot selected";
         }
         return false;
     }
-    m_workRequested = true;
+    const auto now = std::chrono::steady_clock::now();
+    const auto waitMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_slotSelectedAt).count();
+    qCDebug(KWIN_ANLAND) << "anland.frame beginning traversal on selected slot" << waitMs << "ms after selection";
+    m_dispatchDeferred = false;
+    // m_consumerReady stays set: present()/notifyFramePresented consumes the
+    // selection exactly once per traversal (or doBeginFrame re-validates the
+    // index if setup fails first and the slot is reused by the retry).
+    return true;
+}
 
-    // KWin's frameRequested signal is emitted before compositor traversal.
-    // Wait for the consumer's real display tick to select a free slot so the
-    // GL layer cannot render into an index left over from a previous frame.
-    const int selected = wait_buffer_ready(m_display, 5000);
-    if (selected != 1) {
-        m_workRequested = false;
-        if (!m_inFallback) {
-            qCWarning(KWIN_ANLAND) << "consumer did not select a requested frame slot";
-            enterFallback();
-        }
-        return false;
+void AnlandBackend::startFrameTimeout()
+{
+    if (m_frameTimeout) {
+        m_frameTimeout->start(kFrameSlotTimeoutMs);
+    }
+}
+
+void AnlandBackend::cancelPendingFrameWork()
+{
+    if (m_frameTimeout) {
+        m_frameTimeout->stop();
     }
     m_workRequested = false;
-    m_consumerReady = true;
-    m_outputs[0]->onConsumerReady();
-    return true;
+    m_consumerReady = false;
+    m_dispatchDeferred = false;
+    m_requestTimed = false;
+}
+
+void AnlandBackend::onFrameTimeout()
+{
+    if (m_inFallback || !m_workRequested) {
+        return; // selection already consumed, or fallback cleared us first
+    }
+    qCWarning(KWIN_ANLAND) << "anland.frame no slot selected within" << kFrameSlotTimeoutMs << "ms; entering fallback";
+    cancelPendingFrameWork();
+    enterFallback();
 }
 
 bool AnlandBackend::notifyFramePresented(bool damaged)
@@ -466,16 +540,51 @@ void AnlandBackend::onBufferReady()
         return;
     }
 
-    // Normally requestFrameWork() consumes this eventfd synchronously before
-    // the compositor starts. Keep the notifier as a recovery path for a
-    // selection that arrived outside that call; it still never schedules work
-    // on its own.
+    // Drain exactly one selection signal without blocking. The consumer writes
+    // the eventfd exactly once per consumed FRAME_WANTED; a readable fd with
+    // no outstanding request is a stray wakeup: drain it and change nothing so
+    // a stale slot can never be mistaken for a fresh selection.
     if (wait_buffer_ready(m_display, 0) != 1) {
         return;
     }
+    if (!m_workRequested) {
+        qCWarning(KWIN_ANLAND) << "anland.frame spurious buffer-ready with no outstanding request; drained";
+        return;
+    }
     m_workRequested = false;
+    if (m_frameTimeout) {
+        m_frameTimeout->stop();
+    }
     m_consumerReady = true;
+    m_slotSelectedAt = std::chrono::steady_clock::now();
+    if (m_requestTimed) {
+        const auto waitMs = std::chrono::duration_cast<std::chrono::milliseconds>(m_slotSelectedAt - m_requestSentAt).count();
+        qCDebug(KWIN_ANLAND) << "anland.frame slot selected" << waitMs << "ms after request";
+        m_requestTimed = false;
+    } else {
+        qCDebug(KWIN_ANLAND) << "anland.frame slot selected (request time unknown)";
+    }
+    // The selection tick is also SurfaceFlinger's latch tick for the previously
+    // queued frame, so completing it here ties OutputFrame::presented() to the
+    // best available presentation-completion signal (the current protocol has
+    // no distinct final-present ack). Completion may arm the compositor timer
+    // via the normal pending-reschedule path; that dispatch finds SlotReady.
     m_outputs[0]->onConsumerReady();
+    if (m_dispatchDeferred) {
+        // A traversal was skipped waiting for this exact slot. Schedule a
+        // replacement dispatch now; repaintScheduled coalesces (no duplicate
+        // FRAME_WANTED) and the pending damage is collected at traversal time,
+        // so no coalesced repaint is lost.
+        m_dispatchDeferred = false;
+        qCDebug(KWIN_ANLAND) << "anland.frame slot ready for deferred dispatch; rescheduling";
+        if (!m_outputs.isEmpty()) {
+            m_outputs[0]->renderLoop()->scheduleRepaint();
+        }
+    }
+    // Otherwise the armed (or future) compositeTimer dispatch will find
+    // SlotReady via consumeSlotForFrame(). onConsumerReady deliberately never
+    // schedules work itself: RenderLoop's own repaint requests stay the sole
+    // source of FRAME_WANTED, which is what leaves a static desktop idle.
 }
 
 void AnlandBackend::fallbackTrampoline(void *data)
@@ -500,14 +609,17 @@ void AnlandBackend::enterFallback()
 
     teardownNotifiers();
 
+    // Drop any outstanding request/selection/deferral so no stale slot can be
+    // rendered into after the reconnect (fresh selection required), and stop
+    // the slot watchdog (a new one arms with the next request).
+    cancelPendingFrameWork();
+
     // Renderer is stopped: drop the imported dmabuf set now that the producer's fds
     // are gone. The layer is null at startup (no GL backend attached yet).
     if (AnlandEglLayer *layer = m_outputs[0]->eglLayer()) {
         layer->releaseBuffers();
     }
 
-    m_consumerReady = false;
-    m_workRequested = false;
     m_inFallback = true;
 
     // Detach the audio socket: the streams keep running (capture drops its PCM, the
