@@ -1,0 +1,5 @@
+ecd4921a7ef213f77ac28bb61903cbc2ea3e491c8bbf32be8718584fc2177e6f  0001-xwayland-support-kgsl-dmabuf-v3-fallback-paths.patch
+02c4a47a5ccb567d8a1d79f9c7bff05c72990a6fad719deec0d9de7e28e74c88  0002-xwayland-glamor-add-KGSL-surfaceless-backend-path.patch
+9bef66aed430d5ac7eece6f2846dad0ff9647460be5c29430a3ecfc60391db8f  0003-xwayland-dri3-support-KGSL-surfaceless-client-render.patch
+ac84a5d113d864dcb393c306dfa8d0935049c9c157353a77314a1e4655cad50d  0004-xwayland-scope-KGSL-frame-callback-recovery-per-window.patch
+29f218e6d7291bf985735b9bad3d27470a633f3d55bd37981042415a12c0e333  0005-xwayland-preserve-finger-axis-source.patch

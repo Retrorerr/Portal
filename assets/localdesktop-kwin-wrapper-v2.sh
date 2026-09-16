@@ -220,8 +220,9 @@ run_real_kwin() {
     # Scope the graphics overrides to the compositor launch. They used to be
     # injected into the entire guest session, which made unrelated clients
     # (and stock XWayland) look like they had a proven KGSL path. XWayland is
-    # still a Debian package child of KWin, but no XWayland-specific force
-    # variable is exported until a Forky build has a real glamor proof.
+    # a Debian package child of KWin; the Forky 2:24.1.13-1portal1 build
+    # carries the KGSL surfaceless forward-port, so export its force flag
+    # here (hw only) so KWin-launched XWayland reaches the KGSL path.
     gl_mode=hw
     if [ "$(cat /var/lib/localdesktop/kwin-glmode 2>/dev/null || true)" = "sw" ]; then
         gl_mode=sw
@@ -229,6 +230,7 @@ run_real_kwin() {
         export GALLIUM_DRIVER=llvmpipe
         unset FD_FORCE_KGSL FD_KGSL_ENABLE_DMABUF TURNIP_KMD
         unset ANLAND_SKIP_IMPLICIT_SYNC_WAIT
+        unset XWAYLAND_FORCE_KGSL_SURFACELESS
     else
         export MESA_LOADER_DRIVER_OVERRIDE=kgsl
         export GALLIUM_DRIVER=freedreno
@@ -236,6 +238,7 @@ run_real_kwin() {
         export FD_KGSL_ENABLE_DMABUF=1
         export TURNIP_KMD=kgsl
         export ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1
+        export XWAYLAND_FORCE_KGSL_SURFACELESS=1
     fi
     export ANLAND_SOCKET="${ANLAND_SOCKET:-/tmp/anland/display.sock}"
     export ANLAND=1
@@ -245,10 +248,10 @@ run_real_kwin() {
     else
         unset KWIN_GL_DEBUG
     fi
-    printf 'kwin_env mode=%s mesa_override=%s gallium=%s fd_force=%s dmabuf=%s turnip=%s xwayland_force=unset\n' \
+    printf 'kwin_env mode=%s mesa_override=%s gallium=%s fd_force=%s dmabuf=%s turnip=%s xwayland_force=%s\n' \
         "$gl_mode" "$MESA_LOADER_DRIVER_OVERRIDE" "$GALLIUM_DRIVER" \
         "${FD_FORCE_KGSL:-unset}" "${FD_KGSL_ENABLE_DMABUF:-unset}" \
-        "${TURNIP_KMD:-unset}" >> "$log_file"
+        "${TURNIP_KMD:-unset}" "${XWAYLAND_FORCE_KGSL_SURFACELESS:-unset}" >> "$log_file"
     printf 'kwin_debug=%s\n' "${KWIN_GL_DEBUG:-unset}" >> "$log_file"
     export LD_LIBRARY_PATH="$kwin_anland_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export QT_FORCE_STDERR_LOGGING=1
