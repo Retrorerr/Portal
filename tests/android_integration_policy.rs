@@ -784,6 +784,75 @@ fn anland_touchpad_exposes_scroll_settings() {
     assert!(ANLAND_INPUT_SOURCE[finger..].contains("m_naturalScroll"));
 }
 
+const QPA_WINDOW_SOURCE: &str =
+    include_str!("../patches/kwin/anland-6.7.4/src/plugins/qpa/window.cpp");
+const QPA_BACKINGSTORE_SOURCE: &str =
+    include_str!("../patches/kwin/anland-6.7.4/src/plugins/qpa/backingstore.cpp");
+#[test]
+fn anland_qpa_never_uses_invalid_buffers() {
+    // GL QPA surfaces need a dma-buf allocator; Anland has no DRM device, so
+    // the swapchain request must fail closed (EGLPlatformContext handles a
+    // null swapchain). Handing it SHM would crash later inside
+    // importDmaBufAsTexture(*buffer->dmabufAttributes()).
+    assert!(QPA_WINDOW_SOURCE.contains("No DRM render device for GL surface"));
+    assert!(!QPA_WINDOW_SOURCE.contains("using SHM backing store for GL surface"));
+    // The null drmDevice() case returns before any allocator dereference;
+    // the remaining drmDevice()->allocator() use is only reachable with a
+    // valid device (guarded by the early return above it).
+    let guard = QPA_WINDOW_SOURCE
+        .find("!Compositor::self()->backend()->drmDevice()")
+        .expect("null-DRM guard must exist");
+    let guarded_return = QPA_WINDOW_SOURCE[guard..]
+        .find("return nullptr")
+        .expect("null-DRM path must fail closed");
+    let deref = QPA_WINDOW_SOURCE
+        .find("drmDevice()->allocator()")
+        .expect("valid-device allocator path must remain");
+    assert!(guarded_return < deref);
+    // Raster backing stores stay fully supported via SHM.
+    assert!(QPA_BACKINGSTORE_SOURCE.contains("DRM_FORMAT_ARGB8888"));
+    // All three beginPaint() failure modes (no platform window,
+    // swapchain/acquire failure, mapping failure) set the fallback flag, and
+    // flush() drops the frame instead of dereferencing/presenting null.
+    assert!(
+        QPA_BACKINGSTORE_SOURCE
+            .matches("m_usingFallback = true")
+            .count()
+            >= 3
+    );
+    assert!(QPA_BACKINGSTORE_SOURCE.contains("m_usingFallback || !m_buffer"));
+    // A failed acquire keeps the last good buffer instead of going blank.
+    assert!(QPA_BACKINGSTORE_SOURCE.contains("m_buffer = oldBuffer"));
+}
+
+const DEBUG_VEIL_KOTLIN_SOURCE: &str =
+    include_str!("../src/android/kotlin/app/polarbear/ComposeOverlay.kt");
+const DEBUG_VEIL_ACTIVITY_SOURCE: &str =
+    include_str!("../src/android/kotlin/app/polarbear/PortalActivity.kt");
+
+#[test]
+fn debug_veil_hook_is_debug_only_and_ready_gated() {
+    // Automated UI tests must dismiss the READY veil through a Debug-only
+    // hook that mirrors the human reveal transition; Stable/release must be
+    // unable to trigger it and it must refuse before desktop readiness.
+    for required in [
+        "ACTION_DEBUG_DISMISS_VEIL",
+        "debugDismissVeilForAutomation",
+        "BuildConfig.DEBUG",
+        "desktopReadyState",
+        "acknowledgeRevealCommitted",
+    ] {
+        assert!(
+            DEBUG_VEIL_KOTLIN_SOURCE.contains(required),
+            "debug veil hook is missing {required}"
+        );
+    }
+    assert!(DEBUG_VEIL_ACTIVITY_SOURCE.contains("ACTION_DEBUG_DISMISS_VEIL"));
+    assert!(DEBUG_VEIL_ACTIVITY_SOURCE.contains("BuildConfig.DEBUG"));
+    // The hook refuses without readiness or an attached veil (fail closed).
+    assert!(DEBUG_VEIL_KOTLIN_SOURCE.contains("debug veil dismiss refused"));
+}
+
 #[test]
 fn fresh_renderer_selection_is_initialized_before_mesa_and_handoff() {
     let run = include_str!("../src/android/app/run.rs");

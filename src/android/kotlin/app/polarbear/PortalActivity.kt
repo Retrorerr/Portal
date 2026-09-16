@@ -37,12 +37,17 @@ package app.polarbear
 //     SurfaceView, so normal Android hit-testing delivers input; no custom
 //     event routing, no PopupWindow, no second window.
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.WindowManager
 import android.widget.FrameLayout
+import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -103,6 +108,56 @@ open class PortalActivity : GameActivity() {
         }
         super.onCreate(savedInstanceState)
         applyImmersive("onCreate")
+        registerDebugVeilReceiver()
+    }
+
+    override fun onDestroy() {
+        try {
+            debugVeilReceiver?.let { unregisterReceiver(it) }
+        } catch (_: Exception) {
+        } finally {
+            debugVeilReceiver = null
+        }
+        super.onDestroy()
+    }
+
+    /**
+     * DEBUG-ONLY automation hook receiver. Debug builds expose
+     * [ComposeOverlay.ACTION_DEBUG_DISMISS_VEIL] so ADB can dismiss the
+     * READY veil (`am broadcast -a app.polarbear.DEBUG_DISMISS_VEIL`).
+     * Release builds never register it. Exported delivery is required so
+     * the shell UID can reach it; the handler itself re-checks
+     * `BuildConfig.DEBUG` via [ComposeOverlay.debugDismissVeilForAutomation]
+     * and refuses unless the desktop is genuinely ready.
+     */
+    private var debugVeilReceiver: BroadcastReceiver? = null
+
+    private fun registerDebugVeilReceiver() {
+        if (!BuildConfig.DEBUG) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != ComposeOverlay.ACTION_DEBUG_DISMISS_VEIL) return
+                val ok = try {
+                    ComposeOverlay.debugDismissVeilForAutomation()
+                } catch (e: Exception) {
+                    Log.e(TAG, "debug veil dismiss failed", e)
+                    false
+                }
+                Log.i(TAG, "debug dismiss veil broadcast handled ok=$ok")
+            }
+        }
+        debugVeilReceiver = receiver
+        try {
+            ContextCompat.registerReceiver(
+                this,
+                receiver,
+                IntentFilter(ComposeOverlay.ACTION_DEBUG_DISMISS_VEIL),
+                ContextCompat.RECEIVER_EXPORTED,
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "debug veil receiver registration failed", e)
+            debugVeilReceiver = null
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

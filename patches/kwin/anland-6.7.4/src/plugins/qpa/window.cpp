@@ -73,28 +73,30 @@ Swapchain *Window::swapchain(const std::shared_ptr<EglContext> &context, const F
         return nullptr;
     }
 
-    // May be upgraded from false to true below when no DRM render device
-    // exists (Anland surfaceless): GL content then uses SHM backing.
+    // Anland intentionally runs without a DRM RenderDevice (surfaceless KGSL
+    // while Anland owns dmabuf presentation), so there is no dma-buf
+    // allocator for GL render targets. EGLPlatformContext::makeCurrent()
+    // unconditionally dereferences buffer->dmabufAttributes() for GL
+    // surfaces, which a SHM buffer cannot satisfy — handing it SHM would
+    // only move the crash. Fail here instead so makeCurrent() returns false
+    // cleanly; raster (SHM) backing stores are unaffected and fully
+    // supported. No KWin-owned GL surface exists in normal Anland operation
+    // (effects/outlines are scene items, not QPA windows).
     bool software = window()->surfaceType() == QSurface::RasterSurface; // RasterGLSurface is unsupported by us
     if (!m_swapchain || m_swapchain->size() != nativeSize
         || !formats.contains(m_swapchain->format())
         || m_swapchain->modifiers() != formats[m_swapchain->format()]
         || (!software && m_eglContext.lock() != context)) {
+        if (!software && !Compositor::self()->backend()->drmDevice()) {
+            qCWarning(KWIN_QPA) << "No DRM render device for GL surface, refusing swapchain";
+            return nullptr;
+        }
         GraphicsBufferAllocator *allocator;
         if (software) {
             static ShmGraphicsBufferAllocator shmAllocator;
             allocator = &shmAllocator;
-        } else if (auto drmDevice = Compositor::self()->backend()->drmDevice()) {
-            allocator = drmDevice->allocator();
         } else {
-            // Anland intentionally runs without a DRM RenderDevice (surfaceless
-            // KGSL while Anland owns dmabuf presentation). A GL-surface QPA
-            // window must never dereference the null device; fall back to SHM
-            // backing exactly like a raster surface.
-            qCWarning(KWIN_QPA) << "No DRM render device, using SHM backing store for GL surface";
-            static ShmGraphicsBufferAllocator shmAllocator;
-            allocator = &shmAllocator;
-            software = true;
+            allocator = Compositor::self()->backend()->drmDevice()->allocator();
         }
 
         for (auto it = formats.begin(); it != formats.end(); it++) {

@@ -34,7 +34,7 @@
       "archive_sha256": "00a199f8c78407a0630ec2c0873be90bbe4f9e9f31bd0f97c7057cdf224cb180"
     },
     "assets": [
-      {"role": "KWin Wayland executable", "path": "assets/kwin-forky-anland-arm64/kwin_wayland", "bytes": 1537392, "sha256": "2a6323e86b63372e3732baefaccbac5d94d74c18a50b277c29fb0ffe58998364", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "78c171bcd1f3c752937040a0669283a662d435ac"}},
+      {"role": "KWin Wayland executable", "path": "assets/kwin-forky-anland-arm64/kwin_wayland", "bytes": 1537392, "sha256": "5328cbb8a40ec47639c6823ef14ff3dad923a243ba21425d8b354d83338f6e16", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "b39aab72ecc1dc9335fbaafedd214a14d47f456c"}},
       {"role": "Portal Anland KWin library", "path": "assets/kwin-forky-anland-arm64/libkwin.so.6.7.4", "bytes": 10368432, "sha256": "9ae28f608c0690a00a8f541bbafe0ed295d7539dd6d866100292fed803862359", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "dab5fd51974b17d59b882b528536103f864345b7"}}
     ],
     "patches": [
@@ -44,7 +44,7 @@
       {"role": "KWin patch 0004", "path": "patches/kwin/0004-opengl-guard-null-egl-device.patch", "sha256": "f774825530e67bdb21931ab58788c0f3d43604ddf797fda53e44afc6081d4e38"},
       {"role": "KWin patch 0005", "path": "patches/kwin/0005-compositor-tolerate-null-drm-device.patch", "sha256": "01c9ee0f459a182213165c182295ab36163b42eed00bd60dbeb1363b516abdb6"}
     ]
-    ,"source_overlay": {"path": "patches/kwin/anland-6.7.4", "sha256": "8bb14e6d087afef2e27100741310b4e1438d21fea22eb7a857031ae5d4aee0e5", "protocol_version": 3}
+    ,"source_overlay": {"path": "patches/kwin/anland-6.7.4", "sha256": "d8f3c6cb9c0070e1037adb7a4a8a9d54233887ab7177bef004dcd1673d7c7b0b", "protocol_version": 3}
   },
   "xwayland": {
     "active": "debian-package:xwayland",

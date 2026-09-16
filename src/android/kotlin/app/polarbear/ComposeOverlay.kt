@@ -44,6 +44,8 @@ object ComposeOverlay {
     const val STATE_STARTING = "Starting"
     const val STATE_READY = "Desktop ready"
     const val STATE_ERROR = "Error"
+    /** Debug-automation broadcast action. Debug builds only; release ignores it. */
+    const val ACTION_DEBUG_DISMISS_VEIL = "app.polarbear.DEBUG_DISMISS_VEIL"
 
     init {
         try {
@@ -441,6 +443,33 @@ object ComposeOverlay {
         } catch (_: UnsatisfiedLinkError) {
         } catch (_: Exception) {
         }
+    }
+
+    /**
+     * DEBUG-ONLY automation hook: complete the READY veil exactly as a
+     * committed human reveal does, so ADB-driven UI tests never interact
+     * with Plasma through the veil. Release builds ignore every call.
+     * Requires the desktop-ready latch (same eligibility as the reveal
+     * affordance) and an attached veil; otherwise a no-op returning false.
+     * Runs the identical native callbacks as the gesture path
+     * (reveal-committed, then overlay-removed via removeNow), minus the
+     * fling animation. Must be called on the UI thread.
+     */
+    @JvmStatic fun debugDismissVeilForAutomation(): Boolean {
+        if (!BuildConfig.DEBUG) return false
+        if (!desktopReadyState.value) {
+            Log.i(TAG, "debug veil dismiss refused: desktop not ready")
+            return false
+        }
+        val frame = container
+        if (frame == null) {
+            Log.i(TAG, "debug veil dismiss refused: no veil attached")
+            return false
+        }
+        Log.i(TAG, "debug veil dismiss: completing reveal for automation")
+        acknowledgeRevealCommitted()
+        removeNow()
+        return true
     }
 
     private fun acknowledgeRevealCommitted() {
