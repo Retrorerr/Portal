@@ -6,6 +6,11 @@
 */
 #include "anland_input.h"
 #include "anland_backend.h"
+#include "anland_logging.h"
+
+#include <KSharedConfig>
+
+#include <QDBusConnection>
 
 #include <chrono>
 
@@ -21,11 +26,35 @@ static std::chrono::microseconds now()
 AnlandInputDevice::AnlandInputDevice(QObject *parent)
     : InputDevice(parent)
 {
+    const auto config = KSharedConfig::openConfig(QStringLiteral("kcminputrc"));
+    m_config = config->group(QStringLiteral("Libinput"))
+                   .group(QStringLiteral("0"))
+                   .group(QStringLiteral("0"))
+                   .group(name());
+    m_naturalScroll = m_config.readEntry("NaturalScroll", false);
+    m_scrollFactor = m_config.readEntry("ScrollFactor", 1.0);
+
+    const bool registered = QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice/") + sysName(),
+                                                                         QStringLiteral("org.kde.KWin.InputDevice"),
+                                                                         this,
+                                                                         QDBusConnection::ExportAllProperties);
+    qCWarning(KWIN_ANLAND) << "Portal Touchpad input device registered:" << registered
+                        << "naturalScroll:" << m_naturalScroll << "scrollFactor:" << m_scrollFactor;
+}
+
+AnlandInputDevice::~AnlandInputDevice()
+{
+    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/org/kde/KWin/InputDevice/") + sysName());
 }
 
 QString AnlandInputDevice::name() const
 {
-    return QStringLiteral("anland virtual input");
+    return QStringLiteral("Portal Touchpad");
+}
+
+QString AnlandInputDevice::sysName() const
+{
+    return QStringLiteral("portal_touchpad");
 }
 
 bool AnlandInputDevice::isEnabled() const
@@ -59,7 +88,7 @@ bool AnlandInputDevice::isPointer() const
 
 bool AnlandInputDevice::isTouchpad() const
 {
-    return false;
+    return true;
 }
 
 bool AnlandInputDevice::isTouch() const
@@ -125,7 +154,14 @@ void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV
 
 void AnlandInputDevice::pointerAxisFinger(PointerAxis axis, qreal delta)
 {
-    Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Finger, false, now(), this);
+    // Exactly one layer owns each transformation: the host sends raw
+    // buffer-px deltas, so the kcminputrc scroll factor and natural-scroll
+    // inversion are applied here, finger-source only.
+    delta *= m_scrollFactor;
+    if (m_naturalScroll) {
+        delta = -delta;
+    }
+    Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Finger, m_naturalScroll, now(), this);
     Q_EMIT InputDevice::pointerFrame(this);
 }
 
@@ -167,16 +203,96 @@ void AnlandInputDevice::touchCancel()
     Q_EMIT touchCanceled(this);
 }
 
+bool AnlandInputDevice::falseValue() const
+{
+    return false;
+}
+
+bool AnlandInputDevice::trueValue() const
+{
+    return true;
+}
+
+int AnlandInputDevice::zeroValue() const
+{
+    return 0;
+}
+
+quint32 AnlandInputDevice::zeroUnsignedValue() const
+{
+    return 0;
+}
+
+qreal AnlandInputDevice::zeroRealValue() const
+{
+    return 0;
+}
+
+bool AnlandInputDevice::isNaturalScroll() const
+{
+    return m_naturalScroll;
+}
+
+void AnlandInputDevice::setNaturalScroll(bool enabled)
+{
+    if (m_naturalScroll == enabled) {
+        return;
+    }
+    m_naturalScroll = enabled;
+    m_config.writeEntry("NaturalScroll", enabled);
+    m_config.sync();
+    qCWarning(KWIN_ANLAND) << "Portal Touchpad natural scroll set to" << enabled;
+    Q_EMIT naturalScrollChanged();
+}
+
+qreal AnlandInputDevice::scrollFactor() const
+{
+    return m_scrollFactor;
+}
+
+void AnlandInputDevice::setScrollFactor(qreal factor)
+{
+    if (m_scrollFactor == factor) {
+        return;
+    }
+    m_scrollFactor = factor;
+    m_config.writeEntry("ScrollFactor", factor);
+    m_config.sync();
+    qCWarning(KWIN_ANLAND) << "Portal Touchpad scroll factor set to" << factor;
+    Q_EMIT scrollFactorChanged();
+}
+
 AnlandInputBackend::AnlandInputBackend(AnlandBackend *backend)
     : m_backend(backend)
 {
+}
+
+AnlandInputBackend::~AnlandInputBackend()
+{
+    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/org/kde/KWin/InputDevice"));
 }
 
 void AnlandInputBackend::initialize()
 {
     if (AnlandInputDevice *device = m_backend->inputDevice()) {
         Q_EMIT deviceAdded(device);
+        if (device->isTouchpad()) {
+            Q_EMIT deviceAdded(device->sysName());
+        }
     }
+
+    QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice"),
+                                                 QStringLiteral("org.kde.KWin.InputDeviceManager"),
+                                                 this,
+                                                 QDBusConnection::ExportAllProperties | QDBusConnection::ExportAllSignals);
+}
+
+QStringList AnlandInputBackend::devicesSysNames() const
+{
+    if (AnlandInputDevice *device = m_backend->inputDevice()) {
+        return QStringList{device->sysName()};
+    }
+    return QStringList{};
 }
 
 } // namespace KWin
