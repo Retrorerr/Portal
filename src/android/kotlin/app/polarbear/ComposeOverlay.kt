@@ -446,6 +446,19 @@ object ComposeOverlay {
     }
 
     /**
+     * True only on debuggable (Debug) builds. Used to gate automation hooks
+     * without depending on the generated BuildConfig class.
+     */
+    @JvmStatic fun isDebuggableBuild(): Boolean {
+        return try {
+            val flags = container?.context?.applicationInfo?.flags ?: return false
+            (flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
      * DEBUG-ONLY automation hook: complete the READY veil exactly as a
      * committed human reveal does, so ADB-driven UI tests never interact
      * with Plasma through the veil. Release builds ignore every call.
@@ -456,7 +469,7 @@ object ComposeOverlay {
      * fling animation. Must be called on the UI thread.
      */
     @JvmStatic fun debugDismissVeilForAutomation(): Boolean {
-        if (!BuildConfig.DEBUG) return false
+        if (!isDebuggableBuild()) return false
         if (!desktopReadyState.value) {
             Log.i(TAG, "debug veil dismiss refused: desktop not ready")
             return false

@@ -127,13 +127,21 @@ open class PortalActivity : GameActivity() {
      * READY veil (`am broadcast -a app.polarbear.DEBUG_DISMISS_VEIL`).
      * Release builds never register it. Exported delivery is required so
      * the shell UID can reach it; the handler itself re-checks
-     * `BuildConfig.DEBUG` via [ComposeOverlay.debugDismissVeilForAutomation]
+     * debuggability via [ComposeOverlay.debugDismissVeilForAutomation]
      * and refuses unless the desktop is genuinely ready.
      */
     private var debugVeilReceiver: BroadcastReceiver? = null
 
+    private fun isDebuggable(): Boolean {
+        return try {
+            (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun registerDebugVeilReceiver() {
-        if (!BuildConfig.DEBUG) return
+        if (!isDebuggable()) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action != ComposeOverlay.ACTION_DEBUG_DISMISS_VEIL) return

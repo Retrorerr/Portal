@@ -838,7 +838,8 @@ fn debug_veil_hook_is_debug_only_and_ready_gated() {
     for required in [
         "ACTION_DEBUG_DISMISS_VEIL",
         "debugDismissVeilForAutomation",
-        "BuildConfig.DEBUG",
+        "isDebuggable",
+        "FLAG_DEBUGGABLE",
         "desktopReadyState",
         "acknowledgeRevealCommitted",
     ] {
@@ -848,7 +849,7 @@ fn debug_veil_hook_is_debug_only_and_ready_gated() {
         );
     }
     assert!(DEBUG_VEIL_ACTIVITY_SOURCE.contains("ACTION_DEBUG_DISMISS_VEIL"));
-    assert!(DEBUG_VEIL_ACTIVITY_SOURCE.contains("BuildConfig.DEBUG"));
+    assert!(DEBUG_VEIL_ACTIVITY_SOURCE.contains("FLAG_DEBUGGABLE"));
     // The hook refuses without readiness or an attached veil (fail closed).
     assert!(DEBUG_VEIL_KOTLIN_SOURCE.contains("debug veil dismiss refused"));
 }
