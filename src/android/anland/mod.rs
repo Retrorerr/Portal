@@ -108,28 +108,46 @@ pub fn guest_socket_path() -> &'static str {
 
 /// Guest-wide client environment for the Anland session.
 ///
-/// The Mesa/KGSL overrides are exported by the provisioned KWin wrapper at
-/// the compositor boundary, not here. `EGL_PLATFORM` is deliberately NOT set
-/// (it forces QtQuick software fallback with OffscreenQuickView texture
-/// failures).
+/// Minimum safe client KGSL/Freedreno restore (from `main`): ordinary
+/// Wayland/X11 clients need these to initialize the Mesa KGSL stack instead
+/// of silently falling back to llvmpipe/SHM. KWin-specific variables stay
+/// scoped to the compositor wrapper (`localdesktop-kwin-wrapper-v2.sh`):
+/// `ANLAND*`, `ANLAND_NO_DRM_DEVICE`, `ANLAND_SKIP_IMPLICIT_SYNC_WAIT`,
+/// `XWAYLAND_FORCE_KGSL_SURFACELESS` (XWayland inherits it from KWin),
+/// `KWIN_GL_DEBUG`. `EGL_PLATFORM` is deliberately NOT set (it forces
+/// QtQuick software fallback with OffscreenQuickView texture failures).
 ///
 /// The active hardware path needs the Forky Anland KWin assets and the
 /// verified `mesa-kgsl-layer` overlay (the KGSL winsys is not supplied by
 /// stock Debian Mesa). KWin uses KGSL-backed surfaceless EGL while Anland
 /// owns Android dmabuf presentation; the retired QPainter path is not
 /// selected.
-/// - `MOZ_ENABLE_WAYLAND=1`: Firefox uses its normal native Wayland backend.
-///
-/// The old lfdevs XWayland-specific force flag is intentionally absent. The
-/// active Forky stock XWayland package has not yet produced a valid KGSL
-/// glamor proof on Pad 3, so exporting that variable globally would only hide
-/// the unresolved P0 XWayland path behind an ignored environment knob.
+/// - `MOZ_ENABLE_WAYLAND=0`: Firefox uses the known-good XWayland path.
+///   Proven on `main` by A/B (about:support via Marionette): native Wayland
+///   = WebRender (Software) — its dmabuf compositor needs GBM/a render node
+///   absent in PRoot — while X11 + KGSL glamor + forced WR prefs gives real
+///   GPU `Compositing: WebRender` on Adreno (screenshot-verified).
+/// - `MOZ_USE_XINPUT2=1`: KWin forwards native touch through the
+///   xwayland-touch XI2 device (direct touch, 20 slots). Without this
+///   Firefox X11 only sees pointer emulation (tap works, drag/scroll/pinch
+///   don't).
 pub fn guest_mesa_env() -> Vec<(String, String)> {
     vec![
-        // Firefox is a normal native Wayland client. XWayland remains
-        // installed and available to other applications, but Portal no
-        // longer forces the browser through that compatibility path.
-        ("MOZ_ENABLE_WAYLAND".into(), "1".into()),
+        // Client-side Mesa KGSL/Freedreno stack (guest-wide, from `main`).
+        // Lets plasmashell/QtQuick/GTK/Firefox-XWayland pick freedreno/KGSL
+        // instead of llvmpipe. KWin exports the same values locally; keeping
+        // them here does not change the compositor path.
+        ("MESA_LOADER_DRIVER_OVERRIDE".into(), "kgsl".into()),
+        ("GALLIUM_DRIVER".into(), "freedreno".into()),
+        ("FD_FORCE_KGSL".into(), "1".into()),
+        // Expose linear dma-buf import/export on KGSL.
+        ("FD_KGSL_ENABLE_DMABUF".into(), "1".into()),
+        ("TURNIP_KMD".into(), "kgsl".into()),
+        // Firefox is forced through XWayland (known-good GPU path). Stock
+        // Forky XWayland carries the KGSL surfaceless forward-port and
+        // inherits XWAYLAND_FORCE_KGSL_SURFACELESS from the KWin wrapper.
+        ("MOZ_ENABLE_WAYLAND".into(), "0".into()),
+        ("MOZ_USE_XINPUT2".into(), "1".into()),
         // GTK input method: IBus. The Portal IBus engine bridges X11/GTK
         // editable focus to the Android IME (real FocusIn/FocusOut, commit,
         // delete, enter). Qt/Wayland clients are unaffected (QT_IM_MODULE
@@ -144,7 +162,19 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
 /// use still describe the accelerated Anland/Wayland path.
 pub fn validate_launch_contract() -> anyhow::Result<()> {
     let environment = guest_mesa_env();
-    for (name, value) in [("MOZ_ENABLE_WAYLAND", "1"), ("GTK_IM_MODULE", "ibus")] {
+    for (name, value) in [
+        ("MESA_LOADER_DRIVER_OVERRIDE", "kgsl"),
+        ("GALLIUM_DRIVER", "freedreno"),
+        ("FD_FORCE_KGSL", "1"),
+        ("FD_KGSL_ENABLE_DMABUF", "1"),
+        ("TURNIP_KMD", "kgsl"),
+        // Firefox intentionally uses X11/XWayland on the accelerated path;
+        // native Firefox Wayland requires a GBM render node that PRoot does
+        // not expose on the supported Android devices.
+        ("MOZ_ENABLE_WAYLAND", "0"),
+        ("MOZ_USE_XINPUT2", "1"),
+        ("GTK_IM_MODULE", "ibus"),
+    ] {
         anyhow::ensure!(
             environment.iter().any(|(actual_name, actual_value)| {
                 actual_name == name && actual_value == value

@@ -730,13 +730,17 @@ fn input_method_bridge_and_fallback_policy() {
 
 #[test]
 fn stock_xwayland_and_native_firefox_policy() {
-    // XWayland remains the Debian-provided compatibility server, but no
-    // Portal-specific candidate or Firefox-forcing selector is active.
+    // XWayland stays the Forky Debian package with the KGSL surfaceless
+    // forward-port (child of KWin, inherits the wrapper force flag); no
+    // Portal-specific candidate/A-B selector is active. Firefox is forced
+    // back through XWayland (MOZ_ENABLE_WAYLAND=0 + XInput2 + WR prefs) —
+    // the known-good GPU path from `main`.
     assert!(KWIN_WRAPPER_SOURCE.contains("XWayland stays the Debian package"));
     assert!(ANLAND_ENV_SOURCE.contains("MOZ_ENABLE_WAYLAND"));
+    assert!(ANLAND_ENV_SOURCE.contains("MOZ_USE_XINPUT2"));
     assert!(!ANLAND_ENV_SOURCE.contains("LOCALDESKTOP_XWAYLAND_VARIANT"));
     assert!(!ANDROID_SETUP_SOURCE.contains("sync_xwayland_candidate_overlay"));
-    assert!(!ANDROID_SETUP_SOURCE.contains("Firefox Portal GPU preference is missing"));
+    assert!(ANDROID_SETUP_SOURCE.contains("Firefox Portal GPU preference is missing"));
 }
 
 #[test]
@@ -860,25 +864,32 @@ fn anland_repair_revalidates_mesa_kwin_firefox_and_session_contract() {
     assert!(ANDROID_SETUP_SOURCE.contains("sync_kwin_anland_overlay_for_repair"));
     assert!(ANDROID_SETUP_SOURCE.contains("bytes == KWIN_ANLAND_LIBRARY"));
     assert!(ANDROID_SETUP_SOURCE.contains("validate_firefox_anland_config"));
-    assert!(ANDROID_SETUP_SOURCE
+    assert!(ANDROID_SETUP_SOURCE.contains("Firefox Portal GPU preference is missing"));
+    assert!(!ANDROID_SETUP_SOURCE
         .contains("Firefox config still contains a Portal-specific XWayland/GPU override"));
-    assert!(!ANDROID_SETUP_SOURCE.contains("Firefox Portal GPU preference is missing"));
     for required in [
         "MOZ_ENABLE_WAYLAND",
+        "MOZ_USE_XINPUT2",
         "GTK_IM_MODULE",
+        "MESA_LOADER_DRIVER_OVERRIDE",
+        "GALLIUM_DRIVER",
+        "FD_FORCE_KGSL",
+        "FD_KGSL_ENABLE_DMABUF",
+        "TURNIP_KMD",
         "validate_launch_contract",
     ] {
         assert!(ANLAND_ENV_SOURCE.contains(required));
     }
-    // KWin-only acceleration overrides are scoped at the compositor wrapper,
-    // not exported to every guest client or treated as XWayland proof.
+    // KWin wrapper keeps its local HW copy (plus KWin-only ANLAND/XWAYLAND
+    // force flags); clients get the minimal KGSL set guest-wide via
+    // guest_mesa_env. EGL_PLATFORM must stay unset everywhere.
     for required in [
         "MESA_LOADER_DRIVER_OVERRIDE",
         "GALLIUM_DRIVER",
         "FD_FORCE_KGSL",
         "FD_KGSL_ENABLE_DMABUF",
         "TURNIP_KMD",
-        "xwayland_force=unset",
+        "XWAYLAND_FORCE_KGSL_SURFACELESS",
     ] {
         assert!(KWIN_WRAPPER_SOURCE.contains(required));
     }

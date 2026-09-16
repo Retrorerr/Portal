@@ -217,9 +217,11 @@ portal_xinput_probe() {
 }
 
 run_real_kwin() {
-    # Scope the graphics overrides to the compositor launch. They used to be
-    # injected into the entire guest session, which made unrelated clients
-    # (and stock XWayland) look like they had a proven KGSL path. XWayland is
+    # KWin keeps its local HW copy (same values clients now also inherit
+    # guest-wide via guest_mesa_env). KWin-only flags stay here: ANLAND*,
+    # ANLAND_NO_DRM_DEVICE, ANLAND_SKIP_IMPLICIT_SYNC_WAIT, and
+    # XWAYLAND_FORCE_KGSL_SURFACELESS (XWayland is a KWin child, so it
+    # inherits this). XWayland is
     # a Debian package child of KWin; the Forky 2:24.1.13-1portal1 build
     # carries the KGSL surfaceless forward-port, so export its force flag
     # here (hw only) so KWin-launched XWayland reaches the KGSL path.
