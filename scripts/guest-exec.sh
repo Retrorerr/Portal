@@ -7,7 +7,16 @@
 #
 # Usage (from host shell):
 #   LIBDIR=$(adb shell pm path app.polarbear | tr -d '\r' | sed 's/package://;s|/base.apk|/lib/arm64|')
+#   adb shell "run-as app.polarbear cp /data/local/tmp/guest-env.sh /data/data/app.polarbear/files/runtime-B/tmp/guest-env.sh"
 #   adb shell "run-as app.polarbear sh /data/data/app.polarbear/files/tmp/guest_exec.sh $LIBDIR /bin/sh /tmp/myscript.sh"
+#
+# Environment contract (see scripts/guest-env.sh, sourced by caller scripts
+# as their first line: `. /tmp/guest-env.sh`):
+#   * guest-env.sh owns the fixed Portal client policy (KGSL/Freedreno Mesa
+#     selection, Wayland display/runtime defaults) with `${VAR:-default}`
+#     overridability — the same policy UI-launched apps inherit.
+#   * The caller owns DBUS_SESSION_BUS_ADDRESS (session-specific) and the
+#     command. KWin-only Anland variables and EGL_PLATFORM are never set.
 [ -z "$1" ] && { echo "usage: guest_exec.sh <libdir> <cmd...>" >&2; exit 2; }
 libdir="$1"
 shift

@@ -26,6 +26,8 @@ pub mod android {
     pub mod anland;
     pub mod clipboard;
     pub mod clipboard_broker;
+    #[cfg(feature = "portal-debug")]
+    pub mod debug_pointer;
     pub mod diagnostics;
     pub mod ime;
     pub mod tablet_mode_manager;

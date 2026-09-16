@@ -144,14 +144,26 @@ open class PortalActivity : GameActivity() {
         if (!isDebuggable()) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action != ComposeOverlay.ACTION_DEBUG_DISMISS_VEIL) return
-                val ok = try {
-                    ComposeOverlay.debugDismissVeilForAutomation()
-                } catch (e: Exception) {
-                    Log.e(TAG, "debug veil dismiss failed", e)
-                    false
+                when (intent?.action) {
+                    ComposeOverlay.ACTION_DEBUG_DISMISS_VEIL -> {
+                        val ok = try {
+                            ComposeOverlay.debugDismissVeilForAutomation()
+                        } catch (e: Exception) {
+                            Log.e(TAG, "debug veil dismiss failed", e)
+                            false
+                        }
+                        Log.i(TAG, "debug dismiss veil broadcast handled ok=$ok")
+                    }
+                    ComposeOverlay.ACTION_DEBUG_POINTER -> {
+                        val ok = try {
+                            handleDebugPointer(intent)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "debug pointer failed", e)
+                            false
+                        }
+                        Log.i(TAG, "debug pointer broadcast handled ok=$ok")
+                    }
                 }
-                Log.i(TAG, "debug dismiss veil broadcast handled ok=$ok")
             }
         }
         debugVeilReceiver = receiver
@@ -159,12 +171,58 @@ open class PortalActivity : GameActivity() {
             ContextCompat.registerReceiver(
                 this,
                 receiver,
-                IntentFilter(ComposeOverlay.ACTION_DEBUG_DISMISS_VEIL),
+                IntentFilter().apply {
+                    addAction(ComposeOverlay.ACTION_DEBUG_DISMISS_VEIL)
+                    addAction(ComposeOverlay.ACTION_DEBUG_POINTER)
+                },
                 ContextCompat.RECEIVER_EXPORTED,
             )
         } catch (e: Exception) {
             Log.e(TAG, "debug veil receiver registration failed", e)
             debugVeilReceiver = null
+        }
+    }
+
+    /**
+     * Debug-only pointer injection. Coordinates are Android buffer px,
+     * identical semantics to the physical touchpad path downstream.
+     * Inert on release builds (native returns false without queueing).
+     */
+    private fun handleDebugPointer(intent: Intent): Boolean {
+        if (!isDebuggable()) return false
+        return try {
+            // `am broadcast` has no double extra type: accept strings (and
+            // coerce int/float extras) so automation can pass coordinates.
+            fun extraDouble(key: String): Double {
+                intent.getStringExtra(key)?.toDoubleOrNull()?.let { return it }
+                if (intent.hasExtra(key)) {
+                    try {
+                        return intent.getDoubleExtra(key, Double.NaN)
+                    } catch (_: Exception) {
+                    }
+                    try {
+                        val f = intent.getFloatExtra(key, Float.NaN)
+                        if (!f.isNaN()) return f.toDouble()
+                    } catch (_: Exception) {
+                    }
+                    return intent.getIntExtra(key, 0).toDouble()
+                }
+                return 0.0
+            }
+            when (intent.getStringExtra("op")) {
+                "move" -> nativeDebugPointerMove(extraDouble("x"), extraDouble("y"))
+                "button" -> nativeDebugPointerButton(
+                    intent.getIntExtra("button", 0),
+                    intent.getBooleanExtra("pressed", false),
+                )
+                "scroll" -> nativeDebugPointerScroll(extraDouble("x"), extraDouble("y"))
+                "scroll_stop" -> nativeDebugPointerScrollStop()
+                else -> false
+            }
+        } catch (_: UnsatisfiedLinkError) {
+            false
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -211,5 +269,10 @@ open class PortalActivity : GameActivity() {
 
     companion object {
         private const val TAG = "PortalActivity"
+
+        @JvmStatic external fun nativeDebugPointerMove(x: Double, y: Double): Boolean
+        @JvmStatic external fun nativeDebugPointerButton(button: Int, pressed: Boolean): Boolean
+        @JvmStatic external fun nativeDebugPointerScroll(x: Double, y: Double): Boolean
+        @JvmStatic external fun nativeDebugPointerScrollStop(): Boolean
     }
 }

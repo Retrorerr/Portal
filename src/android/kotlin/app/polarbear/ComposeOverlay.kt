@@ -46,6 +46,8 @@ object ComposeOverlay {
     const val STATE_ERROR = "Error"
     /** Debug-automation broadcast action. Debug builds only; release ignores it. */
     const val ACTION_DEBUG_DISMISS_VEIL = "app.polarbear.DEBUG_DISMISS_VEIL"
+    /** Debug-automation pointer action (extras: op, x, y, button, pressed). */
+    const val ACTION_DEBUG_POINTER = "app.polarbear.DEBUG_POINTER"
 
     init {
         try {

@@ -14,6 +14,10 @@ use winit::{event::ElementState, event_loop::EventLoopProxy};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppUserEvent {
     AccessibilityInputReady,
+    /// A Debug-only pointer automation command was queued (see
+    /// `debug_pointer`; `portal-debug` feature only, never sent otherwise).
+    /// The event loop drains it next to the accessibility queue.
+    DebugPointerReady,
     WaylandTraffic,
     /// An Android clipboard observation was queued. The worker never touches
     /// the render thread; this event only wakes the event loop so the queued

@@ -1112,6 +1112,67 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             handle(event, backend, event_loop);
         }
 
+        // Debug-only pointer automation (portal-debug feature): synthesize
+        // the same WindowEvents physical hardware produces and feed the
+        // identical forward_anland_input path (evdev mapping, anchor-motion
+        // deltas, Anland wire, KWin PointerInputRedirection).
+        #[cfg(feature = "portal-debug")]
+        for cmd in crate::android::debug_pointer::drain_pending() {
+            use crate::android::debug_pointer::DebugPointerCmd;
+            use winit::dpi::PhysicalPosition;
+            match cmd {
+                DebugPointerCmd::Move { x, y } => {
+                    forward_anland_input(
+                        backend,
+                        &WindowEvent::CursorMoved {
+                            device_id: winit::event::DeviceId::dummy(),
+                            position: PhysicalPosition::new(x, y),
+                        },
+                    );
+                }
+                DebugPointerCmd::Button { button, pressed } => {
+                    let button = match button {
+                        0 => MouseButton::Left,
+                        1 => MouseButton::Right,
+                        2 => MouseButton::Middle,
+                        other => MouseButton::Other(other as u16),
+                    };
+                    forward_anland_input(
+                        backend,
+                        &WindowEvent::MouseInput {
+                            device_id: winit::event::DeviceId::dummy(),
+                            state: if pressed {
+                                ElementState::Pressed
+                            } else {
+                                ElementState::Released
+                            },
+                            button,
+                        },
+                    );
+                }
+                DebugPointerCmd::FingerScroll { x, y } => {
+                    forward_anland_input(
+                        backend,
+                        &WindowEvent::MouseWheel {
+                            device_id: winit::event::DeviceId::dummy(),
+                            delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(x, y)),
+                            phase: TouchPhase::Moved,
+                        },
+                    );
+                }
+                DebugPointerCmd::FingerStop => {
+                    forward_anland_input(
+                        backend,
+                        &WindowEvent::MouseWheel {
+                            device_id: winit::event::DeviceId::dummy(),
+                            delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 0.0)),
+                            phase: TouchPhase::Ended,
+                        },
+                    );
+                }
+            }
+        }
+
         if let AppUserEvent::ChoreographerFrame {
             frame_time_ns,
             deadline_ns,

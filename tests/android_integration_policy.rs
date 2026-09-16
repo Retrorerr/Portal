@@ -829,6 +829,42 @@ const DEBUG_VEIL_KOTLIN_SOURCE: &str =
     include_str!("../src/android/kotlin/app/polarbear/ComposeOverlay.kt");
 const DEBUG_VEIL_ACTIVITY_SOURCE: &str =
     include_str!("../src/android/kotlin/app/polarbear/PortalActivity.kt");
+const DEBUG_POINTER_RUST_SOURCE: &str = include_str!("../src/android/debug_pointer.rs");
+const DEBUG_POINTER_APPLY_SOURCE: &str = include_str!("../src/android/app/run.rs");
+
+#[test]
+fn debug_pointer_injector_reuses_production_path() {
+    // Debug pointer automation must feed the SAME WindowEvent path as real
+    // hardware (CursorMoved/MouseInput into forward_anland_input), never
+    // hand-built wire events or duplicated coordinate transforms.
+    for required in [
+        "nativeDebugPointerMove",
+        "nativeDebugPointerButton",
+        "nativeDebugPointerScroll",
+        "DebugPointerReady",
+    ] {
+        assert!(
+            DEBUG_POINTER_RUST_SOURCE.contains(required),
+            "debug pointer injector is missing {required}"
+        );
+    }
+    for required in [
+        "drain_pending",
+        "CursorMoved",
+        "MouseInput",
+        "DeviceId::dummy",
+        "forward_anland_input",
+    ] {
+        assert!(
+            DEBUG_POINTER_APPLY_SOURCE.contains(required),
+            "debug pointer application is missing {required}"
+        );
+    }
+    assert!(!DEBUG_POINTER_RUST_SOURCE.contains("pointer_motion("));
+    assert!(!DEBUG_POINTER_RUST_SOURCE.contains("pointer_button("));
+    assert!(DEBUG_VEIL_ACTIVITY_SOURCE.contains("ACTION_DEBUG_POINTER"));
+    assert!(DEBUG_VEIL_ACTIVITY_SOURCE.contains("nativeDebugPointerMove"));
+}
 
 #[test]
 fn debug_veil_hook_is_debug_only_and_ready_gated() {
