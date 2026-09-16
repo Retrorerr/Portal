@@ -1100,6 +1100,17 @@ fn write_executable(path: &Path, contents: &str) {
         .and_then(|file| file.sync_all())
         .expect("Failed to sync executable script");
     fs::rename(&temporary, path).expect("Failed to install executable script");
+    // Drop any stale PRoot metadata sidecar for the destination. Files edited
+    // from inside the guest keep a `.proot-meta-file.*` snapshot (e.g. mode
+    // 600 from an intermediate editor temp file) that shadows the real
+    // permissions for access()/exec checks while stat() still shows the new
+    // mode. A stale sidecar once made every boot skip this script in PATH
+    // resolution and fall through to stock /usr/bin/kwin_wayland. Removing it
+    // lets the freshly staged mode speak for itself.
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        let sidecar = parent.join(format!(".proot-meta-file.{}.meta", name.to_string_lossy()));
+        let _ = fs::remove_file(sidecar);
+    }
 }
 
 fn write_guest_binary(path: &Path, contents: &[u8]) {
