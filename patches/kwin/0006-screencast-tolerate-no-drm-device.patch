@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Portal maintainers <portal@example.invalid>
+Date: Fri, 19 Sep 2026 19:30:00 +0100
+Subject: [PATCH] screencast: use PipeWire memfd when no DRM allocator exists
+
+Portal's Anland backend intentionally uses surfaceless EGL and has no KWin
+DrmDevice. KWin's screencast stream setup still unconditionally dereferenced
+that device while probing DMA-BUF support, so a window-screencast request
+crashed kwin_wayland before the existing MemFdScreenCastBuffer fallback could
+be selected.
+
+Treat the missing DRM allocator as an unavailable DMA-BUF path. The normal
+PipeWire shared-memory negotiation remains available and the DRM-backed path
+is unchanged on backends that provide an allocator.
+---
+ src/plugins/screencast/screencaststream.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/plugins/screencast/screencaststream.cpp b/src/plugins/screencast/screencaststream.cpp
+--- a/src/plugins/screencast/screencaststream.cpp
++++ b/src/plugins/screencast/screencaststream.cpp
+@@ -880,11 +880,16 @@ std::optional<ScreenCastDmaBufTextureParams> ScreenCastStream::testCreateDmaBuf(const QSize &size, quint32 format, const ModifierList &modifiers)
+ {
+     EglBackend *backend = qobject_cast<EglBackend *>(Compositor::self()->backend());
+     if (!backend) {
+         return std::nullopt;
+     }
++    const auto drmDevice = backend->drmDevice();
++    if (!drmDevice || !drmDevice->allocator()) {
++        qCWarning(KWIN_SCREENCAST) << "No DRM allocator available; using PipeWire memfd buffers";
++        return std::nullopt;
++    }
+
+-    GraphicsBuffer *buffer = backend->drmDevice()->allocator()->allocate(GraphicsBufferOptions{
++    GraphicsBuffer *buffer = drmDevice->allocator()->allocate(GraphicsBufferOptions{
+         .size = size,
+         .format = format,
+         .modifiers = modifiers,
+    });

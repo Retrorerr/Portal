@@ -257,6 +257,9 @@ pub struct BuildArgs {
     build_target: BuildTargetArgs,
     #[clap(flatten)]
     cargo: CargoArgs,
+    /// Path to the xbuild YAML manifest. Defaults to manifest.yaml in the package root.
+    #[clap(long, value_name = "PATH")]
+    manifest: Option<PathBuf>,
     /// Use verbose output
     #[clap(long, short)]
     verbose: bool,
@@ -496,11 +499,12 @@ impl BuildEnv {
     pub fn new(args: BuildArgs) -> Result<Self> {
         let verbose = args.verbose;
         let offline = args.cargo.offline;
+        let manifest_path = args.manifest;
         let cargo = args.cargo.cargo()?;
         let build_dir = cargo.target_dir().join("x");
         let cache_dir = dirs::cache_dir().unwrap().join("x");
         let package = cargo.manifest().package.as_ref().unwrap(); // Caller should guarantee that this is a valid package
-        let manifest = cargo.package_root().join("manifest.yaml");
+        let manifest = manifest_path.unwrap_or_else(|| cargo.package_root().join("manifest.yaml"));
         let mut config = Config::parse(manifest)?;
         let build_target = args.build_target.build_target(&config)?;
         config.apply_rust_package(package, cargo.workspace_manifest(), build_target.opt())?;

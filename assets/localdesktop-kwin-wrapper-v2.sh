@@ -60,15 +60,23 @@ ulimit -c unlimited 2>/dev/null || true
 anland_mode=1
 kwin_anland_dir=/usr/local/lib/portal-anland
 kwin_bin="$kwin_anland_dir/kwin_wayland"
+kwin_screencast_plugin="$kwin_anland_dir/kwin/plugins/screencast.so"
 printf 'anland_mode=%s socket=%s kwin=%s\n' \
     "$anland_mode" "${ANLAND_SOCKET:-unset}" "$kwin_bin" >> "$log_file"
-if [ ! -x "$kwin_bin" ] || [ ! -r "$kwin_anland_dir/libkwin.so.6.7.4" ]; then
+if [ ! -x "$kwin_bin" ] || [ ! -r "$kwin_anland_dir/libkwin.so.6.7.4" ] || \
+    [ ! -r "$kwin_screencast_plugin" ]; then
     printf 'anland KWin assets are incomplete\n' >> "$log_file"
     exit 127
 fi
 export LD_LIBRARY_PATH="$kwin_anland_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# The Anland KWin build owns the matching screencast plugin. Put its private
+# Qt plugin root first so KPluginMetaData::findPlugins("kwin/plugins") cannot
+# load Debian's unpatched screencast.so, while retaining distro plugin roots
+# for every other KWin module.
+export QT_PLUGIN_PATH="$kwin_anland_dir${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
 if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$kwin_bin" "$kwin_anland_dir/libkwin.so.6.7.4" >> "$log_file" 2>/dev/null || true
+    sha256sum "$kwin_bin" "$kwin_anland_dir/libkwin.so.6.7.4" \
+        "$kwin_screencast_plugin" >> "$log_file" 2>/dev/null || true
 fi
 export QT_FORCE_STDERR_LOGGING=1
 export QT_LOGGING_RULES="kwin_core.warning=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"

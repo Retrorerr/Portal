@@ -279,7 +279,19 @@ void Compositor::start()
         case NoCompositing:
             break;
         case OpenGLCompositing:
-            QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+            // Anland's accelerated scene compositor deliberately runs without
+            // a KWin DRM render device. QtQuick offscreen views cannot export
+            // an OpenGL render target in that configuration: OffscreenQuickView
+            // would otherwise fall through to EglSwapchain::create() with a
+            // null DRM allocator when an effect (such as Overview) is opened.
+            // Select the existing QtQuick software path before the first
+            // QQuickWindow is constructed; the main KWin scene remains OpenGL.
+            if (!m_backend->drmDevice()) {
+                qCWarning(KWIN_CORE) << "No DRM render device; using QtQuick software rendering for offscreen effects";
+                QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+            } else {
+                QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+            }
             break;
         case QPainterCompositing:
             QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);

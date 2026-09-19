@@ -1,8 +1,8 @@
 # KWin 6.7.4 Android/PRoot source patches
 
-This directory contains the five small source patches and the complete Anland
+This directory contains the six small source patches and the complete Anland
 v3 source overlay applied to Portal's pinned KWin 6.7.4 ARM64 build. Apply all
-five to the same pristine source, in numeric order, then apply
+six to the same pristine source, in numeric order, then apply
 `anland-6.7.4/`:
 
 * `0001` tolerates an unavailable udev monitor in the Android/PRoot guest.
@@ -13,6 +13,8 @@ five to the same pristine source, in numeric order, then apply
   detection and render-node discovery.
 * `0005` lets the generic OpenGL crash-reporting path tolerate Anland's
   intentional surfaceless backend without a KWin DRM device.
+* `0006` makes KWin's screencast DMA-BUF probe take the existing PipeWire
+  memfd path when Anland has no DRM allocator.
 
 The Anland overlay adds the KWin backend and the producer-side work-driven
 display protocol. Its canonical source application path is:
@@ -21,7 +23,7 @@ display protocol. Its canonical source application path is:
 sh /path/to/Portal/scripts/apply_kwin_forky_anland.sh "$kwin_source"
 ```
 
-The script verifies the pinned KWin commit, applies 0001--0005 exactly once,
+The script verifies the pinned KWin commit, applies 0001--0006 exactly once,
 and copies only the tracked overlay files. The overlay digest is recorded in
 `assets/graphics-stack-lock.json`; it must be checked before staging a binary.
 
@@ -50,7 +52,7 @@ disables hotplug setup when the monitor is unavailable.  The extra guard in
 
 ## Pinned source and patch
 
-The patch targets KDE KWin tag `v6.7.4`, commit
+The patches target KDE KWin tag `v6.7.4`, commit
 `8438567a741826da8b7536a8b10eb3af8fc8820d`.  Apply it only to a pristine
 checkout or extraction of that source:
 
@@ -93,7 +95,7 @@ cmake -S "$kwin_source" -B "$kwin_build" -G Ninja \
   -DBUILD_TESTING=OFF \
   -DKWIN_BUILD_X11=ON \
   -DKWIN_BUILD_KCMS=OFF
-cmake --build "$kwin_build" --target kwin kwin_wayland --parallel 2
+cmake --build "$kwin_build" --target kwin kwin_wayland screencast --parallel 2
 ```
 
 Verify that both results are guest ARM64 artifacts before staging them:
@@ -132,7 +134,35 @@ isolated test and backup checks pass:
 ```sh
 install -Dm755 "$kwin_executable" "$kwin_stage/usr/bin/kwin_wayland"
 readelf -h "$kwin_stage/usr/bin/kwin_wayland" | rg 'Class:|Machine:'
+
+screencast_plugin="$kwin_build/bin/kwin/plugins/screencast.so"
+install -Dm755 "$screencast_plugin" "$kwin_stage/usr/lib/kwin/plugins/screencast.so"
+readelf -h "$kwin_stage/usr/lib/kwin/plugins/screencast.so" | rg 'Class:|Machine:'
 ```
+
+The screencast plugin is a separate KWin module, not part of
+`libkwin.so.6.7.4`. Portal therefore ships it as
+`assets/kwin-forky-anland-arm64/screencast.so` and installs it under the
+app-owned Anland overlay at `kwin/plugins/screencast.so`. The KWin wrapper
+prepends `/usr/local/lib/portal-anland` to `QT_PLUGIN_PATH`; without that
+overlay, Debian's stock `screencast.so` is selected and the no-DRM crash can
+return even when the patched library is present.
+
+The Pad 3 crash evidence for patch 0006 was:
+
+```text
+signal=11 fault_address=0x30
+pc_object=/usr/local/lib/portal-anland/libkwin.so.6
+symbol=KWin::DrmDevice::allocator()
+lr_object=/usr/lib/aarch64-linux-gnu/qt6/plugins/kwin/plugins/screencast.so
+symbol=KWin::ScreenCastStream::testCreateDmaBuf(...)
+```
+
+Anland intentionally has no DRM device. The old screencast probe called
+`backend->drmDevice()->allocator()` before checking that fact. Patch 0006
+returns no DMA-BUF candidate when the DRM device or allocator is absent, which
+selects KWin's existing PipeWire memfd path. This is a KWin screencast-module
+fix, not a pointer-coordinate workaround.
 
 ## QPA failure-path regression
 

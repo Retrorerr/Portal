@@ -19,7 +19,7 @@ expected_commit=8438567a741826da8b7536a8b10eb3af8fc8820d
     exit 1
 }
 
-for kwin_patch in "$repo_root"/patches/kwin/000[1-5]-*.patch; do
+for kwin_patch in "$repo_root"/patches/kwin/000[1-6]-*.patch; do
     if git -C "$source_root" apply --check --ignore-space-change --ignore-whitespace "$kwin_patch"; then
         git -C "$source_root" apply --ignore-space-change --ignore-whitespace "$kwin_patch"
     elif git -C "$source_root" apply --reverse --check --ignore-space-change --ignore-whitespace "$kwin_patch"; then
@@ -44,4 +44,4 @@ find "$overlay_root/src" -type f -print | while IFS= read -r overlay_file; do
     cp -f -- "$overlay_file" "$destination"
 done
 
-echo "Applied KWin 0001-0005 and Anland v3 overlay to $source_root"
+echo "Applied KWin 0001-0006 and Anland v3 overlay to $source_root"

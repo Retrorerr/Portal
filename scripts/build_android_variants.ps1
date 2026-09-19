@@ -1,12 +1,15 @@
 [CmdletBinding()]
-param()
+param(
+    # Install and launch the diagnostic package after building it. The package
+    # is app.polarbear; the release package is app.polarbear.portal.
+    [switch]$InstallDebug,
+    [string]$DeviceId
+)
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$manifestPath = Join-Path $repoRoot 'manifest.yaml'
 $debugManifestPath = Join-Path $repoRoot 'manifest.debug.yaml'
 $xbuildManifestPath = Join-Path $repoRoot 'patches\xbuild\xbuild\Cargo.toml'
-$originalManifest = [System.IO.File]::ReadAllBytes($manifestPath)
 
 function Invoke-LocalXBuild {
     param([Parameter(Mandatory)][string[]]$Arguments)
@@ -44,6 +47,68 @@ if (Test-Path -LiteralPath $androidSdk -PathType Container) {
     $env:ANDROID_HOME = $androidSdk
     $env:ANDROID_SDK_ROOT = $androidSdk
 }
+
+function Get-Aapt2 {
+    $sdk = $env:ANDROID_HOME
+    if ([string]::IsNullOrWhiteSpace($sdk)) {
+        throw 'ANDROID_HOME is not set; Android SDK is required to verify the APK package id.'
+    }
+    $aapt2 = Get-ChildItem -LiteralPath (Join-Path $sdk 'build-tools') -Recurse -Filter 'aapt2.exe' |
+        Sort-Object FullName |
+        Select-Object -Last 1 -ExpandProperty FullName
+    if ([string]::IsNullOrWhiteSpace($aapt2)) {
+        throw "aapt2.exe was not found below $sdk\build-tools"
+    }
+    return $aapt2
+}
+
+function Assert-DebugApk {
+    param([Parameter(Mandatory)][string]$ApkPath)
+
+    $aapt2 = Get-Aapt2
+    $packageLine = (& $aapt2 dump badging $ApkPath | Select-String '^package:' | Select-Object -First 1).ToString()
+    if ($packageLine -notmatch "name='app\.polarbear'") {
+        throw "The diagnostic APK is not app.polarbear: $packageLine"
+    }
+}
+
+function Resolve-AdbDevice {
+    param([string]$RequestedDevice)
+
+    if (-not [string]::IsNullOrWhiteSpace($RequestedDevice)) {
+        return $RequestedDevice
+    }
+    $devices = @(& adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '\tdevice\s*$' } | ForEach-Object { ($_ -split '\s+')[0] })
+    if ($devices.Count -ne 1) {
+        throw "Pass -DeviceId explicitly; found $($devices.Count) adb devices in the device state."
+    }
+    return $devices[0]
+}
+
+function Install-AndLaunchDebugApk {
+    param([Parameter(Mandatory)][string]$ApkPath)
+
+    $device = Resolve-AdbDevice $DeviceId
+    & adb -s $device install -r -t $ApkPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "adb install failed with exit code $LASTEXITCODE"
+    }
+
+    $hostHash = (Get-FileHash -LiteralPath $ApkPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $devicePath = (& adb -s $device shell pm path app.polarbear | Select-String '^package:' | Select-Object -First 1).ToString().Trim() -replace '^package:', ''
+    $deviceHashLine = (& adb -s $device shell sha256sum $devicePath).ToString().Trim()
+    $deviceHash = ($deviceHashLine -split '\s+')[0].ToLowerInvariant()
+    if ($deviceHash -ne $hostHash) {
+        throw "Installed APK hash mismatch: host=$hostHash device=$deviceHash"
+    }
+
+    & adb -s $device shell am force-stop app.polarbear
+    & adb -s $device shell monkey -p app.polarbear 1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not launch app.polarbear on $device"
+    }
+    Write-Host "Installed and launched app.polarbear on $device. APK SHA-256: $hostHash"
+}
 foreach ($candidate in @($ndkBin, $gradleBin)) {
     if (Test-Path -LiteralPath $candidate) {
         $env:Path = "$candidate;$env:Path"
@@ -61,17 +126,19 @@ try {
     Copy-Item -LiteralPath $stableUnsigned -Destination (Join-Path $repoRoot 'target\Portal-stable-unsigned.apk') -Force
 
     Write-Host 'Building diagnostic Portal Debug (app.polarbear)...'
-    Copy-Item -LiteralPath $debugManifestPath -Destination $manifestPath -Force
-    Invoke-LocalXBuild -Arguments @('build', '--debug', '--features', 'portal-debug', '--platform', 'android', '--arch', 'arm64', '--format', 'apk')
+    Invoke-LocalXBuild -Arguments @('build', '--manifest', $debugManifestPath, '--debug', '--features', 'portal-debug', '--platform', 'android', '--arch', 'arm64', '--format', 'apk')
 
     $debugGradle = Join-Path $repoRoot 'target\x\debug\android\gradle'
     Assert-AdaptiveIconResources -GradleRoot $debugGradle
     $debugApk = Join-Path $repoRoot 'target\x\debug\android\gradle\app\build\outputs\apk\debug\app-debug.apk'
+    Assert-DebugApk -ApkPath $debugApk
     Copy-Item -LiteralPath $debugApk -Destination (Join-Path $repoRoot 'target\Portal-Debug.apk') -Force
 }
 finally {
-    [System.IO.File]::WriteAllBytes($manifestPath, $originalManifest)
     Pop-Location
 }
 
 Write-Host 'Built target\Portal-stable-unsigned.apk and target\Portal-Debug.apk.'
+if ($InstallDebug) {
+    Install-AndLaunchDebugApk -ApkPath (Join-Path $repoRoot 'target\Portal-Debug.apk')
+}

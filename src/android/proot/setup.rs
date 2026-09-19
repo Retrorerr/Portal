@@ -87,6 +87,11 @@ const KWIN_ANLAND_BINARY: &[u8] =
     include_bytes!("../../../assets/kwin-forky-anland-arm64/kwin_wayland");
 const KWIN_ANLAND_LIBRARY: &[u8] =
     include_bytes!("../../../assets/kwin-forky-anland-arm64/libkwin.so.6.7.4");
+/// Forky KWin's screencast plugin rebuilt against the Anland KWin library.
+/// Debian's plugin dereferences the absent Anland DRM allocator while probing
+/// DMA-BUF support, before its existing PipeWire memfd fallback is selected.
+const KWIN_ANLAND_SCREENCAST_PLUGIN: &[u8] =
+    include_bytes!("../../../assets/kwin-forky-anland-arm64/screencast.so");
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
 /// Each stage is a function that takes the `SetupOptions` and returns a `StageOutput`.
@@ -1915,6 +1920,12 @@ fn validate_required_session_files(fs_root: &Path) -> anyhow::Result<()> {
             .unwrap_or(false),
         "Required Forky Anland KWin library is incomplete"
     );
+    anyhow::ensure!(
+        fs::metadata(anland_dir.join("kwin/plugins/screencast.so"))
+            .map(|metadata| metadata.len() == KWIN_ANLAND_SCREENCAST_PLUGIN.len() as u64)
+            .unwrap_or(false),
+        "Required Forky Anland screencast plugin is incomplete"
+    );
     for (link, target) in [
         ("libkwin.so.6", "libkwin.so.6.7.4"),
         ("libkwin.so", "libkwin.so.6"),
@@ -1962,6 +1973,14 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
             .map(|bytes| bytes == KWIN_ANLAND_LIBRARY)
             .unwrap_or(false),
         "Forky Anland KWin library does not match the Portal asset"
+    );
+    let anland_screencast_plugin =
+        fs_root.join("usr/local/lib/portal-anland/kwin/plugins/screencast.so");
+    anyhow::ensure!(
+        fs::read(&anland_screencast_plugin)
+            .map(|bytes| bytes == KWIN_ANLAND_SCREENCAST_PLUGIN)
+            .unwrap_or(false),
+        "Forky Anland screencast plugin does not match the Portal asset"
     );
     for relative in [
         "usr/local/lib/localdesktop-crash-handler.so",
@@ -2024,6 +2043,20 @@ fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow:
     };
     if !fresh {
         write_guest_binary_result(&kwin_library, KWIN_ANLAND_LIBRARY)?;
+    }
+
+    let screencast_plugin = kwin_dir.join("kwin/plugins/screencast.so");
+    let screencast_fresh = if verify_bytes {
+        fs::read(&screencast_plugin)
+            .map(|bytes| bytes == KWIN_ANLAND_SCREENCAST_PLUGIN)
+            .unwrap_or(false)
+    } else {
+        fs::metadata(&screencast_plugin)
+            .map(|metadata| metadata.len() == KWIN_ANLAND_SCREENCAST_PLUGIN.len() as u64)
+            .unwrap_or(false)
+    };
+    if !screencast_fresh {
+        write_guest_binary_result(&screencast_plugin, KWIN_ANLAND_SCREENCAST_PLUGIN)?;
     }
     // Atomic symlink swap (temp + rename): KWin must never observe a
     // half-deployed soname chain if a launch races a previous update. This

@@ -1043,12 +1043,16 @@ fn anland_repair_revalidates_mesa_kwin_firefox_and_session_contract() {
     for required in [
         "usr/local/lib/portal-anland/kwin_wayland",
         "usr/local/lib/portal-anland/libkwin.so.6.7.4",
+        "usr/local/lib/portal-anland/kwin/plugins/screencast.so",
         "localdesktop-crash-handler.so",
         "portal-ibus-engine",
         "portal-ibus-lazy",
     ] {
         assert!(ANDROID_SETUP_SOURCE.contains(required));
     }
+    assert!(KWIN_WRAPPER_SOURCE.contains("QT_PLUGIN_PATH=\"$kwin_anland_dir"));
+    assert!(KWIN_WRAPPER_SOURCE
+        .contains("kwin_screencast_plugin=\"$kwin_anland_dir/kwin/plugins/screencast.so\""));
 }
 
 #[test]
