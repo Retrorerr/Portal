@@ -92,6 +92,30 @@ const KWIN_ANLAND_LIBRARY: &[u8] =
 /// DMA-BUF support, before its existing PipeWire memfd fallback is selected.
 const KWIN_ANLAND_SCREENCAST_PLUGIN: &[u8] =
     include_bytes!("../../../assets/kwin-forky-anland-arm64/screencast.so");
+/// Portal's narrow Plasma 6.7.4 panel-startup overlay. `plasmashell` carries
+/// the panel-construction scheduling change and ShellCorona timestamps;
+/// libPlasma carries the per-panel-applet readiness timestamps. Keep both
+/// beside the distro files so the stock Plasma package remains recoverable.
+const PLASMA_PANELSTART_BINARY: &[u8] =
+    include_bytes!("../../../assets/plasma-forky-panelstart-arm64/plasmashell");
+const PLASMA_PANELSTART_LIBRARY: &[u8] =
+    include_bytes!("../../../assets/plasma-forky-panelstart-arm64/libPlasma.so.6.7.4");
+const PLASMA_PANELSTART_AUTOSTART: &str = r#"[Desktop Entry]
+Exec=/usr/local/lib/portal-plasma/plasmashell
+X-DBUS-StartupType=Unique
+Name=Plasma
+Type=Application
+StartupNotify=false
+X-DBUS-ServiceName=org.kde.plasmashell
+OnlyShowIn=KDE;
+X-KDE-autostart-phase=0
+Icon=plasma-symbolic
+NoDisplay=true
+X-systemd-skip=true
+
+X-KDE-Wayland-Interfaces=org_kde_plasma_window_management,org_kde_kwin_keystate,zkde_screencast_unstable_v1,org_kde_plasma_activation_feedback,kde_lockscreen_overlay_v1
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
+"#;
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
 /// Each stage is a function that takes the `SetupOptions` and returns a `StageOutput`.
@@ -757,6 +781,15 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/portal-ibus-lazy"),
         PORTAL_IBUS_LAZY,
     );
+    // Plasma's stock XDG autostart entry uses the absolute
+    // /usr/bin/plasmashell path, so PATH cannot select the private overlay.
+    // Shadow that one entry in a Portal-owned XDG config directory instead of
+    // modifying the distro file or the user's home configuration.
+    let plasma_autostart = fs_root.join("usr/local/share/autostart/org.kde.plasmashell.desktop");
+    if let Some(parent) = plasma_autostart.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&plasma_autostart, PLASMA_PANELSTART_AUTOSTART);
     let ibus_component_path = fs_root.join("usr/share/ibus/component/portal.xml");
     if let Some(parent) = ibus_component_path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -767,6 +800,10 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
+    // Keep the narrowly scoped Plasma panel-startup overlay beside the
+    // distribution packages. The launcher opts into it only when both files
+    // are present; this does not alter Plasma animations or UiReady state.
+    sync_plasma_panel_overlay(fs_root);
     // Keep the Forky Anland KWin assets present on every launch (idempotent;
     // see sync_kwin_overlay).
     sync_kwin_overlay(fs_root);
@@ -1939,6 +1976,7 @@ fn validate_required_session_files(fs_root: &Path) -> anyhow::Result<()> {
         "usr/local/bin/portal-ime-bridge",
         "usr/local/bin/wl-copy",
         "usr/local/bin/wl-paste",
+        "usr/local/share/autostart/org.kde.plasmashell.desktop",
     ] {
         anyhow::ensure!(
             fs_root.join(relative).is_file() || fs_root.join(relative).is_dir(),
@@ -1972,6 +2010,28 @@ fn validate_required_session_files(fs_root: &Path) -> anyhow::Result<()> {
         anyhow::ensure!(
             fs::read_link(anland_dir.join(link)).ok().as_deref() == Some(Path::new(target)),
             "Required Forky Anland KWin symlink is incomplete: {link}"
+        );
+    }
+    let plasma_dir = fs_root.join("usr/local/lib/portal-plasma");
+    anyhow::ensure!(
+        fs::metadata(plasma_dir.join("plasmashell"))
+            .map(|metadata| metadata.len() == PLASMA_PANELSTART_BINARY.len() as u64)
+            .unwrap_or(false),
+        "Required Portal Plasma panel-startup binary is incomplete"
+    );
+    anyhow::ensure!(
+        fs::metadata(plasma_dir.join("libPlasma.so.6.7.4"))
+            .map(|metadata| metadata.len() == PLASMA_PANELSTART_LIBRARY.len() as u64)
+            .unwrap_or(false),
+        "Required Portal Plasma panel-startup library is incomplete"
+    );
+    for (link, target) in [
+        ("libPlasma.so.7", "libPlasma.so.6.7.4"),
+        ("libPlasma.so", "libPlasma.so.7"),
+    ] {
+        anyhow::ensure!(
+            fs::read_link(plasma_dir.join(link)).ok().as_deref() == Some(Path::new(target)),
+            "Required Portal Plasma panel-startup symlink is incomplete: {link}"
         );
     }
     Ok(())
@@ -2021,6 +2081,20 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
             .unwrap_or(false),
         "Forky Anland screencast plugin does not match the Portal asset"
     );
+    let plasma_binary = fs_root.join("usr/local/lib/portal-plasma/plasmashell");
+    anyhow::ensure!(
+        fs::read(&plasma_binary)
+            .map(|bytes| bytes == PLASMA_PANELSTART_BINARY)
+            .unwrap_or(false),
+        "Portal Plasma panel-startup binary does not match the Portal asset"
+    );
+    let plasma_library = fs_root.join("usr/local/lib/portal-plasma/libPlasma.so.6.7.4");
+    anyhow::ensure!(
+        fs::read(&plasma_library)
+            .map(|bytes| bytes == PLASMA_PANELSTART_LIBRARY)
+            .unwrap_or(false),
+        "Portal Plasma panel-startup library does not match the Portal asset"
+    );
     for relative in [
         "usr/local/lib/localdesktop-crash-handler.so",
         "usr/local/bin/portal-ibus-engine",
@@ -2032,6 +2106,59 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
             fs_root.join(relative).is_file(),
             "Required Anland session integration is missing: {relative}"
         );
+    }
+    Ok(())
+}
+
+/// Install Portal's patched Plasma panel-startup overlay on every provisioning
+/// pass and session launch so existing runtimes converge without replacing the
+/// distro's Plasma files.
+fn sync_plasma_panel_overlay(fs_root: &Path) {
+    if let Err(error) = sync_plasma_panel_overlay_inner(fs_root) {
+        log::warn!("Could not refresh Plasma panel-startup overlay: {error:#}");
+    }
+}
+
+fn sync_plasma_panel_overlay_inner(fs_root: &Path) -> anyhow::Result<()> {
+    let plasma_dir = fs_root.join("usr/local/lib/portal-plasma");
+    fs::create_dir_all(&plasma_dir)?;
+
+    let plasmashell = plasma_dir.join("plasmashell");
+    if fs::read(&plasmashell)
+        .map(|bytes| bytes != PLASMA_PANELSTART_BINARY)
+        .unwrap_or(true)
+    {
+        write_guest_binary_result(&plasmashell, PLASMA_PANELSTART_BINARY)?;
+    }
+
+    let plasma_library = plasma_dir.join("libPlasma.so.6.7.4");
+    if fs::read(&plasma_library)
+        .map(|bytes| bytes != PLASMA_PANELSTART_LIBRARY)
+        .unwrap_or(true)
+    {
+        write_guest_binary_result(&plasma_library, PLASMA_PANELSTART_LIBRARY)?;
+    }
+
+    // Resolve the patched libPlasma SONAME without replacing the distro's
+    // copy. Atomic symlink replacement keeps a session launch from observing
+    // a half-updated overlay after an interrupted APK upgrade.
+    for (link, target) in [
+        ("libPlasma.so.7", "libPlasma.so.6.7.4"),
+        ("libPlasma.so", "libPlasma.so.7"),
+    ] {
+        let path = plasma_dir.join(link);
+        let temporary = plasma_dir.join(format!("{link}.tmp"));
+        let link_is_valid = fs::read_link(&path).ok().as_deref() == Some(Path::new(target));
+        if !link_is_valid {
+            match fs::remove_file(&temporary) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            symlink(target, &temporary)?;
+            fs::rename(&temporary, &path)?;
+            crate::core::mesa_layer::sync_dir_best_effort(&plasma_dir);
+        }
     }
     Ok(())
 }

@@ -1,0 +1,140 @@
+diff --git a/shell/shellcorona.cpp b/shell/shellcorona.cpp
+index c33387b..6f23077 100644
+--- a/shell/shellcorona.cpp
++++ b/shell/shellcorona.cpp
+@@ -16,6 +16,7 @@
+ #include <QApplication>
+ #include <QDBusConnection>
+ #include <QDebug>
++#include <QDateTime>
+ #include <QJsonDocument>
+ #include <QJsonObject>
+ #include <QMenu>
+@@ -83,6 +84,12 @@ using namespace Qt::StringLiterals;
+ 
+ static const int s_configSyncDelay = 10000; // 10 seconds
+ 
++static QDebug portalStartupTrace(const char *event)
++{
++    return QMessageLogger(__FILE__, __LINE__, Q_FUNC_INFO).warning(PLASMASHELL).noquote()
++        << "PORTAL_STARTUP timestamp_ms=" << QDateTime::currentMSecsSinceEpoch() << "event=" << event;
++}
++
+ Q_DECLARE_METATYPE(QColor)
+ 
+ QDBusArgument &operator<<(QDBusArgument &argument, const QColor &color)
+@@ -790,6 +797,8 @@ void ShellCorona::sanitizeScreenLayout(const QString &configFileName)
+ 
+ void ShellCorona::load()
+ {
++    portalStartupTrace("shellcorona-load-entry") << "pid=" << QCoreApplication::applicationPid();
++
+     if (m_shell.isEmpty()) {
+         return;
+     }
+@@ -856,6 +865,13 @@ void ShellCorona::load()
+             addOutput(screen);
+         }
+     }
++
++    // The normal restored-layout path can reach load() with DesktopViews
++    // already present (for example after a screen-layout rebuild). Ensure the
++    // restored panels are offered to createWaitingPanels() independently of
++    // desktop containment readiness.
++    createWaitingPanels();
++
+     connect(m_screenPool, &ScreenPool::screenOrderChanged, this, &ShellCorona::handleScreenOrderChanged, Qt::UniqueConnection);
+     connect(m_screenPool, &ScreenPool::screenRemoved, this, &ShellCorona::handleScreenRemoved, Qt::UniqueConnection);
+ 
+@@ -1511,6 +1527,13 @@ void ShellCorona::addOutput(QScreen *screen)
+     Plasma::Containment *containment = createContainmentForActivity(m_activityController->currentActivity(), insertPosition);
+     Q_ASSERT(containment);
+ 
++    connect(containment, &Plasma::Containment::uiReadyChanged, this, [containment](bool ready) {
++        if (ready) {
++            portalStartupTrace("desktop-containment-ui-ready") << "containment_id=" << containment->id() << "screen=" << containment->lastScreen()
++                                                                << "plugin=" << containment->pluginMetaData().pluginId();
++        }
++    });
++
+     QAction *removeAction = containment->internalAction(QStringLiteral("remove"));
+     if (removeAction) {
+         removeAction->deleteLater();
+@@ -1518,6 +1541,14 @@ void ShellCorona::addOutput(QScreen *screen)
+ 
+     m_desktopViewForScreen[insertPosition] = view;
+     view->setContainment(containment);
++    portalStartupTrace("desktopview-set-containment") << "containment_id=" << containment->id() << "screen=" << insertPosition
++                                                       << "ui_ready=" << containment->isUiReady();
++
++    // A restored panel only needs a real screen and its DesktopView before its
++    // PanelView can be constructed. PlasmaQuick::ContainmentView keeps the
++    // panel invisible until the panel containment itself is UI-ready.
++    createWaitingPanels();
++
+     view->show();
+ 
+     Q_ASSERT(screen == view->screen());
+@@ -1529,6 +1560,11 @@ void ShellCorona::addOutput(QScreen *screen)
+     checkAllDesktopsUiReady();
+     connect(containment, &Plasma::Containment::uiReadyChanged, this, &ShellCorona::checkAllDesktopsUiReady);
+ 
++    if (containment->isUiReady()) {
++        portalStartupTrace("desktop-containment-ui-ready") << "containment_id=" << containment->id() << "screen=" << containment->lastScreen()
++                                                            << "plugin=" << containment->pluginMetaData().pluginId() << "source=state-after-set-containment";
++    }
++
+     if (!m_screenReorderInProgress) {
+         Q_EMIT availableScreenRectChanged(m_screenPool->idForScreen(screen));
+     }
+@@ -1623,7 +1659,7 @@ void ShellCorona::createWaitingPanels()
+ 
+         QScreen *screen = m_screenPool->screenForId(requestedScreen);
+         DesktopView *desktopView = desktopForScreen(screen);
+-        if (!screen || !desktopView || !desktopView->containment()->isUiReady()) {
++        if (!screen || !desktopView) {
+             stillWaitingPanels << cont;
+             continue;
+         }
+@@ -1631,9 +1667,19 @@ void ShellCorona::createWaitingPanels()
+         // TODO: does a similar check make sense?
+         // Q_ASSERT(qBound(0, requestedScreen, m_screenPool->count() - 1) == requestedScreen);
+         auto *panel = new PanelView(this, screen);
++        portalStartupTrace("panelview-constructed") << "containment_id=" << cont->id() << "screen=" << requestedScreen;
+         if (panel->rendererInterface()->graphicsApi() != QSGRendererInterface::Software) {
+             connect(panel, &QQuickWindow::sceneGraphError, this, &ShellCorona::glInitializationFailed);
+         }
++        QPointer<PanelView> tracedPanel = panel;
++        connect(panel, &QWindow::visibleChanged, this, [tracedPanel](bool visible) {
++            if (!tracedPanel) {
++                return;
++            }
++            const auto *containment = tracedPanel->containment();
++            portalStartupTrace("panelview-visible-changed") << "visible=" << visible << "containment_id=" << (containment ? containment->id() : -1)
++                                                            << "screen=" << (containment ? containment->lastScreen() : -1);
++        });
+         auto rectNotify = [this, panel]() {
+             Q_ASSERT(qobject_cast<PanelView *>(panel)); // https://bugreports.qt.io/browse/QTBUG-118841
+             if (!m_screenReorderInProgress && panel->containment()) {
+@@ -1642,7 +1688,21 @@ void ShellCorona::createWaitingPanels()
+         };
+ 
+         m_panelViews[cont] = panel;
++        QPointer<Plasma::Containment> tracedContainment = cont;
++        connect(cont, &Plasma::Containment::uiReadyChanged, this, [tracedContainment](bool ready) {
++            if (!ready || !tracedContainment) {
++                return;
++            }
++            portalStartupTrace("panel-containment-ui-ready") << "containment_id=" << tracedContainment->id()
++                                                              << "screen=" << tracedContainment->lastScreen();
++        });
+         panel->setContainment(cont);
++        portalStartupTrace("panel-set-containment") << "containment_id=" << cont->id() << "screen=" << requestedScreen
++                                                     << "ui_ready=" << cont->isUiReady() << "visible=" << panel->isVisible();
++        if (cont->isUiReady()) {
++            portalStartupTrace("panel-containment-ui-ready") << "containment_id=" << cont->id() << "screen=" << cont->lastScreen()
++                                                              << "source=state-after-set-containment";
++        }
+         cont->reactToScreenChange();
+         Q_EMIT cont->screenGeometryChanged(cont->screenGeometry());
+ 

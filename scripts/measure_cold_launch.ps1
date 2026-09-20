@@ -279,6 +279,58 @@ function Get-StartupEvents {
     return $events
 }
 
+function Get-PlasmaStartupTraceEvents {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @()
+    }
+
+    $events = @()
+    $lineIndex = 0
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        $lineIndex++
+        if ($line -match "PORTAL_STARTUP\s+timestamp_ms=\s*(?<timestamp>\d+)\s+event=\s*(?<event>\S+)(?<detail>.*)$") {
+            $events += [PSCustomObject]@{
+                TimestampMs = [long]$Matches.timestamp
+                Event = $Matches.event
+                Detail = $Matches.detail.Trim()
+                LineIndex = $lineIndex
+                Line = $line
+            }
+        }
+    }
+    return $events
+}
+
+function Get-FirstPlasmaStartupTraceEvent {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory)][string]$Event,
+        [string]$DetailPattern
+    )
+
+    $matching = @($Events | Where-Object {
+        $_.Event -eq $Event -and ([string]::IsNullOrWhiteSpace($DetailPattern) -or $_.Detail -match $DetailPattern)
+    } | Sort-Object TimestampMs, LineIndex)
+    if ($matching.Count -eq 0) {
+        return $null
+    }
+    return $matching[0]
+}
+
+function Get-PlasmaStartupTraceDelta {
+    param(
+        [AllowNull()][object]$StartEvent,
+        [AllowNull()][object]$EndEvent
+    )
+
+    if ($null -eq $StartEvent -or $null -eq $EndEvent) {
+        return $null
+    }
+    return ([long]$EndEvent.TimestampMs - [long]$StartEvent.TimestampMs)
+}
+
 if ([string]::IsNullOrWhiteSpace($DeviceId)) {
     $deviceLines = & adb devices 2>$null | Select-Object -Skip 1 | Where-Object { $_ -match "\sdevice\s*$" }
     $DeviceId = ($deviceLines | Select-Object -First 1).ToString().Split("`t")[0]
@@ -454,6 +506,29 @@ for ($run = 1; $run -le $Runs; $run++) {
 
     $events = Get-StartupEvents -AfterEpochMilliseconds $startEpoch
     $events | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $runDir "startup-events.json") -Encoding UTF8
+    $plasmaTraceEvents = @(Get-PlasmaStartupTraceEvents -Path (Join-Path $runDir "plasma.log"))
+    $plasmaTraceEvents | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $runDir "plasma-startup-trace.json") -Encoding UTF8
+    $shellCoronaLoad = Get-FirstPlasmaStartupTraceEvent -Events $plasmaTraceEvents -Event "shellcorona-load-entry"
+    $panelViewConstructed = Get-FirstPlasmaStartupTraceEvent -Events $plasmaTraceEvents -Event "panelview-constructed"
+    $panelContainmentUiReady = Get-FirstPlasmaStartupTraceEvent -Events $plasmaTraceEvents -Event "panel-containment-ui-ready"
+    $desktopUiReady = Get-FirstPlasmaStartupTraceEvent -Events $plasmaTraceEvents -Event "desktop-containment-ui-ready"
+
+    # PanelView can emit a transient visible=true while its QML view is being
+    # constructed, before ContainmentView applies the panel containment's own
+    # uiReady gate. Count the first visible event at/after that gate instead.
+    $panelFirstVisible = $null
+    if ($panelContainmentUiReady) {
+        $panelFirstVisible = @(
+            $plasmaTraceEvents |
+                Where-Object {
+                    $_.Event -eq "panelview-visible-changed" -and
+                    $_.Detail -match "visible\s*=\s*true" -and
+                    $_.TimestampMs -ge $panelContainmentUiReady.TimestampMs
+                } |
+                Sort-Object TimestampMs, LineIndex |
+                Select-Object -First 1
+        ) | Select-Object -First 1
+    }
     $activityTotal = ($activityOutput | Select-String -Pattern "TotalTime:\s*(\d+)").Matches.Groups[1].Value
 
     $result = [PSCustomObject]@{
@@ -469,6 +544,15 @@ for ($run = 1; $run -le $Runs; $run++) {
         LaunchToVeilDismissMs = $veilDismissAt
         LaunchToPanelVisibleMs = $panelElapsed
         LaunchToPlasmashellProcessMs = $plasmashellAt
+        ShellCoronaLoadEpochMs = if ($shellCoronaLoad) { $shellCoronaLoad.TimestampMs } else { $null }
+        PanelViewConstructedEpochMs = if ($panelViewConstructed) { $panelViewConstructed.TimestampMs } else { $null }
+        PanelContainmentUiReadyEpochMs = if ($panelContainmentUiReady) { $panelContainmentUiReady.TimestampMs } else { $null }
+        PanelFirstVisibleEpochMs = if ($panelFirstVisible) { $panelFirstVisible.TimestampMs } else { $null }
+        DesktopUiReadyEpochMs = if ($desktopUiReady) { $desktopUiReady.TimestampMs } else { $null }
+        PlasmashellStartToPanelViewConstructedMs = Get-PlasmaStartupTraceDelta -StartEvent $shellCoronaLoad -EndEvent $panelViewConstructed
+        PanelViewConstructedToPanelUiReadyMs = Get-PlasmaStartupTraceDelta -StartEvent $panelViewConstructed -EndEvent $panelContainmentUiReady
+        PlasmashellStartToPanelFirstVisibleMs = Get-PlasmaStartupTraceDelta -StartEvent $shellCoronaLoad -EndEvent $panelFirstVisible
+        PlasmashellStartToDesktopUiReadyMs = Get-PlasmaStartupTraceDelta -StartEvent $shellCoronaLoad -EndEvent $desktopUiReady
         PlasmaReadyMarkerEpochMs = $readyAt
         PanelVisibleEpochMs = $panelAt
         PlasmashellPid = $plasmashellPid
@@ -478,7 +562,9 @@ for ($run = 1; $run -le $Runs; $run++) {
     }
     $runResults += $result
     $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $runDir "result.json") -Encoding UTF8
-    Write-Host ("  result: ready={0} ms panel={1} ms plasmashell={2} ms" -f $readyElapsed, $panelElapsed, $plasmashellAt)
+    Write-Host ("  result: ready={0} ms panel={1} ms plasmashell={2} ms panel-construct={3} ms panel-ui-ready={4} ms desktop-ui-ready={5} ms" -f `
+        $readyElapsed, $panelElapsed, $plasmashellAt, $result.PlasmashellStartToPanelViewConstructedMs, `
+        $result.PanelViewConstructedToPanelUiReadyMs, $result.PlasmashellStartToDesktopUiReadyMs)
 }
 
 $runResults | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputRoot "summary.json") -Encoding UTF8

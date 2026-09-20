@@ -1,0 +1,27 @@
+diff --git a/src/plasma/private/applet_p.cpp b/src/plasma/private/applet_p.cpp
+index f912a8d..10d2975 100644
+--- a/src/plasma/private/applet_p.cpp
++++ b/src/plasma/private/applet_p.cpp
+@@ -13,6 +13,7 @@
+ #include <config-plasma.h>
+ 
+ #include <QDebug>
++#include <QDateTime>
+ #include <QDir>
+ #include <QFile>
+ #include <QFileInfo>
+@@ -402,6 +403,14 @@ void AppletPrivate::propagateConfigChanged()
+ void AppletPrivate::setUiReady()
+ {
+     uiReady = true;
++
++    if (auto *parentContainment = q->containment(); parentContainment
++        && (parentContainment->containmentType() == Containment::Panel || parentContainment->containmentType() == Containment::CustomPanel)) {
++        qCWarning(LOG_PLASMA).noquote() << "PORTAL_STARTUP timestamp_ms=" << QDateTime::currentMSecsSinceEpoch() << "event=panel-applet-ui-ready"
++                                        << "containment_id=" << parentContainment->id() << "screen=" << parentContainment->lastScreen()
++                                        << "applet_id=" << q->id() << "plugin=" << q->pluginMetaData().pluginId() << "started=" << started;
++    }
++
+     // If we a re a containment, call setUiReady
+     Containment *thisContainment = qobject_cast<Containment *>(q);
+     if (thisContainment && thisContainment->isContainment()) {

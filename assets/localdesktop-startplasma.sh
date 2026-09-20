@@ -38,6 +38,18 @@ export WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}
 # Portal's only supported desktop path is Anland. Keep Plasma/KDE clients on
 # native Wayland; XWayland remains available to applications that need X11.
 export QT_QPA_PLATFORM=wayland
+# Portal's Plasma 6.7.4 panel-startup overlay is private and recoverable:
+# only opt into it when setup has staged both the patched plasmashell and its
+# matching libPlasma. This changes construction scheduling/diagnostics only;
+# Plasma's containment UiReady visibility gate and all animations remain stock.
+plasma_overlay_dir=/usr/local/lib/portal-plasma
+plasma_overlay_active=0
+if [ -x "$plasma_overlay_dir/plasmashell" ] && [ -f "$plasma_overlay_dir/libPlasma.so.6.7.4" ]; then
+    export PATH="$plasma_overlay_dir:$PATH"
+    export LD_LIBRARY_PATH="$plasma_overlay_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export XDG_CONFIG_DIRS="/usr/local/share:/etc/xdg${XDG_CONFIG_DIRS:+:$XDG_CONFIG_DIRS}"
+    plasma_overlay_active=1
+fi
 if [ "$LOCALDESKTOP_DIAGNOSTICS" = 1 ] || [ "$LOCALDESKTOP_KWIN_GL_DEBUG" = 1 ]; then
     export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
 else
@@ -62,6 +74,8 @@ rm -f "$ready_marker" "$failure_marker" "$crash_marker"
 started=$(date +%s)
 printf 'stage=launch timestamp=%s attempt=%s mode=classic-dbus-run-session\n' \
     "$started" "$attempt_id" > "$session_log"
+printf 'stage=plasma-panel-overlay active=%s dir=%s\n' \
+    "$plasma_overlay_active" "$plasma_overlay_dir" >> "$session_log"
 printf 'stage=environment timestamp=%s wayland_debug=%s gdb_backtrace=%s\n' \
     "$(date +%s)" "$WAYLAND_DEBUG" "$LOCALDESKTOP_GDB_BACKTRACE" >> "$session_log"
 printf 'stage=backend compositor=kwin_wayland session=plasma-wayland launcher=%s\n' \
