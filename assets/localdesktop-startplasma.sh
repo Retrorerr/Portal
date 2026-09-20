@@ -52,6 +52,11 @@ crash_marker="$state_dir/kwin-crash"
 session_log="$state_dir/plasma.log"
 attempt_id="$(date +%s)-$$"
 export LOCALDESKTOP_ATTEMPT_ID="$attempt_id"
+
+timestamp_ms() {
+    date +%s%3N 2>/dev/null || date +%s000
+}
+
 rm -f "$ready_marker" "$failure_marker" "$crash_marker"
 
 started=$(date +%s)
@@ -307,17 +312,12 @@ if [ ! -f "$state_dir/splash-restored-v1" ]; then
     fi
 fi
 
-# The Android audio owner starts asynchronously before this launcher. Wait
-# briefly for its Pulse endpoint before Plasma's startup notification is
-# dispatched; bounded at ~3s so a slow audio owner cannot stall cold start
-# (Plasma proceeds without audio and logs it).
-for _ in $(seq 1 30); do
-    [ -S /tmp/pulse/native ] && break
-    sleep 0.1
-done
-if [ ! -S /tmp/pulse/native ]; then
-    printf 'stage=audio-unavailable action=retry-portal\n' >> "$session_log"
-fi
+# The Android audio owner starts asynchronously before this launcher. Do not
+# gate Plasma on its Pulse endpoint: the session can start without audio, and
+# clients that need it can connect as soon as the endpoint appears. A bounded
+# background probe below records whether the endpoint came up for diagnostics.
+audio_wait_started_ms="$(timestamp_ms)"
+printf 'stage=audio-deferred timestamp_ms=%s action=continue\n' "$audio_wait_started_ms" >> "$session_log"
 
 # Disable screen locking completely: Android/OxygenOS owns device security
 kdeglobals="$config_dir/kdeglobals"
@@ -344,7 +344,23 @@ fi
 # no user systemd daemon is started in PRoot.
 dbus-run-session -- /usr/bin/startplasma-wayland >> "$session_log" 2>&1 &
 session_pid=$!
-printf 'stage=session-start pid=%s timestamp=%s\n' "$session_pid" "$(date +%s)" >> "$session_log"
+printf 'stage=session-start pid=%s timestamp=%s timestamp_ms=%s\n' \
+    "$session_pid" "$(date +%s)" "$(timestamp_ms)" >> "$session_log"
+(
+    printf 'stage=audio-wait-start timestamp_ms=%s\n' "$audio_wait_started_ms"
+    for _ in $(seq 1 30); do
+        [ -S /tmp/pulse/native ] && break
+        sleep 0.1
+    done
+    audio_wait_finished_ms="$(timestamp_ms)"
+    if [ ! -S /tmp/pulse/native ]; then
+        printf 'stage=audio-unavailable timestamp_ms=%s wait_ms=%s action=retry-portal\n' \
+            "$audio_wait_finished_ms" "$((audio_wait_finished_ms - audio_wait_started_ms))"
+    else
+        printf 'stage=audio-ready timestamp_ms=%s wait_ms=%s\n' \
+            "$audio_wait_finished_ms" "$((audio_wait_finished_ms - audio_wait_started_ms))"
+    fi
+) >> "$session_log" 2>&1 &
 clipboard_bridge_pid=''
 start_clipboard_bridge
 (

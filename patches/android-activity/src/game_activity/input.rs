@@ -198,6 +198,14 @@ impl<'a> MotionEvent<'a> {
         MotionEventFlags(self.ga_event.flags as u32)
     }
 
+    /// Returns Android's motion-event classification, or zero when the
+    /// platform did not classify the event. The value is kept raw because
+    /// Android may add classifications independently of this crate.
+    #[inline]
+    pub fn classification(&self) -> i32 {
+        self.ga_event.classification
+    }
+
     /* Missing from GameActivity currently...
     /// Returns the offset in the x direction between the coordinates and the raw coordinates
     ///

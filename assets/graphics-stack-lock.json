@@ -35,7 +35,7 @@
     },
     "assets": [
       {"role": "KWin Wayland executable", "path": "assets/kwin-forky-anland-arm64/kwin_wayland", "bytes": 1537392, "sha256": "5328cbb8a40ec47639c6823ef14ff3dad923a243ba21425d8b354d83338f6e16", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "b39aab72ecc1dc9335fbaafedd214a14d47f456c"}},
-      {"role": "Portal Anland KWin library", "path": "assets/kwin-forky-anland-arm64/libkwin.so.6.7.4", "bytes": 10368432, "sha256": "986b69cd9e2f7399ed99e3d398e75aebc13250ecdbdf43230dd02be7c13a4df6", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "3dbb9c2a0684bf7c45ff237c750aeafc7f7333aa"}},
+      {"role": "Portal Anland KWin library", "path": "assets/kwin-forky-anland-arm64/libkwin.so.6.7.4", "bytes": 10368528, "sha256": "71f60e7ec0be5c1d1c65f203d5883fe3dfe9585f48ea70debec361e7583f76c6", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "16f49ff37c9381c72f4d6d8340934fab0f56d749"}},
       {"role": "Portal Anland KWin screencast plugin", "path": "assets/kwin-forky-anland-arm64/screencast.so", "bytes": 7569984, "sha256": "03028980187df57af402e43e567f057b9bd2911e72e5e42c226976a0bfa8e7b6", "elf": {"class": "ELF64", "data": "little", "machine": "AArch64", "machine_id": 183, "build_id": "0a855a9c752e69a3d11017a5e43d2d2ea8e0e91e"}}
     ],
     "patches": [
@@ -44,9 +44,10 @@
       {"role": "KWin patch 0003", "path": "patches/kwin/0003-opengl-accept-crlf-shader-lines.patch", "sha256": "1687ac1d170a293a7dd675feb6bda2b13555d12ce3c19cac2f0e79ba4ecc5ef2"},
       {"role": "KWin patch 0004", "path": "patches/kwin/0004-opengl-guard-null-egl-device.patch", "sha256": "f774825530e67bdb21931ab58788c0f3d43604ddf797fda53e44afc6081d4e38"},
       {"role": "KWin patch 0005", "path": "patches/kwin/0005-compositor-tolerate-null-drm-device.patch", "sha256": "01c9ee0f459a182213165c182295ab36163b42eed00bd60dbeb1363b516abdb6"},
-      {"role": "KWin patch 0006", "path": "patches/kwin/0006-screencast-tolerate-no-drm-device.patch", "sha256": "c74859e10d80d21f4a87bac5982ccfbb66271e99790993139aec7bf3b0fd5105"}
+      {"role": "KWin patch 0006", "path": "patches/kwin/0006-screencast-tolerate-no-drm-device.patch", "sha256": "c74859e10d80d21f4a87bac5982ccfbb66271e99790993139aec7bf3b0fd5105"},
+      {"role": "KWin patch 0007", "path": "patches/kwin/0007-offscreenquickview-fbo-without-drm.patch", "sha256": "26435ab5cc6b558a567c63c2e9c980d7c43cd82b80937a1317cee5d35735d876"}
     ]
-    ,"source_overlay": {"path": "patches/kwin/anland-6.7.4", "sha256": "600d780ba8c432e3498c0c6f82193e0b7758683ea3c2434c7f7bc6da0d00bacc", "protocol_version": 3}
+    ,"source_overlay": {"path": "patches/kwin/anland-6.7.4", "sha256": "7c5d796f713da94da597f7747ef130c5728c86cf7bc79aad7c2b780c4a1cd948", "protocol_version": 3}
   },
   "xwayland": {
     "active": "debian-package:xwayland",

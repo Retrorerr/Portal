@@ -167,18 +167,15 @@ pub fn launch() {
         // The explicit Anland repair worker just completed the narrow,
         // checked Portal-owned session sync. Do not immediately replay the
         // broad normal-launch migration against the user's home/configuration
-        // before starting the session. Future launches intentionally take the
-        // normal path below.
+        // before starting the session. Future launches use the
+        // setup-complete asset contract below.
         log::info!("launch: using validated Anland repair handoff assets");
-    } else if let Err(error) =
-        crate::android::proot::setup::try_sync_session_runtime_files(&rootfs, 1)
-    {
-        log::error!("Portal session integration repair failed: {error:#}");
-        LAUNCH_RUNNING.store(false, Ordering::Release);
-        report_failure(
-            "Portal could not repair its desktop session files. Tap Retry Plasma to try again.",
-        );
-        return;
+    } else {
+        // setup_with_completion (and the Retry Plasma setup path) already
+        // completed and validated this sync before the Wayland backend was
+        // returned. Replaying the full archive/config migration here adds
+        // synchronous PRoot and filesystem work to every cold launch.
+        log::debug!("launch: using setup-complete session assets");
     }
     crate::android::ime::start_ime_fifo_listener(&rootfs);
 
@@ -203,15 +200,11 @@ pub fn launch() {
         let _guard = LaunchRunningGuard;
         diagnostics::host_event("desktop-launch", "starting configured Plasma session");
 
-        // Clean up potential leftover files for display :1
+        // Clean up potential leftover files for display :1 in one guest
+        // process. Separate PRoot launches here used to add two avoidable
+        // process-start gaps immediately before startplasma-wayland.
         ArchProcess {
-            command: "rm -f /tmp/.X1-lock".into(),
-            user: None,
-            log: None,
-        }
-        .run_with_cancel(thread_cancel.clone());
-        ArchProcess {
-            command: "rm -f /tmp/.X11-unix/X1".into(),
+            command: "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1".into(),
             user: None,
             log: None,
         }

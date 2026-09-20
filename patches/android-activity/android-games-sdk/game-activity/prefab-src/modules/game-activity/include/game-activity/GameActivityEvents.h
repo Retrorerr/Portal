@@ -40,13 +40,13 @@ extern "C" {
  * The maximum number of axes supported in an Android MotionEvent.
  * See https://developer.android.com/ndk/reference/group/input.
  *
- * PORTAL PATCH (spike/game-activity-host): raised from 48 to 53. Android
- * API 34 defines touchpad gesture axes up to AXIS_GESTURE_SCROLL_Y_DISTANCE
- * (51), plus axis 52; 53 is the minimum count that carries every currently
- * defined gesture axis. Only explicitly enabled axes are copied (X/Y by
- * default), so this changes no default traffic.
+ * PORTAL PATCH (spike/game-activity-host): raised from 48 to 54. Android
+ * API 34 defines touchpad gesture axes through
+ * AXIS_GESTURE_SWIPE_FINGER_COUNT (53); 54 is the minimum count that carries
+ * every currently defined gesture axis. Only explicitly enabled axes are
+ * copied (X/Y by default), so this changes no default traffic.
  */
-#define GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT 53
+#define GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT 54
 
 /**
  * \brief Describe information about a pointer, found in a

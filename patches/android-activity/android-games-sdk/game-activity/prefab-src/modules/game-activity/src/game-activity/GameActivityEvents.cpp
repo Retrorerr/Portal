@@ -26,10 +26,10 @@
 // PORTAL PATCH (spike/game-activity-host): cross-language ABI guard. The
 // Rust FFI mirrors in src/game_activity/ffi_*.rs must match this layout
 // exactly; fail the native build here on any drift.
-static_assert(GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT == 53,
-              "Portal patch expects 53 motion axes (API 34 gesture axes)");
+static_assert(GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT == 54,
+              "Portal patch expects 54 motion axes (API 34 gesture axes)");
 static_assert(sizeof(GameActivityPointerAxes) ==
-                  sizeof(int32_t) * 2 + sizeof(float) * 53 + sizeof(float) * 2,
+                  sizeof(int32_t) * 2 + sizeof(float) * 54 + sizeof(float) * 2,
               "GameActivityPointerAxes layout drifted from the Rust FFI mirror");
 
 static bool enabledAxes[GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT] = {

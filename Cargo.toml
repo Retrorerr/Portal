@@ -20,6 +20,9 @@ required-features = ["pipewire-sink"]
 [features]
 pipewire-sink = ["dep:pipewire"]
 portal-debug = []
+# SPIKE-ONLY: forward the opt-in winit diagnostic feature. This is intentionally
+# absent from the normal APK feature set and is also debug-assertions-gated.
+gesture-axis-debug-log = ["winit/gesture-axis-debug-log"]
 
 [profile.release]
 strip = true      # Automatically strip symbols from the binary.
@@ -109,6 +112,6 @@ cc = "1.2"
 smithay = { path = "patches/smithay" }
 winit = { path = "patches/winit" }
 # SPIKE-ONLY (spike/game-activity-host): vendored android-activity 0.6.1
-# with the GameActivity motion-axis representation extended 48 -> 53 so the
-# API 34 touchpad gesture axes 50/51 arrive. Version/API otherwise identical.
+# with the GameActivity motion-axis representation extended 48 -> 54 so the
+# API 34 touchpad gesture axes 48..53 arrive. Version/API otherwise identical.
 android-activity = { path = "patches/android-activity" }

@@ -1853,6 +1853,45 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         }
         let _ = fs::write(panel_marker, "migrated\n");
     }
+
+    // The stock panel initializes the system tray before the clock and
+    // show-desktop applets.  On Portal's minimal image that makes the tray's
+    // QML/plugin tree dominate the first plasmashell pass, while the panel
+    // remains absent from the screen.  Move only the exact stock order so a
+    // user's custom panel layout is never rewritten, and keep the migration
+    // out of the normal launch path after it has been applied.
+    let panel_order_marker = home_dir.join(".local/state/portal/panel-applet-order-v1");
+    if !panel_order_marker.exists()
+        && config_dir
+            .join("plasma-org.kde.plasma.desktop-appletsrc")
+            .is_file()
+    {
+        let appletsrc = config_dir.join("plasma-org.kde.plasma.desktop-appletsrc");
+        const STOCK_ORDER: &str = "AppletOrder=22;23;24;25;26;37;38";
+        const OPTIMIZED_ORDER: &str = "AppletOrder=22;23;24;25;37;38;26";
+        if let Ok(content) = fs::read_to_string(&appletsrc) {
+            let mut changed = false;
+            let lines: Vec<String> = content
+                .lines()
+                .map(|line| {
+                    if line == STOCK_ORDER {
+                        changed = true;
+                        OPTIMIZED_ORDER.to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect();
+            if changed {
+                fs::write(&appletsrc, format!("{}\n", lines.join("\n")))
+                    .expect("Failed to optimize the default panel applet order");
+            }
+        }
+        if let Some(parent) = panel_order_marker.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(panel_order_marker, "migrated\n");
+    }
     let kscreenlockerrc = config_dir.join("kscreenlockerrc");
     upsert_kv_file(
         &kscreenlockerrc,

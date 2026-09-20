@@ -4,7 +4,7 @@ This directory is the complete source overlay for Portal's active KWin
 6.7.4 Anland backend. It contains the backend sources plus the full contents
 of every KWin file that is intentionally changed by the Android/PRoot
 integration. The overlay is applied after numbered patches `0001` through
-`0006` with `scripts/apply_kwin_forky_anland.sh`.
+`0007` with `scripts/apply_kwin_forky_anland.sh`.
 
 The overlay pins the producer/consumer contract at protocol version 3:
 
@@ -17,6 +17,6 @@ The overlay pins the producer/consumer contract at protocol version 3:
 
 The active presenter remains Anland dmabuf transport plus KWin's accelerated
 surfaceless EGL context. This overlay does not restore the retired DRM shim or
-change output scale policy. QtQuick offscreen effects use their existing
-software-rendering path when the Anland backend has no DRM allocator; the main
-KWin scene remains accelerated.
+change output scale policy. `OffscreenQuickView` keeps QtQuick OpenGL enabled;
+patch 0007 supplies its DRM-independent shared OpenGL FBO only when Anland has
+no KWin `DrmDevice`, while the main KWin scene remains accelerated.

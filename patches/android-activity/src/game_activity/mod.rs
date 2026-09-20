@@ -34,12 +34,12 @@ mod ffi;
 pub mod input;
 
 // PORTAL PATCH (spike/game-activity-host): the vendored GameActivity native
-// glue carries 53 motion axes (up to the API 34 gesture axes) instead of
+// glue carries 54 motion axes (up to the API 34 gesture axes) instead of
 // upstream's 48. This compile-time guard pins the Rust FFI mirror to the
 // patched C layout; the C side has a matching static_assert.
 const _: () = {
-    assert!(ffi::GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT == 53);
-    assert!(std::mem::size_of::<ffi::GameActivityPointerAxes>() == 228);
+    assert!(ffi::GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT == 54);
+    assert!(std::mem::size_of::<ffi::GameActivityPointerAxes>() == 232);
 };
 use crate::input::{
     device_key_character_map, Axis, ImeOptions, InputType, KeyCharacterMap, TextInputAction,
@@ -1267,8 +1267,8 @@ mod portal_axis_patch_tests {
     use super::ffi;
 
     #[test]
-    fn patched_axis_count_is_53() {
-        assert_eq!(ffi::GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT, 53);
+    fn patched_axis_count_is_54() {
+        assert_eq!(ffi::GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT, 54);
     }
 
     #[test]
@@ -1278,16 +1278,19 @@ mod portal_axis_patch_tests {
     }
 
     #[test]
-    fn axis_53_is_out_of_range() {
-        assert!(!(53 < ffi::GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT));
+    fn gesture_axes_48_49_52_53_are_within_range() {
+        assert!(48 < ffi::GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT);
+        assert!(49 < ffi::GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT);
+        assert!(52 < ffi::GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT);
+        assert!(53 < ffi::GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT);
     }
 
     #[test]
-    fn pointer_axes_array_spans_53_axes() {
+    fn pointer_axes_array_spans_54_axes() {
         assert_eq!(
             std::mem::offset_of!(ffi::GameActivityPointerAxes, rawX),
-            8 + 53 * 4
+            8 + 54 * 4
         );
-        assert_eq!(std::mem::size_of::<ffi::GameActivityPointerAxes>(), 228);
+        assert_eq!(std::mem::size_of::<ffi::GameActivityPointerAxes>(), 232);
     }
 }

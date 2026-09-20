@@ -1,0 +1,323 @@
+diff --git a/src/effect/offscreenquickview.cpp b/src/effect/offscreenquickview.cpp
+index 532b92a..bf15765 100644
+--- a/src/effect/offscreenquickview.cpp
++++ b/src/effect/offscreenquickview.cpp
+@@ -19,10 +19,12 @@
+ #include "opengl/eglcontext.h"
+ #include "opengl/eglnativefence.h"
+ #include "opengl/eglswapchain.h"
++#include "opengl/gltexture.h"
+ #include "opengl/glrendertimequery.h"
+ #include "opengl/glutils.h"
+ #include "scene/imageitem.h"
+ #include "scene/itemrenderer.h"
++#include "scene/opengl/texture.h"
+ #include "scene/surfaceitem.h"
+ #include "scene/texture.h"
+ #include "scene/workspacescene.h"
+@@ -64,6 +66,7 @@ public:
+     std::unique_ptr<QQuickRenderControl> m_renderControl;
+     std::unique_ptr<QOffscreenSurface> m_offscreenSurface;
+     std::unique_ptr<QOpenGLContext> m_glcontext;
++    std::unique_ptr<QOpenGLFramebufferObject> m_fbo;
+     std::shared_ptr<EglSwapchain> m_swapchain;
+     std::shared_ptr<EglSwapchainSlot> m_currentSlot;
+     std::unique_ptr<ImageItem> m_imageItem;
+@@ -73,6 +76,7 @@ public:
+     DrmDevice *m_scanoutDevice = nullptr;
+     FormatModifierMap m_scanoutFormats;
+     bool m_surfaceNeedsReallocation = false;
++    bool m_useFbo = false;
+ 
+     std::unique_ptr<QTimer> m_repaintTimer;
+     QImage m_image;
+@@ -116,6 +120,26 @@ public:
+     std::unique_ptr<QQuickItem> quickItem;
+ };
+ 
++class FboTextureOpenGL : public TextureOpenGL
++{
++public:
++    explicit FboTextureOpenGL(std::unique_ptr<GLTexture> texture)
++    {
++        m_size = texture->size();
++        m_planes = {texture.release()};
++    }
++
++    void attach(GraphicsBuffer *, const Region &, const std::shared_ptr<SyncReleasePoint> &) override
++    {
++        Q_UNREACHABLE();
++    }
++
++    void upload(const QImage &, const Rect &) override
++    {
++        Q_UNREACHABLE();
++    }
++};
++
+ class QuickViewItem : public SurfaceItem
+ {
+ public:
+@@ -133,8 +157,51 @@ public:
+     {
+         return hasAlphaChannel() ? RegionF{} : rect();
+     }
++    void preprocess() override
++    {
++        // The no-DRM path supplies an OpenGL texture directly. There is no
++        // GraphicsBuffer for SurfaceItem::preprocess() to import.
++    }
++    std::unique_ptr<Texture> takeFboTexture()
++    {
++        auto texture = std::move(m_texture);
++        setBufferSize(QSize());
++        m_hasAlphaChannel = false;
++        return texture;
++    }
++    bool setFboTexture(const QOpenGLFramebufferObject *fbo)
++    {
++        if (!EglContext::currentContext()) {
++            qCWarning(LIBKWINEFFECTS) << "Cannot wrap no-DRM OffscreenQuickView FBO without KWin's GL context";
++            return false;
++        }
++        if (!fbo) {
++            takeFboTexture();
++            return false;
++        }
++        const QSize size = fbo->size();
++        if (m_texture && m_texture->size() == size) {
++            return true;
++        }
++
++        auto oldTexture = takeFboTexture();
++        Q_UNUSED(oldTexture);
++        auto texture = GLTexture::createNonOwningWrapper(fbo->texture(), fbo->format().internalTextureFormat(), size);
++        if (!texture) {
++            return false;
++        }
++        texture->setFilter(GL_LINEAR);
++        texture->setWrapMode(GL_CLAMP_TO_EDGE);
++        m_texture = std::make_unique<FboTextureOpenGL>(std::move(texture));
++        m_hasAlphaChannel = m_view->hasAlphaChannel();
++        setBufferSize(size);
++        return true;
++    }
+     void setScanoutHint(DrmDevice *device, const FormatModifierMap &drmFormats) override
+     {
++        if (m_view->d->m_useFbo) {
++            return;
++        }
+         if (m_view->d->m_scanoutDevice == device
+             && m_view->d->m_scanoutFormats == drmFormats) {
+             return;
+@@ -164,6 +231,10 @@ OffscreenQuickView::OffscreenQuickView(ExportMode exportMode, bool alpha)
+     }
+ 
+     const bool usingGl = d->m_view->rendererInterface()->graphicsApi() == QSGRendererInterface::OpenGL;
++    d->m_useFbo = usingGl && exportMode == ExportMode::Texture && !Compositor::self()->backend()->drmDevice();
++    if (d->m_useFbo) {
++        qCInfo(LIBKWINEFFECTS) << "No DRM device; using a shared OpenGL FBO for OffscreenQuickView";
++    }
+ 
+     if (!usingGl) {
+         qCDebug(LIBKWINEFFECTS) << "QtQuick Software rendering mode detected";
+@@ -182,7 +253,9 @@ OffscreenQuickView::OffscreenQuickView(ExportMode exportMode, bool alpha)
+ 
+         d->m_view->setFormat(format);
+ 
++        auto shareContext = QOpenGLContext::globalShareContext();
+         d->m_glcontext = std::make_unique<QOpenGLContext>();
++        d->m_glcontext->setShareContext(shareContext);
+         d->m_glcontext->setFormat(format);
+         d->m_glcontext->create();
+ 
+@@ -195,6 +268,13 @@ OffscreenQuickView::OffscreenQuickView(ExportMode exportMode, bool alpha)
+         d->m_view->setGraphicsDevice(QQuickGraphicsDevice::fromOpenGLContext(d->m_glcontext.get()));
+         d->m_renderControl->initialize();
+         d->m_glcontext->doneCurrent();
++        // On Wayland, contexts are implicitly shared and
++        // QOpenGLContext::globalShareContext() may be null. If an explicit
++        // share context exists but was not honored, the FBO texture cannot be
++        // consumed by KWin's scene context; keep the GL path and report it.
++        if (shareContext && !d->m_glcontext->shareContext()) {
++            qCWarning(LIBKWINEFFECTS) << "OffscreenQuickView OpenGL context is not shared with KWin; FBO previews may be unavailable";
++        }
+         d->m_surfaceItem = std::make_unique<QuickViewItem>(this, effects->scene()->overlayItem());
+         d->m_item = d->m_surfaceItem.get();
+     }
+@@ -229,6 +309,8 @@ OffscreenQuickView::~OffscreenQuickView()
+     disconnect(d->m_renderControl.get(), &QQuickRenderControl::renderRequested, this, &OffscreenQuickView::handleRenderRequested);
+     disconnect(d->m_renderControl.get(), &QQuickRenderControl::sceneChanged, this, &OffscreenQuickView::handleSceneChanged);
+ 
++    EglContext *previousContext = EglContext::currentContext();
++    std::unique_ptr<Texture> fboTexture;
+     if (d->m_glcontext) {
+         // close the view whilst we have an active GL context
+         d->m_glcontext->makeCurrent(d->m_offscreenSurface.get());
+@@ -236,6 +318,18 @@ OffscreenQuickView::~OffscreenQuickView()
+ 
+     d->m_view.reset();
+     d->m_renderControl.reset();
++    if (d->m_useFbo) {
++        fboTexture = static_cast<QuickViewItem *>(d->m_surfaceItem.get())->takeFboTexture();
++        d->m_fbo.reset();
++    }
++    if (d->m_glcontext) {
++        d->m_glcontext->doneCurrent();
++        if (previousContext) {
++            previousContext->makeCurrent();
++        } else if (fboTexture) {
++            qCWarning(LIBKWINEFFECTS) << "Destroying no-DRM OffscreenQuickView FBO texture without KWin's GL context";
++        }
++    }
+ }
+ 
+ bool OffscreenQuickView::automaticRepaint() const
+@@ -291,6 +385,7 @@ void OffscreenQuickView::update(OutputFrame *frame)
+ 
+     bool usingGl = d->m_glcontext != nullptr;
+     EglContext *previousContext = EglContext::currentContext();
++    std::unique_ptr<Texture> oldFboTexture;
+     std::unique_ptr<GLRenderTimeQuery> renderTime;
+ 
+     if (usingGl) {
+@@ -308,43 +403,65 @@ void OffscreenQuickView::update(OutputFrame *frame)
+         }
+ 
+         const QSize nativeSize = d->m_view->size() * dpr;
+-        if (!d->m_swapchain || d->m_swapchain->size() != nativeSize || d->m_surfaceNeedsReallocation) {
+-            d->m_textureExport.reset(nullptr);
+-
+-            QOpenGLFramebufferObjectFormat fboFormat;
+-            fboFormat.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
+-            fboFormat.setInternalTextureFormat(GL_RGBA8);
+-
+-            const uint32_t format = d->m_hasAlphaChannel ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_XRGB8888;
+-            if (d->m_scanoutDevice) {
+-                d->m_swapchain = EglSwapchain::create(d->m_scanoutDevice->allocator(),
+-                                                      EglContext::currentContext(), nativeSize,
+-                                                      format, d->m_scanoutFormats.value(format));
++        if (d->m_useFbo) {
++            if (!d->m_fbo || d->m_fbo->size() != nativeSize) {
++                oldFboTexture = static_cast<QuickViewItem *>(d->m_surfaceItem.get())->takeFboTexture();
++                d->m_fbo.reset();
++
++                QOpenGLFramebufferObjectFormat fboFormat;
++                fboFormat.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
++                fboFormat.setInternalTextureFormat(GL_RGBA8);
++
++                d->m_fbo = std::make_unique<QOpenGLFramebufferObject>(nativeSize, fboFormat);
++                if (!d->m_fbo->isValid()) {
++                    d->m_fbo.reset();
++                    d->m_glcontext->doneCurrent();
++                    if (previousContext) {
++                        previousContext->makeCurrent();
++                    }
++                    qCWarning(LIBKWINEFFECTS) << "Creating FBO for no-DRM OffscreenQuickView failed" << nativeSize;
++                    return;
++                }
+             }
+-            if (!d->m_swapchain) {
+-                // TODO add non-scanout feedback on the item for this?
+-                d->m_swapchain = EglSwapchain::create(Compositor::self()->backend()->drmDevice()->allocator(),
+-                                                      EglContext::currentContext(), nativeSize,
+-                                                      format, Compositor::self()->backend()->supportedFormats()[format]);
++
++            QQuickRenderTarget renderTarget = QQuickRenderTarget::fromOpenGLTexture(d->m_fbo->texture(), d->m_fbo->size());
++            renderTarget.setDevicePixelRatio(dpr);
++            d->m_view->setRenderTarget(renderTarget);
++        } else {
++            if (!d->m_swapchain || d->m_swapchain->size() != nativeSize || d->m_surfaceNeedsReallocation) {
++                d->m_textureExport.reset(nullptr);
++
++                const uint32_t format = d->m_hasAlphaChannel ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_XRGB8888;
++                if (d->m_scanoutDevice) {
++                    d->m_swapchain = EglSwapchain::create(d->m_scanoutDevice->allocator(),
++                                                          EglContext::currentContext(), nativeSize,
++                                                          format, d->m_scanoutFormats.value(format));
++                }
++                if (!d->m_swapchain) {
++                    // TODO add non-scanout feedback on the item for this?
++                    d->m_swapchain = EglSwapchain::create(Compositor::self()->backend()->drmDevice()->allocator(),
++                                                          EglContext::currentContext(), nativeSize,
++                                                          format, Compositor::self()->backend()->supportedFormats()[format]);
++                }
++                if (!d->m_swapchain) {
++                    d->m_glcontext->doneCurrent();
++                    qCWarning(LIBKWINEFFECTS, "Creating a swapchain for OffscreenQuickView failed!");
++                    return;
++                }
++                d->m_surfaceNeedsReallocation = false;
+             }
+-            if (!d->m_swapchain) {
++            d->m_currentSlot = d->m_swapchain->acquire();
++            if (!d->m_currentSlot) {
+                 d->m_glcontext->doneCurrent();
+-                qCWarning(LIBKWINEFFECTS, "Creating a swapchain for OffscreenQuickView failed!");
++                qCWarning(LIBKWINEFFECTS, "Acquire for OffscreenQuickView failed!");
+                 return;
+             }
+-            d->m_surfaceNeedsReallocation = false;
+-        }
+-        d->m_currentSlot = d->m_swapchain->acquire();
+-        if (!d->m_currentSlot) {
+-            d->m_glcontext->doneCurrent();
+-            qCWarning(LIBKWINEFFECTS, "Acquire for OffscreenQuickView failed!");
+-            return;
+-        }
+ 
+-        QQuickRenderTarget renderTarget = QQuickRenderTarget::fromOpenGLTexture(d->m_currentSlot->texture()->texture(), d->m_swapchain->size());
+-        renderTarget.setDevicePixelRatio(dpr);
+-        renderTarget.setMirrorVertically(true);
+-        d->m_view->setRenderTarget(renderTarget);
++            QQuickRenderTarget renderTarget = QQuickRenderTarget::fromOpenGLTexture(d->m_currentSlot->texture()->texture(), d->m_swapchain->size());
++            renderTarget.setDevicePixelRatio(dpr);
++            renderTarget.setMirrorVertically(true);
++            d->m_view->setRenderTarget(renderTarget);
++        }
+     }
+ 
+     d->m_renderControl->polishItems();
+@@ -361,7 +478,10 @@ void OffscreenQuickView::update(OutputFrame *frame)
+         QQuickOpenGLUtils::resetOpenGLState();
+     }
+ 
+-    if (d->m_useBlit) {
++    if (d->m_useFbo) {
++        // The FBO-backed SurfaceItem is updated after the QtQuick context is
++        // released and KWin's compositor context has been restored below.
++    } else if (d->m_useBlit) {
+         d->m_image = d->m_view->grabWindow();
+         d->m_imageItem->setImage(d->m_image);
+         d->m_imageItem->setSize(geometry().size());
+@@ -375,8 +495,10 @@ void OffscreenQuickView::update(OutputFrame *frame)
+     d->m_item->setPosition(geometry().topLeft());
+ 
+     if (usingGl) {
+-        EGLNativeFence fence(EglContext::currentContext()->displayObject());
+-        d->m_swapchain->release(d->m_currentSlot, fence.takeFileDescriptor());
++        if (!d->m_useFbo) {
++            EGLNativeFence fence(EglContext::currentContext()->displayObject());
++            d->m_swapchain->release(d->m_currentSlot, fence.takeFileDescriptor());
++        }
+         QOpenGLFramebufferObject::bindDefault();
+         if (frame && renderTime) {
+             renderTime->end();
+@@ -386,6 +508,17 @@ void OffscreenQuickView::update(OutputFrame *frame)
+         if (previousContext) {
+             previousContext->makeCurrent();
+         }
++        if (d->m_useFbo) {
++            auto *surfaceItem = static_cast<QuickViewItem *>(d->m_surfaceItem.get());
++            if (!surfaceItem->setFboTexture(d->m_fbo.get())) {
++                qCWarning(LIBKWINEFFECTS) << "Wrapping FBO texture for no-DRM OffscreenQuickView failed" << d->m_fbo->size();
++                return;
++            }
++            surfaceItem->setBufferReleasePoint(nullptr);
++            surfaceItem->setBufferSourceBox(Rect(QPoint(), d->m_fbo->size()));
++            surfaceItem->setDestinationSize(geometry().size());
++            surfaceItem->addDamage(Rect(QPoint(), d->m_fbo->size()));
++        }
+     }
+     d->m_item->scheduleRepaint(d->m_item->rect());
+ }

@@ -375,7 +375,7 @@ pub const SCNxLEAST64: &[u8; 4] = b"llx\0";
 pub const SCNxFAST8: &[u8; 4] = b"hhx\0";
 pub const SCNxFAST64: &[u8; 4] = b"llx\0";
 pub const SCNxMAX: &[u8; 3] = b"jx\0";
-pub const GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT: u32 = 53;
+pub const GAME_ACTIVITY_POINTER_INFO_AXIS_COUNT: u32 = 54;
 pub const GAMEACTIVITY_MAX_NUM_POINTERS_IN_MOTION_EVENT: u32 = 8;
 pub const GAMETEXTINPUT_MAJOR_VERSION: u32 = 4;
 pub const GAMETEXTINPUT_MINOR_VERSION: u32 = 3;
@@ -2203,14 +2203,14 @@ unsafe extern "C" {
 pub struct GameActivityPointerAxes {
     pub id: i32,
     pub toolType: i32,
-    pub axisValues: [f32; 53usize],
+    pub axisValues: [f32; 54usize],
     pub rawX: f32,
     pub rawY: f32,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of GameActivityPointerAxes"]
-        [::std::mem::size_of::<GameActivityPointerAxes>() - 228usize];
+        [::std::mem::size_of::<GameActivityPointerAxes>() - 232usize];
     ["Alignment of GameActivityPointerAxes"]
         [::std::mem::align_of::<GameActivityPointerAxes>() - 4usize];
     ["Offset of field: GameActivityPointerAxes::id"]
@@ -2220,9 +2220,9 @@ const _: () = {
     ["Offset of field: GameActivityPointerAxes::axisValues"]
         [::std::mem::offset_of!(GameActivityPointerAxes, axisValues) - 8usize];
     ["Offset of field: GameActivityPointerAxes::rawX"]
-        [::std::mem::offset_of!(GameActivityPointerAxes, rawX) - 220usize];
+        [::std::mem::offset_of!(GameActivityPointerAxes, rawX) - 224usize];
     ["Offset of field: GameActivityPointerAxes::rawY"]
-        [::std::mem::offset_of!(GameActivityPointerAxes, rawY) - 224usize];
+        [::std::mem::offset_of!(GameActivityPointerAxes, rawY) - 228usize];
 };
 unsafe extern "C" {
     #[doc = " \\brief Enable the specified axis, so that its value is reported in the\n GameActivityPointerAxes structures stored in a motion event.\n\n You must enable any axis that you want to read, apart from\n `AMOTION_EVENT_AXIS_X` and `AMOTION_EVENT_AXIS_Y` that are enabled by\n default.\n\n If the axis index is out of range, nothing is done."]
@@ -2266,7 +2266,7 @@ pub struct GameActivityMotionEvent {
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of GameActivityMotionEvent"]
-        [::std::mem::size_of::<GameActivityMotionEvent>() - 1912usize];
+        [::std::mem::size_of::<GameActivityMotionEvent>() - 1944usize];
     ["Alignment of GameActivityMotionEvent"]
         [::std::mem::align_of::<GameActivityMotionEvent>() - 8usize];
     ["Offset of field: GameActivityMotionEvent::deviceId"]
@@ -2296,17 +2296,17 @@ const _: () = {
     ["Offset of field: GameActivityMotionEvent::pointers"]
         [::std::mem::offset_of!(GameActivityMotionEvent, pointers) - 60usize];
     ["Offset of field: GameActivityMotionEvent::historySize"]
-        [::std::mem::offset_of!(GameActivityMotionEvent, historySize) - 1884usize];
+        [::std::mem::offset_of!(GameActivityMotionEvent, historySize) - 1916usize];
     ["Offset of field: GameActivityMotionEvent::historicalEventTimesMillis"]
-        [::std::mem::offset_of!(GameActivityMotionEvent, historicalEventTimesMillis) - 1888usize];
+        [::std::mem::offset_of!(GameActivityMotionEvent, historicalEventTimesMillis) - 1920usize];
     ["Offset of field: GameActivityMotionEvent::historicalEventTimesNanos"]
-        [::std::mem::offset_of!(GameActivityMotionEvent, historicalEventTimesNanos) - 1892usize];
+        [::std::mem::offset_of!(GameActivityMotionEvent, historicalEventTimesNanos) - 1924usize];
     ["Offset of field: GameActivityMotionEvent::historicalAxisValues"]
-        [::std::mem::offset_of!(GameActivityMotionEvent, historicalAxisValues) - 1896usize];
+        [::std::mem::offset_of!(GameActivityMotionEvent, historicalAxisValues) - 1928usize];
     ["Offset of field: GameActivityMotionEvent::precisionX"]
-        [::std::mem::offset_of!(GameActivityMotionEvent, precisionX) - 1900usize];
+        [::std::mem::offset_of!(GameActivityMotionEvent, precisionX) - 1932usize];
     ["Offset of field: GameActivityMotionEvent::precisionY"]
-        [::std::mem::offset_of!(GameActivityMotionEvent, precisionY) - 1904usize];
+        [::std::mem::offset_of!(GameActivityMotionEvent, precisionY) - 1936usize];
 };
 unsafe extern "C" {
     pub fn GameActivityMotionEvent_getHistoricalAxisValue(

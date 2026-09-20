@@ -1,8 +1,8 @@
 # KWin 6.7.4 Android/PRoot source patches
 
-This directory contains the six small source patches and the complete Anland
+This directory contains the seven small source patches and the complete Anland
 v3 source overlay applied to Portal's pinned KWin 6.7.4 ARM64 build. Apply all
-six to the same pristine source, in numeric order, then apply
+seven to the same pristine source, in numeric order, then apply
 `anland-6.7.4/`:
 
 * `0001` tolerates an unavailable udev monitor in the Android/PRoot guest.
@@ -15,6 +15,9 @@ six to the same pristine source, in numeric order, then apply
   intentional surfaceless backend without a KWin DRM device.
 * `0006` makes KWin's screencast DMA-BUF probe take the existing PipeWire
   memfd path when Anland has no DRM allocator.
+* `0007` restores KWin 6.6's DRM-independent OpenGL FBO path for
+  `OffscreenQuickView` when Anland has no KWin DRM device, while retaining the
+  6.7.4 EglSwapchain path on DRM-backed backends.
 
 The Anland overlay adds the KWin backend and the producer-side work-driven
 display protocol. Its canonical source application path is:
@@ -23,7 +26,7 @@ display protocol. Its canonical source application path is:
 sh /path/to/Portal/scripts/apply_kwin_forky_anland.sh "$kwin_source"
 ```
 
-The script verifies the pinned KWin commit, applies 0001--0006 exactly once,
+The script verifies the pinned KWin commit, applies 0001--0007 exactly once,
 and copies only the tracked overlay files. The overlay digest is recorded in
 `assets/graphics-stack-lock.json`; it must be checked before staging a binary.
 
@@ -163,6 +166,18 @@ Anland intentionally has no DRM device. The old screencast probe called
 returns no DMA-BUF candidate when the DRM device or allocator is absent, which
 selects KWin's existing PipeWire memfd path. This is a KWin screencast-module
 fix, not a pointer-coordinate workaround.
+
+## OffscreenQuickView and Overview previews
+
+KWin 6.7.4's `OffscreenQuickView` normally allocates an `EglSwapchain`, whose
+fallback assumes `backend()->drmDevice()->allocator()`. That is valid for
+DRM-backed KWin but not for Anland's KGSL/surfaceless backend. Patch 0007
+restores the KWin 6.6-style path only for the no-DRM case: the QtQuick view
+renders into a shared `QOpenGLFramebufferObject`, and a non-owning
+`GLTexture` wrapper is exposed through a `TextureOpenGL`-backed `SurfaceItem`.
+The item has no `GraphicsBuffer`, so it cannot be selected for direct scanout.
+The DRM-backed EglSwapchain/GraphicsBuffer/SurfaceItem path is unchanged, and
+the no-DRM path performs no CPU readback.
 
 ## QPA failure-path regression
 

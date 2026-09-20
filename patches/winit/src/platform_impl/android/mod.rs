@@ -133,17 +133,31 @@ fn action_pointer<'a>(motion_event: &'a input::MotionEvent<'a>) -> Option<input:
     Some(motion_event.pointer_at_index(index))
 }
 
-/// Android 14 touchpad gesture axes (per-sample relative deltas, display
-/// px). GameActivity only copies explicitly enabled axes into the native
-/// event, so these are enabled once at event-loop init (see below); X/Y are
-/// on by default.
+/// Android 14 touchpad gesture axes. Axes 50/51 are per-sample relative
+/// scroll deltas in display px. GameActivity only copies explicitly enabled
+/// axes into the native event, so these are enabled once at event-loop init
+/// (see below); X/Y are on by default.
+const GESTURE_OFFSET_X_AXIS: u32 = 48;
+const GESTURE_OFFSET_Y_AXIS: u32 = 49;
 const GESTURE_X_AXIS: u32 = 50;
 const GESTURE_Y_AXIS: u32 = 51;
+const GESTURE_PINCH_SCALE_AXIS: u32 = 52;
+const GESTURE_SWIPE_FINGER_COUNT_AXIS: u32 = 53;
 
 /// The exact gesture-axis set Portal requires from GameActivity. Single
-/// source for both enablement and coverage: enabling anything else is a
-/// conscious decision, not drift.
+/// source for both enablement and coverage. The normal path keeps the proven
+/// 50/51 scroll contract; the opt-in probe additionally enables 48/49/52/53.
+#[cfg(not(feature = "gesture-axis-debug-log"))]
 const TOUCHPAD_GESTURE_AXIS_IDS: [u32; 2] = [GESTURE_X_AXIS, GESTURE_Y_AXIS];
+#[cfg(feature = "gesture-axis-debug-log")]
+const TOUCHPAD_GESTURE_AXIS_IDS: [u32; 6] = [
+    GESTURE_OFFSET_X_AXIS,
+    GESTURE_OFFSET_Y_AXIS,
+    GESTURE_X_AXIS,
+    GESTURE_Y_AXIS,
+    GESTURE_PINCH_SCALE_AXIS,
+    GESTURE_SWIPE_FINGER_COUNT_AXIS,
+];
 
 /// Pure fold for gesture samples: historical samples oldest-first, then the
 /// current sample. Separated from `Pointer::history()` for unit coverage.
@@ -162,7 +176,7 @@ where
 /// batched historical sample, oldest first, then the current sample.
 ///
 /// Backend-independent: `Pointer::history()` serves both NativeActivity and
-/// GameActivity (the patched android-activity carries 53 axes, so 50/51 are
+/// GameActivity (the patched android-activity carries 54 axes, so 50/51 are
 /// readable on both; no NDK cast anywhere).
 fn touchpad_gesture_samples(pointer: &input::Pointer<'_>) -> Vec<(f64, f64)> {
     let x_axis = input::Axis::from(GESTURE_X_AXIS);
@@ -188,10 +202,115 @@ fn touchpad_gesture_samples(pointer: &input::Pointer<'_>) -> Vec<(f64, f64)> {
         if samples.iter().any(|(x, y)| *x != 0.0 || *y != 0.0)
             && LOGGED_GESTURE_SAMPLES.fetch_add(1, Ordering::Relaxed) < 25
         {
-            tracing::info!("touchpad gesture axes 50/51 live samples: {samples:?}");
+            log::info!(target: "portal_gesture_probe", "touchpad gesture axes 50/51 live samples: {samples:?}");
         }
     }
     samples
+}
+
+#[cfg(all(
+    debug_assertions,
+    feature = "gesture-axis-debug-log",
+    not(feature = "android-native-activity")
+))]
+#[derive(Debug, Clone, Copy)]
+struct GestureProbeSample {
+    offset_x: f32,
+    offset_y: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+    pinch_scale: f32,
+    swipe_finger_count: f32,
+}
+
+#[cfg(all(
+    debug_assertions,
+    feature = "gesture-axis-debug-log",
+    not(feature = "android-native-activity")
+))]
+impl GestureProbeSample {
+    fn is_nonzero(self) -> bool {
+        self.offset_x != 0.0
+            || self.offset_y != 0.0
+            || self.scroll_x != 0.0
+            || self.scroll_y != 0.0
+            || self.pinch_scale != 0.0
+            || self.swipe_finger_count != 0.0
+    }
+}
+
+#[cfg(all(
+    debug_assertions,
+    feature = "gesture-axis-debug-log",
+    not(feature = "android-native-activity")
+))]
+fn touchpad_gesture_probe_samples(pointer: &input::Pointer<'_>) -> Vec<GestureProbeSample> {
+    let offset_x = input::Axis::from(GESTURE_OFFSET_X_AXIS);
+    let offset_y = input::Axis::from(GESTURE_OFFSET_Y_AXIS);
+    let scroll_x = input::Axis::from(GESTURE_X_AXIS);
+    let scroll_y = input::Axis::from(GESTURE_Y_AXIS);
+    let pinch_scale = input::Axis::from(GESTURE_PINCH_SCALE_AXIS);
+    let swipe_finger_count = input::Axis::from(GESTURE_SWIPE_FINGER_COUNT_AXIS);
+    let history = pointer.history().map(|historical| {
+        GestureProbeSample {
+            offset_x: historical.axis_value(offset_x),
+            offset_y: historical.axis_value(offset_y),
+            scroll_x: historical.axis_value(scroll_x),
+            scroll_y: historical.axis_value(scroll_y),
+            pinch_scale: historical.axis_value(pinch_scale),
+            swipe_finger_count: historical.axis_value(swipe_finger_count),
+        }
+    });
+    let (lower, upper) = history.size_hint();
+    let mut samples = Vec::with_capacity(upper.unwrap_or(lower) + 1);
+    samples.extend(history);
+    samples.push(GestureProbeSample {
+        offset_x: pointer.axis_value(offset_x),
+        offset_y: pointer.axis_value(offset_y),
+        scroll_x: pointer.axis_value(scroll_x),
+        scroll_y: pointer.axis_value(scroll_y),
+        pinch_scale: pointer.axis_value(pinch_scale),
+        swipe_finger_count: pointer.axis_value(swipe_finger_count),
+    });
+    samples
+}
+
+#[cfg(all(
+    debug_assertions,
+    feature = "gesture-axis-debug-log",
+    not(feature = "android-native-activity")
+))]
+fn log_touchpad_gesture_probe(
+    motion_event: &input::MotionEvent<'_>,
+    pointer: &input::Pointer<'_>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static LOGGED_PROBE_EVENTS: AtomicUsize = AtomicUsize::new(0);
+    let samples = touchpad_gesture_probe_samples(pointer);
+    // Multi-pointer events are retained even when all gesture axes are zero:
+    // that is useful evidence that Android delivered contacts but withheld a
+    // higher-level gesture axis. Single-pointer ordinary cursor traffic stays
+    // silent.
+    if motion_event.pointer_count() < 2 && !samples.iter().copied().any(GestureProbeSample::is_nonzero)
+    {
+        return;
+    }
+    if LOGGED_PROBE_EVENTS.fetch_add(1, Ordering::Relaxed) >= 200 {
+        return;
+    }
+    log::info!(
+        target: "portal_gesture_probe",
+        "touchpad gesture probe action={:?} source={:?} device_id={} pointers={} classification={} tool={:?} history={} samples={:?}",
+        motion_event.action(),
+        motion_event.source(),
+        motion_event.device_id(),
+        motion_event.pointer_count(),
+        motion_event.classification(),
+        pointer.tool_type(),
+        samples.len().saturating_sub(1),
+        samples,
+    );
 }
 
 #[cfg(test)]
@@ -262,10 +381,12 @@ mod pointer_selection_tests {
     }
 
     #[test]
-    fn game_activity_enables_exactly_gesture_axes_50_51() {
-        // The init path iterates this exact set: no more, no fewer. Axis
-        // 48/49/52 stay disabled until Portal needs them.
+    fn game_activity_enables_the_expected_gesture_axes() {
+        // The init path iterates this exact set: no more, no fewer.
+        #[cfg(not(feature = "gesture-axis-debug-log"))]
         assert_eq!(TOUCHPAD_GESTURE_AXIS_IDS, [50, 51]);
+        #[cfg(feature = "gesture-axis-debug-log")]
+        assert_eq!(TOUCHPAD_GESTURE_AXIS_IDS, [48, 49, 50, 51, 52, 53]);
     }
 
     #[test]
@@ -729,6 +850,15 @@ impl<T: 'static> EventLoop<T> {
                         .unwrap_or_default();
                     let has_gesture_scroll =
                         gesture_samples.iter().any(|(x, y)| *x != 0.0 || *y != 0.0);
+
+                    #[cfg(all(
+                        debug_assertions,
+                        feature = "gesture-axis-debug-log",
+                        not(feature = "android-native-activity")
+                    ))]
+                    if is_touchpad {
+                        log_touchpad_gesture_probe(motion_event, &pointer);
+                    }
 
                     let gesture_time = self.touchpad_clock.elapsed();
                     let button_state = motion_event.button_state();
