@@ -38,17 +38,25 @@ export WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}
 # Portal's only supported desktop path is Anland. Keep Plasma/KDE clients on
 # native Wayland; XWayland remains available to applications that need X11.
 export QT_QPA_PLATFORM=wayland
-# Portal's Plasma 6.7.4 panel-startup overlay is private and recoverable:
+# Portal's Plasma 6.7.4 preload/readiness overlay is private and recoverable:
 # only opt into it when setup has staged both the patched plasmashell and its
 # matching libPlasma. This changes construction scheduling/diagnostics only;
 # Plasma's containment UiReady visibility gate and all animations remain stock.
+# The private overlay restores adaptive preload weights and carries only the
+# startup/preload diagnostics needed for the Portal regression investigation.
 plasma_overlay_dir=/usr/local/lib/portal-plasma
 plasma_overlay_active=0
-if [ -x "$plasma_overlay_dir/plasmashell" ] && [ -f "$plasma_overlay_dir/libPlasma.so.6.7.4" ]; then
+if [ -x "$plasma_overlay_dir/plasmashell" ] \
+    && [ -f "$plasma_overlay_dir/libPlasma.so.6.7.4" ] \
+    && [ -f "$plasma_overlay_dir/libPlasmaQuick.so.6.7.4" ]; then
     export PATH="$plasma_overlay_dir:$PATH"
     export LD_LIBRARY_PATH="$plasma_overlay_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export QT_PLUGIN_PATH="$plasma_overlay_dir/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
     export XDG_CONFIG_DIRS="/usr/local/share:/etc/xdg${XDG_CONFIG_DIRS:+:$XDG_CONFIG_DIRS}"
     plasma_overlay_active=1
+fi
+if [ "$plasma_overlay_active" = 1 ]; then
+    export PORTAL_EVENT_LOOP_TRACE=${PORTAL_EVENT_LOOP_TRACE:-1}
 fi
 if [ "$LOCALDESKTOP_DIAGNOSTICS" = 1 ] || [ "$LOCALDESKTOP_KWIN_GL_DEBUG" = 1 ]; then
     export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"

@@ -92,14 +92,25 @@ const KWIN_ANLAND_LIBRARY: &[u8] =
 /// DMA-BUF support, before its existing PipeWire memfd fallback is selected.
 const KWIN_ANLAND_SCREENCAST_PLUGIN: &[u8] =
     include_bytes!("../../../assets/kwin-forky-anland-arm64/screencast.so");
-/// Portal's narrow Plasma 6.7.4 panel-startup overlay. `plasmashell` carries
-/// the panel-construction scheduling change and ShellCorona timestamps;
-/// libPlasma carries the per-panel-applet readiness timestamps. Keep both
-/// beside the distro files so the stock Plasma package remains recoverable.
+/// Portal's narrow Plasma 6.7.4 preload/readiness overlay. `plasmashell`
+/// carries ShellCorona and event-loop diagnostics; the private Plasma
+/// libraries carry adaptive preload behavior and per-applet timestamps. Keep
+/// them beside the distro files so the stock Plasma package remains
+/// recoverable.
 const PLASMA_PANELSTART_BINARY: &[u8] =
     include_bytes!("../../../assets/plasma-forky-panelstart-arm64/plasmashell");
 const PLASMA_PANELSTART_LIBRARY: &[u8] =
     include_bytes!("../../../assets/plasma-forky-panelstart-arm64/libPlasma.so.6.7.4");
+/// The PlasmaQuick library contains AppletQuickItem's representation and
+/// preload scheduler. Keep the matching SONAME in the same private overlay so
+/// the stock PlasmaQuick library is not modified.
+const PLASMA_PANELSTART_QUICK_LIBRARY: &[u8] =
+    include_bytes!("../../../assets/plasma-forky-panelstart-arm64/libPlasmaQuick.so.6.7.4");
+/// The matching Portal system-tray applet plugin. It carries the tray timing
+/// diagnostics and its embedded QML resources while the distro plugin remains
+/// untouched and recoverable.
+const PLASMA_PANELSTART_SYSTEMTRAY_PLUGIN: &[u8] =
+    include_bytes!("../../../assets/plasma-forky-panelstart-arm64/org.kde.plasma.systemtray.so");
 const PLASMA_PANELSTART_AUTOSTART: &str = r#"[Desktop Entry]
 Exec=/usr/local/lib/portal-plasma/plasmashell
 X-DBUS-StartupType=Unique
@@ -800,7 +811,7 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
-    // Keep the narrowly scoped Plasma panel-startup overlay beside the
+    // Keep the narrowly scoped Plasma preload/readiness overlay beside the
     // distribution packages. The launcher opts into it only when both files
     // are present; this does not alter Plasma animations or UiReady state.
     sync_plasma_panel_overlay(fs_root);
@@ -1891,44 +1902,6 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         let _ = fs::write(panel_marker, "migrated\n");
     }
 
-    // The stock panel initializes the system tray before the clock and
-    // show-desktop applets.  On Portal's minimal image that makes the tray's
-    // QML/plugin tree dominate the first plasmashell pass, while the panel
-    // remains absent from the screen.  Move only the exact stock order so a
-    // user's custom panel layout is never rewritten, and keep the migration
-    // out of the normal launch path after it has been applied.
-    let panel_order_marker = home_dir.join(".local/state/portal/panel-applet-order-v1");
-    if !panel_order_marker.exists()
-        && config_dir
-            .join("plasma-org.kde.plasma.desktop-appletsrc")
-            .is_file()
-    {
-        let appletsrc = config_dir.join("plasma-org.kde.plasma.desktop-appletsrc");
-        const STOCK_ORDER: &str = "AppletOrder=22;23;24;25;26;37;38";
-        const OPTIMIZED_ORDER: &str = "AppletOrder=22;23;24;25;37;38;26";
-        if let Ok(content) = fs::read_to_string(&appletsrc) {
-            let mut changed = false;
-            let lines: Vec<String> = content
-                .lines()
-                .map(|line| {
-                    if line == STOCK_ORDER {
-                        changed = true;
-                        OPTIMIZED_ORDER.to_string()
-                    } else {
-                        line.to_string()
-                    }
-                })
-                .collect();
-            if changed {
-                fs::write(&appletsrc, format!("{}\n", lines.join("\n")))
-                    .expect("Failed to optimize the default panel applet order");
-            }
-        }
-        if let Some(parent) = panel_order_marker.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(panel_order_marker, "migrated\n");
-    }
     let kscreenlockerrc = config_dir.join("kscreenlockerrc");
     upsert_kv_file(
         &kscreenlockerrc,
@@ -2017,21 +1990,35 @@ fn validate_required_session_files(fs_root: &Path) -> anyhow::Result<()> {
         fs::metadata(plasma_dir.join("plasmashell"))
             .map(|metadata| metadata.len() == PLASMA_PANELSTART_BINARY.len() as u64)
             .unwrap_or(false),
-        "Required Portal Plasma panel-startup binary is incomplete"
+        "Required Portal Plasma preload/readiness binary is incomplete"
     );
     anyhow::ensure!(
         fs::metadata(plasma_dir.join("libPlasma.so.6.7.4"))
             .map(|metadata| metadata.len() == PLASMA_PANELSTART_LIBRARY.len() as u64)
             .unwrap_or(false),
-        "Required Portal Plasma panel-startup library is incomplete"
+        "Required Portal Plasma preload/readiness library is incomplete"
+    );
+    anyhow::ensure!(
+        fs::metadata(plasma_dir.join("libPlasmaQuick.so.6.7.4"))
+            .map(|metadata| metadata.len() == PLASMA_PANELSTART_QUICK_LIBRARY.len() as u64)
+            .unwrap_or(false),
+        "Required Portal PlasmaQuick preload library is incomplete"
+    );
+    anyhow::ensure!(
+        fs::metadata(plasma_dir.join("qt6/plugins/plasma/applets/org.kde.plasma.systemtray.so"))
+            .map(|metadata| metadata.len() == PLASMA_PANELSTART_SYSTEMTRAY_PLUGIN.len() as u64)
+            .unwrap_or(false),
+        "Required Portal Plasma system-tray plugin is incomplete"
     );
     for (link, target) in [
         ("libPlasma.so.7", "libPlasma.so.6.7.4"),
         ("libPlasma.so", "libPlasma.so.7"),
+        ("libPlasmaQuick.so.7", "libPlasmaQuick.so.6.7.4"),
+        ("libPlasmaQuick.so", "libPlasmaQuick.so.7"),
     ] {
         anyhow::ensure!(
             fs::read_link(plasma_dir.join(link)).ok().as_deref() == Some(Path::new(target)),
-            "Required Portal Plasma panel-startup symlink is incomplete: {link}"
+            "Required Portal Plasma preload/readiness symlink is incomplete: {link}"
         );
     }
     Ok(())
@@ -2086,14 +2073,30 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
         fs::read(&plasma_binary)
             .map(|bytes| bytes == PLASMA_PANELSTART_BINARY)
             .unwrap_or(false),
-        "Portal Plasma panel-startup binary does not match the Portal asset"
+        "Portal Plasma preload/readiness binary does not match the Portal asset"
     );
     let plasma_library = fs_root.join("usr/local/lib/portal-plasma/libPlasma.so.6.7.4");
     anyhow::ensure!(
         fs::read(&plasma_library)
             .map(|bytes| bytes == PLASMA_PANELSTART_LIBRARY)
             .unwrap_or(false),
-        "Portal Plasma panel-startup library does not match the Portal asset"
+        "Portal Plasma preload/readiness library does not match the Portal asset"
+    );
+    let plasma_quick_library = fs_root.join("usr/local/lib/portal-plasma/libPlasmaQuick.so.6.7.4");
+    anyhow::ensure!(
+        fs::read(&plasma_quick_library)
+            .map(|bytes| bytes == PLASMA_PANELSTART_QUICK_LIBRARY)
+            .unwrap_or(false),
+        "Portal PlasmaQuick preload library does not match the Portal asset"
+    );
+    let plasma_systemtray_plugin = fs_root.join(
+        "usr/local/lib/portal-plasma/qt6/plugins/plasma/applets/org.kde.plasma.systemtray.so",
+    );
+    anyhow::ensure!(
+        fs::read(&plasma_systemtray_plugin)
+            .map(|bytes| bytes == PLASMA_PANELSTART_SYSTEMTRAY_PLUGIN)
+            .unwrap_or(false),
+        "Portal Plasma system-tray plugin does not match the Portal asset"
     );
     for relative in [
         "usr/local/lib/localdesktop-crash-handler.so",
@@ -2110,12 +2113,12 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Install Portal's patched Plasma panel-startup overlay on every provisioning
+/// Install Portal's patched Plasma preload/readiness overlay on every provisioning
 /// pass and session launch so existing runtimes converge without replacing the
 /// distro's Plasma files.
 fn sync_plasma_panel_overlay(fs_root: &Path) {
     if let Err(error) = sync_plasma_panel_overlay_inner(fs_root) {
-        log::warn!("Could not refresh Plasma panel-startup overlay: {error:#}");
+        log::warn!("Could not refresh Plasma preload/readiness overlay: {error:#}");
     }
 }
 
@@ -2139,12 +2142,32 @@ fn sync_plasma_panel_overlay_inner(fs_root: &Path) -> anyhow::Result<()> {
         write_guest_binary_result(&plasma_library, PLASMA_PANELSTART_LIBRARY)?;
     }
 
+    let plasma_quick_library = plasma_dir.join("libPlasmaQuick.so.6.7.4");
+    if fs::read(&plasma_quick_library)
+        .map(|bytes| bytes != PLASMA_PANELSTART_QUICK_LIBRARY)
+        .unwrap_or(true)
+    {
+        write_guest_binary_result(&plasma_quick_library, PLASMA_PANELSTART_QUICK_LIBRARY)?;
+    }
+
+    let systemtray_plugin_dir = plasma_dir.join("qt6/plugins/plasma/applets");
+    fs::create_dir_all(&systemtray_plugin_dir)?;
+    let systemtray_plugin = systemtray_plugin_dir.join("org.kde.plasma.systemtray.so");
+    if fs::read(&systemtray_plugin)
+        .map(|bytes| bytes != PLASMA_PANELSTART_SYSTEMTRAY_PLUGIN)
+        .unwrap_or(true)
+    {
+        write_guest_binary_result(&systemtray_plugin, PLASMA_PANELSTART_SYSTEMTRAY_PLUGIN)?;
+    }
+
     // Resolve the patched libPlasma SONAME without replacing the distro's
     // copy. Atomic symlink replacement keeps a session launch from observing
     // a half-updated overlay after an interrupted APK upgrade.
     for (link, target) in [
         ("libPlasma.so.7", "libPlasma.so.6.7.4"),
         ("libPlasma.so", "libPlasma.so.7"),
+        ("libPlasmaQuick.so.7", "libPlasmaQuick.so.6.7.4"),
+        ("libPlasmaQuick.so", "libPlasmaQuick.so.7"),
     ] {
         let path = plasma_dir.join(link);
         let temporary = plasma_dir.join(format!("{link}.tmp"));

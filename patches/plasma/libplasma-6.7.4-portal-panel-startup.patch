@@ -1,27 +1,271 @@
+diff --git a/src/plasma/applet.cpp b/src/plasma/applet.cpp
+index 22f626068..21d69a238 100644
+--- a/src/plasma/applet.cpp
++++ b/src/plasma/applet.cpp
+@@ -125,9 +125,6 @@ void Applet::save(KConfigGroup &g) const
+     KConfigGroup appletConfigGroup(&group, QStringLiteral("Configuration"));
+     saveState(appletConfigGroup);
+
+-    // clean up old entry
+-    appletConfigGroup.deleteEntry("PreloadWeight");
+-
+     if (d->configLoader) {
+         // we're saving so we know its changed, we don't need or want the configChanged
+         // signal bubbling up at this point due to that
+diff --git a/src/plasma/pluginloader.cpp b/src/plasma/pluginloader.cpp
+index 9fa3f6081..a43ea2577 100644
+--- a/src/plasma/pluginloader.cpp
++++ b/src/plasma/pluginloader.cpp
+@@ -7,6 +7,7 @@
+
+ #include "pluginloader.h"
+
++#include <QDateTime>
+ #include <QDebug>
+ #include <QRegularExpression>
+
+@@ -20,6 +21,7 @@
+ #include "applet.h"
+ #include "containment.h"
+ #include "containmentactions.h"
++#include "debug_p.h"
+ #include "private/applet_p.h"
+
+ using namespace Qt::Literals;
+@@ -166,6 +168,9 @@ ContainmentActions *PluginLoader::loadContainmentActions(Containment *parent, co
+
+ QList<KPluginMetaData> PluginLoader::listAppletMetaData(const QString &category)
+ {
++    const qint64 start = QDateTime::currentMSecsSinceEpoch();
++    qCWarning(LOG_PLASMA).noquote() << "PORTAL_TRAY timestamp_ms=" << start << "event=plugin-list-applets-begin"
++                                    << "category=" << (category.isEmpty() ? QStringLiteral("<all>") : category);
+     auto platforms = KRuntimePlatform::runtimePlatform();
+     // For now desktop always lists everything
+     if (platforms.contains(QStringLiteral("desktop"))) {
+@@ -237,7 +242,11 @@ QList<KPluginMetaData> PluginLoader::listAppletMetaData(const QString &category)
+         extraPlugins << plugin;
+     }
+
+-    return kpackages + extraPlugins;
++    const auto result = kpackages + extraPlugins;
++    qCWarning(LOG_PLASMA).noquote() << "PORTAL_TRAY timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                    << "event=plugin-list-applets-end" << "category=" << (category.isEmpty() ? QStringLiteral("<all>") : category)
++                                    << "count=" << result.size() << "duration_ms=" << (QDateTime::currentMSecsSinceEpoch() - start);
++    return result;
+ }
+
+ QList<KPluginMetaData> PluginLoader::listAppletMetaDataForMimeType(const QString &mimeType)
 diff --git a/src/plasma/private/applet_p.cpp b/src/plasma/private/applet_p.cpp
-index f912a8d..10d2975 100644
+index f912a8d99..04da1c786 100644
 --- a/src/plasma/private/applet_p.cpp
 +++ b/src/plasma/private/applet_p.cpp
 @@ -13,6 +13,7 @@
  #include <config-plasma.h>
- 
+
  #include <QDebug>
 +#include <QDateTime>
  #include <QDir>
  #include <QFile>
  #include <QFileInfo>
-@@ -402,6 +403,14 @@ void AppletPrivate::propagateConfigChanged()
+@@ -402,6 +403,22 @@ void AppletPrivate::propagateConfigChanged()
  void AppletPrivate::setUiReady()
  {
      uiReady = true;
 +
-+    if (auto *parentContainment = q->containment(); parentContainment
-+        && (parentContainment->containmentType() == Containment::Panel || parentContainment->containmentType() == Containment::CustomPanel)) {
++    const auto *containingContainment = q->containment();
++    qCWarning(LOG_PLASMA).noquote() << "PORTAL_STARTUP timestamp_ms=" << QDateTime::currentMSecsSinceEpoch() << "event=applet-ui-ready"
++                                    << "applet_id=" << q->id() << "plugin=" << q->pluginMetaData().pluginId()
++                                    << "is_containment=" << q->isContainment() << "parent_containment_id="
++                                    << (containingContainment ? containingContainment->id() : -1) << "parent_type="
++                                    << (containingContainment ? static_cast<int>(containingContainment->containmentType()) : -1)
++                                    << "started=" << started;
++
++    if (containingContainment
++        && (containingContainment->containmentType() == Containment::Panel || containingContainment->containmentType() == Containment::CustomPanel)) {
 +        qCWarning(LOG_PLASMA).noquote() << "PORTAL_STARTUP timestamp_ms=" << QDateTime::currentMSecsSinceEpoch() << "event=panel-applet-ui-ready"
-+                                        << "containment_id=" << parentContainment->id() << "screen=" << parentContainment->lastScreen()
++                                        << "containment_id=" << containingContainment->id() << "screen=" << containingContainment->lastScreen()
 +                                        << "applet_id=" << q->id() << "plugin=" << q->pluginMetaData().pluginId() << "started=" << started;
 +    }
 +
      // If we a re a containment, call setUiReady
      Containment *thisContainment = qobject_cast<Containment *>(q);
      if (thisContainment && thisContainment->isContainment()) {
+diff --git a/src/plasma/private/containment_p.cpp b/src/plasma/private/containment_p.cpp
+index 03acea215..3b55b106c 100644
+--- a/src/plasma/private/containment_p.cpp
++++ b/src/plasma/private/containment_p.cpp
+@@ -10,6 +10,7 @@
+ #include "private/containment_p.h"
+
+ #include <KLocalizedString>
++#include <QDateTime>
+ #include <QDebug>
+
+ #include "config-plasma.h"
+@@ -225,6 +226,11 @@ void ContainmentPrivate::setUiReady()
+     // if we are the containment and there is still some incomplete applet, we're still incomplete
+     if (!uiReady) {
+         uiReady = true;
++        qCWarning(LOG_PLASMA).noquote() << "PORTAL_STARTUP timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                        << "event=containment-ui-ready" << "containment_id=" << q->id()
++                                        << "plugin=" << q->pluginMetaData().pluginId() << "type=" << static_cast<int>(type)
++                                        << "screen=" << q->lastScreen() << "started=" << q->Applet::d->started
++                                        << "applets_ui_ready=" << appletsUiReady << "loading_applets=" << loadingApplets.size();
+         if (q->Applet::d->started && (appletsUiReady || applets.isEmpty()) && loadingApplets.isEmpty()) {
+             Q_EMIT q->uiReadyChanged(true);
+         }
+diff --git a/src/plasmaquick/appletquickitem.cpp b/src/plasmaquick/appletquickitem.cpp
+index 920731325..76d90ba82 100644
+--- a/src/plasmaquick/appletquickitem.cpp
++++ b/src/plasmaquick/appletquickitem.cpp
+@@ -14,6 +14,8 @@
+ #include "plasmoid/plasmoiditem.h"
+ #include "sharedqmlengine.h"
+
++#include <QDateTime>
++#include <QElapsedTimer>
+ #include <QJsonArray>
+ #include <QQmlProperty>
+ #include <QRandomGenerator>
+@@ -65,7 +67,10 @@ int AppletQuickItemPrivate::preloadWeight() const
+         defaultWeight = DefaultPreloadWeight;
+     }
+     // default widgets to be barely preloaded
+-    return qBound(0, qMax(defaultWeight, applet->pluginMetaData().value(u"X-Plasma-PreloadWeight", 0)), 100);
++    return qBound(
++        0,
++        applet->config().readEntry(QStringLiteral("PreloadWeight"), qMax(defaultWeight, applet->pluginMetaData().value(u"X-Plasma-PreloadWeight", 0))),
++        100);
+ }
+
+ QObject *AppletQuickItemPrivate::searchLayoutAttached(QObject *parent) const
+@@ -222,17 +227,32 @@ QQuickItem *AppletQuickItemPrivate::createFullRepresentationItem()
+         return fullRepresentationItem;
+     }
+
++    const qint64 createStart = QDateTime::currentMSecsSinceEpoch();
++    const int containmentId = applet && applet->containment() ? static_cast<int>(applet->containment()->id()) : -1;
++    qCWarning(LOG_PLASMAQUICK).noquote() << "PORTAL_PRELOAD timestamp_ms=" << createStart << "phase=full-create-begin"
++                                         << "plugin=" << applet->pluginMetaData().pluginId() << "applet_id=" << applet->id()
++                                         << "containment_id=" << containmentId;
++
+     QVariantHash initialProperties;
+     initialProperties[QStringLiteral("parent")] = QVariant();
+
+     fullRepresentationItem = castOrDestroy<QQuickItem *>(qmlObject->createObjectFromComponent(fullRepresentation, qmlContext(q), initialProperties));
+     if (!fullRepresentationItem) {
+         qCWarning(LOG_PLASMAQUICK) << "The fullRepresentation of" << applet->pluginMetaData().pluginId() << "is not an Item";
++        qCWarning(LOG_PLASMAQUICK).noquote() << "PORTAL_PRELOAD timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                             << "phase=full-create-end" << "plugin=" << applet->pluginMetaData().pluginId()
++                                             << "applet_id=" << applet->id() << "containment_id=" << containmentId
++                                             << "duration_ms=" << (QDateTime::currentMSecsSinceEpoch() - createStart) << "result=failed";
+         return nullptr;
+     }
+
+     Q_EMIT q->fullRepresentationItemChanged(fullRepresentationItem);
+
++    qCWarning(LOG_PLASMAQUICK).noquote() << "PORTAL_PRELOAD timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                         << "phase=full-create-end" << "plugin=" << applet->pluginMetaData().pluginId()
++                                         << "applet_id=" << applet->id() << "containment_id=" << containmentId
++                                         << "duration_ms=" << (QDateTime::currentMSecsSinceEpoch() - createStart) << "result=ok";
++
+     return fullRepresentationItem;
+ }
+
+@@ -311,12 +331,27 @@ bool AppletQuickItemPrivate::appletShouldBeExpanded() const
+
+ void AppletQuickItemPrivate::preloadForExpansion()
+ {
++    QElapsedTimer preloadTimer;
++    preloadTimer.start();
++    const qint64 preloadStart = QDateTime::currentMSecsSinceEpoch();
++    const QString pluginId = applet ? applet->pluginMetaData().pluginId() : QStringLiteral("<null>");
++    const int appletId = applet ? static_cast<int>(applet->id()) : -1;
++    const int containmentId = applet && applet->containment() ? static_cast<int>(applet->containment()->id()) : -1;
++    qCWarning(LOG_PLASMAQUICK).noquote() << "PORTAL_PRELOAD timestamp_ms=" << preloadStart << "phase=begin"
++                                         << "plugin=" << pluginId << "applet_id=" << appletId << "containment_id=" << containmentId;
++    const auto tracePreloadEnd = [&, this](const char *result) {
++        qCWarning(LOG_PLASMAQUICK).noquote() << "PORTAL_PRELOAD timestamp_ms=" << QDateTime::currentMSecsSinceEpoch() << "phase=end"
++                                             << "plugin=" << pluginId << "applet_id=" << appletId << "containment_id=" << containmentId
++                                             << "duration_ms=" << preloadTimer.elapsed() << "result=" << result;
++    };
++
+     qint64 time = 0;
+     if (QLoggingCategory::defaultCategory()->isInfoEnabled()) {
+         time = QDateTime::currentMSecsSinceEpoch();
+     }
+
+     if (!createFullRepresentationItem()) {
++        tracePreloadEnd("no-full-representation");
+         return;
+     }
+
+@@ -337,6 +372,7 @@ void AppletQuickItemPrivate::preloadForExpansion()
+     }
+
+     qCDebug(LOG_PLASMAQUICK) << "Applet" << applet->title() << "loaded after" << (QDateTime::currentMSecsSinceEpoch() - time) << "msec";
++    tracePreloadEnd("ok");
+ }
+
+ void AppletQuickItemPrivate::anchorsFillParent(QQuickItem *item, QQuickItem *parent)
+@@ -495,6 +531,11 @@ AppletQuickItem::~AppletQuickItem()
+ {
+     AppletQuickItemPrivate::s_itemsForApplet.remove(d->applet);
+
++    // decrease weight
++    if (d->s_preloadPolicy >= AppletQuickItemPrivate::Adaptive) {
++        d->applet->config().writeEntry(QStringLiteral("PreloadWeight"), qMax(0, d->preloadWeight() - AppletQuickItemPrivate::PreloadWeightDecrement));
++    }
++
+     // Here the order is important
+     delete d->compactRepresentationItem;
+     delete d->fullRepresentationItem;
+@@ -735,6 +776,10 @@ void AppletQuickItem::init()
+         connect(d->applet->containment(), &Plasma::Containment::uiReadyChanged, this, [this](bool uiReady) {
+             if (uiReady && d->s_preloadPolicy >= AppletQuickItemPrivate::Adaptive) {
+                 const int preloadWeight = d->preloadWeight();
++                qCWarning(LOG_PLASMAQUICK).noquote() << "PORTAL_PRELOAD timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                                     << "phase=schedule" << "plugin=" << d->applet->pluginMetaData().pluginId()
++                                                     << "applet_id=" << d->applet->id() << "containment_id=" << d->applet->containment()->id()
++                                                     << "weight=" << preloadWeight << "policy=" << d->s_preloadPolicy;
+                 qCDebug(LOG_PLASMAQUICK) << "New Applet " << d->applet->title() << "with a weight of" << preloadWeight;
+
+                 // don't preload applets less then a certain weight
+@@ -746,6 +791,10 @@ void AppletQuickItem::init()
+                     const int min = (100 - preloadWeight) * 20;
+                     const int max = (100 - preloadWeight) * 100;
+                     const int delay = QRandomGenerator::global()->bounded((max + 1) - min) + min;
++                    qCWarning(LOG_PLASMAQUICK).noquote() << "PORTAL_PRELOAD timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                                         << "phase=scheduled" << "plugin=" << d->applet->pluginMetaData().pluginId()
++                                                         << "applet_id=" << d->applet->id() << "containment_id=" << d->applet->containment()->id()
++                                                         << "weight=" << preloadWeight << "delay_ms=" << delay;
+                     QTimer::singleShot(delay, this, [this, delay]() {
+                         qCDebug(LOG_PLASMAQUICK) << "Delayed preload of " << d->applet->title() << "after" << (qreal)delay / 1000 << "seconds";
+                         d->preloadForExpansion();
+@@ -865,6 +914,13 @@ void AppletQuickItem::setExpanded(bool expanded)
+
+     if (expanded) {
+         d->preloadForExpansion();
++
++        // increase on open, ignore containments
++        if (d->s_preloadPolicy >= AppletQuickItemPrivate::Adaptive && !d->applet->isContainment()) {
++            const int newWeight = qMin(d->preloadWeight() + AppletQuickItemPrivate::PreloadWeightIncrement, 100);
++            d->applet->config().writeEntry(QStringLiteral("PreloadWeight"), newWeight);
++            qCDebug(LOG_PLASMAQUICK) << "Increasing score for" << d->applet->title() << "to" << newWeight;
++        }
+     }
+
+     d->expanded = expanded;
+diff --git a/src/plasmaquick/appletquickitem_p.h b/src/plasmaquick/appletquickitem_p.h
+index c97c44319..3650beffd 100644
+--- a/src/plasmaquick/appletquickitem_p.h
++++ b/src/plasmaquick/appletquickitem_p.h
+@@ -44,6 +44,8 @@ public:
+         DefaultPreloadWeight = 50,
+         DefaultLauncherPreloadWeight = 100,
+         DelayedPreloadWeight = 25,
++        PreloadWeightIncrement = 5,
++        PreloadWeightDecrement = 8,
+     };
+
+     enum PreloadPolicy {

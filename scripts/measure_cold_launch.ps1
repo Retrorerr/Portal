@@ -72,11 +72,13 @@ function Get-DeviceEpochMilliseconds {
 function Get-GuestFile {
     param([Parameter(Mandatory)][string]$Path)
 
+    # The marker is intentionally absent between cleanup and the guest
+    # process creating it.  Keep this one native call non-terminating while
+    # adb reports that expected transient ENOENT.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $output = & adb -s $script:DeviceId shell run-as $script:PackageName cat $Path 2>$null
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) {
-        return ""
-    }
+    $ErrorActionPreference = $previousErrorActionPreference
     return ($output -join "`n")
 }
 
@@ -255,7 +257,10 @@ function Stop-PerfettoTrace {
     if ($null -eq $PerfettoProcessId -or $PerfettoProcessId -le 0) {
         return
     }
-    & adb -s $script:DeviceId shell kill -TERM $PerfettoProcessId 2>$null | Out-Null
+    # The timed trace may already have exited by the time the startup probe
+    # finishes.  Make the cleanup idempotent so that does not invalidate the
+    # run.
+    & adb -s $script:DeviceId shell sh -c "kill -TERM $PerfettoProcessId 2>/dev/null || true" | Out-Null
     Start-Sleep -Milliseconds 750
 }
 

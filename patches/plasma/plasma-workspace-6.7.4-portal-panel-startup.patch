@@ -1,5 +1,141 @@
+diff --git a/applets/systemtray/plasmoidregistry.cpp b/applets/systemtray/plasmoidregistry.cpp
+index 4990b50c6a..1424ca78be 100644
+--- a/applets/systemtray/plasmoidregistry.cpp
++++ b/applets/systemtray/plasmoidregistry.cpp
+@@ -15,6 +15,7 @@
+ #include <Plasma/PluginLoader>
+
+ #include <QDBusConnection>
++#include <QDateTime>
+
+ PlasmoidRegistry::PlasmoidRegistry(QPointer<SystemTraySettings> settings, QObject *parent)
+     : QObject(parent)
+@@ -27,6 +28,8 @@ PlasmoidRegistry::PlasmoidRegistry(QPointer<SystemTraySettings> settings, QObjec
+
+ void PlasmoidRegistry::init()
+ {
++    const qint64 start = QDateTime::currentMSecsSinceEpoch();
++    qCWarning(SYSTEM_TRAY).noquote() << "PORTAL_TRAY timestamp_ms=" << start << "event=registry-init-begin";
+     QDBusConnection::sessionBus().connect(QString(),
+                                           QStringLiteral("/KPackage/Plasma/Applet"),
+                                           QStringLiteral("org.kde.plasma.kpackage"),
+@@ -48,13 +51,21 @@ void PlasmoidRegistry::init()
+
+     connect(m_settings, &SystemTraySettings::enabledPluginsChanged, this, &PlasmoidRegistry::onEnabledPluginsChanged);
+
+-    for (const auto &info : Plasma::PluginLoader::self()->listAppletMetaData(QString())) {
++    const qint64 metadataStart = QDateTime::currentMSecsSinceEpoch();
++    const auto metadata = Plasma::PluginLoader::self()->listAppletMetaData(QString());
++    qCWarning(SYSTEM_TRAY).noquote() << "PORTAL_TRAY timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                      << "event=registry-list-applets" << "count=" << metadata.size()
++                                      << "duration_ms=" << (QDateTime::currentMSecsSinceEpoch() - metadataStart);
++    for (const auto &info : metadata) {
+         registerPlugin(info);
+     }
+
+     m_dbusObserver->initDBusActivatables();
+
+     sanitizeSettings();
++    qCWarning(SYSTEM_TRAY).noquote() << "PORTAL_TRAY timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                      << "event=registry-init-end" << "duration_ms=" << (QDateTime::currentMSecsSinceEpoch() - start)
++                                      << "registered=" << m_systrayApplets.size();
+ }
+
+ QMap<QString, KPluginMetaData> PlasmoidRegistry::systemTrayApplets()
+diff --git a/applets/systemtray/systemtray.cpp b/applets/systemtray/systemtray.cpp
+index 86fa6f98d6..5a96dc7d0b 100644
+--- a/applets/systemtray/systemtray.cpp
++++ b/applets/systemtray/systemtray.cpp
+@@ -18,6 +18,7 @@
+ #include "systemtraysettings.h"
+
+ #include <QGuiApplication>
++#include <QDateTime>
+ #include <QMenu>
+ #include <QMetaMethod>
+ #include <QMetaObject>
+@@ -169,6 +170,9 @@ SystemTray::~SystemTray()
+
+ void SystemTray::init()
+ {
++    const qint64 start = QDateTime::currentMSecsSinceEpoch();
++    qCWarning(SYSTEM_TRAY).noquote() << "PORTAL_TRAY timestamp_ms=" << start << "event=systemtray-init-begin"
++                                      << "id=" << id() << "parent_containment_id=" << (containment() ? containment()->id() : -1);
+     // run this before doing any config restore
+     migrateFromSystrayContainer();
+
+@@ -194,6 +198,10 @@ void SystemTray::init()
+             }
+         });
+     }
++
++    qCWarning(SYSTEM_TRAY).noquote() << "PORTAL_TRAY timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                      << "event=systemtray-init-end" << "id=" << id()
++                                      << "duration_ms=" << (QDateTime::currentMSecsSinceEpoch() - start);
+ }
+
+ void SystemTray::initSettingsAndRegistry()
+@@ -294,6 +302,8 @@ void SystemTray::restoreContents(KConfigGroup &group)
+     }
+
+     initSettingsAndRegistry();
++    qCWarning(SYSTEM_TRAY).noquote() << "PORTAL_TRAY timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                      << "event=systemtray-restore-contents" << "id=" << id() << "applet_groups=" << cg.groupList().size();
+     m_plasmoidRegistry->init();
+ }
+
+diff --git a/shell/main.cpp b/shell/main.cpp
+index 7f55101a09..938c849ffe 100644
+--- a/shell/main.cpp
++++ b/shell/main.cpp
+@@ -19,14 +19,17 @@
+ #include <QDBusConnection>
+ #include <QDBusConnectionInterface>
+ #include <QDBusMessage>
++#include <QDateTime>
+ #include <QDebug>
+ #include <QDir>
++#include <QElapsedTimer>
+ #include <QLoggingCategory>
+ #include <QMessageBox>
+ #include <QProcess>
+ #include <QQmlDebuggingEnabler>
+ #include <QQuickWindow>
+ #include <QSurfaceFormat>
++#include <QTimer>
+
+ #include <KAboutData>
+ #include <KCrash>
+@@ -87,6 +90,27 @@ int main(int argc, char *argv[])
+     qunsetenv("QT_WAYLAND_RECONNECT");
+     QApplication app(argc, argv);
+
++    if (qEnvironmentVariableIntValue("PORTAL_EVENT_LOOP_TRACE") > 0) {
++        auto lastTick = QElapsedTimer();
++        lastTick.start();
++        bool haveTick = false;
++        auto *watchdog = new QTimer(&app);
++        watchdog->setTimerType(Qt::PreciseTimer);
++        watchdog->setInterval(16);
++        QObject::connect(watchdog, &QTimer::timeout, &app, [&lastTick, &haveTick]() {
++            const qint64 gap = lastTick.restart();
++            if (!haveTick) {
++                haveTick = true;
++                return;
++            }
++            if (gap >= 100) {
++                qCWarning(PLASMASHELL).noquote() << "PORTAL_EVENT_LOOP timestamp_ms=" << QDateTime::currentMSecsSinceEpoch()
++                                                  << "event=stall" << "gap_ms=" << gap;
++            }
++        });
++        watchdog->start();
++    }
++
+     qunsetenv("QT_WAYLAND_DISABLE_FIXED_POSITIONS");
+     qputenv("QT_WAYLAND_RECONNECT", "1");
+
 diff --git a/shell/shellcorona.cpp b/shell/shellcorona.cpp
-index c33387b..6f23077 100644
+index c33387b8c6..2a22df9cfd 100644
 --- a/shell/shellcorona.cpp
 +++ b/shell/shellcorona.cpp
 @@ -16,6 +16,7 @@
@@ -11,9 +147,9 @@ index c33387b..6f23077 100644
  #include <QJsonObject>
  #include <QMenu>
 @@ -83,6 +84,12 @@ using namespace Qt::StringLiterals;
- 
+
  static const int s_configSyncDelay = 10000; // 10 seconds
- 
+
 +static QDebug portalStartupTrace(const char *event)
 +{
 +    return QMessageLogger(__FILE__, __LINE__, Q_FUNC_INFO).warning(PLASMASHELL).noquote()
@@ -21,10 +157,10 @@ index c33387b..6f23077 100644
 +}
 +
  Q_DECLARE_METATYPE(QColor)
- 
+
  QDBusArgument &operator<<(QDBusArgument &argument, const QColor &color)
 @@ -790,6 +797,8 @@ void ShellCorona::sanitizeScreenLayout(const QString &configFileName)
- 
+
  void ShellCorona::load()
  {
 +    portalStartupTrace("shellcorona-load-entry") << "pid=" << QCoreApplication::applicationPid();
@@ -32,24 +168,18 @@ index c33387b..6f23077 100644
      if (m_shell.isEmpty()) {
          return;
      }
-@@ -856,6 +865,13 @@ void ShellCorona::load()
+@@ -856,6 +865,7 @@ void ShellCorona::load()
              addOutput(screen);
          }
      }
 +
-+    // The normal restored-layout path can reach load() with DesktopViews
-+    // already present (for example after a screen-layout rebuild). Ensure the
-+    // restored panels are offered to createWaitingPanels() independently of
-+    // desktop containment readiness.
-+    createWaitingPanels();
-+
      connect(m_screenPool, &ScreenPool::screenOrderChanged, this, &ShellCorona::handleScreenOrderChanged, Qt::UniqueConnection);
      connect(m_screenPool, &ScreenPool::screenRemoved, this, &ShellCorona::handleScreenRemoved, Qt::UniqueConnection);
- 
-@@ -1511,6 +1527,13 @@ void ShellCorona::addOutput(QScreen *screen)
+
+@@ -1511,6 +1521,13 @@ void ShellCorona::addOutput(QScreen *screen)
      Plasma::Containment *containment = createContainmentForActivity(m_activityController->currentActivity(), insertPosition);
      Q_ASSERT(containment);
- 
+
 +    connect(containment, &Plasma::Containment::uiReadyChanged, this, [containment](bool ready) {
 +        if (ready) {
 +            portalStartupTrace("desktop-containment-ui-ready") << "containment_id=" << containment->id() << "screen=" << containment->lastScreen()
@@ -60,25 +190,20 @@ index c33387b..6f23077 100644
      QAction *removeAction = containment->internalAction(QStringLiteral("remove"));
      if (removeAction) {
          removeAction->deleteLater();
-@@ -1518,6 +1541,14 @@ void ShellCorona::addOutput(QScreen *screen)
- 
+@@ -1518,6 +1535,9 @@ void ShellCorona::addOutput(QScreen *screen)
+
      m_desktopViewForScreen[insertPosition] = view;
      view->setContainment(containment);
 +    portalStartupTrace("desktopview-set-containment") << "containment_id=" << containment->id() << "screen=" << insertPosition
 +                                                       << "ui_ready=" << containment->isUiReady();
 +
-+    // A restored panel only needs a real screen and its DesktopView before its
-+    // PanelView can be constructed. PlasmaQuick::ContainmentView keeps the
-+    // panel invisible until the panel containment itself is UI-ready.
-+    createWaitingPanels();
-+
      view->show();
- 
+
      Q_ASSERT(screen == view->screen());
-@@ -1529,6 +1560,11 @@ void ShellCorona::addOutput(QScreen *screen)
+@@ -1529,6 +1549,11 @@ void ShellCorona::addOutput(QScreen *screen)
      checkAllDesktopsUiReady();
      connect(containment, &Plasma::Containment::uiReadyChanged, this, &ShellCorona::checkAllDesktopsUiReady);
- 
+
 +    if (containment->isUiReady()) {
 +        portalStartupTrace("desktop-containment-ui-ready") << "containment_id=" << containment->id() << "screen=" << containment->lastScreen()
 +                                                            << "plugin=" << containment->pluginMetaData().pluginId() << "source=state-after-set-containment";
@@ -87,16 +212,7 @@ index c33387b..6f23077 100644
      if (!m_screenReorderInProgress) {
          Q_EMIT availableScreenRectChanged(m_screenPool->idForScreen(screen));
      }
-@@ -1623,7 +1659,7 @@ void ShellCorona::createWaitingPanels()
- 
-         QScreen *screen = m_screenPool->screenForId(requestedScreen);
-         DesktopView *desktopView = desktopForScreen(screen);
--        if (!screen || !desktopView || !desktopView->containment()->isUiReady()) {
-+        if (!screen || !desktopView) {
-             stillWaitingPanels << cont;
-             continue;
-         }
-@@ -1631,9 +1667,19 @@ void ShellCorona::createWaitingPanels()
+@@ -1631,9 +1656,19 @@ void ShellCorona::createWaitingPanels()
          // TODO: does a similar check make sense?
          // Q_ASSERT(qBound(0, requestedScreen, m_screenPool->count() - 1) == requestedScreen);
          auto *panel = new PanelView(this, screen);
@@ -116,9 +232,9 @@ index c33387b..6f23077 100644
          auto rectNotify = [this, panel]() {
              Q_ASSERT(qobject_cast<PanelView *>(panel)); // https://bugreports.qt.io/browse/QTBUG-118841
              if (!m_screenReorderInProgress && panel->containment()) {
-@@ -1642,7 +1688,21 @@ void ShellCorona::createWaitingPanels()
+@@ -1642,7 +1677,21 @@ void ShellCorona::createWaitingPanels()
          };
- 
+
          m_panelViews[cont] = panel;
 +        QPointer<Plasma::Containment> tracedContainment = cont;
 +        connect(cont, &Plasma::Containment::uiReadyChanged, this, [tracedContainment](bool ready) {
@@ -137,4 +253,4 @@ index c33387b..6f23077 100644
 +        }
          cont->reactToScreenChange();
          Q_EMIT cont->screenGeometryChanged(cont->screenGeometry());
- 
+
