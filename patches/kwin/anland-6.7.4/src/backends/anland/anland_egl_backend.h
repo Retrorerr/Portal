@@ -14,18 +14,14 @@
 */
 #pragma once
 
-#include "core/drm_formats.h"
 #include "core/outputlayer.h"
 #include "opengl/eglbackend.h"
 #include "utils/damagejournal.h"
-
-#include <QSize>
 
 #include <array>
 #include <map>
 #include <memory>
 #include <optional>
-#include <sys/types.h>
 
 extern "C" {
 #include "display_producer.h"
@@ -86,20 +82,6 @@ public:
     QList<OutputLayer *> compatibleOutputLayers(BackendOutput *output) override;
     DrmDevice *drmDevice() const override;
 
-    /** Client dma-buf support on a backend with no DRM render node.
-     *
-     * Advertises only driver-reported importable LINEAR layouts for 8-bit
-     * RGB(A) and imports them through the surfaceless EGL display (the same
-     * EXT_image_dma_buf_import path the presentation dmabufs already use).
-     * Anything else fails closed, so clients fall back to SHM exactly as
-     * before. No explicit-sync support is added: client->KWin stays implicit,
-     * separate from the Android BufferQueue fence ownership. */
-    bool initClientDmabuf();
-    bool testImportBuffer(GraphicsBuffer *buffer) override;
-    FormatModifierMap supportedFormats() const override;
-    EGLImageKHR importBufferAsImage(GraphicsBuffer *buffer) override;
-    EGLImageKHR importBufferAsImage(GraphicsBuffer *buffer, int plane, int format, const QSize &size) override;
-
     AnlandBackend *backend() const
     {
         return m_backend;
@@ -114,10 +96,6 @@ private:
 
     AnlandBackend *m_backend;
     std::map<BackendOutput *, std::unique_ptr<AnlandEglLayer>> m_outputs;
-    /** Conservative client-visible dma-buf set (LINEAR 8-bit RGB(A) only).
-     * Empty until initClientDmabuf() proves at least one importable layout
-     * against the live surfaceless EGL display. */
-    FormatModifierMap m_clientFormats;
 };
 
 } // namespace KWin

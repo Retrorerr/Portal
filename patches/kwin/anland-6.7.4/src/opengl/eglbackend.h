@@ -48,11 +48,8 @@ public:
     QList<LinuxDmaBufV1Feedback::Tranche> tranches() const;
 
     std::shared_ptr<GLTexture> importDmaBufAsTexture(const DmaBufAttributes &attributes) const;
-    // Virtual so the Anland backend (no DRM RenderDevice) can redirect client
-    // buffer imports to its surfaceless EGL display instead of dereferencing
-    // a null render device. No other backend overrides these.
-    virtual EGLImageKHR importBufferAsImage(GraphicsBuffer *buffer);
-    virtual EGLImageKHR importBufferAsImage(GraphicsBuffer *buffer, int plane, int format, const QSize &size);
+    EGLImageKHR importBufferAsImage(GraphicsBuffer *buffer);
+    EGLImageKHR importBufferAsImage(GraphicsBuffer *buffer, int plane, int format, const QSize &size);
 
 protected:
     EglBackend();

@@ -34,6 +34,11 @@ export LOCALDESKTOP_GDB_BACKTRACE=${LOCALDESKTOP_GDB_BACKTRACE:-@GDB_BACKTRACE@}
 # Keep a protocol trace in the bounded guest session log when startup needs
 # diagnosis. Set WAYLAND_DEBUG=1 explicitly when tracing protocols.
 export WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}
+export PORTAL_GRAPHICS_TRACE=${PORTAL_GRAPHICS_TRACE:-0}
+export PORTAL_WAYLAND_TRACE=${PORTAL_WAYLAND_TRACE:-1}
+if [ -r /var/lib/localdesktop/portal-graphics-trace ]; then
+    export PORTAL_GRAPHICS_TRACE=1
+fi
 
 # Portal's only supported desktop path is Anland. Keep Plasma/KDE clients on
 # native Wayland; XWayland remains available to applications that need X11.
@@ -62,6 +67,13 @@ if [ "$LOCALDESKTOP_DIAGNOSTICS" = 1 ] || [ "$LOCALDESKTOP_KWIN_GL_DEBUG" = 1 ];
     export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
 else
     export QT_LOGGING_RULES="*.debug=false;*.info=false${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
+fi
+if [ "${PORTAL_GRAPHICS_TRACE:-0}" = 1 ]; then
+    export QSG_INFO=1
+    export QT_LOGGING_RULES="qt.scenegraph.general=true;qt.rhi.*=true;qt.qpa.wayland.*=true;qt.qpa.egl.*=true;qt.qpa.gl=true;qt.quick.*=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
+    if [ "${PORTAL_WAYLAND_TRACE:-1}" = 1 ]; then
+        export WAYLAND_DEBUG=1
+    fi
 fi
 
 state_dir=/var/lib/localdesktop
@@ -108,6 +120,7 @@ for name in HOME USER LOGNAME WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
     KDE_USE_SYSTEMD PLASMA_USE_SYSTEMD QT_NO_XDG_DESKTOP_PORTAL \
     WAYLAND_DEBUG LOCALDESKTOP_CLIPBOARD_HOST LOCALDESKTOP_CLIPBOARD_PORT \
     LOCALDESKTOP_DIAGNOSTICS LOCALDESKTOP_KWIN_GL_DEBUG \
+    PORTAL_GRAPHICS_TRACE PORTAL_WAYLAND_TRACE QSG_INFO QSG_RHI_BACKEND \
     ANLAND_SOCKET ANLAND ANLAND_NO_DRM_DEVICE MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER \
     FD_FORCE_KGSL FD_KGSL_ENABLE_DMABUF ANLAND_SKIP_IMPLICIT_SYNC_WAIT \
     ANLAND_DISABLE_AUDIO; do

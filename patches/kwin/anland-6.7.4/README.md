@@ -20,3 +20,9 @@ surfaceless EGL context. This overlay does not restore the retired DRM shim or
 change output scale policy. `OffscreenQuickView` keeps QtQuick OpenGL enabled;
 patch 0007 supplies its DRM-independent shared OpenGL FBO only when Anland has
 no KWin `DrmDevice`, while the main KWin scene remains accelerated.
+
+The no-DRM Anland path does not advertise client `linux-dmabuf` feedback. A
+Wayland dma-buf v5 tranche must carry a real, client-resolvable DRM `dev_t`;
+`dev_t(0)` is not a sentinel for SHM and causes KWin's client-side DRM lookup
+to fail. Clients therefore use the honest Wayland SHM path until a real KGSL
+allocation/import path with a valid DRM identity exists.
