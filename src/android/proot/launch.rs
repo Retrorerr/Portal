@@ -203,15 +203,9 @@ pub fn launch() {
         let _guard = LaunchRunningGuard;
         diagnostics::host_event("desktop-launch", "starting configured Plasma session");
 
-        // Clean up potential leftover files for display :1
+        // Clean up potential leftover files for display :1 in one guest process.
         ArchProcess {
-            command: "rm -f /tmp/.X1-lock".into(),
-            user: None,
-            log: None,
-        }
-        .run_with_cancel(thread_cancel.clone());
-        ArchProcess {
-            command: "rm -f /tmp/.X11-unix/X1".into(),
+            command: "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1".into(),
             user: None,
             log: None,
         }
