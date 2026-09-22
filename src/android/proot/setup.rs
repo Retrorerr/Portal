@@ -1165,6 +1165,15 @@ fn write_executable(path: &Path, contents: &str) {
         .and_then(|file| file.sync_all())
         .expect("Failed to sync executable script");
     fs::rename(&temporary, path).expect("Failed to install executable script");
+    // PRoot's fake-root extension gives a `.proot-meta-file.<name>.meta`
+    // sidecar precedence over the host mode for access()/exec. A stale
+    // non-executable record can send PATH lookup past this wrapper. These
+    // Portal-owned scripts are restaged before a new guest session starts, so
+    // remove exactly the destination sidecar after installing the replacement.
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        let sidecar = parent.join(format!(".proot-meta-file.{}.meta", name.to_string_lossy()));
+        let _ = fs::remove_file(sidecar);
+    }
 }
 
 fn write_guest_binary(path: &Path, contents: &[u8]) {
