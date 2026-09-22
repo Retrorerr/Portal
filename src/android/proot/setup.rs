@@ -1149,9 +1149,22 @@ fn write_executable(path: &Path, contents: &str) {
     // text assets with CRLF. A guest kernel interprets the shebang literally,
     // so `#!/bin/bash\r` fails with ENOENT. Normalize at the Android/guest
     // boundary rather than relying on a developer's Git attributes.
-    fs::write(path, normalize_guest_text(contents)).expect("Failed to write executable script");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+    // Stage through a temporary file and rename into place: sync runs on
+    // every session launch while kwin_wayland_wrapper resolves
+    // /usr/local/bin/kwin_wayland via PATH concurrently. A direct truncate
+    // + write (+ chmod after) exposes incomplete/non-executable windows in
+    // which resolution silently falls through to stock /usr/bin/kwin_wayland,
+    // which then crashes without Anland and wedges the boot. Rename is
+    // atomic: concurrent execs always see the old or the new complete script.
+    let temporary = path.with_extension("portal-tmp");
+    fs::write(&temporary, normalize_guest_text(contents))
+        .expect("Failed to write executable script");
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
         .expect("Failed to mark executable script");
+    fs::File::open(&temporary)
+        .and_then(|file| file.sync_all())
+        .expect("Failed to sync executable script");
+    fs::rename(&temporary, path).expect("Failed to install executable script");
 }
 
 fn write_guest_binary(path: &Path, contents: &[u8]) {
