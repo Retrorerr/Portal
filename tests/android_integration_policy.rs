@@ -323,8 +323,7 @@ fn software_keyboard_mixed_and_edge_case_commits() {
             (20, false), // t
             (45, false), // x
             (20, false), // t
-            (28, false), // \r
-            (28, false), // \n
+            (28, false), // \r\n: one Enter
         ]
     );
     assert!(committed_ascii_to_key_events("").is_empty());
