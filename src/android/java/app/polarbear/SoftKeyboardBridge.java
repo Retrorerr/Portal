@@ -3,6 +3,7 @@ package app.polarbear;
 import android.app.Activity;
 import android.content.Context;
 import android.graphics.Color;
+import android.text.Editable;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -254,9 +255,30 @@ public final class SoftKeyboardBridge {
                     }
                 }
 
+                // Keyboards that compose (Samsung, CJK, some Gboard modes) keep the
+                // word in this editor and never pass it to commitText. Let the base
+                // connection apply commits and compositions, then forward whatever
+                // the editor holds and empty it again, so the IME always sees an
+                // empty field and the guest receives each final text exactly once.
+                private void flushEditable() {
+                    Editable content = getEditable();
+                    if (content != null && content.length() > 0) {
+                        commit(content);
+                        content.clear();
+                    }
+                }
+
                 @Override
                 public boolean commitText(CharSequence text, int newCursorPosition) {
-                    commit(text);
+                    super.commitText(text, newCursorPosition);
+                    flushEditable();
+                    return true;
+                }
+
+                @Override
+                public boolean finishComposingText() {
+                    super.finishComposingText();
+                    flushEditable();
                     return true;
                 }
 
