@@ -1,5 +1,15 @@
 //! Host-testable Android input translation policy.
 
+/// Linux evdev code for a mouse's back thumb button (`BTN_SIDE`).
+///
+/// libinput reports a real mouse's back/forward buttons as `BTN_SIDE`/`BTN_EXTRA`, and that is
+/// what Wayland clients read as navigation: Qt maps them to `BackButton`/`ForwardButton`, GTK to
+/// buttons 8/9 and Xwayland to X buttons 8/9. `BTN_BACK`/`BTN_FORWARD` (0x116/0x115) become Qt's
+/// `ExtraButton4`/`ExtraButton3` and X buttons 11/10, which no application treats as back/forward.
+pub const BUTTON_BACK_EVDEV: u32 = 0x113;
+/// Linux evdev code for a mouse's forward thumb button (`BTN_EXTRA`); see [`BUTTON_BACK_EVDEV`].
+pub const BUTTON_FORWARD_EVDEV: u32 = 0x114;
+
 /// Translate Android's stable `KeyEvent.KEYCODE_*` values to Linux evdev scan codes.
 ///
 /// Winit normally gives the compositor a physical key code, but Android's accessibility bridge

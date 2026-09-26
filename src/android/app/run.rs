@@ -492,8 +492,8 @@ fn forward_anland_input(
                 MouseButton::Left => 0x110,
                 MouseButton::Right => 0x111,
                 MouseButton::Middle => 0x112,
-                MouseButton::Back => 0x116,
-                MouseButton::Forward => 0x115,
+                MouseButton::Back => crate::core::android_input::BUTTON_BACK_EVDEV,
+                MouseButton::Forward => crate::core::android_input::BUTTON_FORWARD_EVDEV,
                 MouseButton::Other(b) => 0x110 + (*b as u32),
             };
             let pressed = *state == ElementState::Pressed;
