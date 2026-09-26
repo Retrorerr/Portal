@@ -284,6 +284,31 @@ impl ApplicationContext {
             self.android_app.clone(),
         )
     }
+
+    /// Android's primary language as a BCP 47 tag, e.g. `pt-BR`.
+    pub fn get_language_tag(&self) -> Option<String> {
+        run_in_jvm(
+            |env, _| {
+                let locale = env
+                    .call_static_method("java/util/Locale", "getDefault", "()Ljava/util/Locale;", &[])
+                    .ok()?
+                    .l()
+                    .ok()?;
+                let tag = env
+                    .call_method(&locale, "toLanguageTag", "()Ljava/lang/String;", &[])
+                    .ok()?
+                    .l()
+                    .ok()?;
+                if tag.is_null() {
+                    return None;
+                }
+                env.get_string(&JString::from(tag))
+                    .ok()
+                    .map(|value| value.to_string_lossy().into_owned())
+            },
+            self.android_app.clone(),
+        )
+    }
 }
 
 static APPLICATION_CONTEXT: RwLock<Option<ApplicationContext>> = RwLock::new(None);
