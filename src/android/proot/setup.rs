@@ -14,7 +14,7 @@ use crate::{
         },
     },
     core::{
-        config::{DESKTOP_USER, DOCS_HOME_URL, PRODUCTION_FS_ROOT},
+        config::{APP_FILES_ROOT, DESKTOP_USER, DOCS_HOME_URL, PRODUCTION_FS_ROOT},
         install_plan::{
             validate_initial_setup_proof, AppliedAppearance, AppearanceChoice, InstallPlan,
             InstallPlanState, OptionalApp, PersistedInstallPlan, INSTALL_PLAN_FILE,
@@ -4842,6 +4842,20 @@ pub fn setup_with_completion(
     let (sender, receiver) = mpsc::channel();
     let progress = Arc::new(Mutex::new(0));
 
+    // Before the PRoot probe, which would fail here too and blame the device.
+    let files_dir = get_application_context().data_dir;
+    if !crate::core::config::runs_in_primary_profile(&files_dir, Path::new(APP_FILES_ROOT)) {
+        log::error!(
+            "Portal runs outside the primary Android profile: files dir {}",
+            files_dir.display()
+        );
+        diagnostics::host_event("setup-unsupported", "not the primary Android profile");
+        return PolarBearBackend::WebView(WebviewBackend::unsupported(
+            android_app,
+            "Portal only runs in your device's main profile. Open it there instead of a work \
+             profile, Private Space or another user.",
+        ));
+    }
     if !ArchProcess::is_supported(&android_app) {
         log::info!("PRoot support check failed, showing Device Unsupported page");
         diagnostics::host_event("setup-unsupported", "PRoot support probe failed");
