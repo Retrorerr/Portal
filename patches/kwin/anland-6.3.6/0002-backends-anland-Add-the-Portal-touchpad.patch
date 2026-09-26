@@ -1,0 +1,460 @@
+From 3065e13cc6e130342d956b7c04dbc188408a2b73 Mon Sep 17 00:00:00 2001
+From: Portal <masobazee@gmail.com>
+Date: Sat, 26 Sep 2026 23:12:39 +0100
+Subject: [PATCH 2/2] backends/anland: Add the Portal touchpad and
+ finger-source scrolling
+
+Portal's Android host forwards a hardware touchpad's two-finger scroll
+as raw buffer-px deltas. Two input types carry it:
+
+* INPUT_TYPE_POINTER_AXIS_FINGER (13) emits PointerAxisSource::Finger,
+  so Wayland clients scroll kinetically, after applying the Portal
+  Touchpad's ScrollFactor and NaturalScroll from kcminputrc group
+  Libinput/0/0/Portal Touchpad.
+* INPUT_TYPE_POINTER_AXIS_STOP (14) ends the stream with a zero-delta
+  finger event, so KWin sends wl_pointer.axis_stop.
+
+The device reports itself as a touchpad named Portal Touchpad and is
+exported over D-Bus (org.kde.KWin.InputDevice at
+/org/kde/KWin/InputDevice/portal_touchpad, plus an
+org.kde.KWin.InputDeviceManager at /org/kde/KWin/InputDevice), so
+Plasma's touchpad settings page can change both settings. Wheel and
+continuous scrolling are unchanged.
+---
+ src/backends/anland/anland_backend.cpp |  17 +++
+ src/backends/anland/anland_input.cpp   | 156 ++++++++++++++++++++++++-
+ src/backends/anland/anland_input.h     | 114 ++++++++++++++++++
+ src/backends/anland/protocol.h         |   7 ++
+ 4 files changed, 292 insertions(+), 2 deletions(-)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index d571283..72ab560 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -322,6 +322,23 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
+         m_inputDevice->pointerAxis(axis, ev.pointer_axis.value, ev.pointer_axis.discrete * 120);
+         break;
+     }
++    case INPUT_TYPE_POINTER_AXIS_FINGER: {
++        // Touchpad finger-source smooth scroll (raw buffer-px delta from the
++        // consumer). Emitted with PointerAxisSource::Finger so Wayland clients
++        // get kinetic scrolling; unlike POINTER_AXIS there is no discrete part.
++        const PointerAxis axis =
++            ev.pointer_axis.axis == 0 ? PointerAxis::Vertical : PointerAxis::Horizontal;
++        m_inputDevice->pointerAxisFinger(axis, ev.pointer_axis.value);
++        break;
++    }
++    case INPUT_TYPE_POINTER_AXIS_STOP: {
++        // Terminates the finger scroll stream so KWin emits axis-stop and the
++        // gesture cannot remain active across surfaces or focus changes.
++        const PointerAxis axis =
++            ev.pointer_axis.axis == 0 ? PointerAxis::Vertical : PointerAxis::Horizontal;
++        m_inputDevice->pointerAxisStop(axis);
++        break;
++    }
+     case INPUT_TYPE_KEY:
+         m_inputDevice->keyboardKey(ev.key.keycode, ev.key.action == INPUT_ACTION_DOWN);
+         break;
+diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
+index b2bb835..ba6513d 100644
+--- a/src/backends/anland/anland_input.cpp
++++ b/src/backends/anland/anland_input.cpp
+@@ -6,6 +6,11 @@
+ */
+ #include "anland_input.h"
+ #include "anland_backend.h"
++#include "anland_logging.h"
++
++#include <KSharedConfig>
++
++#include <QDBusConnection>
+ 
+ #include <chrono>
+ 
+@@ -21,11 +26,35 @@ static std::chrono::microseconds now()
+ AnlandInputDevice::AnlandInputDevice(QObject *parent)
+     : InputDevice(parent)
+ {
++    const auto config = KSharedConfig::openConfig(QStringLiteral("kcminputrc"));
++    m_config = config->group(QStringLiteral("Libinput"))
++                   .group(QStringLiteral("0"))
++                   .group(QStringLiteral("0"))
++                   .group(name());
++    m_naturalScroll = m_config.readEntry("NaturalScroll", false);
++    m_scrollFactor = m_config.readEntry("ScrollFactor", 1.0);
++
++    const bool registered = QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice/") + sysName(),
++                                                                         QStringLiteral("org.kde.KWin.InputDevice"),
++                                                                         this,
++                                                                         QDBusConnection::ExportAllProperties);
++    qCWarning(KWIN_ANLAND) << "Portal Touchpad input device registered:" << registered
++                        << "naturalScroll:" << m_naturalScroll << "scrollFactor:" << m_scrollFactor;
++}
++
++AnlandInputDevice::~AnlandInputDevice()
++{
++    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/org/kde/KWin/InputDevice/") + sysName());
+ }
+ 
+ QString AnlandInputDevice::name() const
+ {
+-    return QStringLiteral("anland virtual input");
++    return QStringLiteral("Portal Touchpad");
++}
++
++QString AnlandInputDevice::sysName() const
++{
++    return QStringLiteral("portal_touchpad");
+ }
+ 
+ bool AnlandInputDevice::isEnabled() const
+@@ -59,7 +88,7 @@ bool AnlandInputDevice::isPointer() const
+ 
+ bool AnlandInputDevice::isTouchpad() const
+ {
+-    return false;
++    return true;
+ }
+ 
+ bool AnlandInputDevice::isTouch() const
+@@ -123,6 +152,25 @@ void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV
+     Q_EMIT InputDevice::pointerFrame(this);
+ }
+ 
++void AnlandInputDevice::pointerAxisFinger(PointerAxis axis, qreal delta)
++{
++    // Exactly one layer owns each transformation: the host sends raw
++    // buffer-px deltas, so the kcminputrc scroll factor and natural-scroll
++    // inversion are applied here, finger-source only.
++    delta *= m_scrollFactor;
++    if (m_naturalScroll) {
++        delta = -delta;
++    }
++    Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Finger, m_naturalScroll, now(), this);
++    Q_EMIT InputDevice::pointerFrame(this);
++}
++
++void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
++{
++    Q_EMIT pointerAxisChanged(axis, 0, 0, PointerAxisSource::Finger, false, now(), this);
++    Q_EMIT InputDevice::pointerFrame(this);
++}
++
+ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
+ {
+     Q_EMIT keyChanged(keycode,
+@@ -155,18 +203,122 @@ void AnlandInputDevice::touchCancel()
+     Q_EMIT touchCanceled(this);
+ }
+ 
++bool AnlandInputDevice::falseValue() const
++{
++    return false;
++}
++
++bool AnlandInputDevice::trueValue() const
++{
++    return true;
++}
++
++int AnlandInputDevice::zeroValue() const
++{
++    return 0;
++}
++
++quint32 AnlandInputDevice::zeroUnsignedValue() const
++{
++    return 0;
++}
++
++qreal AnlandInputDevice::zeroRealValue() const
++{
++    return 0;
++}
++
++bool AnlandInputDevice::isNaturalScroll() const
++{
++    return m_naturalScroll;
++}
++
++void AnlandInputDevice::setNaturalScroll(bool enabled)
++{
++    if (m_naturalScroll == enabled) {
++        return;
++    }
++    m_naturalScroll = enabled;
++    m_config.writeEntry("NaturalScroll", enabled);
++    m_config.sync();
++    qCWarning(KWIN_ANLAND) << "Portal Touchpad natural scroll set to" << enabled;
++    Q_EMIT naturalScrollChanged();
++}
++
++qreal AnlandInputDevice::scrollFactor() const
++{
++    return m_scrollFactor;
++}
++
++void AnlandInputDevice::setScrollFactor(qreal factor)
++{
++    if (m_scrollFactor == factor) {
++        return;
++    }
++    m_scrollFactor = factor;
++    m_config.writeEntry("ScrollFactor", factor);
++    m_config.sync();
++    qCWarning(KWIN_ANLAND) << "Portal Touchpad scroll factor set to" << factor;
++    Q_EMIT scrollFactorChanged();
++}
++
+ AnlandInputBackend::AnlandInputBackend(AnlandBackend *backend)
+     : m_backend(backend)
+ {
+ }
+ 
++AnlandInputBackend::~AnlandInputBackend()
++{
++    QDBusConnection::sessionBus().unregisterObject(QStringLiteral("/org/kde/KWin/InputDevice"));
++}
++
+ void AnlandInputBackend::initialize()
+ {
++    // Register the manager object BEFORE emitting deviceAdded: a
++    // late-starting KCM enumerates via ListPointers() and must find the
++    // object already owned on the bus.
++    const bool managerRegistered = QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice"),
++                                                                                 QStringLiteral("org.kde.KWin.InputDeviceManager"),
++                                                                                 this,
++                                                                                 QDBusConnection::ExportAllProperties | QDBusConnection::ExportAllSignals | QDBusConnection::ExportScriptableContents);
++    qCWarning(KWIN_ANLAND) << "Portal input device manager registered:" << managerRegistered;
++
+     if (AnlandInputDevice *device = m_backend->inputDevice()) {
+         Q_EMIT deviceAdded(device);
++        if (device->isTouchpad()) {
++            Q_EMIT deviceAdded(device->sysName());
++        }
+     }
+ }
+ 
++QStringList AnlandInputBackend::devicesSysNames() const
++{
++    if (AnlandInputDevice *device = m_backend->inputDevice()) {
++        return QStringList{device->sysName()};
++    }
++    return QStringList{};
++}
++
++QStringList AnlandInputBackend::ListPointers() const
++{
++    if (AnlandInputDevice *device = m_backend->inputDevice()) {
++        if (device->isPointer()) {
++            return QStringList{device->sysName()};
++        }
++    }
++    return QStringList{};
++}
++
++QStringList AnlandInputBackend::ListKeyboards() const
++{
++    return QStringList{};
++}
++
++QStringList AnlandInputBackend::ListTouch() const
++{
++    return QStringList{};
++}
++
+ } // namespace KWin
+ 
+ #include "moc_anland_input.cpp"
+diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
+index 787f146..8681f78 100644
+--- a/src/backends/anland/anland_input.h
++++ b/src/backends/anland/anland_input.h
+@@ -7,12 +7,23 @@
+     Input for the anland backend. A single combined InputDevice (pointer +
+     keyboard + touch) fed from the display daemon's data fd. Mirrors the single
+     weston_seat that weston's backend-anland sets up.
++
++    The device also presents the Portal touchpad identity over D-Bus
++    (org.kde.KWin.InputDevice at /org/kde/KWin/InputDevice/portal_touchpad)
++    so Plasma System Settings exposes natural-scroll and scroll-factor
++    controls, as Portal's nested Wayland-backend touchpad patch does. The
++    settings apply only to finger-source smooth scroll in pointerAxisFinger();
++    wheel/continuous deltas and axis-stop are untouched, and the Android host
++    keeps sending raw buffer-px deltas so exactly one layer owns each
++    transformation.
+ */
+ #pragma once
+ 
+ #include "core/inputbackend.h"
+ #include "core/inputdevice.h"
+ 
++#include <KConfigGroup>
++
+ namespace KWin
+ {
+ 
+@@ -21,11 +32,72 @@ class AnlandBackend;
+ class AnlandInputDevice : public InputDevice
+ {
+     Q_OBJECT
++    Q_CLASSINFO("D-Bus Interface", "org.kde.KWin.InputDevice")
++    Q_PROPERTY(bool touchpad READ isTouchpad CONSTANT)
++    Q_PROPERTY(bool pointer READ isPointer CONSTANT)
++    Q_PROPERTY(QString name READ name CONSTANT)
++    Q_PROPERTY(QString sysName READ sysName CONSTANT)
++    Q_PROPERTY(bool supportsDisableEvents READ falseValue CONSTANT)
++    Q_PROPERTY(bool enabled READ trueValue CONSTANT)
++    Q_PROPERTY(int supportedButtons READ zeroValue CONSTANT)
++    Q_PROPERTY(bool supportsLeftHanded READ falseValue CONSTANT)
++    Q_PROPERTY(bool leftHandedEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool leftHanded READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsPointerAcceleration READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsPointerAccelerationProfileFlat READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsPointerAccelerationProfileAdaptive READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsDisableWhileTyping READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsDisableEventsOnExternalMouse READ falseValue CONSTANT)
++    Q_PROPERTY(qreal defaultPointerAcceleration READ zeroRealValue CONSTANT)
++    Q_PROPERTY(bool defaultPointerAccelerationProfileFlat READ falseValue CONSTANT)
++    Q_PROPERTY(bool defaultPointerAccelerationProfileAdaptive READ falseValue CONSTANT)
++    Q_PROPERTY(bool disableEventsOnExternalMouseEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool disableWhileTypingEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(qreal pointerAcceleration READ zeroRealValue CONSTANT)
++    Q_PROPERTY(bool pointerAccelerationProfileFlat READ falseValue CONSTANT)
++    Q_PROPERTY(bool pointerAccelerationProfileAdaptive READ falseValue CONSTANT)
++    Q_PROPERTY(bool disableEventsOnExternalMouse READ falseValue CONSTANT)
++    Q_PROPERTY(bool disableWhileTyping READ falseValue CONSTANT)
++    Q_PROPERTY(int tapFingerCount READ zeroValue CONSTANT)
++    Q_PROPERTY(bool supportsMiddleEmulation READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapToClickEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapAndDragEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapDragLockEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool middleEmulationEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapToClick READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapAndDrag READ falseValue CONSTANT)
++    Q_PROPERTY(bool tapDragLock READ falseValue CONSTANT)
++    Q_PROPERTY(bool middleEmulation READ falseValue CONSTANT)
++    Q_PROPERTY(bool lmrTapButtonMapEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool lmrTapButtonMap READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsNaturalScroll READ isTouchpad CONSTANT)
++    Q_PROPERTY(bool naturalScrollEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool naturalScroll READ isNaturalScroll WRITE setNaturalScroll NOTIFY naturalScrollChanged)
++    Q_PROPERTY(bool supportsScrollTwoFinger READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsScrollEdge READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsScrollOnButtonDown READ falseValue CONSTANT)
++    Q_PROPERTY(bool scrollTwoFingerEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool scrollEdgeEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(bool scrollOnButtonDownEnabledByDefault READ falseValue CONSTANT)
++    Q_PROPERTY(quint32 defaultScrollButton READ zeroUnsignedValue CONSTANT)
++    Q_PROPERTY(bool scrollTwoFinger READ falseValue CONSTANT)
++    Q_PROPERTY(bool scrollEdge READ falseValue CONSTANT)
++    Q_PROPERTY(bool scrollOnButtonDown READ falseValue CONSTANT)
++    Q_PROPERTY(quint32 scrollButton READ zeroUnsignedValue CONSTANT)
++    Q_PROPERTY(qreal scrollFactor READ scrollFactor WRITE setScrollFactor NOTIFY scrollFactorChanged)
++    Q_PROPERTY(bool supportsClickMethodAreas READ falseValue CONSTANT)
++    Q_PROPERTY(bool supportsClickMethodClickfinger READ falseValue CONSTANT)
++    Q_PROPERTY(bool defaultClickMethodAreas READ falseValue CONSTANT)
++    Q_PROPERTY(bool defaultClickMethodClickfinger READ falseValue CONSTANT)
++    Q_PROPERTY(bool clickMethodAreas READ falseValue CONSTANT)
++    Q_PROPERTY(bool clickMethodClickfinger READ falseValue CONSTANT)
+ 
+ public:
+     explicit AnlandInputDevice(QObject *parent = nullptr);
++    ~AnlandInputDevice() override;
+ 
+     QString name() const override;
++    QString sysName() const;
+     bool isEnabled() const override;
+     void setEnabled(bool enabled) override;
+     LEDs leds() const override;
+@@ -40,11 +112,30 @@ public:
+     bool isTabletModeSwitch() const override;
+     bool isLidSwitch() const override;
+ 
++    // D-Bus constant helpers (unsupported capabilities report safe defaults).
++    bool falseValue() const;
++    bool trueValue() const;
++    int zeroValue() const;
++    quint32 zeroUnsignedValue() const;
++    qreal zeroRealValue() const;
++    bool isNaturalScroll() const;
++    void setNaturalScroll(bool enabled);
++    qreal scrollFactor() const;
++    void setScrollFactor(qreal factor);
++
+     // Event injection helpers (called by AnlandBackend from the data-fd reader).
+     void pointerMotionAbsolute(const QPointF &position);
+     void pointerMotion(const QPointF &pos, const QPointF &delta, const QPointF &deltaUnaccel);
+     void pointerButton(quint32 button, bool pressed);
+     void pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120);
++    // Touchpad finger-source smooth scroll (buffer-px delta, Finger source for
++    // kinetic scrolling). The consumer sends raw deltas; the kcminputrc
++    // scroll factor and natural-scroll inversion are applied here, exactly
++    // once.
++    void pointerAxisFinger(PointerAxis axis, qreal delta);
++    // Terminates an active finger scroll stream (zero-delta Finger event so
++    // SeatInterface emits wl_pointer.axis_stop and kinetic scrolling settles).
++    void pointerAxisStop(PointerAxis axis);
+     void keyboardKey(quint32 keycode, bool pressed);
+     void touchDown(qint32 id, const QPointF &position);
+     void touchMotion(qint32 id, const QPointF &position);
+@@ -52,18 +143,41 @@ public:
+     void touchFrame();
+     void touchCancel();
+ 
++Q_SIGNALS:
++    void naturalScrollChanged();
++    void scrollFactorChanged();
++
+ private:
+     bool m_enabled = true;
++    KConfigGroup m_config;
++    bool m_naturalScroll = false;
++    qreal m_scrollFactor = 1.0;
+ };
+ 
+ class AnlandInputBackend : public InputBackend
+ {
+     Q_OBJECT
++    Q_CLASSINFO("D-Bus Interface", "org.kde.KWin.InputDeviceManager")
++    Q_PROPERTY(QStringList devicesSysNames READ devicesSysNames CONSTANT)
+ 
+ public:
+     explicit AnlandInputBackend(AnlandBackend *backend);
++    ~AnlandInputBackend() override;
++    using InputBackend::deviceAdded;
++    using InputBackend::deviceRemoved;
+ 
+     void initialize() override;
++    QStringList devicesSysNames() const;
++
++    // Plasma 6.3's touchpad KCM enumerates via devicesSysNames; later Plasma
++    // releases use these scriptable methods, so both are provided.
++    Q_SCRIPTABLE QStringList ListPointers() const;
++    Q_SCRIPTABLE QStringList ListKeyboards() const;
++    Q_SCRIPTABLE QStringList ListTouch() const;
++
++Q_SIGNALS:
++    void deviceAdded(const QString &sysName);
++    void deviceRemoved(const QString &sysName);
+ 
+ private:
+     AnlandBackend *m_backend;
+diff --git a/src/backends/anland/protocol.h b/src/backends/anland/protocol.h
+index c76b506..726503a 100644
+--- a/src/backends/anland/protocol.h
++++ b/src/backends/anland/protocol.h
+@@ -66,6 +66,13 @@ struct buf_info {
+  * The InputEvent carries { service type, fdnum }; the fdnum fds follow as a
+  * separate DATA_MSG_INPUT_EXTEND_FDS message (SCM_RIGHTS). */
+ #define INPUT_TYPE_RESOURCE       11
++/* Portal: touchpad finger-source smooth scroll, { axis, value } in buffer px,
++ * emitted with PointerAxisSource::Finger so clients get kinetic scrolling.
++ * Unlike INPUT_TYPE_POINTER_AXIS there is no discrete component.
++ * Wire-identical to Portal's src/android/anland/protocol.rs. */
++#define INPUT_TYPE_POINTER_AXIS_FINGER 13
++/* Portal: terminates an active finger scroll stream, { axis }. */
++#define INPUT_TYPE_POINTER_AXIS_STOP 14
+ 
+ /* Service identifiers used by OUTPUT_TYPE_RESOURCES_REQUEST / INPUT_TYPE_RESOURCE. */
+ #define SERVICE_TYPE_CAMERA 1
