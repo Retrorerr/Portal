@@ -1,6 +1,6 @@
 [package]
 name = "localdesktop"
-version = "2.2.0"
+version = "2.2.1"
 edition = "2021"
 build = "build.rs"
 default-run = "build_apk"
@@ -30,7 +30,6 @@ codegen-units = 1
 [target.'cfg(target_os = "android")'.dependencies] # Portal's Android host dependencies
 tracing = { version = "0.1.41", features = ["release_max_level_warn"] }
 jni = "0.21.1"
-mockall = "0.13.1"
 android_logger = { version = "0.14", default-features = false }
 winit = { version = "0.30.11", features = [
     "android-game-activity",
@@ -46,16 +45,6 @@ libc = "0.2"
 websocket = { version = "0.27.1", default-features = false, features = [
     "sync",
 ] }
-sentry = { version = "0.41.0", default-features = false, features = [
-    "reqwest",
-    "rustls",
-    "backtrace",
-    "contexts",
-    "panic",
-    "debug-images",
-    "logs",
-    "log",
-] }
 pathdiff = "0.2"
 pipewire = { version = "0.10", features = ["v1_0_0"], optional = true }
 smithay = { version = "0.5.0", default-features = false, features = [
@@ -64,6 +53,9 @@ smithay = { version = "0.5.0", default-features = false, features = [
     "renderer_glow",
     "wayland_frontend",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies] # Host builds: renameat2 in core::install_plan
+libc = "0.2"
 
 [target.'cfg(not(target_os = "android"))'.dependencies] # Deps used only for setting up cross testing
 typst-as-lib = { version = "0.15", features = ["typst-kit-embed-fonts"] }
@@ -75,7 +67,6 @@ regex = "1"
 anyhow = "1.0.68"
 android-sdkmanager-rs = "0.5.0"
 byteorder = "1.4.3"
-dunce = "1.0.3"
 flate2 = "1.0"
 image = { version = "0.24.5", default-features = false, features = [
     "png",

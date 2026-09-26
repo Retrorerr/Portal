@@ -260,8 +260,8 @@ impl PointerButtonEvent<WinitInput> for WinitMouseInputEvent {
             WinitMouseButton::Left => 0x110,
             WinitMouseButton::Right => 0x111,
             WinitMouseButton::Middle => 0x112,
-            WinitMouseButton::Forward => 0x115,
-            WinitMouseButton::Back => 0x116,
+            WinitMouseButton::Forward => crate::core::android_input::BUTTON_FORWARD_EVDEV,
+            WinitMouseButton::Back => crate::core::android_input::BUTTON_BACK_EVDEV,
             WinitMouseButton::Other(b) => {
                 if self.is_x11 {
                     xorg_mouse_to_libinput(b as u32)

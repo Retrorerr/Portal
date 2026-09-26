@@ -95,8 +95,10 @@ impl ExternalBuffer for WleglBufferData {
                     .map_err(|err| -> ExternalBufferImportError { Box::new(err) })?;
             }
             let display = renderer.egl_context().display().get_display_handle();
-            self.importer
-                .import_ahb(
+            // SAFETY: `display` belongs to the context made current above, and
+            // `self.ahb` stays owned by this buffer until its Drop releases it.
+            unsafe {
+                self.importer.import_ahb(
                     renderer,
                     **display,
                     self.ahb,
@@ -104,9 +106,10 @@ impl ExternalBuffer for WleglBufferData {
                     self.height,
                     self.is_external,
                 )
-                .map_err(|err| -> ExternalBufferImportError {
-                    std::io::Error::new(std::io::ErrorKind::Other, err).into()
-                })
+            }
+            .map_err(|err| -> ExternalBufferImportError {
+                std::io::Error::new(std::io::ErrorKind::Other, err).into()
+            })
         })();
 
         let texture = match texture {
@@ -274,10 +277,10 @@ pub fn handle_wlegl_request<D>(
                 return;
             }
 
-            // AHB registered successfully and owns the file descriptors
-            for fd in inner.fds.drain(..) {
-                std::mem::forget(fd);
-            }
+            // The AHB owns duplicates of the client's fds (see
+            // tawc_wlegl_import), so the originals are closed here on success
+            // and by `inner` on every failure path alike.
+            inner.fds.clear();
             drop(inner);
 
             WLEGL_BUFFERS_CREATED.fetch_add(1, Ordering::Relaxed);

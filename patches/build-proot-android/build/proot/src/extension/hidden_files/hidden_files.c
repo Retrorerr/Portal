@@ -10,9 +10,11 @@
 #include <dirent.h>      /* opendir(3), readdir(3), */
 #include <fcntl.h>       /* AT_REMOVEDIR, */
 #include <stdbool.h>
+#include <stddef.h>      /* offsetof(3), */
 #include <stdio.h>       /* snprintf(3), */
 #include <string.h>      /* strcmp(3), strncmp(3), */
 #include <unistd.h>      /* unlink(2), */
+#include <talloc.h>      /* talloc_size(3), */
 
 #include "extension/extension.h"
 #include "tracee/mem.h"
@@ -73,33 +75,44 @@ static int handle_getdents(Tracee *tracee)
     switch (get_sysnum(tracee, ORIGINAL)) {
     case PR_getdents64: 
     case PR_getdents: {
-        /* get the result of the syscall, which is the number of bytes read by getdents */
-        unsigned int res = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-        if (res <= 0) {
-            return res;
+        /* the result is the number of bytes read, or a negative errno
+         * (ENOENT for a removed directory, ENOTDIR, EINVAL, EFAULT...):
+         * leave errors and end-of-directory untouched */
+        word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+        if ((long) result <= 0) {
+            return 0;
         }
+        size_t res = result;
 
         /* get the system call arguments */
         word_t orig_start = peek_reg(tracee, CURRENT, SYSARG_2);
-        unsigned int count = peek_reg(tracee, CURRENT, SYSARG_3);
-        char orig[count];
+        word_t count = peek_reg(tracee, CURRENT, SYSARG_3);
+        if (res > count) {
+            return 0;
+        }
+        /* sized by what the kernel returned, not by the guest's buffer
+         * size, and never on the tracer's stack */
+        char *orig = talloc_size(tracee->ctx, res);
+        char *copy = talloc_size(tracee->ctx, res);
+        if (orig == NULL || copy == NULL) {
+            TALLOC_FREE(orig);
+            TALLOC_FREE(copy);
+            return 0;
+        }
 
         char path[PATH_MAX];
         int status = readlink_proc_pid_fd(tracee->pid, peek_reg(tracee, ORIGINAL, SYSARG_1), path);
-        if (status < 0) {
-           return 0;
+        if (status < 0 || !belongs_to_guestfs(tracee, path)) {
+            status = 0;
+            goto end;
         }
-        if(!belongs_to_guestfs(tracee, path))
-           return 0;
 
         /* retrieve the data from getdents */
         status = read_data(tracee, orig, orig_start, res);
         if (status < 0) {
-            return status;
+            goto end;
         }
 
-        /* allocate a space for the copy of the data we want */
-        char copy[count];
         /* curr will hold the current struct we're examining */
         struct linux_dirent64 *curr64;
         struct linux_dirent *curr32;
@@ -113,9 +126,18 @@ static int handle_getdents(Tracee *tracee)
         /* while we're still within the memory allowed */
         if (get_sysnum(tracee, ORIGINAL) == PR_getdents64) {
             while (ptr < orig + res) {
+                size_t left = orig + res - ptr;
 
-                /* get the current struct */
+                /* get the current struct, which must fit in what is left:
+                 * the kernel's records always do, anything else stops
+                 * filtering and leaves the result untouched */
                 curr64 = (struct linux_dirent64 *)ptr;
+                if (left <= offsetof(struct linux_dirent64, d_name)
+                    || curr64->d_reclen <= offsetof(struct linux_dirent64, d_name)
+                    || curr64->d_reclen > left) {
+                    status = 0;
+                    goto end;
+                }
 
                 /* if the name does not matche a given prefix */
                 if (!hasprefix(HIDDEN_PREFIX, curr64->d_name)) {
@@ -132,9 +154,18 @@ static int handle_getdents(Tracee *tracee)
             }
         } else {
             while (ptr < orig + res) {
+                size_t left = orig + res - ptr;
 
-                /* get the current struct */
+                /* get the current struct, which must fit in what is left:
+                 * the kernel's records always do, anything else stops
+                 * filtering and leaves the result untouched */
                 curr32 = (struct linux_dirent *)ptr;
+                if (left <= offsetof(struct linux_dirent, d_name)
+                    || curr32->d_reclen <= offsetof(struct linux_dirent, d_name)
+                    || curr32->d_reclen > left) {
+                    status = 0;
+                    goto end;
+                }
 
                 /* if the name does not matche a given prefix */
                 if (!hasprefix(HIDDEN_PREFIX, curr32->d_name)) {
@@ -162,14 +193,18 @@ static int handle_getdents(Tracee *tracee)
             /* copy the data back into the register */
             status = write_data(tracee, orig_start, copy, nleft);
             if (status < 0) {
-                return status;
+                goto end;
             }
             /* update the return value to match the data */
             poke_reg(tracee, SYSARG_RESULT, nleft);
         }
 
         /* return successful */
-        return 0;
+        status = 0;
+    end:
+        talloc_free(orig);
+        talloc_free(copy);
+        return status;
     }
 
     default:

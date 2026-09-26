@@ -167,8 +167,10 @@ start_clipboard_bridge() {
         "$clipboard_bridge_pid" "$XDG_RUNTIME_DIR" >> "$session_log"
 }
 
+# LANG is only the default. startplasma-wayland applies the Region & Language
+# settings (plasma-localerc) as per-category LC_* variables, which an exported
+# LC_ALL would override for every program in the session.
 export LANG=en_GB.UTF-8
-export LC_ALL=en_GB.UTF-8
 
 # The Android audio owner starts asynchronously before this launcher. Wait
 # for its Pulse endpoint before Plasma's startup notification is dispatched.
