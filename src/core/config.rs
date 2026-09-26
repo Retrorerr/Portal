@@ -23,6 +23,22 @@ pub const PRODUCTION_FS_ROOT: &str = "/data/data/app.polarbear.portal/files/runt
 #[cfg(test)]
 pub const PRODUCTION_FS_ROOT: &str = "/data/local/tmp/runtime-B";
 
+/// Whether Android gave Portal the app data directory its paths are built on.
+///
+/// `APP_FILES_ROOT`, the rootfs and the guest's host-path aliases are fixed at
+/// `/data/data/<package>/files`, which is the primary Android user's storage
+/// (`/data/user/0` links to `/data/data`). A secondary user, work profile or
+/// Private Space gets `/data/user/<id>/<package>/files` instead and cannot
+/// reach the fixed paths. `files_dir` is Android's `Context.getFilesDir()`.
+pub fn runs_in_primary_profile(files_dir: &std::path::Path, app_files_root: &std::path::Path) -> bool {
+    match (fs::canonicalize(files_dir), fs::canonicalize(app_files_root)) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        // The fixed root is unreadable from another profile. Without a
+        // canonical path, only an exact match counts.
+        _ => files_dir == app_files_root,
+    }
+}
+
 /// Project homepage, also the online documentation entry point.
 pub const DOCS_HOME_URL: &str = "https://github.com/Retrorerr/Portal#readme";
 
@@ -206,6 +222,36 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn primary_profile_matches_through_the_user_zero_link() {
+        let root = tempdir().unwrap();
+        let data = root.path().join("data/data/app/files");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(root.path().join("data/user")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("data/data"), root.path().join("data/user/0"))
+            .unwrap();
+        assert!(runs_in_primary_profile(
+            &root.path().join("data/user/0/app/files"),
+            &data
+        ));
+    }
+
+    #[test]
+    fn other_profiles_do_not_match() {
+        let root = tempdir().unwrap();
+        let data = root.path().join("data/data/app/files");
+        let secondary = root.path().join("data/user/10/app/files");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&secondary).unwrap();
+        assert!(!runs_in_primary_profile(&secondary, &data));
+        // Another profile cannot even resolve the fixed root.
+        assert!(!runs_in_primary_profile(
+            &secondary,
+            &root.path().join("missing/app/files")
+        ));
+    }
 
     fn with_config_file(content: &str, f: impl Fn(String)) -> () {
         let dir = tempdir().unwrap();
