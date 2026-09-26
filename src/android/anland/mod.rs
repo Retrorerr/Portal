@@ -189,7 +189,10 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         ("ANLAND_SKIP_IMPLICIT_SYNC_WAIT".into(), "1".into()),
         // The audio engine has no host counterpart yet; skip it entirely.
         ("ANLAND_DISABLE_AUDIO".into(), "1".into()),
-        ("KWIN_GL_DEBUG".into(), "1".into()),
+        // KWIN_GL_DEBUG is deliberately NOT set: it enables every GL_KHR_debug
+        // message class (performance/other included), making Mesa format and
+        // deliver driver chatter through KWin's callback on the compositing
+        // hot path. KWin still receives GL errors without it.
     ]
 }
 

@@ -44,7 +44,9 @@ if [ -n "${ANLAND_SOCKET:-}" ]; then
     # path: without this, ksmserver/plasmashell can fall back to xcb, fail to
     # start, and plasma_session waits forever for org.kde.ksmserver. DISPLAY
     # stays set for XWayland/Firefox (X11), which select xcb explicitly.
-    export QT_QPA_PLATFORM=wayland
+    # The xcb fallback is for Qt5 apps: the guest has no Qt5 Wayland plugin,
+    # so a bare "wayland" made them abort unless they forced xcb themselves.
+    export QT_QPA_PLATFORM="wayland;xcb"
     export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
 fi
 
