@@ -60,7 +60,7 @@ pub mod android {
         pub mod frame_rate;
         pub mod fullscreen_immersive;
         pub mod ndk;
-        pub mod webview;
+        pub mod recovery_screen;
         pub mod webview_handoff;
     }
 }

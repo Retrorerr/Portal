@@ -1,9 +1,6 @@
 icon: assets/portal-icon.png
 android:
   assets:
-    - assets/setup-progress-v2.html
-    - assets/runtime-error.html
-    - assets/unsupported.html
     - assets/ld-linux-aarch64.so.1
     - assets/wireplumber-share.tar
   runtime_libs:
@@ -39,7 +36,6 @@ android:
     application:
       label: "Portal"
       extract_native_libs: true # Required for proot invocations
-      use_cleartext_traffic: true # Required for the loopback setup-progress WebSocket.
       theme: "@style/PortalSplashTheme"
       activities:
         - name: app.polarbear.PortalActivity

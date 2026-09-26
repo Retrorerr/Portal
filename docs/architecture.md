@@ -9,7 +9,7 @@ Android
 └─ Portal package / NativeActivity
    ├─ winit event loop
    ├─ Smithay Wayland compositor
-   ├─ setup and diagnostics WebView
+   ├─ Compose setup and recovery screens
    ├─ Android integration bridges
    └─ PRoot supervisor
       └─ Debian 13 guest

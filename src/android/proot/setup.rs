@@ -4845,7 +4845,10 @@ pub fn setup_with_completion(
     if !ArchProcess::is_supported(&android_app) {
         log::info!("PRoot support check failed, showing Device Unsupported page");
         diagnostics::host_event("setup-unsupported", "PRoot support probe failed");
-        return PolarBearBackend::WebView(WebviewBackend::unsupported(android_app));
+        return PolarBearBackend::WebView(WebviewBackend::unsupported(
+            android_app,
+            "This device can't run Portal's Linux environment.",
+        ));
     }
     let _ = sender.send(SetupMessage::Progress("✅ Your device is supported!".to_string()));
 

@@ -42,9 +42,6 @@ khronos-egl = { version = "6.0.0", features = ["dynamic"] }
 
 libloading = "0.8.6"
 libc = "0.2"
-websocket = { version = "0.27.1", default-features = false, features = [
-    "sync",
-] }
 pathdiff = "0.2"
 pipewire = { version = "0.10", features = ["v1_0_0"], optional = true }
 smithay = { version = "0.5.0", default-features = false, features = [
