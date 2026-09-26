@@ -9,8 +9,9 @@
 //! and touchpad accessories are disconnected.
 //!
 //! Portal bridges this gap by listening to Android's authoritative `InputManager` device hotplug
-//! events and dynamically writing `[Input] TabletMode = on | off` directly into the guest `kwinrc`.
-//! KWin's `KConfigWatcher` detects file modifications, recalculates `effectiveTabletMode()`,
+//! events and setting `[Input] TabletMode = on | off` in the desktop user's `kwinrc`. In a live
+//! session the IME bridge applies it with `kwriteconfig6 --notify`: KWin's `KConfigWatcher`
+//! acts on that D-Bus notification (not on file changes), recalculates `effectiveTabletMode()`,
 //! and triggers tablet mode adaptions in both KWin and Plasma.
 
 /// Android `InputDevice.SOURCE_KEYBOARD`
