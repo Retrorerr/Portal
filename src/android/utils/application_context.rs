@@ -1,7 +1,7 @@
 use crate::core::runtime::LinuxRuntime;
 use crate::{
     android::utils::ndk::run_in_jvm,
-    core::config::{parse_config, LocalConfig, CONFIG_FILE, PRODUCTION_FS_ROOT},
+    core::config::{parse_config, LocalConfig, CONFIG_FILE, DESKTOP_USER, PRODUCTION_FS_ROOT},
 };
 use jni::{
     objects::{JObject, JString},
@@ -57,7 +57,14 @@ impl ApplicationContext {
         } else {
             format!("{}{}", PRODUCTION_FS_ROOT, CONFIG_FILE)
         };
-        let local_config = parse_config(full_config_path);
+        let mut local_config = parse_config(full_config_path);
+        if local_config.user.username != DESKTOP_USER {
+            log::warn!(
+                "Ignoring legacy graphical username {}; Portal Plasma uses the persistent desktop account",
+                local_config.user.username
+            );
+            local_config.user.username = DESKTOP_USER.to_owned();
+        }
         let permission_all_files_access = Self::is_all_files_access_granted(android_app);
 
         {

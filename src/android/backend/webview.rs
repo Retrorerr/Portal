@@ -565,6 +565,17 @@ impl WebviewBackend {
         backend
     }
 
+    /// A first-run preference failure still belongs to setup.  The fallback
+    /// page therefore offers Retry Setup and never claims a completed desktop.
+    pub fn setup_error(android_app: AndroidApp, reason: impl Into<String>) -> Self {
+        let progress = Arc::new(Mutex::new(0));
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let mut backend = Self::build(receiver, progress);
+        backend.error = ErrorVariant::Setup(reason.into());
+        backend.attach_android_app(android_app);
+        backend
+    }
+
     /// Build an authenticated WebView backend for a support-probe failure.
     ///
     /// Unsupported devices still need a live localhost bridge so the graphical page can export

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Called by the graphical recovery dialog.
 set -eu
-state_dir=/var/lib/localdesktop
+state_dir=/var/lib/localdesktop/session
 rm -f "$state_dir/plasma-failed" "$state_dir/kwin-crash" "$state_dir/plasma-ready"
 labwc_pid=$(cat "$state_dir/labwc.pid" 2>/dev/null || true)
 case "$labwc_pid" in

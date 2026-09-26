@@ -19,7 +19,7 @@ use std::os::unix::fs as unix_fs;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -70,6 +70,10 @@ static AAUDIO_CHILDREN: Mutex<Option<PipewireAaudioChildren>> = Mutex::new(None)
 // and that startup can publish children after shutdown has already returned.
 static AAUDIO_OPERATION: Mutex<()> = Mutex::new(());
 static AAUDIO_WANTED: AtomicBool = AtomicBool::new(false);
+// The sink process reports AAudio stream disconnection on stderr but may keep
+// its PipeWire node alive. Treat that exact process as failed so the shared
+// backend can recover instead of leaving a selectable silent output.
+static AAUDIO_SINK_ERROR_PID: AtomicU32 = AtomicU32::new(0);
 
 struct PipewireAaudioChildren {
     pipewire: Child,
@@ -94,29 +98,63 @@ struct PipewireAaudioEnv {
 pub fn spawn_after_ready(android_app: AndroidApp) {
     AAUDIO_WANTED.store(true, Ordering::SeqCst);
 
+    schedule_start(android_app);
+}
+
+fn schedule_start(android_app: AndroidApp) {
     pw_info!(
         "server",
         "scheduling standalone-client PipeWire/AAudio backend"
     );
     thread::spawn(move || {
-        let _operation = AAUDIO_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
-        if !AAUDIO_WANTED.load(Ordering::SeqCst) {
-            return;
+        for attempt in 0..5 {
+            let started = phase_begin("ensure_pipewire_aaudio");
+            let result = {
+                let _operation = AAUDIO_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+                if !AAUDIO_WANTED.load(Ordering::SeqCst) {
+                    return;
+                }
+                let result = ensure_running(&android_app);
+                if !AAUDIO_WANTED.load(Ordering::SeqCst) {
+                    stop_running();
+                    return;
+                }
+                result
+            };
+            phase_end("ensure_pipewire_aaudio", started);
+            match result {
+                Ok(ready) => {
+                    if ready {
+                        pw_info!("server", "standalone-client PipeWire/AAudio ready");
+                    } else {
+                        pw_warn!("server", "standalone-client PipeWire/AAudio unavailable on this device/build");
+                    }
+                    return;
+                }
+                Err(error) => pw_error!(
+                    "server",
+                    "standalone-client PipeWire/AAudio attempt {}/5 failed: {error}",
+                    attempt + 1
+                ),
+            }
+            if attempt < 4 {
+                thread::sleep(Duration::from_secs(1 << attempt));
+            }
         }
-        let started = phase_begin("ensure_pipewire_aaudio");
-        let result = ensure_running(&android_app);
-        if !AAUDIO_WANTED.load(Ordering::SeqCst) {
-            stop_running();
-        }
-        match &result {
-            Ok(()) => pw_info!(
-                "server",
-                "standalone-client PipeWire/AAudio ready or intentionally disabled"
-            ),
-            Err(e) => pw_error!("server", "standalone-client PipeWire/AAudio failed: {e}"),
-        }
-        phase_end("ensure_pipewire_aaudio", started);
     });
+}
+
+struct SocketCleanupOnError {
+    runtime_dir: PathBuf,
+    armed: bool,
+}
+
+impl Drop for SocketCleanupOnError {
+    fn drop(&mut self) {
+        if self.armed {
+            cleanup_socket(&self.runtime_dir);
+        }
+    }
 }
 
 fn pipewire_runtime_dir() -> PathBuf {
@@ -153,7 +191,7 @@ fn stop_running() {
     cleanup_socket(&runtime_dir);
 }
 
-fn ensure_running(android_app: &AndroidApp) -> Result<(), String> {
+fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
     let stale_children = {
         let mut slot = AAUDIO_CHILDREN
             .lock()
@@ -167,7 +205,7 @@ fn ensure_running(android_app: &AndroidApp) -> Result<(), String> {
                 slot.take()
             } else {
                 pw_debug!("server", "reuse running PipeWire/AAudio children");
-                return Ok(());
+                return Ok(true);
             }
         } else {
             None
@@ -186,7 +224,7 @@ fn ensure_running(android_app: &AndroidApp) -> Result<(), String> {
             "server",
             "disabled; bundled Termux PipeWire requires Android API {MIN_PIPEWIRE_API_LEVEL}+ (device API {api_level})"
         );
-        return Ok(());
+        return Ok(false);
     }
 
     let ctx = get_application_context();
@@ -196,14 +234,15 @@ fn ensure_running(android_app: &AndroidApp) -> Result<(), String> {
     let sink_bin = lib_dir.join(AAUDIO_SINK_LIB);
     let wireplumber_bin = lib_dir.join(WIREPLUMBER_DAEMON_LIB);
 
-    if !pipewire_bin.exists() || !sink_bin.exists() {
+    if !pipewire_bin.exists() || !pulse_bin.exists() || !sink_bin.exists() {
         pw_info!(
             "server",
-            "disabled; bundle {} and {} in nativeLibraryDir to enable",
+            "disabled; bundle {}, {}, and {} in nativeLibraryDir to enable",
             PIPEWIRE_DAEMON_LIB,
+            PIPEWIRE_PULSE_DAEMON_LIB,
             AAUDIO_SINK_LIB
         );
-        return Ok(());
+        return Ok(false);
     }
 
     let env = build_pipewire_env(&ctx.data_dir, &lib_dir)?;
@@ -213,11 +252,15 @@ fn ensure_running(android_app: &AndroidApp) -> Result<(), String> {
         .map_err(|e| format!("mkdir {}: {e}", env.config_dir.display()))?;
     fs::create_dir_all(&env.pulse_dir)
         .map_err(|e| format!("mkdir {}: {e}", env.pulse_dir.display()))?;
+    cleanup_socket(&env.runtime_dir);
+    let mut cleanup_on_error = SocketCleanupOnError {
+        runtime_dir: env.runtime_dir.clone(),
+        armed: true,
+    };
     prepare_spa_plugin_layout(&env, &lib_dir)?;
     if wireplumber_bin.exists() {
         prepare_wireplumber_share(android_app, &env)?;
     }
-    cleanup_socket(&env.runtime_dir);
 
     let config = write_pipewire_config(&env.config_dir, !wireplumber_bin.exists())?;
     let mut pipewire = spawn_pipewire_daemon(&pipewire_bin, &config, &env)?;
@@ -267,7 +310,7 @@ fn ensure_running(android_app: &AndroidApp) -> Result<(), String> {
         return Err(e);
     }
 
-    let pulse = if pulse_bin.exists() {
+    let pulse = {
         let config = write_pipewire_pulse_config(&env.config_dir, &env)?;
         let mut child = match spawn_pipewire_pulse(&pulse_bin, &config, &env) {
             Ok(child) => child,
@@ -294,13 +337,6 @@ fn ensure_running(android_app: &AndroidApp) -> Result<(), String> {
             return Err(e);
         }
         Some(child)
-    } else {
-        pw_info!(
-            "pulse",
-            "{} missing; PulseAudio-compatible clients such as Firefox will not have audio",
-            PIPEWIRE_PULSE_DAEMON_LIB
-        );
-        None
     };
 
     *AAUDIO_CHILDREN
@@ -311,7 +347,8 @@ fn ensure_running(android_app: &AndroidApp) -> Result<(), String> {
         wireplumber,
         sink,
     });
-    spawn_child_monitor(env.runtime_dir.clone());
+    cleanup_on_error.armed = false;
+    spawn_child_monitor(env.runtime_dir.clone(), android_app.clone());
 
     pw_info!(
         "server",
@@ -320,12 +357,14 @@ fn ensure_running(android_app: &AndroidApp) -> Result<(), String> {
         config::PULSE_GUEST_SERVER,
         config::PIPEWIRE_GUEST_RUNTIME_DIR
     );
-    Ok(())
+    Ok(true)
 }
 
-fn spawn_child_monitor(runtime_dir: PathBuf) {
+fn spawn_child_monitor(runtime_dir: PathBuf, android_app: AndroidApp) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(1));
+
+        let _operation = AAUDIO_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
 
         let exited_children = {
             let mut slot = match AAUDIO_CHILDREN.lock() {
@@ -359,12 +398,23 @@ fn spawn_child_monitor(runtime_dir: PathBuf) {
         if let Some(children) = exited_children {
             stop_children(children);
             cleanup_socket(&runtime_dir);
+            drop(_operation);
+            if AAUDIO_WANTED.load(Ordering::SeqCst) {
+                schedule_start(android_app);
+            }
             return;
         }
     });
 }
 
 fn poll_child_exit(children: &mut PipewireAaudioChildren) -> Result<Option<String>, String> {
+    if AAUDIO_SINK_ERROR_PID.load(Ordering::SeqCst) == children.sink.id() {
+        AAUDIO_SINK_ERROR_PID.store(0, Ordering::SeqCst);
+        return Ok(Some(format!(
+            "AAudio stream disconnected in sink pid={}",
+            children.sink.id()
+        )));
+    }
     if let Some(status) = children
         .pipewire
         .try_wait()
@@ -777,10 +827,10 @@ fn spawn_logged(mut command: Command, name: &'static str) -> Result<Child, Strin
     pw_info!("spawn", "{name} child pid={pid}");
 
     if let Some(stderr) = child.stderr.take() {
-        thread::spawn(move || stream_child_lines(name, "stderr", stderr));
+        thread::spawn(move || stream_child_lines(name, pid, "stderr", stderr));
     }
     if let Some(stdout) = child.stdout.take() {
-        thread::spawn(move || stream_child_lines(name, "stdout", stdout));
+        thread::spawn(move || stream_child_lines(name, pid, "stdout", stdout));
     }
 
     Ok(child)
@@ -801,8 +851,11 @@ fn verify_child_still_running(
     Ok(())
 }
 
-fn stream_child_lines(name: &'static str, stream: &'static str, pipe: impl std::io::Read) {
+fn stream_child_lines(name: &'static str, pid: u32, stream: &'static str, pipe: impl std::io::Read) {
     for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+        if name == "aaudio-sink" && line.contains("[pipewire-aaudio-sink] AAudio error:") {
+            AAUDIO_SINK_ERROR_PID.store(pid, Ordering::SeqCst);
+        }
         pw_info!("daemon", "[{name}:{stream}] {line}");
     }
     pw_debug!("daemon", "[{name}:{stream}] stream closed");

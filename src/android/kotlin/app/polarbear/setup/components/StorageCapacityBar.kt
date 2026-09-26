@@ -2,17 +2,12 @@ package app.polarbear.setup.components
 
 import android.os.StatFs
 import android.util.Log
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
@@ -69,20 +64,23 @@ fun rememberStorageCapacity(): StorageCapacity? {
 @Composable
 internal fun StorageCapacityBar(
     capacity: StorageCapacity?,
-    selectedIds: Set<String>,
+    selectedIds: Set<String>?,
     palette: PortalPalette,
     modifier: Modifier = Modifier,
     phase: SetupPhase = SetupPhase.Configure,
     installProgress: State<Float>? = null,
     installMessage: String? = null,
-    hasSelectedApps: Boolean = false,
+    hasSelectedApps: Boolean? = null,
 ) {
     if (capacity == null && phase == SetupPhase.Configure) {
         Text("Storage capacity unavailable", modifier = modifier, color = palette.textSecondary, fontSize = 13.sp)
         return
     }
 
-    val projected = capacity?.projection(projectedInstallBytes(selectedIds))
+    // A restarted Compose tree intentionally has no plan copy. Do not render
+    // a projection from its visual defaults; native alone owns the persisted
+    // plan until it exposes a real progress snapshot.
+    val projected = selectedIds?.let { ids -> capacity?.projection(projectedInstallBytes(ids)) }
     // The bar and numbers consume the SAME animated value. Free-after is always
     // derived as the remainder; it cannot drift independently of the orange bar.
     val animatedPortalGb by animateFloatAsState((projected?.portalBytes ?: 0L) / 1_000_000_000f,
@@ -255,7 +253,7 @@ private fun InstallLogLines(
     progressState: State<Float>,
     ready: Boolean,
     currentMessage: String?,
-    hasSelectedApps: Boolean,
+    hasSelectedApps: Boolean?,
     palette: PortalPalette,
 ) {
     val stages = remember(hasSelectedApps) {
@@ -263,12 +261,12 @@ private fun InstallLogLines(
             add("Preparing system…")
             add("Installing Debian base…")
             add("Configuring KDE Plasma…")
-            if (hasSelectedApps) add("Installing selected apps…")
+            if (hasSelectedApps == true) add("Installing selected apps…")
             add("Finalizing Portal…")
         }
     }
     val activeIndex by remember(progressState, hasSelectedApps) {
-        derivedStateOf { installStageIndex(progressState.value, hasSelectedApps) }
+        derivedStateOf { installStageIndex(progressState.value, hasSelectedApps == true) }
     }
     val lines = remember(stages, activeIndex, ready, currentMessage) {
         val history = if (ready) {
@@ -280,51 +278,43 @@ private fun InstallLogLines(
         }
         history.takeLast(4)
     }
-    AnimatedContent(
-        targetState = lines,
+    // Progress messages change their counts frequently; keep the rows in place
+    // so only the text value updates instead of re-entering the entire log.
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .height(55.dp),
-        transitionSpec = {
-            (fadeIn(tween(190)) + slideInVertically(tween(220)) { it / 8 })
-                .togetherWith(
-                    fadeOut(tween(150)) + slideOutVertically(tween(180)) { -it / 10 },
-                )
-        },
-        contentAlignment = Alignment.TopStart,
-        label = "install log settling",
-    ) { visibleLines ->
-        Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-            visibleLines.forEachIndexed { index, line ->
-                val age = visibleLines.lastIndex - index
-                val current = age == 0
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Canvas(Modifier.size(5.dp)) {
-                        if (current) drawCircle(PortalColors.Orange.copy(alpha = 0.8f))
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = line,
-                        color = if (current) {
-                            palette.textPrimary.copy(alpha = 0.78f)
-                        } else {
-                            palette.textSecondary.copy(
-                                alpha = when (age) {
-                                    1 -> 0.44f
-                                    2 -> 0.34f
-                                    else -> 0.25f
-                                },
-                            )
-                        },
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                        lineHeight = 13.sp,
-                        maxLines = 1,
-                    )
+        verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+        lines.forEachIndexed { index, line ->
+            val age = lines.lastIndex - index
+            val current = age == 0
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Canvas(Modifier.size(5.dp)) {
+                    if (current) drawCircle(PortalColors.Orange.copy(alpha = 0.8f))
                 }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = line,
+                    color = if (current) {
+                        palette.textPrimary.copy(alpha = 0.78f)
+                    } else {
+                        palette.textSecondary.copy(
+                            alpha = when (age) {
+                                1 -> 0.44f
+                                2 -> 0.34f
+                                else -> 0.25f
+                            },
+                        )
+                    },
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    lineHeight = 13.sp,
+                    maxLines = 1,
+                )
             }
         }
     }

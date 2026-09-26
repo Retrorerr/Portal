@@ -7,6 +7,7 @@ pub mod core {
     pub mod config;
     pub mod coordinate_transform;
     pub mod ime_policy;
+    pub mod install_plan;
     pub mod mesa_layer;
     pub mod pointer_buttons;
     pub mod presentation;

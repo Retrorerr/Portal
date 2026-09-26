@@ -29,6 +29,12 @@ static EVENT_LOOP_PROXY: OnceLock<Mutex<Option<EventLoopProxy<AppUserEvent>>>> =
 /// installation truth; this bit is never consulted as proof that setup
 /// succeeded.
 static SETUP_HANDOFF_PENDING: AtomicBool = AtomicBool::new(false);
+/// A provisional first-run Plasma launch must also wait for an HTML fallback
+/// popup to close, but it must not borrow `SETUP_HANDOFF_PENDING`: that flag
+/// means the durable completion marker already exists.  Keeping this edge
+/// distinct prevents a pending KScreen/appearance proof from triggering the
+/// ordinary completed-install handoff.
+static INITIAL_PREFERENCES_HANDOFF_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn control() -> &'static Mutex<PopupControl> {
     CONTROL.get_or_init(|| Mutex::new(PopupControl::default()))
@@ -76,6 +82,36 @@ pub fn complete_setup(android_app: AndroidApp) {
 /// an installed-state query.
 pub fn take_setup_handoff() -> bool {
     SETUP_HANDOFF_PENDING.swap(false, Ordering::AcqRel)
+}
+
+/// Close a fallback setup popup before Portal launches the provisional Plasma
+/// session that applies an accepted initial-preferences plan.  The separate
+/// pending bit ensures `clear()` wakes the event loop after the popup's
+/// Looper has actually exited.
+pub fn request_initial_preferences_handoff(android_app: AndroidApp) {
+    INITIAL_PREFERENCES_HANDOFF_PENDING.store(true, Ordering::Release);
+    if !request_close(android_app) {
+        wake_event_loop();
+    }
+}
+
+/// Consume the popup-close edge for the provisional-preferences handoff.
+/// Callers that observe a still-open popup must put it back so `clear()` can
+/// issue the post-close wake rather than losing the handoff.
+pub fn take_initial_preferences_handoff() -> bool {
+    INITIAL_PREFERENCES_HANDOFF_PENDING.swap(false, Ordering::AcqRel)
+}
+
+/// Restore a provisional popup-close edge after an early event-loop wake.
+pub fn requeue_initial_preferences_handoff() {
+    INITIAL_PREFERENCES_HANDOFF_PENDING.store(true, Ordering::Release);
+}
+
+/// Clear a provisional first-run handoff after launch or KScreen proof fails.
+/// This prevents the ordinary event loop from consuming a stale popup-close
+/// edge while setup remains retryable under the same persisted plan.
+pub fn cancel_initial_preferences_handoff() {
+    INITIAL_PREFERENCES_HANDOFF_PENDING.store(false, Ordering::Release);
 }
 
 /// Register the Looper and PopupWindow owned by the WebView thread.
@@ -140,7 +176,9 @@ pub fn clear() {
         control.looper = None;
         control.popup = None;
     }
-    if SETUP_HANDOFF_PENDING.load(Ordering::Acquire) {
+    if SETUP_HANDOFF_PENDING.load(Ordering::Acquire)
+        || INITIAL_PREFERENCES_HANDOFF_PENDING.load(Ordering::Acquire)
+    {
         wake_event_loop();
     }
 }

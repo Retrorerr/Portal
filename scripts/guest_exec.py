@@ -15,6 +15,16 @@ def get_device():
         pass
     raise RuntimeError("No active authorized ADB device found")
 
+
+def find_process_pid(ps_output, process_name):
+    """Match Android's exact NAME column, not pidof's command-line substring."""
+    for line in ps_output.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1].isdigit() and fields[-1] == process_name:
+            return fields[1]
+    return None
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: guest_exec.py <command>")
@@ -31,13 +41,13 @@ def main():
     proot_loader = lib_dir + "/libproot_loader.so"
     libproot = lib_dir + "/libproot.so"
 
-    pid_str = subprocess.check_output([
-        "adb", "-s", device_id, "shell", "pidof plasmashell"
-    ], text=True).strip().split()
-    if not pid_str:
-        print("plasmashell not running")
+    ps_output = subprocess.check_output([
+        "adb", "-s", device_id, "shell", "ps -A"
+    ], text=True)
+    plasma_pid = find_process_pid(ps_output, "plasmashell")
+    if not plasma_pid:
+        print("plasmashell not running (no exact process-name match)")
         sys.exit(1)
-    plasma_pid = pid_str[0]
 
     env_raw = subprocess.check_output([
         "adb", "-s", device_id, "exec-out",
@@ -86,7 +96,7 @@ def main():
 
     remote_cmd = (
         f"export PROOT_LOADER={proot_loader}; "
-        "export PROOT_TMP_DIR=/data/data/app.polarbear/files/tmp; "
+        "export PROOT_TMP_DIR=/data/data/app.polarbear/files/runtime-B/tmp; "
         f"{libproot} -r /data/data/app.polarbear/files/runtime-B "
         "-L --link2symlink --sysvipc --kill-on-exit --root-id "
         "-b /dev -b /proc -b /sys "
@@ -112,6 +122,7 @@ def main():
         print("STDOUT:", res.stdout)
     if res.stderr:
         print("STDERR:", res.stderr)
+    sys.exit(res.returncode)
 
 if __name__ == "__main__":
     main()

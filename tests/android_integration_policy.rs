@@ -21,6 +21,8 @@ const ANDROID_TEXT_INPUT_V2_SOURCE: &str =
 const ANDROID_KEYBOARD_BRIDGE_SOURCE: &str =
     include_str!("../src/android/java/app/polarbear/SoftKeyboardBridge.java");
 const ANDROID_SETUP_SOURCE: &str = include_str!("../src/android/proot/setup.rs");
+const INITIAL_SETUP_HELPER_SOURCE: &str =
+    include_str!("../assets/localdesktop-apply-initial-appearance.py");
 const ANDROID_IME_SOURCE: &str = include_str!("../src/android/ime.rs");
 const KWIN_WRAPPER_SOURCE: &str = include_str!("../assets/localdesktop-kwin-wrapper-v2.sh");
 const STARTPLASMA_SOURCE: &str = include_str!("../assets/localdesktop-startplasma.sh");
@@ -58,6 +60,15 @@ use clipboard_policy::{
 };
 
 #[test]
+fn optional_libreoffice_has_a_wayland_backend_and_guest_proc_version() {
+    let proot = include_str!("../src/android/runtime/proot.rs");
+    assert!(ANDROID_SETUP_SOURCE.contains("proc/.version"));
+    assert!(proot.contains("/proc/.version:/proc/version"));
+    assert!(ANDROID_SETUP_SOURCE.contains("libreoffice libreoffice-kf6"));
+    assert!(ANDROID_SETUP_SOURCE.contains("!launchers.contains(&\"preferred://filemanager\")"));
+}
+
+#[test]
 fn oneplus_pad_like_metrics_keep_fractional_scale_and_refresh_period() {
     let scale = density_scale_factor(280);
     assert!((scale - 1.75).abs() < f64::EPSILON);
@@ -65,6 +76,52 @@ fn oneplus_pad_like_metrics_keep_fractional_scale_and_refresh_period() {
     assert_eq!(xft_dpi(scale), 168);
     assert_eq!(refresh_period_nanos(144_000), 6_944_444);
     assert_eq!(physical_window_size(2560, 1600), Some((2560, 1600)));
+}
+
+#[test]
+fn first_run_panel_shortcuts_are_attempt_proven_before_runtime_commit() {
+    let run = ANDROID_SETUP_SOURCE
+        .split("fn run_installation(")
+        .nth(1)
+        .and_then(|source| source.split("fn set_registration(").next())
+        .expect("first-run installation transaction must exist");
+    let launcher_apply = run
+        .find("apply_initial_preferences_before_commit(")
+        .expect("selected launchers and appearance must be applied");
+    let marker_commit = run
+        .find("finalise_installation(&registration)")
+        .expect("runtime completion must follow initial setup proof");
+    assert!(launcher_apply < marker_commit);
+
+    let handoff = ANDROID_SETUP_SOURCE
+        .split("fn apply_initial_preferences_before_commit(")
+        .nth(1)
+        .and_then(|source| source.split("fn run_installation(").next())
+        .expect("initial setup handoff must exist");
+    assert!(handoff.contains("stage_initial_appearance_helper(root)"));
+    assert!(handoff.contains("wait_for_initial_preferences_proof"));
+    assert!(handoff.contains("remove_guest_file(&root.join(INITIAL_APPEARANCE_PLAN), true)"));
+
+    let proof = ANDROID_SETUP_SOURCE
+        .split("fn verify_initial_preferences_proof(")
+        .nth(1)
+        .and_then(|source| source.split("fn wait_for_initial_preferences_proof(").next())
+        .expect("native proof gate must exist");
+    assert!(proof.contains("validate_initial_setup_proof"));
+    assert!(INITIAL_SETUP_HELPER_SOURCE.contains("org.kde.plasma.taskmanager"));
+    assert!(INITIAL_SETUP_HELPER_SOURCE.contains("org.kde.plasma.icontasks"));
+    assert!(INITIAL_SETUP_HELPER_SOURCE.contains("widget.writeConfig(\"launchers\", merged)"));
+    assert!(INITIAL_SETUP_HELPER_SOURCE.contains("widget.reloadConfig()"));
+
+    let runtime_sync = ANDROID_SETUP_SOURCE
+        .split("fn sync_session_runtime_files(")
+        .nth(1)
+        .and_then(|source| source.split("fn ").next())
+        .expect("ordinary session asset synchronization must exist");
+    assert!(!runtime_sync.contains("stage_initial_appearance_helper"));
+    assert!(runtime_sync.contains("is_bootable(fs_root)"));
+    assert!(runtime_sync.contains("sync_initial_desktop_defaults(fs_root)"));
+    assert!(!runtime_sync.contains("localdesktop-online-docs.desktop"));
 }
 
 #[test]
@@ -317,21 +374,25 @@ fn nested_android_owned_settings_are_truthful() {
 #[test]
 fn debian_package_management_and_tablet_mode_policy() {
     const PLASMA_LAUNCHER_SOURCE: &str = include_str!("../assets/localdesktop-startplasma.sh");
+    const SYSTEM_CACHES: &str = include_str!("../assets/localdesktop-system-caches.sh");
     assert!(!PLASMA_LAUNCHER_SOURCE.contains("TabletMode auto"));
-    assert!(PLASMA_LAUNCHER_SOURCE.contains("TabletMode off"));
-    assert!(PLASMA_LAUNCHER_SOURCE.contains("update-mime-database"));
-    assert!(PLASMA_LAUNCHER_SOURCE.contains("update-desktop-database"));
-    assert!(PLASMA_LAUNCHER_SOURCE.contains("kbuildsycoca6 --noincremental"));
+    assert!(!PLASMA_LAUNCHER_SOURCE.contains("TabletMode off"));
+    assert!(ANDROID_SETUP_SOURCE.contains("\"TabletMode\", \"off\""));
+    assert!(!PLASMA_LAUNCHER_SOURCE.contains("update-mime-database"));
+    assert!(!PLASMA_LAUNCHER_SOURCE.contains("update-desktop-database"));
+    assert!(SYSTEM_CACHES.contains("update-mime-database"));
+    assert!(SYSTEM_CACHES.contains("update-desktop-database"));
 }
 
 #[test]
 fn ibus_autostart_never_blocks_session_startup() {
     // No package management anywhere on the splash->desktop path.
     assert!(!STARTPLASMA_SOURCE.contains("apt-get"));
-    // The autostart entry delegates to the lazy launcher (returns in
-    // milliseconds), starts after the panel, and carries no fixed sleep.
-    assert!(STARTPLASMA_SOURCE.contains("Exec=/usr/local/bin/portal-ibus-lazy"));
-    assert!(STARTPLASMA_SOURCE.contains("X-KDE-autostart-after=panel"));
+    // First setup seeds the lazy autostart entry once; cold launches never
+    // recreate it after the user removes it.
+    assert!(!STARTPLASMA_SOURCE.contains("Exec=/usr/local/bin/portal-ibus-lazy"));
+    assert!(ANDROID_SETUP_SOURCE.contains("Exec=/usr/local/bin/portal-ibus-lazy"));
+    assert!(ANDROID_SETUP_SOURCE.contains("X-KDE-autostart-after=panel"));
     assert!(!STARTPLASMA_SOURCE.contains("sleep 4; ibus engine portal"));
     // The lazy launcher detaches all work with bounded waits: no apt-get,
     // no blocking sleep on the critical path.
@@ -603,9 +664,11 @@ fn input_method_bridge_and_fallback_policy() {
     assert!(KWIN_WRAPPER_SOURCE.contains("unset GALLIUM_DRIVER"));
     assert!(KWIN_WRAPPER_SOURCE.contains("unset ANLAND_NO_DRM_DEVICE"));
 
-    // 3. Startplasma sets kwinrc InputMethod and VirtualKeyboardMode
-    assert!(STARTPLASMA_SOURCE.contains("InputMethod=/usr/share/applications/portal-ime.desktop"));
-    assert!(STARTPLASMA_SOURCE.contains("VirtualKeyboardMode=1"));
+    // 3. First setup seeds the IME preferences; later Plasma edits remain authoritative.
+    assert!(!STARTPLASMA_SOURCE.contains("InputMethod=/usr/share/applications/portal-ime.desktop"));
+    assert!(!STARTPLASMA_SOURCE.contains("VirtualKeyboardMode=1"));
+    assert!(ANDROID_SETUP_SOURCE.contains("/usr/share/applications/portal-ime.desktop"));
+    assert!(ANDROID_SETUP_SOURCE.contains("\"VirtualKeyboardMode\", \"1\""));
 
     // 4. Portal IME Bridge speaks zwp_input_method_v1 with commit_string (1) and delete_surrounding_text (5)
     assert!(PORTAL_IME_BRIDGE_SOURCE.contains("zwp_input_method_v1"));
@@ -1023,7 +1086,7 @@ fn anland_surface_resume_failures_use_committed_runtime_recovery() {
         .nth(1)
         .and_then(|source| source.split("fn enter_runtime_error_with_mode").next())
         .expect("committed runtime recovery helper must exist");
-    assert!(recovery.contains("enter_runtime_error_with_mode(reason.into(), true)"));
+    assert!(recovery.contains("enter_runtime_error_with_mode(reason.into(), true, false)"));
 }
 
 #[test]

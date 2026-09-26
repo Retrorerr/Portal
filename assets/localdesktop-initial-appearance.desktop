@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Portal Initial Appearance Setup
+Comment=Apply and verify the pending Portal first-run appearance and output scale
+Exec=/usr/local/bin/localdesktop-apply-initial-appearance
+OnlyShowIn=KDE;
+X-KDE-autostart-after=panel

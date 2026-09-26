@@ -30,7 +30,7 @@
 //! the winit event loop.
 
 use jni::{
-    objects::{JClass, JObject, JValue},
+    objects::{JClass, JObject, JString, JValue},
     sys::_jobject,
     JNIEnv,
 };
@@ -599,10 +599,33 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayShowFail
 /// the UI thread and cannot create a duplicate operation.
 #[no_mangle]
 pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeBeginInstall(
+    mut env: JNIEnv,
+    _class: JObject,
+    plan_json: JString,
+) -> jni::sys::jboolean {
+    let plan_json = match env.get_string(&plan_json) {
+        Ok(value) => value.to_string_lossy().into_owned(),
+        Err(error) => {
+            log::error!("Could not read proposed install plan from Compose: {error}");
+            clear_exception(&mut env, "read native install plan");
+            return 0;
+        }
+    };
+    if crate::android::proot::setup::begin_install(&plan_json) {
+        1
+    } else {
+        0
+    }
+}
+
+/// JNI bridge for retrying the same app-private accepted plan. No current UI
+/// selections or display metrics cross this retry edge.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRetryInstall(
     _env: JNIEnv,
     _class: JObject,
 ) -> jni::sys::jboolean {
-    if crate::android::proot::setup::begin_install() {
+    if crate::android::proot::setup::retry_install() {
         1
     } else {
         0

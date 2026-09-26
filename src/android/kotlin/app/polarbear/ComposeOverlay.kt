@@ -35,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
+import app.polarbear.setup.InstallPlan
 import app.polarbear.setup.PortalLaunchTransition
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -57,7 +58,9 @@ object ComposeOverlay {
     @JvmStatic external fun nativeOnOverlayRemoved()
     @JvmStatic external fun nativeOnOverlayShown()
     @JvmStatic external fun nativeOnOverlayShowFailed(reason: String)
-    @JvmStatic external fun nativeBeginInstall(): Boolean
+    @JvmStatic external fun nativeBeginInstall(planJson: String): Boolean
+    /** Retry only an already-persisted native plan; never synthesize UI defaults. */
+    @JvmStatic external fun nativeRetryInstall(): Boolean
     /** Explicit repair action for an already-installed QPainter/legacy runtime. */
     @JvmStatic external fun nativeRepairEnableAnland(): Boolean
     /** Return to the existing committed-runtime recovery page after a repair failure. */
@@ -241,14 +244,25 @@ object ComposeOverlay {
         composeView?.post { anlandRepairStateValue.value = anlandRepairStateSnapshot }
     }
 
-    /** Start or attach to the one native provisioning operation. */
-    @JvmStatic fun beginInstall(): Boolean = try {
-        nativeBeginInstall()
+    /** Persist and start exactly the immutable first-run plan accepted by the user. */
+    @JvmStatic fun beginInstall(plan: InstallPlan): Boolean = try {
+        nativeBeginInstall(plan.toNativeJson())
     } catch (_: UnsatisfiedLinkError) {
         Log.e(TAG, "nativeBeginInstall unavailable")
         false
     } catch (e: Exception) {
         Log.e(TAG, "nativeBeginInstall failed", e)
+        false
+    }
+
+    /** Attach to the durable pending plan after a failed or restarted install. */
+    @JvmStatic fun retryInstall(): Boolean = try {
+        nativeRetryInstall()
+    } catch (_: UnsatisfiedLinkError) {
+        Log.e(TAG, "nativeRetryInstall unavailable")
+        false
+    } catch (e: Exception) {
+        Log.e(TAG, "nativeRetryInstall failed", e)
         false
     }
 
