@@ -35,7 +35,6 @@ const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 struct Paths {
-    root: PathBuf,
     host_log: PathBuf,
     guest_log: PathBuf,
     stages_log: PathBuf,
@@ -88,7 +87,6 @@ pub fn initialize() {
         guest_log: root.join(GUEST_LOG),
         stages_log: root.join(STAGES_LOG),
         archive_dir: root.join("exports"),
-        root,
     };
     let _ = fs::create_dir_all(&paths.archive_dir);
     let _ = PATHS.set(paths);
@@ -125,6 +123,10 @@ fn guest_state_dir() -> PathBuf {
     crate::android::runtime::proot::PRootRuntime::active()
         .rootfs_path()
         .join("var/lib/localdesktop")
+}
+
+fn guest_session_state_dir() -> PathBuf {
+    guest_state_dir().join("session")
 }
 
 /// Append a guest-side event and mirror it into the guest rootfs.  Mirroring
@@ -221,7 +223,7 @@ fn mark_plasma_frame_presented_with_evidence(
     evidence: &str,
     presentation_timestamp_ns: Option<i64>,
 ) {
-    let marker = guest_state_dir().join("plasma-ready");
+    let marker = guest_session_state_dir().join("plasma-ready");
     if let Some(parent) = marker.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -278,7 +280,7 @@ pub fn desktop_exit(status: Option<i32>, elapsed_ms: u128) {
         &format!("status={status_text} elapsed_ms={elapsed_ms}"),
     );
     if status.is_some_and(|value| value == 139 || value == 134 || value >= 128) {
-        let marker = guest_state_dir().join("kwin-crash");
+        let marker = guest_session_state_dir().join("kwin-crash");
         if let Some(parent) = marker.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -302,7 +304,7 @@ pub fn desktop_exit(status: Option<i32>, elapsed_ms: u128) {
 /// real debugger trace when `gdb`/`coredumpctl` are available; this fallback
 /// preserves the command, environment and signal even on minimal guests.
 pub fn kwin_crash_metadata(args: &str, status: i32, pid: Option<i32>) {
-    let path = guest_state_dir().join("kwin-backtrace.log");
+    let path = guest_session_state_dir().join("kwin-backtrace.log");
     let text = format!(
         "timestamp_ms={} status={} pid={} args={}\nbacktrace=best-effort wrapper metadata; no debugger available\n",
         now_ms(),

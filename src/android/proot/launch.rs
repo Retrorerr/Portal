@@ -1,6 +1,6 @@
 use super::process::ArchProcess;
 use crate::android::{
-    diagnostics, utils::application_context::get_application_context, utils::webview_handoff,
+    diagnostics, utils::webview_handoff,
 };
 use crate::core::runtime::LinuxRuntime;
 use std::fs;
@@ -69,7 +69,7 @@ pub fn take_failure() -> Option<String> {
 
 fn clear_failure_markers() {
     let runtime = crate::android::runtime::proot::PRootRuntime::active();
-    let state_dir = runtime.rootfs_path().join("var/lib/localdesktop");
+    let state_dir = runtime.rootfs_path().join("var/lib/localdesktop/session");
     for marker in ["plasma-failed", "kwin-crash", "plasma-ready"] {
         let _ = fs::remove_file(state_dir.join(marker));
     }
@@ -98,7 +98,7 @@ fn marker_reason(path: &Path, name: &str) -> String {
 fn spawn_failure_monitor(cancel: Arc<AtomicBool>) -> JoinHandle<()> {
     thread::spawn(move || {
         let runtime = crate::android::runtime::proot::PRootRuntime::active();
-        let state_dir = runtime.rootfs_path().join("var/lib/localdesktop");
+        let state_dir = runtime.rootfs_path().join("var/lib/localdesktop/session");
         let mut last_net_sync = Instant::now();
         while !cancel.load(Ordering::Acquire) {
             for name in ["plasma-failed", "kwin-crash"] {
@@ -151,7 +151,10 @@ pub fn launch() {
 
     let runtime = crate::android::runtime::proot::PRootRuntime::active();
     let rootfs = runtime.rootfs_path();
-    if !crate::core::provisioning::RuntimeArtifact::production().is_bootable(rootfs) {
+    let committed = crate::core::provisioning::RuntimeArtifact::production().is_bootable(rootfs);
+    let pending_initial_preferences = !committed
+        && crate::android::proot::setup::can_launch_pending_initial_preferences(rootfs);
+    if !committed && !pending_initial_preferences {
         log::error!("Refusing to launch an incomplete or incompatible Debian runtime");
         LAUNCH_RUNNING.store(false, Ordering::Release);
         // Surface the failure instead of sitting on a blank UI: an
@@ -162,13 +165,14 @@ pub fn launch() {
         );
         return;
     }
+    if pending_initial_preferences {
+        log::info!("Launching provisional Plasma session to apply initial preferences");
+    }
     log::info!("launch: active runtime rootfs is {}", rootfs.display());
     if crate::android::proot::setup::take_prepared_anland_launch() {
-        // The explicit Anland repair worker just completed the narrow,
-        // checked Portal-owned session sync. Do not immediately replay the
-        // broad normal-launch migration against the user's home/configuration
-        // before starting the session. Future launches intentionally take the
-        // normal path below.
+        // The explicit Anland repair worker already refreshed Portal-owned
+        // session support. A normal launch below now preserves the committed
+        // user's home and Plasma configuration too.
         log::info!("launch: using validated Anland repair handoff assets");
     } else if let Err(error) =
         crate::android::proot::setup::try_sync_session_runtime_files(&rootfs, 1)
@@ -203,6 +207,14 @@ pub fn launch() {
         let _guard = LaunchRunningGuard;
         diagnostics::host_event("desktop-launch", "starting configured Plasma session");
 
+        if let Err(error) = crate::android::proot::setup::prepare_desktop_login(committed) {
+            log::error!("Refusing graphical launch: {error:#}");
+            report_failure(format!(
+                "Portal could not prepare the persistent Debian desktop user: {error:#}"
+            ));
+            return;
+        }
+
         // Clean up potential leftover files for display :1 in one guest process.
         ArchProcess {
             command: "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1".into(),
@@ -211,8 +223,7 @@ pub fn launch() {
         }
         .run_with_cancel(thread_cancel.clone());
 
-        let local_config = get_application_context().local_config;
-        let username = local_config.user.username;
+        let username = crate::core::config::DESKTOP_USER.to_owned();
 
         let started = Instant::now();
         let broker_environment = crate::android::clipboard::ClipboardBridge::broker_environment();
@@ -248,7 +259,9 @@ pub fn launch() {
         }
         let broker_environment = broker_environment.into_iter().chain(extra_env);
         let output = ArchProcess {
-            command: local_config.command.launch,
+            // Graphical login is a fixed, validated unprivileged boundary;
+            // legacy config commands must not restore a root Plasma session.
+            command: "/usr/local/bin/startplasma-localdesktop".into(),
             user: Some(username),
             log: Some(Arc::new(|it| log::info!("guest-session: {}", it))),
         }

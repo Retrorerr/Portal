@@ -48,6 +48,10 @@ SEED_PACKAGES = [
     "dbus-user-session",
     "dbus-bin",
     "dbus-daemon",
+    "xdg-desktop-portal",
+    "xdg-desktop-portal-kde",
+    "xdg-desktop-portal-gtk",
+    "xdg-utils",
     # Audio
     "pipewire",
     "wireplumber",
@@ -628,6 +632,7 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked
     )
     with open(passwd, "w", newline="\n", encoding="utf-8") as f:
         f.write(passwd_content)
+    passwd.chmod(0o644)
 
     group = output_dir / "etc" / "group"
     group_content = (
@@ -637,6 +642,7 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked
         "video:x:44:desktop\n"
     )
     group.write_text(group_content)
+    group.chmod(0o644)
 
     # Ensure /etc/default/locale exists
     default_locale = output_dir / "etc" / "default" / "locale"

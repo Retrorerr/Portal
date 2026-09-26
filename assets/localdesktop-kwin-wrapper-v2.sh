@@ -4,7 +4,7 @@
 # denied and running every launch under gdb changes startup timing.
 set -o pipefail
 
-state_dir=/var/lib/localdesktop
+state_dir=/var/lib/localdesktop/session
 mkdir -p "$state_dir"
 log_file="$state_dir/kwin.log"
 trace_file="$state_dir/kwin-backtrace.log"

@@ -35,6 +35,9 @@ pub fn user_manual_url() -> String {
 }
 
 pub const WAYLAND_SOCKET_NAME: &str = "wayland-0";
+pub const DESKTOP_USER: &str = "desktop";
+pub const DESKTOP_UID: u32 = 1000;
+pub const DESKTOP_RUNTIME_DIR: &str = "/run/user/1000";
 
 pub const MAX_PANEL_LOG_ENTRIES: usize = 100;
 
@@ -73,7 +76,7 @@ pub struct UserConfig {
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
-            username: "root".to_string(),
+            username: DESKTOP_USER.to_string(),
         }
     }
 }
@@ -98,7 +101,7 @@ fn default_install() -> String {
 }
 /// Direct the desktop session to the compositor and the host PipeWire socket.
 fn default_launch() -> String {
-    format!("export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR} PULSE_SERVER={PULSE_GUEST_SERVER}; XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE /usr/local/bin/startplasma-localdesktop 2>&1")
+    format!("export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR} PULSE_SERVER={PULSE_GUEST_SERVER}; XDG_RUNTIME_DIR={DESKTOP_RUNTIME_DIR} WAYLAND_DISPLAY=/tmp/wayland-0 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE /usr/local/bin/startplasma-localdesktop 2>&1")
         .to_string()
 }
 
@@ -296,7 +299,9 @@ mod tests {
         assert!(config.check.contains("kscreen"));
         assert_eq!(config.install, "true");
         assert!(config.launch.contains("startplasma-localdesktop"));
-        assert!(config.launch.contains("WAYLAND_DISPLAY=wayland-0"));
+        assert!(config.launch.contains("WAYLAND_DISPLAY=/tmp/wayland-0"));
+        assert!(config.launch.contains("XDG_RUNTIME_DIR=/run/user/1000"));
+        assert_eq!(UserConfig::default().username, DESKTOP_USER);
         assert!(config.launch.contains("XDG_CURRENT_DESKTOP=KDE"));
 
         let defaults = format!("{} {} {}", config.check, config.install, config.launch);

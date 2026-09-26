@@ -606,15 +606,9 @@ impl PolarBearApp {
                 android_app,
             );
         });
-        // The HTML page has no Compose Begin button. Its initial page is only
-        // a fallback for a failed/hidden overlay, so start the same native
-        // coordinator after showing it. A failure page remains user-driven by
-        // its explicit Retry Setup action.
-        if matches!(&backend.error, ErrorVariant::None)
-            && crate::android::proot::setup::should_auto_begin_install()
-        {
-            crate::android::proot::setup::begin_install();
-        }
+        // Only Compose can accept first-run choices. An accepted plan is
+        // resumed by setup_with_completion from its durable native record;
+        // showing the HTML fallback must never start an install from defaults.
     }
 
     /// Complete the committed-install runtime-error handoff after Compose
@@ -635,17 +629,30 @@ impl PolarBearApp {
     /// configuration remain alive, so Android does not briefly expose a blank native surface or
     /// require a fixed-delay activity recreation.
     fn enter_runtime_error(&mut self, reason: impl Into<String>) {
-        self.enter_runtime_error_with_mode(reason.into(), false);
+        self.enter_runtime_error_with_mode(reason.into(), false, false);
+    }
+
+    fn enter_initial_preferences_error(&mut self, reason: impl Into<String>) {
+        // The native worker also queues this failure to wake a waiting event
+        // loop. Direct launch failures are already handled on this loop, so
+        // consume that edge before replacing the backend a second time.
+        let _ = crate::android::proot::setup::take_initial_preferences_failure();
+        self.enter_runtime_error_with_mode(reason.into(), false, true);
     }
 
     /// Runtime launch failure after the installer has committed. The durable
     /// marker remains untouched and the existing HTML runtime-error page
     /// provides Retry Plasma; it must not be represented as setup failure.
     fn enter_committed_install_runtime_error(&mut self, reason: impl Into<String>) {
-        self.enter_runtime_error_with_mode(reason.into(), true);
+        self.enter_runtime_error_with_mode(reason.into(), true, false);
     }
 
-    fn enter_runtime_error_with_mode(&mut self, reason: String, committed_install: bool) {
+    fn enter_runtime_error_with_mode(
+        &mut self,
+        reason: String,
+        committed_install: bool,
+        initial_preferences_setup: bool,
+    ) {
         let android_app = self.frontend.android_app.clone();
         // Reap the tracked PRoot/session worker before dropping the compositor. Otherwise its
         // launch guard can keep the next Retry Plasma request from starting a new session.
@@ -665,8 +672,11 @@ impl PolarBearApp {
         pipewire_standalone_aaudio::shutdown();
         webview_handoff::clear();
         log::error!("Switching to graphical runtime error screen: {reason}");
-        self.backend =
-            PolarBearBackend::WebView(WebviewBackend::runtime_error(android_app, reason));
+        self.backend = PolarBearBackend::WebView(if initial_preferences_setup {
+            WebviewBackend::setup_error(android_app, reason)
+        } else {
+            WebviewBackend::runtime_error(android_app, reason)
+        });
         self.pending_runtime_error_page = false;
         if committed_install {
             if compose_overlay::is_hidden() {
@@ -711,7 +721,7 @@ impl PolarBearApp {
             PolarBearBackend::Wayland(_) => (false, false),
         };
         if retry_setup {
-            crate::android::proot::setup::begin_install();
+            crate::android::proot::setup::retry_install();
             return;
         };
         if !retry_runtime {
@@ -860,6 +870,70 @@ impl PolarBearApp {
         }
     }
 
+    /// Start the one provisional Plasma session needed to apply the accepted
+    /// first-run appearance and KScreen output scale.  The persisted plan and
+    /// prepared runtime are checked again by the builder; this event is only a
+    /// wake after the setup popup has closed, never installation truth.
+    fn handle_initial_preferences_handoff(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if webview_handoff::is_open() {
+            return false;
+        }
+        if !webview_handoff::take_initial_preferences_handoff() {
+            return false;
+        }
+        if is_running() {
+            webview_handoff::requeue_initial_preferences_handoff();
+            return false;
+        }
+
+        let android_app = self.frontend.android_app.clone();
+        let old_backend = std::mem::replace(
+            &mut self.backend,
+            PolarBearBackend::WebView(WebviewBackend::runtime_error(
+                android_app.clone(),
+                "Portal is applying your initial Plasma preferences…",
+            )),
+        );
+        drop(old_backend);
+        let backend = match crate::android::proot::setup::build_pending_wayland_backend(
+            android_app.clone(),
+        ) {
+            Ok(backend) => backend,
+            Err(error) => {
+                let reason = format!("Could not start Plasma to apply initial preferences: {error:#}");
+                crate::android::proot::setup::fail_initial_preferences_handoff(&reason);
+                self.enter_initial_preferences_error(reason);
+                return true;
+            }
+        };
+        self.backend = backend;
+        let resumed = if let PolarBearBackend::Wayland(backend) = &mut self.backend {
+            resume_wayland(backend, event_loop, &android_app)
+        } else {
+            false
+        };
+        if !resumed {
+            let reason = "Plasma could not start to apply initial preferences";
+            crate::android::proot::setup::fail_initial_preferences_handoff(reason);
+            self.enter_initial_preferences_error(reason);
+            return true;
+        }
+        if let PolarBearBackend::Wayland(_) = &self.backend {
+            crate::android::tablet_mode_manager::apply_kwin_tablet_mode(
+                ime::is_desktop_input_present(),
+            );
+        }
+        true
+    }
+
+    fn handle_initial_preferences_failure(&mut self) -> bool {
+        let Some(reason) = crate::android::proot::setup::take_initial_preferences_failure() else {
+            return false;
+        };
+        self.enter_initial_preferences_error(reason);
+        true
+    }
+
     /// Transition from completed provisioning WebView to Wayland backend in-process.
     /// Returns true if a transition occurred.
     fn handle_setup_complete(&mut self, event_loop: &ActiveEventLoop) -> bool {
@@ -924,6 +998,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         if self.handle_anland_repair_result(event_loop) {
             return;
         }
+        if self.handle_initial_preferences_failure() {
+            return;
+        }
         // SPIKE compose-setup: on the first process resume, show the Compose veil,
         // then immediately continue the normal native resume path underneath it.
         // The Activity is never recreated; later resumes use the same paths below.
@@ -972,11 +1049,15 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         }
         if let Some(reason) = take_failure() {
             if matches!(&self.backend, PolarBearBackend::Wayland(_)) {
-                // A Wayland backend is only built from a bootable committed
-                // runtime. Any producer/guest failure here is therefore a
-                // runtime-launch failure, including ordinary Anland resume,
-                // not an incomplete installation.
-                self.enter_committed_install_runtime_error(reason);
+                let runtime = crate::android::runtime::proot::PRootRuntime::active();
+                if crate::core::provisioning::RuntimeArtifact::production()
+                    .is_bootable(runtime.rootfs_path())
+                {
+                    self.enter_committed_install_runtime_error(reason);
+                } else {
+                    crate::android::proot::setup::fail_initial_preferences_handoff(&reason);
+                    self.enter_initial_preferences_error(reason);
+                }
                 return;
             }
         }
@@ -987,6 +1068,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             return;
         }
         if matches!(&self.backend, PolarBearBackend::WebView(_)) {
+            if self.handle_initial_preferences_handoff(event_loop) {
+                return;
+            }
             if self.handle_setup_complete(event_loop) {
                 return;
             }
@@ -1036,9 +1120,20 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         if self.handle_anland_repair_result(event_loop) {
             return;
         }
+        if self.handle_initial_preferences_failure() {
+            return;
+        }
         if let Some(reason) = take_failure() {
             if matches!(&self.backend, PolarBearBackend::Wayland(_)) {
-                self.enter_committed_install_runtime_error(reason);
+                let runtime = crate::android::runtime::proot::PRootRuntime::active();
+                if crate::core::provisioning::RuntimeArtifact::production()
+                    .is_bootable(runtime.rootfs_path())
+                {
+                    self.enter_committed_install_runtime_error(reason);
+                } else {
+                    crate::android::proot::setup::fail_initial_preferences_handoff(&reason);
+                    self.enter_initial_preferences_error(reason);
+                }
                 return;
             }
         }
@@ -1065,6 +1160,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             // Retry Plasma may have replaced the error page with a live Wayland backend. Do not
             // run setup-completion handling against that newly installed backend.
             if !matches!(&self.backend, PolarBearBackend::WebView(_)) {
+                return;
+            }
+            if self.handle_initial_preferences_handoff(event_loop) {
                 return;
             }
             if self.handle_setup_complete(event_loop) {

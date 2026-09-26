@@ -14,6 +14,41 @@ const ERROR_PAGE: &str = include_str!("../assets/runtime-error.html");
 const ANDROID_MAIN: &str = include_str!("../src/android/main.rs");
 const DRMSHIM_SOURCE: &str = include_str!("../assets/guest-arm64/drmshim.c");
 const DRMSHIM_BINARY: &[u8] = include_bytes!("../assets/guest-arm64/drmshim.so");
+const AUDIO_SUPERVISOR: &str = include_str!("../src/android/backend/pipewire_standalone_aaudio.rs");
+const LOGIN_HELPER: &str = include_str!("../assets/localdesktop-prepare-login.py");
+const ROOTFS_BUILDER: &str = include_str!("../scripts/build_debian_rootfs.py");
+
+#[test]
+fn graphical_login_is_nonroot_and_keeps_privileged_install_plan_separate() {
+    assert!(LOGIN_HELPER.contains("UID = GID = 1000"));
+    assert!(LOGIN_HELPER.contains("HOME = Path(\"/home/desktop\")"));
+    assert!(LOGIN_HELPER.contains("RUNTIME = Path(\"/run/user/1000\")"));
+    assert!(LOGIN_HELPER.contains("SESSION = Path(\"/var/lib/localdesktop/session\")"));
+    assert!(LOGIN_HELPER.contains("if destination.exists() or destination.is_symlink():"));
+    assert!(LOGIN_HELPER.contains("merge(child, destination / child.name"));
+    assert!(LOGIN_HELPER.contains("write_marker(*result)"));
+    assert!(PLASMA_LAUNCHER.contains("XDG_RUNTIME_DIR=/run/user/1000"));
+    assert!(PLASMA_LAUNCHER.contains("WAYLAND_DISPLAY=/tmp/wayland-0"));
+    assert!(PLASMA_LAUNCHER.contains("state_dir=/var/lib/localdesktop/session"));
+    assert!(KWIN_WRAPPER.contains("state_dir=/var/lib/localdesktop/session"));
+    assert!(!PLASMA_LAUNCHER.contains("state_dir=/var/lib/localdesktop\n"));
+    assert!(ROOTFS_BUILDER.contains("desktop:x:1000:1000"));
+    assert!(SETUP.contains(".with_user(DESKTOP_USER)"));
+    assert!(SETUP.contains("fs_root.join(\"root/.config/autostart/localdesktop-session-init.desktop\")"));
+}
+
+#[test]
+fn audio_supervisor_recovers_dead_or_disconnected_backend_without_changing_guest_sockets() {
+    assert!(AUDIO_SUPERVISOR.contains("AAUDIO_SINK_ERROR_PID"));
+    assert!(AUDIO_SUPERVISOR.contains("AAudio stream disconnected in sink"));
+    assert!(AUDIO_SUPERVISOR.contains("SocketCleanupOnError"));
+    assert!(AUDIO_SUPERVISOR.contains("schedule_start(android_app)"));
+    assert!(AUDIO_SUPERVISOR.contains("AAUDIO_OPERATION.lock()"));
+    assert!(AUDIO_SUPERVISOR.contains(".join(\"tmp\")"));
+    assert!(PLASMA_LAUNCHER.contains("PULSE_SERVER=unix:/tmp/pulse/native"));
+    assert!(PLASMA_LAUNCHER.contains("audio_connects"));
+    assert!(AUDIO_SUPERVISOR.contains("!pulse_bin.exists()"));
+}
 
 #[test]
 fn kwin_wrapper_does_not_make_gdb_a_release_requirement() {
@@ -60,8 +95,8 @@ fn plasma_launcher_waits_for_host_presented_marker() {
     assert!(PLASMA_LAUNCHER.contains("plasma-ready"));
     assert!(PLASMA_LAUNCHER.contains("dbus-run-session -- /usr/bin/startplasma-wayland"));
     assert!(PLASMA_LAUNCHER.contains("KDE_USE_SYSTEMD=0"));
-    assert!(PLASMA_LAUNCHER.contains("systemdBoot false"));
-    assert!(PLASMA_LAUNCHER.contains("loginMode emptySession"));
+    assert!(!PLASMA_LAUNCHER.contains("systemdBoot false"));
+    assert!(!PLASMA_LAUNCHER.contains("loginMode emptySession"));
     assert!(!PLASMA_LAUNCHER.contains("pgrep plasmashell"));
     assert!(
         PLASMA_LAUNCHER.contains("rm -f \"$ready_marker\" \"$failure_marker\" \"$crash_marker\"")
@@ -93,13 +128,38 @@ fn proot_starts_guest_processes_with_debian_shell_defaults() {
 }
 
 #[test]
-fn electron_desktop_entries_receive_proot_safe_startup_flags() {
+fn preinstall_support_probe_keeps_diagnostics_out_of_runtime_b() {
+    let support_check = PROOT_RUNTIME
+        .split("pub fn is_supported")
+        .nth(1)
+        .and_then(|source| source.split("fn ensure_support_probe_rootfs").next())
+        .expect("PRoot support check must remain present");
+    assert!(support_check.contains("diagnostics::host_event("));
+    assert!(!support_check.contains("diagnostics::guest_event("));
+
+    let probe = PROOT_RUNTIME
+        .split("fn try_proot_probe")
+        .nth(1)
+        .and_then(|source| source.split("\nfn drain_stream").next())
+        .expect("PRoot support probe must remain present");
+    assert!(probe.contains("diagnostics::host_event("));
+    assert!(!probe.contains("diagnostics::guest_event("));
+}
+
+#[test]
+fn electron_helper_remains_available_without_automatic_desktop_rewrites() {
     assert!(SETUP.contains("resources/app.asar"));
     assert!(SETUP.contains("--no-sandbox"));
     assert!(SETUP.contains("--no-stdio-init"));
     assert!(SETUP.contains("--ozone-platform=wayland"));
-    assert!(SETUP.contains("99portal-desktop-integration"));
-    assert!(SETUP.contains("desktop-integration.log"));
+    assert!(SETUP.contains("retire_legacy_desktop_mutators"));
+    assert!(!PLASMA_LAUNCHER.contains("localdesktop-no-sandbox-entries"));
+    let package_setup = SETUP
+        .split("fn sync_debian_package_management(")
+        .nth(1)
+        .and_then(|source| source.split("fn ").next())
+        .expect("Debian package setup must exist");
+    assert!(!package_setup.contains("99portal-desktop-integration"));
     assert!(SETUP.contains("$dst.portal-tmp.$$"));
 }
 
@@ -109,9 +169,12 @@ fn kwin_wrapper_disables_guest_screenlocker() {
 }
 
 #[test]
-fn plasma_launcher_and_setup_disable_guest_screenlocker() {
-    assert!(PLASMA_LAUNCHER.contains("action/lock_screen"));
-    assert!(PLASMA_LAUNCHER.contains("Autolock false"));
+fn first_setup_seeds_guest_screenlocker_defaults_without_rewriting_them_at_launch() {
+    assert!(!PLASMA_LAUNCHER.contains("kwriteconfig6"));
+    assert!(!PLASMA_LAUNCHER.contains("Desktop/"));
+    assert!(!PLASMA_LAUNCHER.contains("plasma-systemmonitor"));
+    assert!(!PLASMA_LAUNCHER.contains("action/lock_screen"));
+    assert!(!PLASMA_LAUNCHER.contains("Autolock false"));
     assert!(SETUP.contains("action/lock_screen"));
     assert!(SETUP.contains("kscreenlockerrc"));
 }

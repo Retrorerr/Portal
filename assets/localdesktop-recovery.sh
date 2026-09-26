@@ -14,9 +14,10 @@ case "$output_scale" in
     ''|*@*|*[!0-9.]*) output_scale=2 ;;
 esac
 
-export XDG_RUNTIME_DIR=/tmp
-export WAYLAND_DISPLAY=wayland-0
+export XDG_RUNTIME_DIR=/run/user/1000
+export WAYLAND_DISPLAY=/tmp/wayland-0
 export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=plasma
 export XDG_CURRENT_DESKTOP=KDE
 export KDE_FULL_SESSION=true
 export ELECTRON_DISABLE_SANDBOX=1
@@ -29,7 +30,7 @@ cursor_int="${output_scale%.*}"
 [ "$cursor_int" -ge 1 ] 2>/dev/null || cursor_int=2
 export XCURSOR_SIZE=$(( 24 * cursor_int ))
 
-state_dir=/var/lib/localdesktop
+state_dir=/var/lib/localdesktop/session
 mkdir -p "$state_dir"
 failure_marker="$state_dir/plasma-failed"
 labwc_pid_file="$state_dir/labwc.pid"
@@ -89,7 +90,7 @@ ENV
 
     cat > "$config_dir/autostart" <<'AUTOSTART'
 #!/bin/sh
-state_dir=/var/lib/localdesktop
+state_dir=/var/lib/localdesktop/session
 failure_marker="$state_dir/plasma-failed"
 message="$state_dir/recovery-message.txt"
 

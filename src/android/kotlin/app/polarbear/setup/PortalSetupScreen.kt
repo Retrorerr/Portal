@@ -6,6 +6,8 @@ package app.polarbear.setup
 // durable provisioning snapshot consumed below.
 
 import android.animation.ValueAnimator
+import android.content.Context
+import android.content.res.Configuration
 import android.util.Log
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -41,6 +43,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -68,6 +71,7 @@ import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.setup.components.AddAppsPicker
@@ -84,12 +88,14 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
 import app.polarbear.setup.components.PortalAgslGlow
 import app.polarbear.setup.components.SlidingSegmentedControl
 import app.polarbear.setup.components.portalBloom
 import app.polarbear.ComposeOverlay
+import kotlin.math.roundToInt
 
 private const val PREVIEW_TAG = "PortalComposeSetup"
 private const val READY_BACKGROUND_ALPHA = 0.83f
@@ -145,7 +151,7 @@ fun PortalSetupScreen(
     var pickerBounds by remember { mutableStateOf(Rect.Zero) }
     var rootOrigin by remember { mutableStateOf(Offset.Zero) }
     var pickerVisible by remember { mutableStateOf(false) }
-    var essentials by remember { mutableStateOf(DEFAULT_ESSENTIALS) }
+    var optionalAppIds by remember { mutableStateOf(DEFAULT_OPTIONAL_APP_IDS) }
     var settingsHeightPx by remember { mutableStateOf(0) }
     var appearanceControlTopPx by remember { mutableStateOf(0f) }
     var interfaceControlBottomPx by remember { mutableStateOf(0f) }
@@ -157,7 +163,11 @@ fun PortalSetupScreen(
         else -> SetupPhase.Configure
     }
     var beginAccepted by remember { mutableStateOf(false) }
-    var frozenEssentials by remember { mutableStateOf(DEFAULT_ESSENTIALS) }
+    // Only a native-persisted plan survives process death. Keep this local
+    // snapshot solely for truthful in-process progress presentation; never
+    // regenerate a plan from the visual defaults after a restart.
+    var acceptedPlan by remember { mutableStateOf<InstallPlan?>(null) }
+    var installSubmissionError by remember { mutableStateOf<String?>(null) }
     val installProgressState: State<Float> = androidx.compose.animation.core.animateFloatAsState(
         targetValue = nativeInstallState.progress / 100f,
         animationSpec = tween(360),
@@ -172,17 +182,39 @@ fun PortalSetupScreen(
         }
     }
 
+    val context = LocalContext.current
     val beginLocalInstall: () -> Unit = {
         if (phase == SetupPhase.Configure && !beginAccepted) {
-            if (ComposeOverlay.beginInstall()) {
+            installSubmissionError = null
+            val planResult = runCatching {
+                InstallPlan.fromSelections(
+                    appearance = appearance,
+                    systemIsDark = androidSystemIsDark(context),
+                    interfaceSize = interfaceSize,
+                    displayMetrics = currentInstallDisplayMetrics(context),
+                    selectedAppIds = optionalAppIds,
+                )
+            }
+            val plan = planResult.getOrNull()
+            if (plan == null) {
+                Log.e(PREVIEW_TAG, "Unable to create first-run install plan", planResult.exceptionOrNull())
+                installSubmissionError =
+                    "Current display settings are outside Portal’s supported range. Adjust them in Android Settings and try again."
+            } else if (ComposeOverlay.beginInstall(plan)) {
                 beginAccepted = true
-                frozenEssentials = essentials.toSet()
+                acceptedPlan = plan
                 pickerVisible = false
+            } else {
+                installSubmissionError = "Portal didn’t accept these install settings. Please try again."
             }
         } else if (phase == SetupPhase.Failed) {
-            // Retry re-attaches to the process-lifetime native coordinator;
-            // it never creates a second installer or clears safe disk state.
-            ComposeOverlay.beginInstall()
+            // Retry re-attaches only to the durable native plan. In particular,
+            // a recreated Compose tree must not turn its visual defaults into a
+            // new installation request.
+            installSubmissionError = null
+            if (!ComposeOverlay.retryInstall()) {
+                installSubmissionError = "Portal couldn’t resume the saved installation. Please try again."
+            }
         }
     }
     val palette = resolvePalette(appearance)
@@ -333,9 +365,15 @@ fun PortalSetupScreen(
                                 ) {
                                     AddAppsPicker(
                                         expanded = pickerVisible,
-                                        selectedIds = essentials,
+                                        selectedIds = optionalAppIds,
                                         onExpandedChange = { pickerVisible = it },
-                                        onToggle = { id -> essentials = if (id in essentials) essentials - id else essentials + id },
+                                        onToggle = { id ->
+                                            optionalAppIds = if (id in optionalAppIds) {
+                                                optionalAppIds - id
+                                            } else {
+                                                optionalAppIds + id
+                                            }
+                                        },
                                         onBounds = { pickerBounds = it },
                                         palette = palette,
                                         collapsedHeight = addAppsCollapsedHeight,
@@ -358,13 +396,17 @@ fun PortalSetupScreen(
                             ) {
                                 StorageCapacityBar(
                                     capacity = capacity,
-                                    selectedIds = if (phase == SetupPhase.Configure) essentials else frozenEssentials,
+                                    selectedIds = if (phase == SetupPhase.Configure) {
+                                        optionalAppIds
+                                    } else {
+                                        acceptedPlan?.selectedAppIds?.toSet()
+                                    },
                                     palette = palette,
                                     modifier = Modifier.weight(1f),
                                     phase = phase,
                                     installProgress = installProgressState,
                                     installMessage = nativeInstallState.message,
-                                    hasSelectedApps = frozenEssentials.isNotEmpty(),
+                                    hasSelectedApps = acceptedPlan?.selectedAppIds?.isNotEmpty(),
                                 )
                                 // Reserve the button, let its unchanged 56dp glow
                                 // overlap the footer breathing room instead of
@@ -374,6 +416,7 @@ fun PortalSetupScreen(
                                     desktopReady = desktopReady,
                                     palette = palette,
                                     inactiveConfigurationModifier = configurationVisual,
+                                    errorMessage = installSubmissionError,
                                     onBeginInstall = beginLocalInstall,
                                 )
                             }
@@ -402,9 +445,15 @@ fun PortalSetupScreen(
                             Spacer(modifier = Modifier.height(11.dp))
                             AddAppsPicker(
                                 expanded = pickerVisible,
-                                selectedIds = essentials,
+                                selectedIds = optionalAppIds,
                                 onExpandedChange = { pickerVisible = it },
-                                onToggle = { id -> essentials = if (id in essentials) essentials - id else essentials + id },
+                                onToggle = { id ->
+                                    optionalAppIds = if (id in optionalAppIds) {
+                                        optionalAppIds - id
+                                    } else {
+                                        optionalAppIds + id
+                                    }
+                                },
                                 onBounds = { pickerBounds = it },
                                 palette = palette,
                                 enabled = phase == SetupPhase.Configure,
@@ -413,12 +462,16 @@ fun PortalSetupScreen(
                         Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
                         StorageCapacityBar(
                             capacity = capacity,
-                            selectedIds = if (phase == SetupPhase.Configure) essentials else frozenEssentials,
+                            selectedIds = if (phase == SetupPhase.Configure) {
+                                optionalAppIds
+                            } else {
+                                acceptedPlan?.selectedAppIds?.toSet()
+                            },
                             palette = palette,
                             phase = phase,
                             installProgress = installProgressState,
                             installMessage = nativeInstallState.message,
-                            hasSelectedApps = frozenEssentials.isNotEmpty(),
+                            hasSelectedApps = acceptedPlan?.selectedAppIds?.isNotEmpty(),
                         )
                         Spacer(Modifier.height(28.dp))
                         Box(Modifier.fillMaxWidth().padding(bottom = 26.dp), contentAlignment = Alignment.Center) {
@@ -427,6 +480,7 @@ fun PortalSetupScreen(
                                 desktopReady = desktopReady,
                                 palette = palette,
                                 inactiveConfigurationModifier = configurationVisual,
+                                errorMessage = installSubmissionError,
                                 onBeginInstall = beginLocalInstall,
                             )
                         }
@@ -436,6 +490,30 @@ fun PortalSetupScreen(
         }
 
     }
+}
+
+/** Read Android's actual theme and display metrics at acceptance time. */
+private fun androidSystemIsDark(context: Context): Boolean =
+    (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+        Configuration.UI_MODE_NIGHT_YES
+
+private fun currentInstallDisplayMetrics(context: Context): InstallDisplayMetrics {
+    val resources = context.resources
+    val configuration = resources.configuration
+    val display = resources.displayMetrics
+    // Match Portal's established baseline from Resources.getDisplayMetrics().
+    val densityDpi = display.densityDpi.takeIf { it > 0 } ?: configuration.densityDpi
+    require(densityDpi > 0) { "Android did not report a usable densityDpi" }
+    val density = densityDpi.toDouble() / 160.0
+    fun logicalExtent(pixelExtent: Int, dpExtent: Int, axis: String): Int =
+        pixelExtent.takeIf { it > 0 }
+            ?: (dpExtent * density).roundToInt().takeIf { it > 0 }
+            ?: error("Android did not report a usable $axis display extent")
+    return InstallDisplayMetrics(
+        densityDpi = densityDpi,
+        logicalWidthPx = logicalExtent(display.widthPixels, configuration.screenWidthDp, "width"),
+        logicalHeightPx = logicalExtent(display.heightPixels, configuration.screenHeightDp, "height"),
+    )
 }
 
 // Shared Portal ambient background primitive: exact installer background
@@ -653,7 +731,7 @@ private fun MinimalInstallRow(
                 fontWeight = FontWeight.Medium,
             )
             Text(
-                "Firefox · Dolphin · Konsole · codecs · Portal tools",
+                "Debian + Plasma baseline · Okular and Kate included",
                 color = palette.textSecondary,
                 fontSize = 11.sp,
                 lineHeight = 15.sp,
@@ -668,43 +746,65 @@ private fun InstallActionArea(
     desktopReady: Boolean,
     palette: PortalPalette,
     inactiveConfigurationModifier: Modifier,
+    errorMessage: String?,
     onBeginInstall: () -> Unit,
 ) {
-    Box(
-        modifier = Modifier
-            .size(PortalDimens.BeginMaxWidth, PortalDimens.BeginHeight)
-            .wrapContentSize(unbounded = true),
-        contentAlignment = Alignment.Center,
+    Column(
+        modifier = Modifier.width(PortalDimens.BeginMaxWidth),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        AnimatedVisibility(
-            visible = phase != SetupPhase.Ready,
-            exit = fadeOut(tween(200)) +
-                slideOutVertically(tween(220)) { -it / 8 } +
-                scaleOut(tween(220), targetScale = 0.985f),
+        Box(
+            modifier = Modifier
+                .size(PortalDimens.BeginMaxWidth, PortalDimens.BeginHeight)
+                .wrapContentSize(unbounded = true),
+            contentAlignment = Alignment.Center,
         ) {
-            BeginInstallButton(
-                palette = palette,
-                centered = false,
-                onBeginInstall = onBeginInstall,
-                enabled = phase == SetupPhase.Configure || phase == SetupPhase.Failed,
-                label = if (phase == SetupPhase.Failed) "Retry" else "Begin Install",
-                modifier = inactiveConfigurationModifier,
-            )
+            this@Column.AnimatedVisibility(
+                visible = phase != SetupPhase.Ready,
+                exit = fadeOut(tween(200)) +
+                    slideOutVertically(tween(220)) { -it / 8 } +
+                    scaleOut(tween(220), targetScale = 0.985f),
+            ) {
+                BeginInstallButton(
+                    palette = palette,
+                    centered = false,
+                    onBeginInstall = onBeginInstall,
+                    enabled = phase == SetupPhase.Configure || phase == SetupPhase.Failed,
+                    label = if (phase == SetupPhase.Failed) "Retry" else "Begin Install",
+                    modifier = inactiveConfigurationModifier,
+                )
+            }
+            this@Column.AnimatedVisibility(
+                visible = phase == SetupPhase.Ready && !desktopReady,
+                enter = fadeIn(tween(durationMillis = 300, delayMillis = 90)) +
+                    slideInVertically(tween(340, delayMillis = 50)) { it / 3 } +
+                    scaleIn(tween(340, delayMillis = 50), initialScale = 0.98f),
+                exit = fadeOut(tween(180)) +
+                    slideOutVertically(tween(210)) { -it / 4 } +
+                    scaleOut(tween(210), targetScale = 0.99f),
+            ) {
+                Text(
+                    text = "Finishing Portal…",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.textMuted,
+                )
+            }
         }
         AnimatedVisibility(
-            visible = phase == SetupPhase.Ready && !desktopReady,
-            enter = fadeIn(tween(durationMillis = 300, delayMillis = 90)) +
-                slideInVertically(tween(340, delayMillis = 50)) { it / 3 } +
-                scaleIn(tween(340, delayMillis = 50), initialScale = 0.98f),
-            exit = fadeOut(tween(180)) +
-                slideOutVertically(tween(210)) { -it / 4 } +
-                scaleOut(tween(210), targetScale = 0.99f),
+            visible = errorMessage != null && phase != SetupPhase.Ready,
+            enter = fadeIn(tween(160)) + slideInVertically(tween(180)) { -it / 4 },
+            exit = fadeOut(tween(120)),
         ) {
             Text(
-                text = "Finishing Portal…",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                color = palette.textMuted,
+                text = errorMessage.orEmpty(),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                fontSize = 11.sp,
+                lineHeight = 14.sp,
+                color = palette.accent,
+                textAlign = TextAlign.Center,
+                maxLines = 3,
             )
         }
     }

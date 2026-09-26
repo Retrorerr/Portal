@@ -104,7 +104,7 @@ fun AddAppsPicker(expanded: Boolean, selectedIds: Set<String>, onExpandedChange:
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text(
-                            "Add Essential Apps",
+                            "Add additional apps",
                             fontSize = 14.sp,
                             lineHeight = 17.sp,
                             fontWeight = FontWeight.Medium,
@@ -145,20 +145,17 @@ fun AddAppsPicker(expanded: Boolean, selectedIds: Set<String>, onExpandedChange:
                             color = palette.textSecondary,
                             maxLines = 1,
                         )
+                        OPTIONAL_APPS.chunked(3).forEach { apps ->
+                            Text(
+                                apps.joinToString(" · ") { it.name },
+                                fontSize = 11.sp,
+                                lineHeight = 14.sp,
+                                color = palette.textSecondary.copy(alpha = 0.76f),
+                                maxLines = 1,
+                            )
+                        }
                         Text(
-                            "LibreOffice · VLC · GIMP",
-                            fontSize = 11.sp,
-                            lineHeight = 14.sp,
-                            color = palette.textSecondary.copy(alpha = 0.76f),
-                        )
-                        Text(
-                            "Krita · Inkscape · Thunderbird",
-                            fontSize = 11.sp,
-                            lineHeight = 14.sp,
-                            color = palette.textSecondary.copy(alpha = 0.76f),
-                        )
-                        Text(
-                            "Okular · Kate",
+                            "Choose any combination",
                             fontSize = 11.sp,
                             lineHeight = 14.sp,
                             color = palette.textSecondary.copy(alpha = 0.76f),
@@ -166,9 +163,11 @@ fun AddAppsPicker(expanded: Boolean, selectedIds: Set<String>, onExpandedChange:
                     }
                 }
                 if (open) {
-                    // Eight compact custom rows; the growing container clips and
+                    // The genuinely optional rows grow inside the container;
+                    // Okular and Kate are already part of the baseline rootfs.
+                    // The growing container clips and
                     // progressively reveals them while the subtitle dissolves.
-                    ESSENTIAL_APPS.forEach { app ->
+                    OPTIONAL_APPS.forEach { app ->
                         AppSelectionRow(app, app.id in selectedIds, { onToggle(app.id) }, palette, enabled)
                     }
                 }

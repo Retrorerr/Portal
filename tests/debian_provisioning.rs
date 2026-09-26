@@ -559,11 +559,13 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
     assert!(setup.contains("mark_installation_complete"));
     assert!(setup.contains("build_committed_wayland_backend"));
     assert!(setup.contains("run_all_stages(stages(), &options, &registration)"));
-    assert!(setup.contains("pub fn begin_install()"));
+    assert!(setup.contains("pub fn begin_install(plan_json: &str) -> bool"));
+    assert!(setup.contains("persist_plan_before_start(Some(proposed), false)"));
     assert!(compose.contains("nativeBeginInstall"));
     assert!(compose.contains("updateInstallState"));
     assert!(compose.contains("dismissForRuntimeRecovery"));
-    assert!(setup_screen.contains("ComposeOverlay.beginInstall()"));
+    assert!(setup_screen.contains("ComposeOverlay.beginInstall(plan)"));
+    assert!(setup_screen.contains("InstallPlan.fromSelections("));
     assert!(!setup_screen.contains("FAKE_INSTALL_DURATION_MS"));
     assert!(provisioning.contains("replace_atomic"));
     assert!(provisioning.contains("sync_parent_directory"));

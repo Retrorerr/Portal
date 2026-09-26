@@ -64,7 +64,11 @@ impl PRootRuntime {
         };
 
         if !supported {
-            diagnostics::guest_event(
+            // This capability check runs before first-run provisioning. Keep
+            // its diagnostic on the Android side rather than creating files
+            // inside runtime-B, which must remain absent until a plan is
+            // accepted.
+            diagnostics::host_event(
                 "support-probe-failed",
                 "PRoot loader probe did not complete successfully; device cannot run the ARM64 guest",
             );
@@ -134,7 +138,11 @@ impl PRootRuntime {
                             false
                         },
                         |output| {
-                            diagnostics::guest_event(
+                            // The support probe is host startup diagnostics,
+                            // not guest activity: mirroring it into runtime-B
+                            // would make a clean first-run look like a partial
+                            // installation before the user accepts a plan.
+                            diagnostics::host_event(
                                 "support-probe",
                                 &format!(
                                     "program={} status={:?} stdout={} stderr={}",
@@ -342,6 +350,10 @@ impl LinuxRuntime for PRootRuntime {
 
         process
             .arg("--bind=/dev/urandom:/dev/random")
+            // Android denies unprivileged reads of /proc/version. The guest
+            // already seeds this file; expose it through the same PRoot path
+            // so ordinary Debian launchers can probe the kernel.
+            .arg(format!("--bind={}/proc/.version:/proc/version", rootfs_str))
             .arg("--bind=/proc/self/fd:/dev/fd")
             .arg("--bind=/proc/self/fd/0:/dev/stdin")
             .arg("--bind=/proc/self/fd/1:/dev/stdout")
@@ -397,7 +409,6 @@ impl LinuxRuntime for PRootRuntime {
         } else {
             process
                 .arg("runuser")
-                .arg("--pty")
                 .arg("-u")
                 .arg(&user)
                 .arg("--")
