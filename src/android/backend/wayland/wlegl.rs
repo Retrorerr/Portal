@@ -277,10 +277,10 @@ pub fn handle_wlegl_request<D>(
                 return;
             }
 
-            // AHB registered successfully and owns the file descriptors
-            for fd in inner.fds.drain(..) {
-                std::mem::forget(fd);
-            }
+            // The AHB owns duplicates of the client's fds (see
+            // tawc_wlegl_import), so the originals are closed here on success
+            // and by `inner` on every failure path alike.
+            inner.fds.clear();
             drop(inner);
 
             WLEGL_BUFFERS_CREATED.fetch_add(1, Ordering::Relaxed);
