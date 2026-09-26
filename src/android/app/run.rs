@@ -553,9 +553,9 @@ fn forward_anland_input(
                 ElementState::Pressed => crate::android::anland::protocol::INPUT_ACTION_DOWN,
                 ElementState::Released => crate::android::anland::protocol::INPUT_ACTION_UP,
             };
-            log::info!(
-                "anland.input key action={action} scancode={scancode}"
-            );
+            // Keystrokes stay out of info logs: debug builds persist those to
+            // the exportable diagnostics host.log.
+            log::trace!("anland.input key action={action} scancode={scancode}");
             session.send_input(&AnlandInput::key(action, scancode as i32));
         }
         _ => {}
