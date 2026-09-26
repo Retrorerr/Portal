@@ -47,6 +47,10 @@
 #include "path/canon.h"
 #include "arch.h"
 
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+
 /**
  * Translate @path and put the result in the @tracee's memory address
  * space pointed to by the @reg argument of the current syscall. See
@@ -154,6 +158,16 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_brk:
 		translate_brk_enter(tracee);
 		status = 0;
+		break;
+
+	/* Path-taking syscalls newer than PRoot's translation.  Passed
+	 * through, their paths would resolve on the host file system
+	 * (ENOENT, or the wrong file).  ENOSYS makes callers fall back:
+	 * glibc emulates fchmodat(AT_SYMLINK_NOFOLLOW) through an O_PATH
+	 * descriptor, and openat2() users retry with openat().  */
+	case PR_fchmodat2:
+	case PR_openat2:
+		status = -ENOSYS;
 		break;
 
 	case PR_getcwd:
@@ -423,6 +437,19 @@ int translate_syscall_enter(Tracee *tracee)
 			|| syscall_number == PR_name_to_handle_at)
 			? peek_reg(tracee, CURRENT, SYSARG_5)
 			: peek_reg(tracee, CURRENT, SYSARG_4);
+
+		/* glibc implements fstat(fd) as fstatat(fd, "", AT_EMPTY_PATH).
+		 * A descriptor with no file-system path (socket, pipe,
+		 * epoll/eventfd, deleted or pseudo file) cannot be translated
+		 * relative to itself; let the kernel stat it directly.  */
+		if (   (syscall_number == PR_newfstatat || syscall_number == PR_fstatat64)
+		    && path[0] == '\0'
+		    && (flags & AT_EMPTY_PATH) != 0
+		    && dirfd != AT_FDCWD
+		    && !fd_has_reachable_path(tracee->pid, (int) dirfd)) {
+			status = 0;
+			break;
+		}
 
 		if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);

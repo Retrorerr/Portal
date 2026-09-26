@@ -46,6 +46,7 @@
 #include "execve/auxv.h"
 #include "path/binding.h"
 #include "path/f2fs-bug.h"
+#include "path/path.h"
 #include "arch.h"
 
 #include "extension/fake_id0/chown.h"
@@ -798,6 +799,11 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		char path[PATH_MAX];
 		result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
 		poke_reg(tracee, SYSARG_RESULT, 0);
+		/* readlink("/proc/<pid>/fd/<fd>") fails with ENOENT for a
+		 * descriptor that is not open; fstat() must report EBADF, which
+		 * runtimes rely on when probing for open descriptors.  */
+		if ((int)result == -ENOENT)
+			return -EBADF;
 		if ((int)result <= 0)
 			return result;
 
@@ -807,7 +813,15 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 
 		path[result] = '\0';
 
-		if ((strcmp(path + strlen(path) - strlen(" (deleted)"), " (deleted)") == 0) || (strncmp(path, "pipe", 4) == 0)) {
+		/* Only a descriptor that still names a file by path can carry
+		 * fake ownership metadata.  Anything else (sockets, pipes,
+		 * epoll/eventfd/inotify, deleted or pseudo files) must be
+		 * stat'ed through the descriptor: a path-based fstatat() on
+		 * "socket:[...]" fails with ENOENT, which breaks runtimes that
+		 * fstat() their stdio (Bun, Node, Python asyncio).  */
+		if ((strcmp(path + strlen(path) - strlen(" (deleted)"), " (deleted)") == 0)
+		    || (strncmp(path, "pipe", 4) == 0)
+		    || !fd_has_reachable_path(tracee->pid, (int) peek_reg(tracee, ORIGINAL, SYSARG_1))) {
 			register_chained_syscall(tracee, sysnum, peek_reg(tracee, ORIGINAL, SYSARG_1), peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0, 0);
 		} else {
 			write_data(tracee, peek_reg(tracee, MODIFIED, SYSARG_3), path, sizeof(path));
