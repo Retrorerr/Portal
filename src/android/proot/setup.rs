@@ -73,6 +73,65 @@ pub struct SetupOptions {
 pub type SetupCompletionCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 const KWIN_WRAPPER: &str = include_str!("../../../assets/localdesktop-kwin-wrapper-v2.sh");
+/// Opt-in helper deriving `--no-sandbox` user desktop entries for
+/// Chromium/Electron apps (see `setup_chromium_no_sandbox`).
+const CHROMIUM_ENTRIES_HELPER: &str = r#"#!/bin/sh
+target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+mkdir -p "$target_dir" || exit 1
+
+for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop; do
+    [ -f "$src" ] || continue
+
+    prog=$(sed -n 's/^Exec=//p' "$src" | head -n1 | awk '{print $1}')
+    [ -n "$prog" ] || continue
+    case "$prog" in
+        /*) bin="$prog" ;;
+        *) bin=$(command -v "$prog" 2>/dev/null) || continue ;;
+    esac
+    bin=$(readlink -f "$bin" 2>/dev/null)
+    [ -n "$bin" ] || continue
+
+    dir=$(dirname "$bin")
+    electron=0
+    for root in "$dir" "$dir/.."; do
+        if [ -f "$root/resources/app.asar" ] || [ -d "$root/resources/app" ]; then
+            electron=1
+            break
+        fi
+    done
+    if [ "$electron" -ne 1 ] &&
+       [ ! -e "$dir/chrome-sandbox" ] && [ ! -e "$dir/../chrome-sandbox" ]; then
+        continue
+    fi
+
+    dst="$target_dir/$(basename "$src")"
+    # Leave alone anything the user wrote themselves.
+    if [ -e "$dst" ] && ! grep -q '^X-LocalDesktop-NoSandbox=' "$dst"; then
+        continue
+    fi
+
+    tmp="$dst.portal-tmp.$$"
+    if ! awk -v electron="$electron" '
+        /^\[Desktop Entry\]/ && !seen { print; print "X-LocalDesktop-NoSandbox=true"; seen = 1; next }
+        /^Exec=/ {
+            if (index($0, "--no-sandbox") == 0)
+                sub(/^Exec=[^ ]+/, "& --no-sandbox")
+            if (electron == 1 && index($0, "--no-stdio-init") == 0)
+                sub(/^Exec=[^ ]+/, "& --no-stdio-init")
+            if (electron == 1 && index($0, "--ozone-platform=") == 0)
+                sub(/^Exec=[^ ]+/, "& --ozone-platform=wayland")
+            # KDE confirms each portal global-shortcut session by opening
+            # System Settings over the app on launch.
+            if (index($0, "--disable-features=") == 0)
+                sub(/^Exec=[^ ]+/, "& --disable-features=GlobalShortcutsPortal")
+        }
+        { print }
+    ' "$src" > "$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$dst"; then
+        rm -f "$tmp"
+        printf 'Failed to update Portal desktop integration for %s\n' "$src" >&2
+    fi
+done
+"#;
 const PLASMA_LAUNCHER: &str = include_str!("../../../assets/localdesktop-startplasma.sh");
 const PLASMASHELL_SUPERVISOR: &str =
     include_str!("../../../assets/localdesktop-plasmashell-supervisor.sh");
@@ -155,6 +214,11 @@ const ANLAND_STUB_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/li
 /// cannot open /dev/dri/renderD128. Preloaded ONLY in Anland sessions.
 /// Source: `assets/guest-arm64/drmshim.c` (recipe: `drmshim-recipe.txt`).
 const DRMSHIM_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/drmshim.so");
+/// Project Anland damage hint: forwards KWin's own repaint requests to the
+/// host so self-driven animations present at full rate without input.
+/// Optional (a missing hint only restores heartbeat pacing); preloaded ONLY
+/// in Anland sessions. Source: `assets/guest-arm64/anland-damage.c`.
+const ANLAND_DAMAGE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/anland-damage.so");
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -842,8 +906,14 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
                 .all(|package| installed.contains(*package))
         })
         .collect::<Vec<_>>();
-    let chatgpt_selected = selected_apps.contains(&OptionalApp::Chatgpt);
-    if missing.is_empty() && !chatgpt_selected {
+    // Official Electron apps ship their own launchers, which need Portal's
+    // no-sandbox copy in the user's applications directory.
+    let electron_apps = selected_apps
+        .iter()
+        .copied()
+        .filter(|app| matches!(app, OptionalApp::Chatgpt | OptionalApp::Claude))
+        .collect::<Vec<_>>();
+    if missing.is_empty() && electron_apps.is_empty() {
         provision_ibus_packages(fs_root);
         return None;
     }
@@ -861,13 +931,32 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
                     test "$(dpkg-deb --field /tmp/portal-chatgpt_arm64.deb.part Package)" = chatgpt &&
                     test "$(dpkg-deb --field /tmp/portal-chatgpt_arm64.deb.part Architecture)" = arm64 &&
                     mv -f /tmp/portal-chatgpt_arm64.deb.part /tmp/portal-chatgpt_arm64.deb &&
-                    apt-get install -y --no-install-recommends /tmp/portal-chatgpt_arm64.deb &&
+                    apt-get install -y --no-install-recommends /tmp/portal-chatgpt_arm64.deb git ripgrep python3-venv &&
                     rm -f /tmp/portal-chatgpt_arm64.deb)"#,
-                OptionalApp::Gimp => "apt-get install -y --no-install-recommends gimp",
-                OptionalApp::Inkscape => "apt-get install -y --no-install-recommends inkscape",
-                OptionalApp::Krita => "apt-get install -y --no-install-recommends krita",
+                // Anthropic's signed apt repository, as its Linux install
+                // guide describes, so apt resolves the newest release now and
+                // delivers later ones with ordinary package updates. The key
+                // is accepted only with Anthropic's published fingerprint.
+                OptionalApp::Claude => r#"(apt-get install -y --no-install-recommends curl gnupg ca-certificates &&
+                    curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                        --output /tmp/portal-claude-desktop-key.asc.part \
+                        https://downloads.claude.ai/claude-desktop/key.asc &&
+                    test "$(gpg --batch --with-colons --show-keys /tmp/portal-claude-desktop-key.asc.part |
+                        awk -F: '$1 == "fpr" { print $10; exit }')" = 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE &&
+                    install -m 0644 /tmp/portal-claude-desktop-key.asc.part \
+                        /usr/share/keyrings/claude-desktop-archive-keyring.asc &&
+                    rm -f /tmp/portal-claude-desktop-key.asc.part &&
+                    printf '%s\n' 'deb [arch=arm64 signed-by=/usr/share/keyrings/claude-desktop-archive-keyring.asc] https://downloads.claude.ai/claude-desktop/apt/stable stable main' \
+                        >/etc/apt/sources.list.d/claude-desktop.list &&
+                    apt-get update &&
+                    apt-get install -y --no-install-recommends claude-desktop git ripgrep python3-venv)"#,
+                OptionalApp::Gimp => "apt-get install -y --no-install-recommends gimp ghostscript",
+                OptionalApp::Inkscape => {
+                    "apt-get install -y --no-install-recommends inkscape python3-lxml                         python3-numpy python3-scour python3-cssselect"
+                },
+                OptionalApp::Krita => "apt-get install -y --no-install-recommends krita python3-pyqt5",
                 OptionalApp::Libreoffice => {
-                    "apt-get install -y --no-install-recommends libreoffice libreoffice-kf6"
+                    "apt-get install -y --no-install-recommends libreoffice libreoffice-kf6                         libreoffice-style-breeze fonts-crosextra-carlito fonts-crosextra-caladea                         fonts-liberation"
                 }
                 OptionalApp::Thunderbird => {
                     "apt-get install -y --no-install-recommends thunderbird"
@@ -911,18 +1000,24 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
                 .all(|app| app.required_packages().iter().all(|package| installed.contains(*package))),
             "A requested optional Debian app is not fully installed after apt completed"
         );
-        if chatgpt_selected {
+        for app in electron_apps {
+            let desktop_file = app.desktop_file_id();
             anyhow::ensure!(
-                installed.contains("chatgpt")
+                installed.contains(app.package_name())
                     && Path::new(PRODUCTION_FS_ROOT)
-                        .join("usr/share/applications/chatgpt.desktop")
+                        .join("usr/share/applications")
+                        .join(desktop_file)
                         .is_file(),
-                "The requested official ChatGPT desktop app is not fully installed"
+                "The requested official {} desktop app is not fully installed",
+                app.id()
             );
             // This is a one-time first-run application to the selected user's
-            // desktop entry. A later cold start must not regenerate it.
+            // desktop entry. A later cold start must not regenerate it. The
+            // entry name is fixed enum metadata, never UI input.
             let user = get_application_context().local_config.user.username;
-            let desktop_command = "/usr/local/bin/localdesktop-no-sandbox-entries && grep -q '^X-LocalDesktop-NoSandbox=true$' \"$HOME/.local/share/applications/chatgpt.desktop\" && grep -q '^Exec=.* --no-sandbox' \"$HOME/.local/share/applications/chatgpt.desktop\"";
+            let desktop_command = format!(
+                "/usr/local/bin/localdesktop-no-sandbox-entries && grep -q '^X-LocalDesktop-NoSandbox=true$' \"$HOME/.local/share/applications/{desktop_file}\" && grep -q '^Exec=.* --no-sandbox' \"$HOME/.local/share/applications/{desktop_file}\""
+            );
             let output = PRootRuntime::active().execute(
                 ProcessSpec::new(desktop_command).with_user(user),
                 None,
@@ -930,7 +1025,8 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
             );
             anyhow::ensure!(
                 output.status.success(),
-                "The official ChatGPT launcher could not be prepared for Portal's PRoot session: {}",
+                "The official {} launcher could not be prepared for Portal's PRoot session: {}",
+                app.id(),
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -1096,6 +1192,12 @@ defaultPref("media.rdd-process.enabled", false);
 // until a render node exists (dmabuf-GBM is unavoidable there).
 defaultPref("gfx.webrender.all", true);
 defaultPref("layers.acceleration.force-enabled", true);
+// Server-side (KWin) title bar by default. With tabs drawn in the title bar
+// the X11 window grows before Firefox repaints, leaving black strips along
+// the new edges for the whole interactive resize; with KWin decorating the
+// window, resizes stay in sync (device-verified). Users can still re-enable
+// "Title Bar" off in Customize Toolbar.
+defaultPref("browser.tabs.inTitlebar", 0);
 
 "#;
 
@@ -1373,6 +1475,174 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     // Keep the QPainter overlay present and the default loader path free of
     // shadows on every launch (idempotent; see sync_kwin_overlay).
     sync_kwin_overlay(fs_root);
+    sync_guest_host_path_alias(fs_root);
+    sync_chromium_entries(fs_root);
+    sync_default_applications(fs_root);
+    sync_thunderbird_defaults(fs_root);
+}
+
+/// Make the rootfs's own Android host path resolve inside the guest.
+///
+/// PRoot translates paths in syscalls but not the contents of
+/// `/proc/<pid>/maps`, which therefore list libraries under the host path
+/// (`/data/data/<package>/files/runtime-B/usr/lib/...`). Software that locates
+/// its resources relative to its own library by parsing maps sees a path that
+/// does not exist in the guest: VLC's `config_GetLibDir()` found zero plugins
+/// and exited silently on every launch. A guest symlink from that host path to
+/// `/` makes such paths resolve to the right files. It is a symlink rather
+/// than a bind so recursive walks (`find /`, indexers, backups) never loop.
+fn sync_guest_host_path_alias(fs_root: &Path) {
+    let mut host_paths = vec![fs_root.to_path_buf()];
+    if let Ok(canonical) = fs::canonicalize(fs_root) {
+        if !host_paths.contains(&canonical) {
+            host_paths.push(canonical);
+        }
+    }
+    for host_path in host_paths {
+        let Ok(relative) = host_path.strip_prefix("/") else {
+            continue;
+        };
+        let alias = fs_root.join(relative);
+        if fs::read_link(&alias).is_ok_and(|target| target == Path::new("/")) {
+            continue;
+        }
+        if alias.symlink_metadata().is_ok() {
+            // Never replace something that is not our alias.
+            log::warn!("guest host-path alias {} exists and is not ours", alias.display());
+            continue;
+        }
+        let created = alias
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| std::os::unix::fs::symlink("/", &alias));
+        if let Err(error) = created {
+            log::warn!("guest host-path alias {} failed: {error}", alias.display());
+        }
+    }
+}
+
+/// Keep the Chromium/Electron entries helper current and bring entries it
+/// already derived up to its current flags. Only entries carrying the helper's
+/// marker are touched, so entries the user removed or wrote stay as they are.
+///
+/// Earlier helpers forced `--password-store=basic`. Electron's safeStorage is
+/// unavailable with that store, so apps such as Claude could not keep their
+/// sign-in; derived entries drop it and use the desktop's secret service.
+fn sync_chromium_entries(fs_root: &Path) {
+    write_executable(
+        &fs_root.join("usr/local/bin/localdesktop-no-sandbox-entries"),
+        CHROMIUM_ENTRIES_HELPER,
+    );
+    let Ok(entries) = fs::read_dir(fs_root.join("home/desktop/.local/share/applications")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "desktop") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if !text.lines().any(|line| line == "X-LocalDesktop-NoSandbox=true") {
+            continue;
+        }
+        let updated = text
+            .split_inclusive('\n')
+            .map(|line| {
+                let body = line.trim_end_matches(['\r', '\n']);
+                let eol = &line[body.len()..];
+                let Some(exec) = body.strip_prefix("Exec=") else {
+                    return line.to_owned();
+                };
+                let exec = exec.replace(" --password-store=basic", "");
+                let exec = exec.as_str();
+                let (program, rest) = match exec.split_once(' ') {
+                    Some((program, rest)) => (program, format!(" {rest}")),
+                    None => (exec, String::new()),
+                };
+                let mut added = String::new();
+                for (probe, flag) in [(
+                    "--disable-features=",
+                    "--disable-features=GlobalShortcutsPortal",
+                )] {
+                    if !exec.contains(probe) {
+                        added.push(' ');
+                        added.push_str(flag);
+                    }
+                }
+                format!("Exec={program}{added}{rest}{eol}")
+            })
+            .collect::<String>();
+        if updated != text {
+            if let Err(error) = fs::write(&path, updated) {
+                log::warn!("{} could not be updated: {error}", path.display());
+            }
+        }
+    }
+}
+
+/// System-wide default applications (`/etc/xdg/mimeapps.list`; users'
+/// `~/.config/mimeapps.list` still wins).
+///
+/// Without explicit defaults, the first desktop entry in `mimeinfo.cache`
+/// wins. The optional ChatGPT app claims http/https and Office/CSV types and
+/// sorts before Firefox and LibreOffice, so it became the default browser:
+/// Plasma's `preferred://browser` panel launcher then showed a second ChatGPT
+/// icon instead of Firefox. Entries naming an app that is not installed are
+/// ignored by the spec, so the same defaults hold for every selection.
+fn sync_default_applications(fs_root: &Path) {
+    const DEFAULTS: &str = "# Managed by Portal: system-wide default applications.\n\
+# Override per user in ~/.config/mimeapps.list (System Settings > Default Applications).\n\
+[Default Applications]\n\
+x-scheme-handler/http=firefox-esr.desktop;\n\
+x-scheme-handler/https=firefox-esr.desktop;\n\
+text/html=firefox-esr.desktop;\n\
+application/xhtml+xml=firefox-esr.desktop;\n\
+x-scheme-handler/mailto=thunderbird.desktop;\n\
+text/csv=libreoffice-calc.desktop;\n\
+text/tab-separated-values=libreoffice-calc.desktop;\n\
+application/vnd.ms-excel=libreoffice-calc.desktop;\n\
+application/vnd.ms-excel.sheet.macroEnabled.12=libreoffice-calc.desktop;\n\
+application/vnd.openxmlformats-officedocument.spreadsheetml.sheet=libreoffice-calc.desktop;\n\
+application/vnd.openxmlformats-officedocument.wordprocessingml.document=libreoffice-writer.desktop;\n\
+application/vnd.openxmlformats-officedocument.presentationml.presentation=libreoffice-impress.desktop;\n";
+    let path = fs_root.join("etc/xdg/mimeapps.list");
+    let current = fs::read_to_string(&path).ok();
+    if current.as_deref() == Some(DEFAULTS) {
+        return;
+    }
+    if current.is_some_and(|text| !text.starts_with("# Managed by Portal")) {
+        log::warn!("{} is not Portal-managed; leaving it untouched", path.display());
+        return;
+    }
+    if let Err(error) = path
+        .parent()
+        .map_or(Ok(()), fs::create_dir_all)
+        .and_then(|()| fs::write(&path, DEFAULTS))
+    {
+        log::warn!("default applications could not be installed: {error}");
+    }
+}
+
+/// Thunderbird default preferences. Like Firefox (see `sync_firefox_config`),
+/// Thunderbird runs through XWayland and, with tabs drawn in its own title
+/// bar, left black strips along the growing edges during interactive
+/// resizes; with KWin decorating the window, resizes stay in sync. Users can
+/// still switch the title bar off again in Thunderbird's settings.
+fn sync_thunderbird_defaults(fs_root: &Path) {
+    const PREFS: &str = "// Managed by Portal: Thunderbird defaults (user settings still win).\n\
+pref(\"mail.tabs.drawInTitlebar\", false);\n";
+    let dir = fs_root.join("usr/lib/thunderbird/defaults/pref");
+    if !dir.is_dir() {
+        return;
+    }
+    let path = dir.join("portal.js");
+    if fs::read_to_string(&path).ok().as_deref() != Some(PREFS) {
+        if let Err(error) = fs::write(&path, PREFS) {
+            log::warn!("Thunderbird defaults could not be installed: {error}");
+        }
+    }
 }
 
 fn sync_crash_handler(fs_root: &Path) -> anyhow::Result<()> {
@@ -1584,59 +1854,7 @@ fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
     // from session startup or apt: those hooks recreated user-removed entries.
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-no-sandbox-entries"),
-        r#"#!/bin/sh
-target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-mkdir -p "$target_dir" || exit 1
-
-for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop; do
-    [ -f "$src" ] || continue
-
-    prog=$(sed -n 's/^Exec=//p' "$src" | head -n1 | awk '{print $1}')
-    [ -n "$prog" ] || continue
-    case "$prog" in
-        /*) bin="$prog" ;;
-        *) bin=$(command -v "$prog" 2>/dev/null) || continue ;;
-    esac
-    bin=$(readlink -f "$bin" 2>/dev/null)
-    [ -n "$bin" ] || continue
-
-    dir=$(dirname "$bin")
-    electron=0
-    for root in "$dir" "$dir/.."; do
-        if [ -f "$root/resources/app.asar" ] || [ -d "$root/resources/app" ]; then
-            electron=1
-            break
-        fi
-    done
-    if [ "$electron" -ne 1 ] &&
-       [ ! -e "$dir/chrome-sandbox" ] && [ ! -e "$dir/../chrome-sandbox" ]; then
-        continue
-    fi
-
-    dst="$target_dir/$(basename "$src")"
-    # Leave alone anything the user wrote themselves.
-    if [ -e "$dst" ] && ! grep -q '^X-LocalDesktop-NoSandbox=' "$dst"; then
-        continue
-    fi
-
-    tmp="$dst.portal-tmp.$$"
-    if ! awk -v electron="$electron" '
-        /^\[Desktop Entry\]/ && !seen { print; print "X-LocalDesktop-NoSandbox=true"; seen = 1; next }
-        /^Exec=/ {
-            if (index($0, "--no-sandbox") == 0)
-                sub(/^Exec=[^ ]+/, "& --no-sandbox")
-            if (electron == 1 && index($0, "--no-stdio-init") == 0)
-                sub(/^Exec=[^ ]+/, "& --no-stdio-init")
-            if (electron == 1 && index($0, "--ozone-platform=") == 0)
-                sub(/^Exec=[^ ]+/, "& --ozone-platform=wayland")
-        }
-        { print }
-    ' "$src" > "$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$dst"; then
-        rm -f "$tmp"
-        printf 'Failed to update Portal desktop integration for %s\n' "$src" >&2
-    fi
-done
-"#,
+        CHROMIUM_ENTRIES_HELPER,
     );
 
     // Same flag for terminal launches, following the /usr/local/bin PATH-priority pattern.
@@ -2801,6 +3019,19 @@ fn sync_kwin_overlay(fs_root: &Path) {
         if fs::write(&shim_tmp, DRMSHIM_BINARY).is_ok() {
             let _ = fs::set_permissions(&shim_tmp, fs::Permissions::from_mode(0o755));
             let _ = fs::rename(&shim_tmp, &shim_path);
+        }
+    }
+    // Project Anland damage hint (see ANLAND_DAMAGE_BINARY). Content-compared:
+    // it is tiny, and a same-size rebuild must still replace it.
+    let damage_path = kwin_dir.join("anland-damage.so");
+    let damage_fresh = fs::read(&damage_path)
+        .map(|bytes| bytes == ANLAND_DAMAGE_BINARY)
+        .unwrap_or(false);
+    if !damage_fresh {
+        let damage_tmp = damage_path.with_extension("so.tmp");
+        if fs::write(&damage_tmp, ANLAND_DAMAGE_BINARY).is_ok() {
+            let _ = fs::set_permissions(&damage_tmp, fs::Permissions::from_mode(0o755));
+            let _ = fs::rename(&damage_tmp, &damage_path);
         }
     }
     // Project Anland unified KWin library (Anland backend + Portal Touchpad).

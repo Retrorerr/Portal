@@ -95,10 +95,37 @@ import app.polarbear.setup.components.PortalAgslGlow
 import app.polarbear.setup.components.SlidingSegmentedControl
 import app.polarbear.setup.components.portalBloom
 import app.polarbear.ComposeOverlay
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.util.lerp
+import app.polarbear.setup.components.LocalPortalVeil
+import app.polarbear.setup.components.PlasmaFrostBackdrop
+import app.polarbear.setup.components.PortalEmphasized
+import app.polarbear.setup.components.PortalEmphasizedAccelerate
+import app.polarbear.setup.components.PortalEmphasizedDecelerate
+import app.polarbear.setup.components.dissolveBlur
+import app.polarbear.setup.components.portalBlur
+import app.polarbear.setup.components.rememberPlasmaSnapshot
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.graphics.ImageBitmap
+import app.polarbear.setup.components.INCLUDED_APPS
+import app.polarbear.setup.components.rememberAppIcons
+import app.polarbear.setup.components.rememberThemeReveal
+import app.polarbear.setup.components.themeReveal
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 private const val PREVIEW_TAG = "PortalComposeSetup"
 private const val READY_BACKGROUND_ALPHA = 0.83f
+// Veil tint over the live desktop frost: enough ground for ivory (dark) or
+// charcoal (light) text on any wallpaper, light enough to read as glass.
+private const val FROST_TINT_DARK = 0.64f
+private const val FROST_TINT_LIGHT = 0.70f
 
 internal enum class SetupPhase { Configure, Installing, Failed, Ready }
 
@@ -146,15 +173,16 @@ fun PortalSetupScreen(
     launchMarkModifier: Modifier = Modifier,
 ) {
     var appearance by remember { mutableStateOf(AppearanceMode.System) }
+    // What is painted. It trails [appearance] by the capture of one frame so
+    // the theme reveal can freeze the old theme before the repaint.
+    var paintedAppearance by remember { mutableStateOf(AppearanceMode.System) }
     var interfaceSize by remember { mutableStateOf(InterfaceSize.Balanced) }
     val ambientCardBounds = remember { mutableStateOf(Rect.Zero) }
     var pickerBounds by remember { mutableStateOf(Rect.Zero) }
     var rootOrigin by remember { mutableStateOf(Offset.Zero) }
     var pickerVisible by remember { mutableStateOf(false) }
     var optionalAppIds by remember { mutableStateOf(DEFAULT_OPTIONAL_APP_IDS) }
-    var settingsHeightPx by remember { mutableStateOf(0) }
-    var appearanceControlTopPx by remember { mutableStateOf(0f) }
-    var interfaceControlBottomPx by remember { mutableStateOf(0f) }
+    var lastPress by remember { mutableStateOf(Offset.Unspecified) }
     val nativeInstallState by ComposeOverlay.installState()
     val phase = when {
         nativeInstallState.complete -> SetupPhase.Ready
@@ -217,18 +245,27 @@ fun PortalSetupScreen(
             }
         }
     }
-    val palette = resolvePalette(appearance)
+    val palette = resolvePalette(paintedAppearance)
+    val veil = LocalPortalVeil.current
+    SideEffect { veil.ink = palette.textPrimary }
     val capacity = rememberStorageCapacity()
     val density = LocalDensity.current
-    val settingsHeight = with(density) {
-        if (settingsHeightPx > 0) settingsHeightPx.toDp() else 161.dp
-    }
-    val addAppsTopInset = with(density) {
-        if (appearanceControlTopPx > 0f) appearanceControlTopPx.toDp() else 24.dp
-    }
-    val addAppsCollapsedHeight = with(density) {
-        val measured = interfaceControlBottomPx - appearanceControlTopPx
-        if (measured >= 48f) measured.toDp() else settingsHeight - addAppsTopInset
+    val icons by rememberAppIcons(APP_ICON_IDS)
+    val reveal = rememberThemeReveal()
+    val revealScope = rememberCoroutineScope()
+    val systemDark = isSystemInDarkTheme()
+    val selectAppearance: (AppearanceMode) -> Unit = { mode ->
+        appearance = mode
+        val becomesDark = when (mode) {
+            AppearanceMode.System -> systemDark
+            AppearanceMode.Dark -> true
+            AppearanceMode.Light -> false
+        }
+        if (becomesDark == palette.isDark) {
+            paintedAppearance = mode
+        } else {
+            reveal.play(revealScope, from = lastPress) { paintedAppearance = mode }
+        }
     }
     val configurationInactive = phase != SetupPhase.Configure
     val configurationTransition = updateTransition(
@@ -247,13 +284,25 @@ fun PortalSetupScreen(
         transitionSpec = { tween(360) },
         label = "configuration lift",
     ) { inactive -> if (inactive) (-3).dp else 0.dp }
+    // Depth of field: settings drift out of focus as installation takes the
+    // stage, and sharpen again if it ever hands control back.
+    val configurationFocus by configurationTransition.animateFloat(
+        transitionSpec = { tween(560, easing = PortalEmphasized) },
+        label = "configuration focus",
+    ) { inactive -> if (inactive) 1f else 0f }
+    val recedeBlurPx = with(density) { 4.dp.toPx() }
     val configurationVisual = if (configurationInactive || configurationTransition.isRunning) {
         Modifier.graphicsLayer {
             alpha = configurationAlpha
             scaleX = configurationScale
             scaleY = configurationScale
             translationY = configurationLift.toPx()
-            compositingStrategy = CompositingStrategy.ModulateAlpha
+            portalBlur(configurationFocus * recedeBlurPx)
+            compositingStrategy = if (renderEffect == null) {
+                CompositingStrategy.ModulateAlpha
+            } else {
+                CompositingStrategy.Auto
+            }
         }
     } else {
         Modifier
@@ -262,9 +311,12 @@ fun PortalSetupScreen(
 
     Box(modifier = Modifier.fillMaxSize()
         .onGloballyPositioned { rootOrigin = it.positionInRoot() }
+        .themeReveal(reveal)
         .pointerInput(Unit) {
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                // Where a theme change blooms from.
+                lastPress = down.position
                 if (pickerVisible && !down.isConsumed && !pickerBounds.contains(down.position + rootOrigin)) {
                     // Local Compose dismissal: consume this whole outside gesture
                     // so closing the picker cannot also activate Begin Install.
@@ -312,13 +364,12 @@ fun PortalSetupScreen(
                         vertical = PortalDimens.SurfacePaddingV,
                     ),
             ) {
-                SetupHeader(
+                SetupHeaderIdentity(
                     palette = palette,
                     launchMarkModifier = launchMarkModifier,
-                    phase = phase,
-                    inactiveConfigurationModifier = configurationVisual,
+                    title = phase.title,
                 )
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(22.dp))
                 BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                     if (maxWidth >= PortalDimens.TwoColumnBreakpoint) {
                         Column {
@@ -330,19 +381,12 @@ fun PortalSetupScreen(
                                     PortalDimens.ColumnGutter,
                                 ),
                             ) {
-                                Column(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .onSizeChanged { settingsHeightPx = it.height },
-                                ) {
+                                Column(modifier = Modifier.weight(1f)) {
                                     AppearanceSection(
                                         appearance = appearance,
-                                        onSelect = { appearance = it },
+                                        onSelect = selectAppearance,
                                         palette = palette,
                                         enabled = phase == SetupPhase.Configure,
-                                        controlModifier = Modifier.onGloballyPositioned {
-                                            appearanceControlTopPx = it.positionInParent().y
-                                        },
                                     )
                                     Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
                                     InterfaceSizeSection(
@@ -350,20 +394,12 @@ fun PortalSetupScreen(
                                         onSelect = { interfaceSize = it },
                                         palette = palette,
                                         enabled = phase == SetupPhase.Configure,
-                                        controlModifier = Modifier.onGloballyPositioned {
-                                            interfaceControlBottomPx =
-                                                it.positionInParent().y + it.size.height
-                                        },
                                     )
                                 }
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .heightIn(min = settingsHeight)
-                                        .padding(top = addAppsTopInset),
-                                    contentAlignment = Alignment.TopCenter,
-                                ) {
-                                    AddAppsPicker(
+                                Column(modifier = Modifier.weight(1f)) {
+                                    IncludedAppsSection(palette = palette, icons = icons)
+                                    Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
+                                    OptionalAppsSection(
                                         expanded = pickerVisible,
                                         selectedIds = optionalAppIds,
                                         onExpandedChange = { pickerVisible = it },
@@ -376,7 +412,7 @@ fun PortalSetupScreen(
                                         },
                                         onBounds = { pickerBounds = it },
                                         palette = palette,
-                                        collapsedHeight = addAppsCollapsedHeight,
+                                        icons = icons,
                                         enabled = phase == SetupPhase.Configure,
                                     )
                                 }
@@ -429,7 +465,7 @@ fun PortalSetupScreen(
                         ) {
                             AppearanceSection(
                                 appearance = appearance,
-                                onSelect = { appearance = it },
+                                onSelect = selectAppearance,
                                 palette = palette,
                                 enabled = phase == SetupPhase.Configure,
                             )
@@ -441,9 +477,9 @@ fun PortalSetupScreen(
                                 enabled = phase == SetupPhase.Configure,
                             )
                             Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
-                            MinimalInstallRow(palette = palette)
-                            Spacer(modifier = Modifier.height(11.dp))
-                            AddAppsPicker(
+                            IncludedAppsSection(palette = palette, icons = icons)
+                            Spacer(modifier = Modifier.height(PortalDimens.SectionSpacing))
+                            OptionalAppsSection(
                                 expanded = pickerVisible,
                                 selectedIds = optionalAppIds,
                                 onExpandedChange = { pickerVisible = it },
@@ -456,6 +492,7 @@ fun PortalSetupScreen(
                                 },
                                 onBounds = { pickerBounds = it },
                                 palette = palette,
+                                icons = icons,
                                 enabled = phase == SetupPhase.Configure,
                             )
                         }
@@ -540,10 +577,25 @@ internal fun PortalAmbientBackground(
             Log.i(PREVIEW_TAG, "ambient veil settled at final compositing alpha=$READY_BACKGROUND_ALPHA")
         }
     }
+    // Live desktop frost: once the veil may be lifted, the desktop's own
+    // colours glow through a blurred pane instead of a flat translucent dim.
+    val veil = LocalPortalVeil.current
+    val snapshot = rememberPlasmaSnapshot(active = readyPrelude && veil.eligible)
+    val hasFrost by remember { derivedStateOf { snapshot.value != null } }
+    val frost = remember { Animatable(0f) }
+    LaunchedEffect(hasFrost) {
+        val target = if (hasFrost) 1f else 0f
+        if (ValueAnimator.areAnimatorsEnabled()) {
+            frost.animateTo(target, tween(if (hasFrost) 1100 else 240, easing = PortalEmphasized))
+        } else {
+            frost.snapTo(target)
+        }
+    }
+    val tint = if (palette.isDark) FROST_TINT_DARK else FROST_TINT_LIGHT
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .graphicsLayer { alpha = finalLayerAlpha.value },
+            .graphicsLayer { alpha = lerp(finalLayerAlpha.value, 1f, frost.value) },
     ) {
         // Full-canvas pixel size for the ambient loop tables (arc-length
         // traversal needs the real aspect, not fraction space). All ambient
@@ -553,49 +605,18 @@ internal fun PortalAmbientBackground(
         val scenePx = remember(density, maxWidth, maxHeight) {
             with(density) { IntSize(maxWidth.toPx().toInt(), maxHeight.toPx().toInt()) }
         }
+        PlasmaFrostBackdrop(
+            snapshot = { snapshot.value },
+            opacity = { frost.value },
+        )
         PortalAmbientFragments(
-            background = palette.background,
+            background = { palette.background.copy(alpha = lerp(1f, tint, frost.value)) },
+            ink = { palette.fragmentInk },
+            gains = { Offset(palette.fragmentGain, palette.thresholdGain) },
             cardBounds = cardBounds,
             scenePx = scenePx,
             scatter = readyPrelude,
         )
-    }
-}
-
-@Composable
-private fun SetupHeader(
-    palette: PortalPalette,
-    launchMarkModifier: Modifier,
-    phase: SetupPhase,
-    inactiveConfigurationModifier: Modifier,
-) {
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        if (maxWidth >= PortalDimens.TwoColumnBreakpoint) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(PortalDimens.ColumnGutter),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SetupHeaderIdentity(
-                    palette = palette,
-                    launchMarkModifier = launchMarkModifier,
-                    title = phase.title,
-                    modifier = Modifier.weight(1f),
-                )
-                MinimalInstallRow(
-                    palette = palette,
-                    modifier = Modifier
-                        .weight(1f)
-                        .then(inactiveConfigurationModifier),
-                )
-            }
-        } else {
-            SetupHeaderIdentity(
-                palette = palette,
-                launchMarkModifier = launchMarkModifier,
-                title = phase.title,
-            )
-        }
     }
 }
 
@@ -616,20 +637,22 @@ private fun SetupHeaderIdentity(
             AnimatedContent(
                 targetState = title,
                 transitionSpec = {
-                    (fadeIn(tween(260, delayMillis = 45)) +
-                        slideInVertically(tween(300)) { it / 4 } +
-                        scaleIn(tween(300), initialScale = 0.985f))
+                    (fadeIn(tween(380, delayMillis = 70, easing = PortalEmphasizedDecelerate)) +
+                        slideInVertically(tween(560, easing = PortalEmphasized)) { it / 3 } +
+                        scaleIn(tween(560, easing = PortalEmphasized), initialScale = 0.97f))
                         .togetherWith(
-                            fadeOut(tween(180)) +
-                                slideOutVertically(tween(220)) { -it / 5 } +
-                                scaleOut(tween(220), targetScale = 0.99f),
+                            fadeOut(tween(200, easing = PortalEmphasizedAccelerate)) +
+                                slideOutVertically(tween(260, easing = PortalEmphasizedAccelerate)) { -it / 4 } +
+                                scaleOut(tween(260), targetScale = 0.98f),
                         )
+                        .using(SizeTransform(clip = false))
                 },
                 contentAlignment = Alignment.CenterStart,
                 label = "setup title",
             ) { animatedTitle ->
                 Text(
                     text = animatedTitle,
+                    modifier = Modifier.dissolveBlur(this, radius = 12.dp),
                     fontSize = PortalDimens.TitleSize,
                     fontWeight = FontWeight.SemiBold,
                     color = palette.textPrimary,
@@ -704,42 +727,133 @@ private fun InterfaceSizeSection(
     )
 }
 
+private val APP_ICON_IDS = INCLUDED_APPS.map { it.id } + OPTIONAL_APPS.map { it.id }
+
+/**
+ * What every install already has, as the icons you will meet in Plasma.
+ * Touching an icon names it in the section label for a moment.
+ */
 @Composable
-private fun MinimalInstallRow(
+private fun IncludedAppsSection(
     palette: PortalPalette,
-    modifier: Modifier = Modifier,
+    icons: Map<String, ImageBitmap>,
 ) {
+    var named by remember { mutableStateOf<String?>(null) }
+    var touchCount by remember { mutableStateOf(0) }
+    LaunchedEffect(touchCount) {
+        if (named != null) {
+            delay(2200)
+            named = null
+        }
+    }
+    AnimatedContent(
+        targetState = named,
+        transitionSpec = {
+            (fadeIn(tween(260, delayMillis = 40, easing = PortalEmphasizedDecelerate)) +
+                slideInVertically(tween(360, easing = PortalEmphasized)) { it / 2 })
+                .togetherWith(
+                    fadeOut(tween(160, easing = PortalEmphasizedAccelerate)) +
+                        slideOutVertically(tween(220, easing = PortalEmphasizedAccelerate)) { -it / 2 },
+                )
+                .using(SizeTransform(clip = false))
+        },
+        contentAlignment = Alignment.CenterStart,
+        label = "included label",
+    ) { name ->
+        Text(
+            text = if (name == null) "Included" else "Included · $name",
+            modifier = Modifier.dissolveBlur(this, radius = 4.dp),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = palette.textMuted,
+        )
+    }
+    Spacer(modifier = Modifier.height(9.dp))
     val shape = RoundedCornerShape(24.dp)
     Row(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxWidth()
-            .height(64.dp)
+            .height(48.dp)
             .clip(shape)
             .background(palette.trackFill)
-            .border(1.dp, palette.surfaceBorder, shape),
+            .border(1.dp, palette.surfaceBorder, shape)
+            .padding(horizontal = 10.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 18.dp),
-        ) {
-            Text(
-                "Minimal install",
-                color = palette.textPrimary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
+        INCLUDED_APPS.forEachIndexed { index, app ->
+            val icon = icons[app.id]
+            // Icons settle in one after another once decoded.
+            val shown by animateFloatAsState(
+                targetValue = if (icon != null) 1f else 0f,
+                animationSpec = tween(480, delayMillis = 60 + index * 45, easing = PortalEmphasizedDecelerate),
+                label = "included icon",
             )
-            Text(
-                "Debian + Plasma baseline · Okular and Kate included",
-                color = palette.textSecondary,
-                fontSize = 11.sp,
-                lineHeight = 15.sp,
-                maxLines = 1,
+            val lifted by animateFloatAsState(
+                targetValue = if (named == app.name) 1f else 0f,
+                animationSpec = tween(320, easing = PortalEmphasized),
+                label = "included focus",
             )
+            val tap = remember { MutableInteractionSource() }
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clickable(
+                        interactionSource = tap,
+                        indication = null,
+                        onClickLabel = app.name,
+                        onClick = {
+                            named = app.name
+                            touchCount++
+                        },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (icon != null) {
+                    Image(
+                        bitmap = icon,
+                        contentDescription = app.name,
+                        modifier = Modifier
+                            .size(26.dp)
+                            .graphicsLayer {
+                                alpha = shown
+                                val s = (0.86f + 0.14f * shown) * (1f + 0.14f * lifted)
+                                scaleX = s
+                                scaleY = s
+                                translationY = (1f - shown) * 6.dp.toPx() - lifted * 2.dp.toPx()
+                            },
+                    )
+                }
+            }
         }
     }
 }
+
+@Composable
+private fun OptionalAppsSection(
+    expanded: Boolean,
+    selectedIds: Set<String>,
+    onExpandedChange: (Boolean) -> Unit,
+    onToggle: (String) -> Unit,
+    onBounds: (Rect) -> Unit,
+    palette: PortalPalette,
+    icons: Map<String, ImageBitmap>,
+    enabled: Boolean,
+) {
+    SectionLabel(text = "Optional apps", palette = palette)
+    Spacer(modifier = Modifier.height(9.dp))
+    AddAppsPicker(
+        expanded = expanded,
+        selectedIds = selectedIds,
+        onExpandedChange = onExpandedChange,
+        onToggle = onToggle,
+        onBounds = onBounds,
+        palette = palette,
+        icons = icons,
+        enabled = enabled,
+    )
+}
+
 @Composable
 private fun InstallActionArea(
     phase: SetupPhase,
@@ -772,20 +886,31 @@ private fun InstallActionArea(
                     onBeginInstall = onBeginInstall,
                     enabled = phase == SetupPhase.Configure || phase == SetupPhase.Failed,
                     label = if (phase == SetupPhase.Failed) "Retry" else "Begin Install",
-                    modifier = inactiveConfigurationModifier,
+                    modifier = inactiveConfigurationModifier.dissolveBlur(this, radius = 16.dp),
                 )
             }
             this@Column.AnimatedVisibility(
                 visible = phase == SetupPhase.Ready && !desktopReady,
-                enter = fadeIn(tween(durationMillis = 300, delayMillis = 90)) +
-                    slideInVertically(tween(340, delayMillis = 50)) { it / 3 } +
-                    scaleIn(tween(340, delayMillis = 50), initialScale = 0.98f),
-                exit = fadeOut(tween(180)) +
-                    slideOutVertically(tween(210)) { -it / 4 } +
-                    scaleOut(tween(210), targetScale = 0.99f),
+                enter = fadeIn(tween(durationMillis = 420, delayMillis = 120, easing = PortalEmphasizedDecelerate)) +
+                    slideInVertically(tween(560, delayMillis = 60, easing = PortalEmphasized)) { it / 2 },
+                exit = fadeOut(tween(200, easing = PortalEmphasizedAccelerate)) +
+                    slideOutVertically(tween(240, easing = PortalEmphasizedAccelerate)) { -it / 3 },
             ) {
+                // A slow breath while the desktop finishes coming up.
+                val breath by rememberInfiniteTransition(label = "finishing breath").animateFloat(
+                    initialValue = 1f,
+                    targetValue = 0.55f,
+                    animationSpec = infiniteRepeatable(
+                        tween(1400, easing = PortalEmphasized),
+                        RepeatMode.Reverse,
+                    ),
+                    label = "finishing alpha",
+                )
                 Text(
                     text = "Finishing Portal…",
+                    modifier = Modifier
+                        .dissolveBlur(this, radius = 12.dp)
+                        .graphicsLayer { alpha = breath },
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
                     color = palette.textMuted,
@@ -799,7 +924,10 @@ private fun InstallActionArea(
         ) {
             Text(
                 text = errorMessage.orEmpty(),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                modifier = Modifier
+                    .dissolveBlur(this, radius = 6.dp)
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
                 fontSize = 11.sp,
                 lineHeight = 14.sp,
                 color = palette.accent,
@@ -851,7 +979,7 @@ private fun BeginInstallButton(
                     .portalBloom(
                         glow = palette.glow,
                         cornerRadius = 26.dp,
-                        intensity = dip,
+                        intensity = dip * (if (palette.isDark) 1f else 0.7f),
                         tightAlpha = 0.22f,
                         broadAlpha = 0.06f,
                     ),
@@ -864,7 +992,7 @@ private fun BeginInstallButton(
                 buttonWidth = buttonWidth,
                 buttonHeight = buttonHeight,
                 margin = glowMargin,
-                glowAlpha = dip,
+                glowAlpha = dip * (if (palette.isDark) 1f else 0.72f),
             )
             Box(
                 modifier = Modifier

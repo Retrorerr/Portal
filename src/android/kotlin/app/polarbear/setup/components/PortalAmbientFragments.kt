@@ -164,7 +164,9 @@ private class LoopPath private constructor(
  */
 @Composable
 fun PortalAmbientFragments(
-    background: Color,
+    background: () -> Color,
+    ink: () -> Color,
+    gains: () -> Offset,
     cardBounds: () -> Rect,
     scenePx: IntSize,
     scatter: Boolean,
@@ -172,16 +174,18 @@ fun PortalAmbientFragments(
     // Modern Pad path. Older devices keep the ordinary backdrop/light without
     // trying to instantiate RuntimeShader (no new dependency or CPU blur fallback).
     if (Build.VERSION.SDK_INT >= 33) {
-        AmbientScene(background, cardBounds, scenePx, scatter)
+        AmbientScene(background, ink, gains, cardBounds, scenePx, scatter)
     } else {
-        Canvas(Modifier.fillMaxSize()) { drawRect(background) }
+        Canvas(Modifier.fillMaxSize()) { drawRect(background()) }
     }
 }
 
 @RequiresApi(33)
 @Composable
 private fun AmbientScene(
-    background: Color,
+    background: () -> Color,
+    ink: () -> Color,
+    gains: () -> Offset,
     cardBounds: () -> Rect,
     scenePx: IntSize,
     scatter: Boolean,
@@ -197,7 +201,6 @@ private fun AmbientScene(
     }
     val centers = remember(paths) { paths.map { it.getBounds().center } }
     val stroke = remember { Stroke(54f) }
-    val colors = remember { DRIFTS.map { (if (it.orange) PortalColors.Orange else PortalColors.Ivory).copy(alpha = it.opacity) } }
     val motion = rememberInfiniteTransition(label = "Portal environment")
     // Loops are built in real scene pixels (keyed on size, so rotation
     // rebuilds them) for exact arc-length uniformity. One clock per fragment;
@@ -292,7 +295,11 @@ private fun AmbientScene(
             // then the seven fragments. Both blur passes operate on this
             // same full scene, so a fragment-free region is identical
             // charcoal no matter which pass dominates it.
-            drawRect(background)
+            drawRect(background())
+            // Aperture pieces take the palette's ink; gains (x: aperture,
+            // y: threshold) keep them perceptible on a bright ground.
+            val apertureInk = ink()
+            val gain = gains()
             val base = minOf(sceneWidth, sceneHeight)
             val capturedScatter = scatterOrigins
             val scatterAmount = scatterProgress.value.coerceIn(0f, 1f)
@@ -328,7 +335,13 @@ private fun AmbientScene(
                     ) {
                         scale(magnification, magnification, Offset.Zero) {
                             translate(-centers[index].x, -centers[index].y) {
-                                drawPath(paths[index], colors[index], alpha = exitAlpha, style = stroke)
+                                drawPath(
+                                    paths[index],
+                                    if (drift.orange) PortalColors.Orange else apertureInk,
+                                    alpha = (drift.opacity * (if (drift.orange) gain.y else gain.x) * exitAlpha)
+                                        .coerceIn(0f, 1f),
+                                    style = stroke,
+                                )
                             }
                         }
                     }
@@ -381,7 +394,8 @@ half4 main(float2 p) {
     float2 q = abs(p - (card.xy + card.zw) * 0.5) - halfSize + r;
     float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
     float influence = 1.0 - smoothstep(0.0, feather, distance);
-    half4 color = scene.eval(p);
-    return half4(color.rgb * influence, influence);
+    // Premultiplied scale: exact for the opaque scene and still exact when
+    // the ready veil tints its base translucent over the desktop frost.
+    return scene.eval(p) * half(influence);
 }
 """

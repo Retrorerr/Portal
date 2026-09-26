@@ -123,3 +123,7 @@ For sensitive reports, follow [SECURITY.md](SECURITY.md) rather than opening a p
 ## Lineage
 
 Portal is an independent continuation of [Local Desktop](https://github.com/localdesktop/localdesktop.github.io). The original commit history and GPL-3.0 licensing are retained for attribution and traceability.
+
+## Trademarks
+
+App names and logos shown in Portal, such as Firefox, LibreOffice, ChatGPT or Claude, are trademarks of their respective owners. Portal shows them only to identify the apps it installs and is not affiliated with or endorsed by them. Icon sources and licences are listed in [third_party/app-icons](third_party/app-icons/README.md).

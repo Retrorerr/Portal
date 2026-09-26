@@ -37,11 +37,12 @@ spec.loader.exec_module(helper)
 
 class LauncherPlanTests(unittest.TestCase):
     def test_native_app_ids_map_to_allowlisted_debian_desktop_entries(self):
-        app_ids = ["chatgpt", "gimp", "inkscape", "krita", "libreoffice", "thunderbird", "vlc"]
+        app_ids = ["chatgpt", "claude", "gimp", "inkscape", "krita", "libreoffice", "thunderbird", "vlc"]
         self.assertEqual(
             helper.launcher_urls(app_ids),
             [
                 "applications:chatgpt.desktop",
+                "applications:com.anthropic.Claude.desktop",
                 "applications:gimp.desktop",
                 "applications:org.inkscape.Inkscape.desktop",
                 "applications:org.kde.krita.desktop",

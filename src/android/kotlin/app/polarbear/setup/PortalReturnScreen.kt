@@ -65,6 +65,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.SideEffect
+import app.polarbear.setup.components.LocalPortalVeil
+import app.polarbear.setup.components.PortalEmphasized
+import app.polarbear.setup.components.PortalEmphasizedAccelerate
+import app.polarbear.setup.components.PortalEmphasizedDecelerate
+import app.polarbear.setup.components.dissolveBlur
 import app.polarbear.ComposeOverlay
 import kotlinx.coroutines.delay
 
@@ -131,23 +137,23 @@ private fun ReturnAnlandAffordance(
 
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(320, delayMillis = 35)) +
-            slideInVertically(tween(380, delayMillis = 20)) { it / 5 } +
-            scaleIn(tween(380, delayMillis = 20), initialScale = 0.985f),
-        exit = fadeOut(tween(220)) +
-            slideOutVertically(tween(260)) { -it / 6 } +
-            scaleOut(tween(260), targetScale = 0.99f),
+        enter = fadeIn(tween(420, delayMillis = 60, easing = PortalEmphasizedDecelerate)) +
+            slideInVertically(tween(560, easing = PortalEmphasized)) { it / 3 } +
+            scaleIn(tween(560, easing = PortalEmphasized), initialScale = 0.97f),
+        exit = fadeOut(tween(220, easing = PortalEmphasizedAccelerate)) +
+            slideOutVertically(tween(260, easing = PortalEmphasizedAccelerate)) { -it / 5 } +
+            scaleOut(tween(260), targetScale = 0.98f),
     ) {
         AnimatedContent(
             targetState = phase,
             transitionSpec = {
-                (fadeIn(tween(260, delayMillis = 35)) +
-                    slideInVertically(tween(320)) { it / 5 } +
-                    scaleIn(tween(320), initialScale = 0.99f))
+                (fadeIn(tween(380, delayMillis = 70, easing = PortalEmphasizedDecelerate)) +
+                    slideInVertically(tween(520, easing = PortalEmphasized)) { it / 4 } +
+                    scaleIn(tween(520, easing = PortalEmphasized), initialScale = 0.975f))
                     .togetherWith(
-                        fadeOut(tween(170)) +
-                            slideOutVertically(tween(220)) { -it / 6 } +
-                            scaleOut(tween(220), targetScale = 0.995f),
+                        fadeOut(tween(190, easing = PortalEmphasizedAccelerate)) +
+                            slideOutVertically(tween(240, easing = PortalEmphasizedAccelerate)) { -it / 5 } +
+                            scaleOut(tween(240), targetScale = 0.985f),
                     )
                     .using(
                         SizeTransform(clip = false) { _, _ ->
@@ -165,6 +171,7 @@ private fun ReturnAnlandAffordance(
             }
             Column(
                 modifier = Modifier
+                    .dissolveBlur(this, radius = 10.dp)
                     .animateContentSize(
                         animationSpec = tween(360, easing = FastOutSlowInEasing),
                     )
@@ -326,6 +333,8 @@ internal fun PortalReturnScreen(
     onRepairBlockedChanged: (Boolean) -> Unit = {},
 ) {
     val palette = resolvePalette(AppearanceMode.System)
+    val veil = LocalPortalVeil.current
+    SideEffect { veil.ink = palette.textPrimary }
     var returnReady by remember { mutableStateOf(false) }
     var repairRequested by remember { mutableStateOf(false) }
     var recoveryRequested by remember { mutableStateOf(false) }
@@ -391,13 +400,31 @@ internal fun PortalReturnScreen(
                     textAlign = TextAlign.Center,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Restoring your desktop",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.textMuted,
-                    textAlign = TextAlign.Center,
-                )
+                // The line settles from "restoring" to "ready" the moment the
+                // veil may be lifted, dissolving through a soft blur.
+                AnimatedContent(
+                    targetState = veil.eligible,
+                    transitionSpec = {
+                        (fadeIn(tween(420, delayMillis = 90, easing = PortalEmphasizedDecelerate)) +
+                            slideInVertically(tween(560, easing = PortalEmphasized)) { it / 2 })
+                            .togetherWith(
+                                fadeOut(tween(200, easing = PortalEmphasizedAccelerate)) +
+                                    slideOutVertically(tween(260, easing = PortalEmphasizedAccelerate)) { -it / 3 },
+                            )
+                            .using(SizeTransform(clip = false))
+                    },
+                    contentAlignment = Alignment.Center,
+                    label = "return subtitle",
+                ) { desktopReady ->
+                    Text(
+                        text = if (desktopReady) "Your desktop is ready" else "Restoring your desktop",
+                        modifier = Modifier.dissolveBlur(this, radius = 8.dp),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.textMuted,
+                        textAlign = TextAlign.Center,
+                    )
+                }
                 ReturnAnlandAffordance(
                     phase = repairPhase,
                     progress = repairState.progress,

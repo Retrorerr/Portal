@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -91,7 +92,11 @@ fun PortalLaunchTransition(
     val currentReadyPreludeChanged by rememberUpdatedState(onReadyPreludeChanged)
     // Both modes wait for the actual measured logo destination so the
     // travelling mark cannot start before its landing slot exists.
-    val laidOut = rootBounds.width > 0f && destinationBounds.width > 0f
+    // Derived, so the header moving later (the card re-centring as the app
+    // picker unfolds) never recomposes the whole setup tree per frame.
+    val laidOut by remember {
+        derivedStateOf { rootBounds.width > 0f && destinationBounds.width > 0f }
+    }
 
     // Unlike a FrameLayout pre-draw, this gate cannot release before both the
     // actual CONFIGURE and its logo destination have participated in layout.
@@ -168,9 +173,11 @@ fun PortalLaunchTransition(
                 }
             }
     } else Modifier
-    val launchMarkModifier = Modifier
-        .onGloballyPositioned { destinationBounds = it.boundsInRoot() }
-        .then(if (active) Modifier.drawWithContent { } else Modifier)
+    val launchMarkModifier = remember(active) {
+        Modifier
+            .onGloballyPositioned { destinationBounds = it.boundsInRoot() }
+            .then(if (active) Modifier.drawWithContent { } else Modifier)
+    }
 
     PortalRevealVeil(
         eligible = resolved && setupReady && desktopReady && !returnRepairBlocked,
@@ -211,6 +218,11 @@ fun PortalLaunchTransition(
 @Composable
 private fun TravellingPortalMark(root: Rect, header: Rect, elapsed: () -> Float) {
     val painter = portalMarkPainter(PortalColors.Ivory, PortalColors.Orange)
+    // Setup opens on the system theme; in light the header mark is inked in
+    // charcoal, so the travelling mark takes that ink on its way there.
+    val landing = PortalColors.light()
+    val lightPainter = portalMarkPainter(landing.logoMain, landing.logoThreshold)
+    val landsLight = !androidx.compose.foundation.isSystemInDarkTheme()
     val splashSize = with(LocalDensity.current) { 288.dp.toPx() }
     val glow = remember {
         Brush.radialGradient(
@@ -246,7 +258,12 @@ private fun TravellingPortalMark(root: Rect, header: Rect, elapsed: () -> Float)
             }
         }
         translate(rect.left, rect.top) {
-            with(painter) { draw(Size(rect.width, rect.height)) }
+            if (landsLight) {
+                with(painter) { draw(Size(rect.width, rect.height), alpha = 1f - travel) }
+                with(lightPainter) { draw(Size(rect.width, rect.height), alpha = travel) }
+            } else {
+                with(painter) { draw(Size(rect.width, rect.height)) }
+            }
         }
     }
 }

@@ -21,8 +21,9 @@ fun main() {
             check(projectedInstallBytes(ids + app.id) - requested == app.installedMb * 1_000_000L)
         }
     }
-    check(OPTIONAL_APP_IDS == setOf("chatgpt", "libreoffice", "vlc", "gimp", "krita", "inkscape", "thunderbird"))
-    check(projectedInstallBytes(setOf("chatgpt")) - projectedInstallBytes(emptySet()) == 1_900_000_000L)
+    check(OPTIONAL_APP_IDS == setOf("claude", "chatgpt", "libreoffice", "vlc", "gimp", "krita", "inkscape", "thunderbird"))
+    check(projectedInstallBytes(setOf("chatgpt")) - projectedInstallBytes(emptySet()) == 1_940_000_000L)
+    check(projectedInstallBytes(setOf("claude")) - projectedInstallBytes(emptySet()) == 600_000_000L)
     check("okular" !in OPTIONAL_APP_IDS && "kate" !in OPTIONAL_APP_IDS)
     check(projectedInstallBytes(setOf("okular", "kate")) == projectedInstallBytes(emptySet()))
     check(selectedAppsSummary(emptySet()) == "Optional desktop applications")
