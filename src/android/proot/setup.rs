@@ -2542,6 +2542,7 @@ fn sync_initial_desktop_defaults(fs_root: &Path) {
     .unpack(fs_root)
     .expect("Failed to install desktop cache tools");
     sync_firefox_config(fs_root);
+    seed_plasma_locale(fs_root);
     // Repair Portal's own launcher to use Debian's installed browser/icon name.
     let docs_entry = home_dir.join("Desktop/localdesktop-online-docs.desktop");
     if fs_root.join("usr/bin/firefox-esr").exists() {
@@ -3194,6 +3195,28 @@ fn migrate_konsole_profile(home_dir: &Path, guest_home: &str) {
         fs::create_dir_all(parent).expect("Failed to create Konsole migration state directory");
     }
     fs::write(marker, "version=2\n").expect("Failed to record Konsole profile migration");
+}
+
+/// Start the desktop in Android's language. First install only, and only when the user has no
+/// Region & Language settings yet: after that, Plasma's settings own it.
+fn seed_plasma_locale(fs_root: &Path) {
+    let localerc = chroot_home_dir(fs_root, DESKTOP_USER).join(".config/plasma-localerc");
+    if localerc.exists() {
+        return;
+    }
+    let Some(tag) = get_application_context().get_language_tag() else {
+        return;
+    };
+    let Some(locale) = crate::core::guest_locale::plasma_locale_for(&tag) else {
+        return;
+    };
+    if let Some(parent) = localerc.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match fs::write(&localerc, crate::core::guest_locale::plasma_localerc(&locale)) {
+        Ok(()) => log::info!("Seeded Plasma language {} from Android {tag}", locale.language),
+        Err(error) => log::warn!("Could not seed Plasma language from Android {tag}: {error}"),
+    }
 }
 
 /// Follow Android's timezone on every launch (the APK is authoritative for it). A zone the
