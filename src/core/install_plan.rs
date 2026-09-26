@@ -58,6 +58,7 @@ pub enum InterfaceSize {
 #[serde(rename_all = "lowercase")]
 pub enum OptionalApp {
     Chatgpt,
+    Claude,
     Gimp,
     Inkscape,
     Krita,
@@ -70,6 +71,7 @@ impl OptionalApp {
     pub const fn id(self) -> &'static str {
         match self {
             Self::Chatgpt => "chatgpt",
+            Self::Claude => "claude",
             Self::Gimp => "gimp",
             Self::Inkscape => "inkscape",
             Self::Krita => "krita",
@@ -82,6 +84,7 @@ impl OptionalApp {
     pub const fn package_name(self) -> &'static str {
         match self {
             Self::Chatgpt => "chatgpt",
+            Self::Claude => "claude-desktop",
             Self::Gimp => "gimp",
             Self::Inkscape => "inkscape",
             Self::Krita => "krita",
@@ -93,13 +96,34 @@ impl OptionalApp {
 
     /// Packages required for the selected app to run in Portal's Plasma
     /// Wayland session, not merely for Debian to mark its metapackage installed.
+    ///
+    /// Installs skip Recommends to stay small, so this names the recommended
+    /// packages that whole features depend on: PDF/PostScript import (GIMP),
+    /// the Extensions menu and optimized SVG (Inkscape), Python plugins
+    /// (Krita), Office-metric fonts and KDE icons (LibreOffice), and for the
+    /// ChatGPT and Claude apps' coding agents: git, ripgrep, and venv so
+    /// agents can install Python packages (Debian refuses a global pip).
     pub const fn required_packages(self) -> &'static [&'static str] {
         match self {
-            Self::Chatgpt => &["chatgpt"],
-            Self::Gimp => &["gimp"],
-            Self::Inkscape => &["inkscape"],
-            Self::Krita => &["krita"],
-            Self::Libreoffice => &["libreoffice", "libreoffice-kf6"],
+            Self::Chatgpt => &["chatgpt", "git", "ripgrep", "python3-venv"],
+            Self::Claude => &["claude-desktop", "git", "ripgrep", "python3-venv"],
+            Self::Gimp => &["gimp", "ghostscript"],
+            Self::Inkscape => &[
+                "inkscape",
+                "python3-lxml",
+                "python3-numpy",
+                "python3-scour",
+                "python3-cssselect",
+            ],
+            Self::Krita => &["krita", "python3-pyqt5"],
+            Self::Libreoffice => &[
+                "libreoffice",
+                "libreoffice-kf6",
+                "libreoffice-style-breeze",
+                "fonts-crosextra-carlito",
+                "fonts-crosextra-caladea",
+                "fonts-liberation",
+            ],
             Self::Thunderbird => &["thunderbird"],
             Self::Vlc => &["vlc"],
         }
@@ -110,6 +134,7 @@ impl OptionalApp {
     pub const fn desktop_file_id(self) -> &'static str {
         match self {
             Self::Chatgpt => "chatgpt.desktop",
+            Self::Claude => "com.anthropic.Claude.desktop",
             Self::Gimp => "gimp.desktop",
             Self::Inkscape => "org.inkscape.Inkscape.desktop",
             Self::Krita => "org.kde.krita.desktop",
@@ -817,6 +842,11 @@ mod tests {
     fn optional_apps_have_fixed_debian_desktop_entries() {
         let apps = [
             (OptionalApp::Chatgpt, "chatgpt", "chatgpt.desktop"),
+            (
+                OptionalApp::Claude,
+                "claude",
+                "com.anthropic.Claude.desktop",
+            ),
             (OptionalApp::Gimp, "gimp", "gimp.desktop"),
             (
                 OptionalApp::Inkscape,
@@ -841,8 +871,37 @@ mod tests {
             );
         }
         assert_eq!(
-            OptionalApp::Libreoffice.required_packages(),
+            &OptionalApp::Libreoffice.required_packages()[..2],
             &["libreoffice", "libreoffice-kf6"]
+        );
+        for app in [
+            OptionalApp::Chatgpt,
+            OptionalApp::Claude,
+            OptionalApp::Gimp,
+            OptionalApp::Inkscape,
+            OptionalApp::Krita,
+            OptionalApp::Libreoffice,
+            OptionalApp::Thunderbird,
+            OptionalApp::Vlc,
+        ] {
+            assert_eq!(app.required_packages()[0], app.package_name());
+        }
+    }
+
+    #[test]
+    fn official_claude_is_a_canonical_optional_choice() {
+        let plan = InstallPlan::from_json(&VALID_PLAN.replace(
+            "[\"gimp\",\"libreoffice\",\"vlc\"]",
+            "[\"chatgpt\",\"claude\",\"gimp\"]",
+        ))
+        .unwrap();
+        assert_eq!(
+            plan.selected_apps(),
+            &[OptionalApp::Chatgpt, OptionalApp::Claude, OptionalApp::Gimp]
+        );
+        assert_eq!(
+            plan.selected_packages().collect::<Vec<_>>(),
+            vec!["chatgpt", "claude-desktop", "gimp"]
         );
     }
 
@@ -854,7 +913,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(plan.selected_apps()[0], OptionalApp::Chatgpt);
-        assert_eq!(OptionalApp::Chatgpt.required_packages(), &["chatgpt"]);
+        assert_eq!(
+            OptionalApp::Chatgpt.required_packages(),
+            &["chatgpt", "git", "ripgrep", "python3-venv"]
+        );
         assert_eq!(
             plan.selected_packages().collect::<Vec<_>>(),
             vec!["chatgpt", "gimp", "libreoffice", "vlc"]

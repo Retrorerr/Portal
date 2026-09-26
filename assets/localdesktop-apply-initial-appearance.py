@@ -52,6 +52,7 @@ MAX_PANEL_WAIT_SECONDS = 20
 # shell fragments; all three mappings are fixed allowlists.
 APP_DESKTOP_FILES = {
     "chatgpt": "chatgpt.desktop",
+    "claude": "com.anthropic.Claude.desktop",
     "gimp": "gimp.desktop",
     "inkscape": "org.inkscape.Inkscape.desktop",
     "krita": "org.kde.krita.desktop",

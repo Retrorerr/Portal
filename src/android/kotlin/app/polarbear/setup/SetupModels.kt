@@ -147,12 +147,13 @@ class InstallPlan private constructor(
 data class EssentialApp(val id: String, val name: String, val blurb: String, val installedMb: Int)
 
 val OPTIONAL_APPS = listOf(
-    EssentialApp("chatgpt", "ChatGPT", "Official OpenAI desktop app", 1900),
-    EssentialApp("libreoffice", "LibreOffice", "Office suite", 770),
+    EssentialApp("claude", "Claude", "Official Anthropic desktop app", 600),
+    EssentialApp("chatgpt", "ChatGPT", "Official OpenAI desktop app", 1940),
+    EssentialApp("libreoffice", "LibreOffice", "Office suite", 790),
     EssentialApp("vlc", "VLC", "Media player", 215),
-    EssentialApp("gimp", "GIMP", "Image editor", 300),
-    EssentialApp("krita", "Krita", "Digital painting", 590),
-    EssentialApp("inkscape", "Inkscape", "Vector graphics", 260),
+    EssentialApp("gimp", "GIMP", "Image editor", 325),
+    EssentialApp("krita", "Krita", "Digital painting", 615),
+    EssentialApp("inkscape", "Inkscape", "Vector graphics", 300),
     EssentialApp("thunderbird", "Thunderbird", "Email client", 355),
 )
 val OPTIONAL_APP_IDS: Set<String> = OPTIONAL_APPS.mapTo(linkedSetOf()) { it.id }

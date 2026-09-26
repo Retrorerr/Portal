@@ -1,8 +1,10 @@
 package app.polarbear.setup.components
 
 // SPIKE-ONLY: sliding segmented control with ONE inset selection surface
-// that glides between options (~220ms, position-based, no bounce). Text
-// colour cross-fades with the movement.
+// that glides between options. The pill moves like a drop of liquid: its
+// leading edge springs ahead and the trailing edge follows, so it stretches
+// toward the new option and settles back to size. Both edges are critically
+// damped (no bounce). Text colour cross-fades with the movement.
 
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -39,6 +41,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.setup.PortalPalette
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.graphicsLayer
 
 @Composable
 fun <T> SlidingSegmentedControl(
@@ -64,18 +69,34 @@ fun <T> SlidingSegmentedControl(
     ) {
         val segmentWidth = (maxWidth - inset * 2) / options.size
         val selectedIndex = options.indexOf(selected).coerceAtLeast(0)
-        val pillOffset by animateDpAsState(
-            targetValue = inset + segmentWidth * selectedIndex,
-            animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-            label = "segmentSlide",
+        val previousIndex = remember { intArrayOf(selectedIndex) }
+        val movingRight = remember(selectedIndex) {
+            (selectedIndex >= previousIndex[0]).also { previousIndex[0] = selectedIndex }
+        }
+        val leading = spring<Dp>(dampingRatio = 1f, stiffness = 1_100f)
+        val trailing = spring<Dp>(dampingRatio = 1f, stiffness = 300f)
+        val targetLeft = inset + segmentWidth * selectedIndex
+        val pillLeft by animateDpAsState(
+            targetValue = targetLeft,
+            animationSpec = if (movingRight) trailing else leading,
+            label = "segment left edge",
         )
+        val pillRight by animateDpAsState(
+            targetValue = targetLeft + segmentWidth,
+            animationSpec = if (movingRight) leading else trailing,
+            label = "segment right edge",
+        )
+        val pillWidth = (pillRight - pillLeft).coerceAtLeast(0.dp)
+        // Stretching thins the drop a little, as surface tension would.
+        val stretch = ((pillWidth - segmentWidth) / segmentWidth).coerceIn(0f, 1f)
         Box(
             modifier = Modifier
-                .offset(x = pillOffset)
-                .width(segmentWidth)
+                .offset(x = pillLeft)
+                .width(pillWidth)
+                .graphicsLayer { scaleY = 1f - 0.1f * stretch }
                 .padding(vertical = inset)
                 .fillMaxHeight()
-                .shadow(6.dp, pillShape, ambientColor = Color.Black.copy(alpha = 0.25f), spotColor = Color.Black.copy(alpha = 0.25f))
+                .shadow(6.dp, pillShape, ambientColor = palette.pillShadow, spotColor = palette.pillShadow)
                 .clip(pillShape)
                 .background(palette.selectionPill),
         ) {
@@ -94,12 +115,17 @@ fun <T> SlidingSegmentedControl(
             )
         }
         Row(modifier = Modifier.fillMaxSize()) {
-            options.forEach { option ->
+            options.forEachIndexed { index, option ->
                 val interaction = remember { MutableInteractionSource() }
                 val isSelected = option == selected
-                val textColor by animatedTint(
-                    target = if (isSelected) palette.selectionText else palette.optionText,
-                )
+                // Each label lights exactly as much as the pill covers it, so
+                // the text brightens under the glass as it slides past.
+                val segmentLeft = inset + segmentWidth * index
+                val covered = (
+                    (minOf(pillRight, segmentLeft + segmentWidth) - maxOf(pillLeft, segmentLeft)) /
+                        segmentWidth
+                    ).coerceIn(0f, 1f)
+                val textColor = lerp(palette.optionText, palette.selectionText, covered)
                 Box(
                     modifier = Modifier
                         .weight(1f)

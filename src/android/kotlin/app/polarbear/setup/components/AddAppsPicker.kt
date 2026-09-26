@@ -1,177 +1,244 @@
 package app.polarbear.setup.components
 
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
+// Optional apps: a 48dp pill, the same size as the segmented controls beside
+// it, that unfolds in place into a list of real app icons.
+//
+// Every row is composed and laid out from the start and only clipped by the
+// animated height, so the first expansion does no composition, text layout
+// or image decoding mid-animation. Height, row stagger and the header's
+// icon cluster all read one spring in layout/draw; nothing recomposes per
+// frame.
+
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.polarbear.setup.*
+import app.polarbear.setup.EssentialApp
+import app.polarbear.setup.OPTIONAL_APPS
+import app.polarbear.setup.PortalColors
+import app.polarbear.setup.PortalPalette
+import app.polarbear.setup.selectedApps
+import kotlin.math.roundToInt
 
-/** Inline container transformation: AnimatedContent reserves spring-driven space
- * in the real layout; sharedBounds carries the container and sharedElement carries
- * the header. No floating dialog, screen navigation or animateContentSize shortcut.
- */
-@OptIn(ExperimentalSharedTransitionApi::class)
+private val PillShape = RoundedCornerShape(24.dp)
+
 @Composable
-fun AddAppsPicker(expanded: Boolean, selectedIds: Set<String>, onExpandedChange: (Boolean) -> Unit,
-    onToggle: (String) -> Unit, onBounds: (Rect) -> Unit, palette: PortalPalette,
-    modifier: Modifier = Modifier, collapsedHeight: Dp = 48.dp, enabled: Boolean = true) {
-    val transition = updateTransition(expanded, label = "Add apps container")
-    val corner by transition.animateDp({ spring(dampingRatio = 1f, stiffness = 260f) }, label = "glass corner") { 24.dp }
-    val inset by transition.animateDp({ spring(dampingRatio = 1f, stiffness = 260f) }, label = "glass inset") { if (it) 16.dp else 18.dp }
-    val rotation = transition.animateFloat({ spring(dampingRatio = 1f, stiffness = 260f) }, label = "chevron") { if (it) 180f else 0f }
-    val collapsedTap = remember { MutableInteractionSource() }
+fun AddAppsPicker(
+    expanded: Boolean,
+    selectedIds: Set<String>,
+    onExpandedChange: (Boolean) -> Unit,
+    onToggle: (String) -> Unit,
+    onBounds: (Rect) -> Unit,
+    palette: PortalPalette,
+    icons: Map<String, ImageBitmap>,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val open = remember { Animatable(if (expanded) 1f else 0f) }
+    LaunchedEffect(expanded) {
+        open.animateTo(
+            if (expanded) 1f else 0f,
+            // Critically damped; closing is a little quicker than opening.
+            spring(dampingRatio = 1f, stiffness = if (expanded) 340f else 520f),
+        )
+    }
     val headerTap = remember { MutableInteractionSource() }
-    SharedTransitionLayout(modifier.fillMaxWidth().onGloballyPositioned { onBounds(it.boundsInRoot()) }) {
-        transition.AnimatedContent(
-            contentAlignment = Alignment.TopStart,
-            transitionSpec = {
-                (EnterTransition.None togetherWith ExitTransition.None).using(
-                    SizeTransform(clip = true) { _, _ -> spring(dampingRatio = 1f, stiffness = 260f) })
-            },
-        ) { open ->
-            val shape = RoundedCornerShape(corner)
-            Column(Modifier.fillMaxWidth()
-                .sharedBounds(rememberSharedContentState("add-apps-container"), this,
-                    boundsTransform = { _, _ -> spring(dampingRatio = 1f, stiffness = 260f) },
-                    enter = fadeIn(tween(220, delayMillis = if (open) 100 else 40)),
-                    exit = fadeOut(tween(100)),
-                    resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
-                    renderInOverlayDuringTransition = false)
-                .then(
-                    if (!open) {
-                        Modifier.clickable(
-                            enabled = enabled,
-                            interactionSource = collapsedTap,
-                            indication = null,
-                            role = Role.Button,
-                            onClick = { onExpandedChange(true) },
-                        )
-                    } else Modifier
+    Column(
+        modifier
+            .fillMaxWidth()
+            .onGloballyPositioned { onBounds(it.boundsInRoot()) }
+            .clip(PillShape)
+            .background(palette.trackFill)
+            .border(1.dp, palette.surfaceBorder, PillShape),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .clickable(
+                    enabled = enabled,
+                    interactionSource = headerTap,
+                    indication = null,
+                    role = Role.Button,
+                    onClick = { onExpandedChange(!expanded) },
                 )
-                .then(if (!open) Modifier.height(collapsedHeight) else Modifier)
-                .clip(shape)
-                .background(palette.trackFill)
-                .border(1.dp, palette.surfaceBorder, shape)
-                .padding(
-                    start = inset,
-                    end = if (open) inset else 0.dp,
-                    top = if (open) 8.dp else 0.dp,
-                    bottom = if (open) 8.dp else 0.dp,
-                )) {
-                Row(Modifier.fillMaxWidth()
-                    .sharedElement(rememberSharedContentState("add-apps-header"), this@AnimatedContent,
-                        boundsTransform = { _, _ -> spring(dampingRatio = 1f, stiffness = 260f) },
-                        renderInOverlayDuringTransition = false)
-                    .clip(RoundedCornerShape(10.dp))
-                    .then(
-                        if (open) {
-                            Modifier.clickable(
-                                enabled = enabled,
-                                interactionSource = headerTap,
-                                indication = null,
-                                role = Role.Button,
-                                onClick = { onExpandedChange(false) },
-                            )
-                        } else Modifier
+                .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
+                .padding(start = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val chosen = selectedApps(selectedIds)
+            Text(
+                text = when {
+                    chosen.isEmpty() -> "Add apps"
+                    chosen.size == 1 -> chosen.first().name
+                    else -> "${chosen.first().name} +${chosen.size - 1}"
+                },
+                modifier = Modifier.weight(1f),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            IconCluster(
+                selectedIds = selectedIds,
+                icons = icons,
+                palette = palette,
+                modifier = Modifier.graphicsLayer {
+                    // The cluster hands over to the full rows as they unfold.
+                    val hide = (open.value * 1.8f).coerceIn(0f, 1f)
+                    alpha = 1f - hide
+                    translationX = hide * 10.dp.toPx()
+                },
+            )
+            Box(Modifier.width(44.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                Canvas(Modifier.size(20.dp)) {
+                    // The chevron morphs rather than spins: its tip travels
+                    // through a flat line and folds the other way.
+                    val t = open.value.coerceIn(0f, 1f)
+                    val arms = size.height * (0.36f + 0.26f * t)
+                    val tip = size.height * (0.62f - 0.26f * t)
+                    val path = Path().apply {
+                        moveTo(size.width * 0.22f, arms)
+                        lineTo(size.width * 0.5f, tip)
+                        lineTo(size.width * 0.78f, arms)
+                    }
+                    drawPath(
+                        path,
+                        palette.textSecondary,
+                        style = Stroke(2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
                     )
-                    .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
-                    .height(48.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "Add additional apps",
-                            fontSize = 14.sp,
-                            lineHeight = 17.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = palette.textPrimary,
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .width(48.dp)
-                            .fillMaxHeight(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Canvas(Modifier.size(20.dp).graphicsLayer { rotationZ = rotation.value }) {
-                            val path = Path().apply {
-                                moveTo(size.width * 0.22f, size.height * 0.36f)
-                                lineTo(size.width * 0.5f, size.height * 0.62f)
-                                lineTo(size.width * 0.78f, size.height * 0.36f)
-                            }
-                            drawPath(path, palette.textSecondary, style = Stroke(2.dp.toPx(), cap = StrokeCap.Round))
-                        }
-                    }
-                }
-                if (!open) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(end = 48.dp, bottom = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        Text(
-                            if (selectedIds.isEmpty()) {
-                                "Optional desktop applications"
-                            } else {
-                                "Selected · ${selectedAppsSummary(selectedIds)}"
-                            },
-                            fontSize = 11.sp,
-                            lineHeight = 14.sp,
-                            color = palette.textSecondary,
-                            maxLines = 1,
-                        )
-                        OPTIONAL_APPS.chunked(3).forEach { apps ->
-                            Text(
-                                apps.joinToString(" · ") { it.name },
-                                fontSize = 11.sp,
-                                lineHeight = 14.sp,
-                                color = palette.textSecondary.copy(alpha = 0.76f),
-                                maxLines = 1,
-                            )
-                        }
-                        Text(
-                            "Choose any combination",
-                            fontSize = 11.sp,
-                            lineHeight = 14.sp,
-                            color = palette.textSecondary.copy(alpha = 0.76f),
-                        )
-                    }
-                }
-                if (open) {
-                    // The genuinely optional rows grow inside the container;
-                    // Okular and Kate are already part of the baseline rootfs.
-                    // The growing container clips and
-                    // progressively reveals them while the subtitle dissolves.
-                    OPTIONAL_APPS.forEach { app ->
-                        AppSelectionRow(app, app.id in selectedIds, { onToggle(app.id) }, palette, enabled)
-                    }
                 }
             }
+        }
+        val density = LocalDensity.current
+        val risePx = with(density) { 10.dp.toPx() }
+        val blurPx = with(density) { 6.dp.toPx() }
+        Column(
+            Modifier
+                .clipToBounds()
+                .layout { measurable, constraints ->
+                    val placeable = measurable.measure(
+                        constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity),
+                    )
+                    val height = (placeable.height * open.value.coerceIn(0f, 1f)).roundToInt()
+                    layout(placeable.width, height) {
+                        if (height > 0) placeable.place(0, 0)
+                    }
+                }
+                .padding(start = 6.dp, end = 6.dp, bottom = 6.dp),
+        ) {
+            OPTIONAL_APPS.forEachIndexed { index, app ->
+                AppSelectionRow(
+                    app = app,
+                    icon = icons[app.id],
+                    checked = app.id in selectedIds,
+                    onToggle = { onToggle(app.id) },
+                    palette = palette,
+                    enabled = enabled && expanded,
+                    modifier = Modifier.graphicsLayer {
+                        // Rows condense into place one after another; on the
+                        // way back the last row leaves first.
+                        val start = 0.1f + index * 0.07f
+                        val shown = ((open.value - start) / 0.42f).coerceIn(0f, 1f)
+                        val eased = PortalEmphasizedDecelerate.transform(shown)
+                        alpha = eased
+                        translationY = (1f - eased) * risePx
+                        portalBlur((1f - eased) * blurPx)
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** A quiet row of every optional app, with the chosen ones lit. */
+@Composable
+private fun IconCluster(
+    selectedIds: Set<String>,
+    icons: Map<String, ImageBitmap>,
+    palette: PortalPalette,
+    modifier: Modifier = Modifier,
+) {
+    if (icons.isEmpty()) return
+    Row(modifier.semantics { contentDescription = "Optional apps" }) {
+        OPTIONAL_APPS.forEachIndexed { index, app ->
+            val icon = icons[app.id] ?: return@forEachIndexed
+            val lit by animateFloatAsState(
+                if (selectedIds.isEmpty() || app.id in selectedIds) 1f else 0f,
+                tween(320, easing = PortalEmphasized),
+                label = "cluster icon",
+            )
+            Image(
+                bitmap = icon,
+                contentDescription = null,
+                // Unchosen apps rest nearly monochrome and colour up when picked.
+                colorFilter = if (lit >= 0.999f) {
+                    null
+                } else {
+                    ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0.15f + 0.85f * lit) })
+                },
+                modifier = Modifier
+                    .padding(start = if (index == 0) 0.dp else 5.dp)
+                    .size(18.dp)
+                    .graphicsLayer {
+                        alpha = if (palette.isDark) 0.38f + 0.62f * lit else 0.45f + 0.55f * lit
+                        val s = 0.9f + 0.1f * lit
+                        scaleX = s
+                        scaleY = s
+                    },
+            )
         }
     }
 }
@@ -179,37 +246,78 @@ fun AddAppsPicker(expanded: Boolean, selectedIds: Set<String>, onExpandedChange:
 @Composable
 private fun AppSelectionRow(
     app: EssentialApp,
+    icon: ImageBitmap?,
     checked: Boolean,
     onToggle: () -> Unit,
     palette: PortalPalette,
     enabled: Boolean,
+    modifier: Modifier = Modifier,
 ) {
-    val fill by animateColorAsState(if (checked) palette.accent.copy(alpha = 0.11f) else palette.accent.copy(alpha = 0f), tween(180), label = "selected row")
-    val check by animateFloatAsState(if (checked) 1f else 0f, tween(180), label = "check")
+    val fill by animateColorAsState(
+        if (checked) palette.accent.copy(alpha = if (palette.isDark) 0.11f else 0.09f) else palette.accent.copy(alpha = 0f),
+        tween(240),
+        label = "selected row",
+    )
+    val check by animateFloatAsState(
+        if (checked) 1f else 0f,
+        if (checked) tween(360, easing = PortalEmphasized) else tween(200, easing = PortalEmphasizedAccelerate),
+        label = "check",
+    )
     val tap = remember { MutableInteractionSource() }
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(fill)
-        .clickable(
-            enabled = enabled,
-            interactionSource = tap,
-            indication = null,
-            role = Role.Checkbox,
-            onClick = onToggle,
-        )
-        .semantics { stateDescription = if (checked) "Selected" else "Not selected" }
-        .padding(horizontal = 10.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(fill)
+            .clickable(
+                enabled = enabled,
+                interactionSource = tap,
+                indication = null,
+                role = Role.Checkbox,
+                onClick = onToggle,
+            )
+            .semantics { stateDescription = if (checked) "Selected" else "Not selected" }
+            .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+            if (icon != null) {
+                Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(30.dp))
+            }
+        }
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(app.name, color = palette.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-            Text(app.blurb, color = palette.textSecondary, fontSize = 11.sp)
+            Text(
+                "${app.blurb} · ${formatInstalledSize(app.installedMb)}",
+                color = palette.textSecondary,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
+        Spacer(Modifier.width(8.dp))
         Canvas(Modifier.size(20.dp)) {
-            drawRoundRect(palette.textSecondary.copy(alpha = 0.5f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(5.dp.toPx()), style = Stroke(1.dp.toPx()))
-            drawRoundRect(PortalColors.Orange, cornerRadius = androidx.compose.ui.geometry.CornerRadius(5.dp.toPx()), alpha = check)
-            val path = Path().apply {
-                moveTo(size.width * 0.23f, size.height * 0.51f)
-                lineTo(size.width * 0.44f, size.height * 0.72f)
-                lineTo(size.width * 0.78f, size.height * 0.28f)
+            val corner = CornerRadius(6.dp.toPx())
+            drawRoundRect(palette.textSecondary.copy(alpha = 0.45f), cornerRadius = corner, style = Stroke(1.dp.toPx()))
+            // The box fills first, then the tick draws itself stroke by stroke.
+            val boxFill = (check * 1.8f).coerceIn(0f, 1f)
+            drawRoundRect(PortalColors.Orange, cornerRadius = corner, alpha = boxFill)
+            val tick = ((check - 0.2f) / 0.8f).coerceIn(0f, 1f)
+            if (tick > 0f) {
+                val path = Path().apply {
+                    moveTo(size.width * 0.25f, size.height * 0.52f)
+                    lineTo(size.width * 0.44f, size.height * 0.70f)
+                    lineTo(size.width * 0.76f, size.height * 0.31f)
+                }
+                val measure = PathMeasure().apply { setPath(path, false) }
+                val drawn = Path()
+                measure.getSegment(0f, measure.length * tick, drawn, true)
+                drawPath(drawn, PortalColors.Charcoal, style = Stroke(2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
             }
-            drawPath(path, PortalColors.Charcoal, alpha = check, style = Stroke(2.dp.toPx(), cap = StrokeCap.Round))
         }
     }
 }
+
+private fun formatInstalledSize(mb: Int): String =
+    if (mb >= 1000) "%.1f GB".format(mb / 1000f) else "$mb MB"

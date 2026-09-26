@@ -62,6 +62,21 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import kotlin.math.abs
+import android.os.SystemClock
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.layout.onSizeChanged
+import app.polarbear.setup.components.LocalPortalVeil
+import app.polarbear.setup.components.PortalEmphasizedDecelerate
+import app.polarbear.setup.components.PortalVeilMotion
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 private const val TAG = "PortalVeilReveal"
 private const val COMMIT_TRAVEL_FRACTION = 0.28f
@@ -69,6 +84,12 @@ private const val COMMIT_VELOCITY_DP_PER_SECOND = 1_450f
 private const val EFFECT_START_DP_PER_SECOND = 280f
 private const val EFFECT_FULL_DP_PER_SECOND = 2_600f
 private val MAX_SMEAR = 15.dp
+// Idle hint: the veil breathes up a touch, as if lifted by a draught, so the
+// progressive edge shows a sliver of the live desktop beneath.
+private val HINT_LIFT = 14.dp
+private const val HINT_FIRST_DELAY_MS = 1_800L
+private const val HINT_PERIOD_MS = 5_600L
+private const val HINT_TOUCH_QUIET_MS = 3_500L
 
 /**
  * Stationary input shell plus one translated Compose visual layer. Keeping the
@@ -87,13 +108,18 @@ internal fun PortalRevealVeil(
     val density = LocalDensity.current
     val densityScale = density.density
     val lifecycle = (LocalContext.current as LifecycleOwner).lifecycle
-    var displacement by remember { mutableFloatStateOf(0f) }
+    val motion = remember { PortalVeilMotion() }
+    var displacement by motion::gesture
     var effectStrength by remember { mutableFloatStateOf(0f) }
     val animationScope = rememberCoroutineScope()
     val settleJob = remember { arrayOfNulls<Job>(1) }
     val commitInFlight = remember { booleanArrayOf(false) }
     val currentCommitted by rememberUpdatedState(onCommitted)
     val currentFinished by rememberUpdatedState(onFinished)
+    val hintJob = remember { arrayOfNulls<Job>(1) }
+    val lastTouchMs = remember { longArrayOf(0L) }
+    var sweepKey by remember { mutableIntStateOf(0) }
+    SideEffect { motion.eligible = eligible }
 
     LaunchedEffect(eligible) {
         if (eligible) {
@@ -104,6 +130,32 @@ internal fun PortalRevealVeil(
             commitInFlight[0] = false
             effectStrength = 0f
             displacement = 0f
+            motion.hint = 0f
+        }
+    }
+
+    LaunchedEffect(eligible) {
+        if (!eligible || !ValueAnimator.areAnimatorsEnabled()) return@LaunchedEffect
+        val hintPx = with(density) { HINT_LIFT.toPx() }
+        delay(HINT_FIRST_DELAY_MS)
+        while (isActive) {
+            val quiet = SystemClock.uptimeMillis() - lastTouchMs[0] > HINT_TOUCH_QUIET_MS
+            if (quiet && displacement == 0f && !commitInFlight[0]) {
+                sweepKey++
+                val job = launch {
+                    val lift = Animatable(motion.hint)
+                    lift.animateTo(hintPx, tween(620, easing = PortalEmphasizedDecelerate)) {
+                        motion.hint = value
+                    }
+                    lift.animateTo(
+                        0f,
+                        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 90f),
+                    ) { motion.hint = value }
+                }
+                hintJob[0] = job
+                job.join()
+            }
+            delay(HINT_PERIOD_MS)
         }
     }
 
@@ -112,6 +164,8 @@ internal fun PortalRevealVeil(
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
                 settleJob[0]?.cancel()
                 settleJob[0] = null
+                hintJob[0]?.cancel()
+                motion.hint = 0f
                 effectStrength = 0f
                 if (commitInFlight[0]) {
                     // The app is no longer visible, so finish the already
@@ -129,7 +183,7 @@ internal fun PortalRevealVeil(
     }
 
     val motionLayer = rememberPortalVeilMotionLayer(
-        displacement = { displacement },
+        motion = motion,
         strength = { effectStrength },
     )
     val gesture = Modifier.pointerInput(eligible, densityScale) {
@@ -150,6 +204,15 @@ internal fun PortalRevealVeil(
             }
             settleJob[0]?.cancel()
             settleJob[0] = null
+            // Take over an idle hint mid-breath: fold its lift into the
+            // gesture so the veil never jumps under the finger.
+            lastTouchMs[0] = SystemClock.uptimeMillis()
+            hintJob[0]?.cancel()
+            hintJob[0] = null
+            if (motion.hint != 0f) {
+                displacement = (displacement + motion.hint).coerceAtLeast(0f)
+                motion.hint = 0f
+            }
             val originDisplacement = displacement
             var total = Offset.Zero
             var dragging = false
@@ -285,30 +348,45 @@ internal fun PortalRevealVeil(
     // This outer shell remains stationary and input-owning. Only the inner
     // visual layer moves, so the same finger coordinates stay stable.
     val affordanceRisePx = with(density) { 10.dp.roundToPx() }
-    Box(Modifier.fillMaxSize().then(gesture)) {
+    val affordanceFadePx = with(density) { 72.dp.toPx() }
+    CompositionLocalProvider(LocalPortalVeil provides motion) {
         Box(
-            modifier = Modifier
+            Modifier
                 .fillMaxSize()
-                .then(motionLayer)
-                .then(modifier),
+                .onSizeChanged { motion.height = it.height.toFloat() }
+                .then(gesture),
         ) {
-            content()
-            AnimatedVisibility(
-                visible = eligible,
-                enter = fadeIn(tween(360, delayMillis = 40)) +
-                    slideInVertically(
-                        animationSpec = tween(420, delayMillis = 20),
-                        initialOffsetY = { affordanceRisePx },
-                    ) + scaleIn(
-                        animationSpec = tween(420, delayMillis = 20),
-                        initialScale = 0.97f,
-                    ),
-                exit = fadeOut(tween(140)) +
-                    slideOutVertically(tween(160)) { affordanceRisePx / 2 } +
-                    scaleOut(tween(160), targetScale = 0.985f),
-                modifier = Modifier.align(Alignment.BottomCenter),
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(motionLayer)
+                    .then(modifier),
             ) {
-                PortalHomeGestureAffordance()
+                content()
+                AnimatedVisibility(
+                    visible = eligible,
+                    enter = fadeIn(tween(520, delayMillis = 60, easing = PortalEmphasizedDecelerate)) +
+                        slideInVertically(
+                            animationSpec = tween(640, delayMillis = 20, easing = PortalEmphasizedDecelerate),
+                            initialOffsetY = { affordanceRisePx * 2 },
+                        ) + scaleIn(
+                            animationSpec = tween(640, delayMillis = 20, easing = PortalEmphasizedDecelerate),
+                            initialScale = 0.96f,
+                        ),
+                    exit = fadeOut(tween(140)) +
+                        slideOutVertically(tween(160)) { affordanceRisePx / 2 } +
+                        scaleOut(tween(160), targetScale = 0.985f),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        // The instruction dissolves as the finger takes over.
+                        .graphicsLayer {
+                            val fade = (motion.gesture / affordanceFadePx).coerceIn(0f, 1f)
+                            alpha = 1f - fade
+                            translationY = -fade * affordanceRisePx
+                        },
+                ) {
+                    PortalHomeGestureAffordance(ink = motion.ink, sweepKey = sweepKey)
+                }
             }
         }
     }
@@ -332,18 +410,20 @@ internal fun effectStrengthFor(upwardVelocityPx: Float, density: Float): Float {
 }
 
 @Composable
-private fun PortalHomeGestureAffordance() {
+private fun PortalHomeGestureAffordance(ink: Color, sweepKey: Int) {
     val sweep = remember { Animatable(0f) }
     val sweepLayer = rememberPortalAffordanceSweepLayer { sweep.value }
 
-    LaunchedEffect(Unit) {
+    // Entrance, then one glint with every idle hint: light crosses the
+    // instruction as the veil breathes.
+    LaunchedEffect(sweepKey) {
         if (ValueAnimator.areAnimatorsEnabled()) {
             sweep.snapTo(0f)
-            sweep.animateTo(1f, tween(560, easing = FastOutSlowInEasing))
+            sweep.animateTo(1f, tween(if (sweepKey == 0) 560 else 900, easing = FastOutSlowInEasing))
         } else {
             sweep.snapTo(1f)
         }
-        Log.i(TAG, "final affordance entrance sweep settled; shader dormant")
+        if (sweepKey == 0) Log.i(TAG, "final affordance entrance sweep settled; shader dormant")
     }
 
     Column(
@@ -355,7 +435,7 @@ private fun PortalHomeGestureAffordance() {
     ) {
         Text(
             text = "Swipe up to enter Portal",
-            color = PortalColors.Ivory.copy(alpha = 0.48f),
+            color = ink.copy(alpha = 0.62f),
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
         )
@@ -364,7 +444,7 @@ private fun PortalHomeGestureAffordance() {
             Modifier
                 .size(width = 104.dp, height = 5.dp)
                 .background(
-                    PortalColors.Ivory.copy(alpha = 0.68f),
+                    ink.copy(alpha = 0.72f),
                     RoundedCornerShape(50),
                 ),
         )
@@ -379,7 +459,7 @@ private fun PortalHomeGestureAffordance() {
  */
 @Composable
 private fun rememberPortalVeilMotionLayer(
-    displacement: () -> Float,
+    motion: PortalVeilMotion,
     strength: () -> Float,
 ): Modifier {
     val density = LocalDensity.current
@@ -389,18 +469,48 @@ private fun rememberPortalVeilMotionLayer(
         remember(shader) { createVeilMotionEffect(shader) }
     } else null
 
-    return Modifier.graphicsLayer {
-        translationY = -displacement().coerceAtLeast(0f)
-        val amount = strength().coerceIn(0f, 1f)
-        if (shader != null && effect != null && amount > 0.001f) {
-            shader.setFloatUniform("size", size.width, size.height)
-            shader.setFloatUniform("strength", amount)
-            shader.setFloatUniform("maxSmear", maxSmearPx)
-            renderEffect = effect
-        } else {
-            renderEffect = null
+    return Modifier
+        .graphicsLayer {
+            translationY = -motion.lift
+            // The leading edge feathers only while lifted; at rest the veil is
+            // an ordinary layer and composites at no extra cost.
+            compositingStrategy = if (motion.featherBand > 0.5f) {
+                CompositingStrategy.Offscreen
+            } else {
+                CompositingStrategy.Auto
+            }
+            val amount = strength().coerceIn(0f, 1f)
+            if (shader != null && effect != null && amount > 0.001f) {
+                shader.setFloatUniform("size", size.width, size.height)
+                shader.setFloatUniform("strength", amount)
+                shader.setFloatUniform("maxSmear", maxSmearPx)
+                renderEffect = effect
+            } else {
+                renderEffect = null
+            }
         }
-    }
+        .drawWithContent {
+            drawContent()
+            val band = motion.featherBand
+            if (band > 0.5f) {
+                // Eased alpha falloff: glass thins into the sharp desktop
+                // instead of ending at a hard line. The frost inside the veil
+                // already lightens its blur over a wider band above this, so
+                // blur and opacity fall away together (progressive blur).
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0f to Color.Black,
+                        0.35f to Color.Black.copy(alpha = 0.86f),
+                        0.65f to Color.Black.copy(alpha = 0.5f),
+                        0.85f to Color.Black.copy(alpha = 0.18f),
+                        1f to Color.Transparent,
+                        startY = size.height - band,
+                        endY = size.height,
+                    ),
+                    blendMode = BlendMode.DstIn,
+                )
+            }
+        }
 }
 
 @RequiresApi(33)

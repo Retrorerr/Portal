@@ -32,6 +32,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.roundToInt
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
 
 /** One snapshot of the actual private app/data volume; refresh on resume, not per frame. */
 @Composable
@@ -213,6 +225,17 @@ private fun InstallProgressBar(
 ) {
     val progress = progressState.value.coerceIn(0f, 1f)
     val percent = (progress * 100f).roundToInt().coerceIn(0, 100)
+    // A slow glint travels the filled track: the bar reads as alive even
+    // while a long step holds the percentage still.
+    val glint by rememberInfiniteTransition(label = "progress glint").animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            tween(1_700, delayMillis = 900, easing = PortalEmphasized),
+            RepeatMode.Restart,
+        ),
+        label = "glint position",
+    )
     Box(modifier = modifier) {
         Text(
             text = "Installing Portal · $percent%",
@@ -236,13 +259,29 @@ private fun InstallProgressBar(
             )
             val progressWidth = size.width * progress
             if (progressWidth > 0f) {
+                val fillRadius = androidx.compose.ui.geometry.CornerRadius(
+                    minOf(size.height / 2f, progressWidth / 2f),
+                )
                 drawRoundRect(
                     color = PortalColors.Orange,
                     size = Size(progressWidth, size.height),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(
-                        minOf(size.height / 2f, progressWidth / 2f),
-                    ),
+                    cornerRadius = fillRadius,
                 )
+                if (progress < 1f) {
+                    val band = 120.dp.toPx()
+                    val centre = -band + (size.width + band * 2f) * glint
+                    drawRoundRect(
+                        brush = Brush.horizontalGradient(
+                            0f to Color.Transparent,
+                            0.5f to PortalColors.Ivory.copy(alpha = 0.34f),
+                            1f to Color.Transparent,
+                            startX = centre - band / 2f,
+                            endX = centre + band / 2f,
+                        ),
+                        size = Size(progressWidth, size.height),
+                        cornerRadius = fillRadius,
+                    )
+                }
             }
         }
     }
@@ -268,55 +307,102 @@ private fun InstallLogLines(
     val activeIndex by remember(progressState, hasSelectedApps) {
         derivedStateOf { installStageIndex(progressState.value, hasSelectedApps == true) }
     }
-    val lines = remember(stages, activeIndex, ready, currentMessage) {
-        val history = if (ready) {
+    val history = remember(stages, activeIndex, ready, currentMessage) {
+        if (ready) {
             stages + "Portal is ready"
         } else if (!currentMessage.isNullOrBlank()) {
             stages.take(activeIndex) + currentMessage
         } else {
             stages.take(activeIndex + 1)
         }
-        history.takeLast(4)
     }
-    // Progress messages change their counts frequently; keep the rows in place
-    // so only the text value updates instead of re-entering the entire log.
-    Column(
+    val first = (history.size - 4).coerceAtLeast(0)
+    // Rows are keyed by their stage, so a changing progress count only
+    // updates its text, while a new stage scrolls the log: the new line
+    // condenses in, older lines glide up and dim, the oldest dissolves.
+    LazyColumn(
         modifier = Modifier
             .fillMaxWidth()
             .height(55.dp),
+        userScrollEnabled = false,
         verticalArrangement = Arrangement.spacedBy(1.dp),
     ) {
-        lines.forEachIndexed { index, line ->
-            val age = lines.lastIndex - index
-            val current = age == 0
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Canvas(Modifier.size(5.dp)) {
-                    if (current) drawCircle(PortalColors.Orange.copy(alpha = 0.8f))
-                }
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = line,
-                    color = if (current) {
-                        palette.textPrimary.copy(alpha = 0.78f)
-                    } else {
-                        palette.textSecondary.copy(
-                            alpha = when (age) {
-                                1 -> 0.44f
-                                2 -> 0.34f
-                                else -> 0.25f
-                            },
-                        )
-                    },
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    lineHeight = 13.sp,
-                    maxLines = 1,
-                )
-            }
+        items(count = history.size - first, key = { first + it }) { offset ->
+            val index = first + offset
+            InstallLogLine(
+                text = history[index],
+                age = history.lastIndex - index,
+                palette = palette,
+                modifier = Modifier.animateItem(
+                    fadeInSpec = tween(360, delayMillis = 60),
+                    placementSpec = spring(
+                        dampingRatio = 1f,
+                        stiffness = 260f,
+                        visibilityThreshold = IntOffset.VisibilityThreshold,
+                    ),
+                    fadeOutSpec = tween(220),
+                ),
+            )
         }
+    }
+}
+
+@Composable
+private fun InstallLogLine(
+    text: String,
+    age: Int,
+    palette: PortalPalette,
+    modifier: Modifier = Modifier,
+) {
+    val current = age == 0
+    val strength by animateFloatAsState(
+        targetValue = when (age) {
+            0 -> 0.78f
+            1 -> 0.44f
+            2 -> 0.34f
+            else -> 0.25f
+        },
+        animationSpec = tween(480, easing = PortalEmphasized),
+        label = "log line strength",
+    )
+    val dot by animateFloatAsState(
+        targetValue = if (current) 0.8f else 0f,
+        animationSpec = tween(420, easing = PortalEmphasized),
+        label = "log line dot",
+    )
+    val tone by animatedTint(
+        target = if (current) palette.textPrimary else palette.textSecondary,
+        durationMillis = 480,
+    )
+    val entrance = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        entrance.animateTo(1f, tween(560, easing = PortalEmphasizedDecelerate))
+    }
+    val density = LocalDensity.current
+    val blurPx = with(density) { 5.dp.toPx() }
+    val shiftPx = with(density) { 6.dp.toPx() }
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                val pending = 1f - entrance.value
+                translationX = pending * shiftPx
+                portalBlur(pending * blurPx)
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Canvas(Modifier.size(5.dp)) {
+            if (dot > 0.01f) drawCircle(PortalColors.Orange.copy(alpha = dot))
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = text,
+            color = tone.copy(alpha = strength),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            lineHeight = 13.sp,
+            maxLines = 1,
+        )
     }
 }
 

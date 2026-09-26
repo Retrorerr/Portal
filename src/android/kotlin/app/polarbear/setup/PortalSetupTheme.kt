@@ -38,6 +38,13 @@ data class PortalPalette(
     val arcOrange: Color,
     val logoMain: Color,
     val logoThreshold: Color,
+    // Ambient drifting fragments: the aperture pieces take [fragmentInk],
+    // thresholds stay orange. Gains lift the tuned dark-mode opacities so the
+    // same pieces stay perceptible on a bright ground.
+    val fragmentInk: Color,
+    val fragmentGain: Float,
+    val thresholdGain: Float,
+    val pillShadow: Color,
     val isDark: Boolean,
 )
 
@@ -70,6 +77,10 @@ object PortalColors {
         arcOrange = Color(0x14F07949),
         logoMain = Ivory,
         logoThreshold = Orange,
+        fragmentInk = Ivory,
+        fragmentGain = 1f,
+        thresholdGain = 1f,
+        pillShadow = Color(0x40000000),
         isDark = true,
     )
 
@@ -83,22 +94,28 @@ object PortalColors {
         textSecondary = Color(0xFF4C4E4E),
         textMuted = Color(0xFF76716B),
         trackFill = Color(0x0A191B1C),
-        selectionPill = Color(0x40F07949),
-        selectionHighlight = Color(0x1EFFFFFF),
-        // Charcoal on the light tint: white text would fail contrast here.
+        // A sheet of paper lifted off the track: the orange tint read as
+        // salmon on cream, and charcoal text stays crisp on white.
+        selectionPill = Color(0xFFFFFDF8),
+        selectionHighlight = Color(0x00FFFFFF),
         selectionText = Color(0xFF222425),
         optionText = Color(0xFF7C766E),
         accent = Orange,
         accentSoft = Orange,
         buttonInterior = Color(0xFF1E2021),
-        buttonOutline = Color(0x99F07949),
+        buttonOutline = Color(0x5CF07949),
         glow = Color(0xFFF07949),
         scrim = Color(0x4D191B1C),
         arcIvory = Color(0x0A191B1C),
         arcOrange = Color(0x16F07949),
-        // Exact official mark colours in both modes: no badge, no container.
-        logoMain = Ivory,
+        // The official monochrome reading of the mark: an ivory aperture
+        // vanishes on cream, so it inks in charcoal with the orange threshold.
+        logoMain = Color(0xFF222425),
         logoThreshold = Orange,
+        fragmentInk = Charcoal,
+        fragmentGain = 1.5f,
+        thresholdGain = 2.4f,
+        pillShadow = Color(0x24191B1C),
         isDark = false,
     )
 }
