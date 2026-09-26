@@ -542,7 +542,10 @@ fn forward_anland_input(
         }
         WindowEvent::KeyboardInput { event, .. } => {
             if event.state == ElementState::Pressed && event.repeat {
-                // Compositor-side autorepeat owns repeats; forward the press.
+                // Wayland clients repeat held keys themselves (KWin's
+                // repeat_info), so Android's repeats would be extra presses.
+                // The Smithay path drops them the same way.
+                return;
             }
             let Some(scancode) = crate::android::backend::wayland::keymap::physicalkey_to_scancode(
                 event.physical_key,
