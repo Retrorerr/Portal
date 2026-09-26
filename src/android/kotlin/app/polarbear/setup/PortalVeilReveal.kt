@@ -51,6 +51,8 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -186,6 +188,58 @@ internal fun PortalRevealVeil(
         motion = motion,
         strength = { effectStrength },
     )
+    // The one commit path, shared by the upward gesture and by accessibility
+    // services (TalkBack, Switch Access, Voice Access), which cannot perform
+    // the swipe: TalkBack passes it through as two fingers, which cancels it.
+    fun commitReveal(fullHeight: Float, upwardVelocity: Float) {
+        if (!ValueAnimator.areAnimatorsEnabled()) {
+            effectStrength = 0f
+            currentCommitted()
+            displacement = fullHeight
+            currentFinished()
+            return
+        }
+        Log.i(
+            TAG,
+            "reveal committed travel=${displacement / fullHeight} velocityPx=$upwardVelocity",
+        )
+        effectStrength = maxOf(
+            effectStrength,
+            effectStrengthFor(upwardVelocity, densityScale),
+        )
+        val peakEffectStrength = effectStrength
+        val releaseDisplacement = displacement
+        val remainingTravel = (fullHeight - releaseDisplacement).coerceAtLeast(1f)
+        commitInFlight[0] = true
+        currentCommitted()
+        val launchVelocity = upwardVelocity.coerceAtMost(fullHeight * 4f)
+        settleJob[0] = animationScope.launch {
+            Animatable(displacement).animateTo(
+                targetValue = fullHeight,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = 420f,
+                ),
+                initialVelocity = launchVelocity,
+            ) {
+                displacement = value.coerceIn(0f, fullHeight)
+                // Hold the release energy through most of the exit, then
+                // collapse it over the final 22% of remaining travel.
+                // This ties the last motion frame to veil geometry
+                // instead of guessing at a fixed delay.
+                val remainingFraction = (
+                    (fullHeight - displacement) / remainingTravel
+                ).coerceIn(0f, 1f)
+                effectStrength = peakEffectStrength *
+                    (remainingFraction / 0.22f).coerceIn(0f, 1f)
+            }
+            effectStrength = 0f
+            displacement = fullHeight
+            commitInFlight[0] = false
+            currentFinished()
+        }
+    }
+
     val gesture = Modifier.pointerInput(eligible, densityScale) {
         if (!eligible) return@pointerInput
         val velocityThresholdPx = COMMIT_VELOCITY_DP_PER_SECOND * densityScale
@@ -267,58 +321,11 @@ internal fun PortalRevealVeil(
                 velocityThreshold = velocityThresholdPx,
             )
 
-            if (!ValueAnimator.areAnimatorsEnabled()) {
-                effectStrength = 0f
-                if (commit) {
-                    currentCommitted()
-                    displacement = fullHeight
-                    currentFinished()
-                } else {
-                    displacement = 0f
-                }
-                return@awaitEachGesture
-            }
-
             if (commit) {
-                Log.i(
-                    TAG,
-                    "reveal committed travel=${displacement / fullHeight} velocityPx=$upwardVelocity",
-                )
-                effectStrength = maxOf(
-                    effectStrength,
-                    effectStrengthFor(upwardVelocity, densityScale),
-                )
-                val peakEffectStrength = effectStrength
-                val releaseDisplacement = displacement
-                val remainingTravel = (fullHeight - releaseDisplacement).coerceAtLeast(1f)
-                commitInFlight[0] = true
-                currentCommitted()
-                val launchVelocity = upwardVelocity.coerceAtMost(fullHeight * 4f)
-                settleJob[0] = animationScope.launch {
-                    Animatable(displacement).animateTo(
-                        targetValue = fullHeight,
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioNoBouncy,
-                            stiffness = 420f,
-                        ),
-                        initialVelocity = launchVelocity,
-                    ) {
-                        displacement = value.coerceIn(0f, fullHeight)
-                        // Hold the release energy through most of the exit, then
-                        // collapse it over the final 22% of remaining travel.
-                        // This ties the last motion frame to veil geometry
-                        // instead of guessing at a fixed delay.
-                        val remainingFraction = (
-                            (fullHeight - displacement) / remainingTravel
-                        ).coerceIn(0f, 1f)
-                        effectStrength = peakEffectStrength *
-                            (remainingFraction / 0.22f).coerceIn(0f, 1f)
-                    }
-                    effectStrength = 0f
-                    displacement = fullHeight
-                    commitInFlight[0] = false
-                    currentFinished()
-                }
+                commitReveal(fullHeight, upwardVelocity)
+            } else if (!ValueAnimator.areAnimatorsEnabled()) {
+                effectStrength = 0f
+                displacement = 0f
             } else {
                 Log.i(TAG, "reveal cancelled; veil returning to rest")
                 settleJob[0] = animationScope.launch {
@@ -354,6 +361,18 @@ internal fun PortalRevealVeil(
             Modifier
                 .fillMaxSize()
                 .onSizeChanged { motion.height = it.height.toFloat() }
+                .semantics {
+                    if (eligible) {
+                        onClick(label = "Enter Portal") {
+                            if (commitInFlight[0] || motion.height <= 0f) return@onClick false
+                            settleJob[0]?.cancel()
+                            hintJob[0]?.cancel()
+                            motion.hint = 0f
+                            commitReveal(motion.height, 0f)
+                            true
+                        }
+                    }
+                }
                 .then(gesture),
         ) {
             Box(
