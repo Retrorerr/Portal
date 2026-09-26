@@ -41,8 +41,6 @@ pub const DESKTOP_RUNTIME_DIR: &str = "/run/user/1000";
 
 pub const MAX_PANEL_LOG_ENTRIES: usize = 100;
 
-pub const SENTRY_DSN: &str = "https://d8af27f864ade027ff81ecadea91b02e@o4509548388417536.ingest.de.sentry.io/4509548392480848";
-
 /// PipeWire runtime path as seen from inside the proot guest.
 pub const PIPEWIRE_GUEST_RUNTIME_DIR: &str = "/tmp";
 
