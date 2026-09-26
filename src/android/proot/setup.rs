@@ -935,14 +935,17 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
                     rm -f /tmp/portal-chatgpt_arm64.deb)"#,
                 // Anthropic's signed apt repository, as its Linux install
                 // guide describes, so apt resolves the newest release now and
-                // delivers later ones with ordinary package updates. The key
-                // is accepted only with Anthropic's published fingerprint.
+                // delivers later ones with ordinary package updates. The whole
+                // key file becomes apt's keyring for this source, so it is
+                // accepted only if it holds exactly one key and that key has
+                // Anthropic's published fingerprint.
                 OptionalApp::Claude => r#"(apt-get install -y --no-install-recommends curl gnupg ca-certificates &&
                     curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
                         --output /tmp/portal-claude-desktop-key.asc.part \
                         https://downloads.claude.ai/claude-desktop/key.asc &&
                     test "$(gpg --batch --with-colons --show-keys /tmp/portal-claude-desktop-key.asc.part |
-                        awk -F: '$1 == "fpr" { print $10; exit }')" = 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE &&
+                        awk -F: '$1 == "pub" { keys++ } $1 == "fpr" && primary == "" { primary = $10 }
+                            END { if (keys == 1) print primary }')" = 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE &&
                     install -m 0644 /tmp/portal-claude-desktop-key.asc.part \
                         /usr/share/keyrings/claude-desktop-archive-keyring.asc &&
                     rm -f /tmp/portal-claude-desktop-key.asc.part &&
