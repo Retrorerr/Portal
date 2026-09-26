@@ -347,7 +347,9 @@ fn resume_anland(
         let Some(session) = backend.anland.as_mut() else {
             return false;
         };
-        if let Err(error) = session.resume_surface(raw, window, &config) {
+        // SAFETY: `raw` is the ANativeWindow of `window`, created above and
+        // kept alive by the session; `suspended()` detaches it before it goes.
+        if let Err(error) = unsafe { session.resume_surface(raw, window, &config) } {
             log::error!("anland.surface resume failed (guest session preserved): {error}");
             accessibility::set_runtime_active(false);
             event_loop.set_control_flow(ControlFlow::Wait);
@@ -360,7 +362,9 @@ fn resume_anland(
             refresh_mhz
         );
     } else {
-        match crate::android::anland::AnlandSession::start(raw, window, &config) {
+        // SAFETY: as above; `suspended()` stops the session while `window`
+        // is still alive.
+        match unsafe { crate::android::anland::AnlandSession::start(raw, window, &config) } {
             Ok(session) => {
                 log::info!(
                     "anland.session=active compositor=kwin-opengl(expected) driver=freedreno(expected) window={}x{} refresh_mhz={}",
@@ -488,8 +492,8 @@ fn forward_anland_input(
                 MouseButton::Left => 0x110,
                 MouseButton::Right => 0x111,
                 MouseButton::Middle => 0x112,
-                MouseButton::Back => 0x116,
-                MouseButton::Forward => 0x115,
+                MouseButton::Back => crate::core::android_input::BUTTON_BACK_EVDEV,
+                MouseButton::Forward => crate::core::android_input::BUTTON_FORWARD_EVDEV,
                 MouseButton::Other(b) => 0x110 + (*b as u32),
             };
             let pressed = *state == ElementState::Pressed;
@@ -538,7 +542,10 @@ fn forward_anland_input(
         }
         WindowEvent::KeyboardInput { event, .. } => {
             if event.state == ElementState::Pressed && event.repeat {
-                // Compositor-side autorepeat owns repeats; forward the press.
+                // Wayland clients repeat held keys themselves (KWin's
+                // repeat_info), so Android's repeats would be extra presses.
+                // The Smithay path drops them the same way.
+                return;
             }
             let Some(scancode) = crate::android::backend::wayland::keymap::physicalkey_to_scancode(
                 event.physical_key,
@@ -549,9 +556,9 @@ fn forward_anland_input(
                 ElementState::Pressed => crate::android::anland::protocol::INPUT_ACTION_DOWN,
                 ElementState::Released => crate::android::anland::protocol::INPUT_ACTION_UP,
             };
-            log::info!(
-                "anland.input key action={action} scancode={scancode}"
-            );
+            // Keystrokes stay out of info logs: debug builds persist those to
+            // the exportable diagnostics host.log.
+            log::trace!("anland.input key action={action} scancode={scancode}");
             session.send_input(&AnlandInput::key(action, scancode as i32));
         }
         _ => {}

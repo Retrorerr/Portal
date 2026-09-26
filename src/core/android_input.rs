@@ -1,5 +1,15 @@
 //! Host-testable Android input translation policy.
 
+/// Linux evdev code for a mouse's back thumb button (`BTN_SIDE`).
+///
+/// libinput reports a real mouse's back/forward buttons as `BTN_SIDE`/`BTN_EXTRA`, and that is
+/// what Wayland clients read as navigation: Qt maps them to `BackButton`/`ForwardButton`, GTK to
+/// buttons 8/9 and Xwayland to X buttons 8/9. `BTN_BACK`/`BTN_FORWARD` (0x116/0x115) become Qt's
+/// `ExtraButton4`/`ExtraButton3` and X buttons 11/10, which no application treats as back/forward.
+pub const BUTTON_BACK_EVDEV: u32 = 0x113;
+/// Linux evdev code for a mouse's forward thumb button (`BTN_EXTRA`); see [`BUTTON_BACK_EVDEV`].
+pub const BUTTON_FORWARD_EVDEV: u32 = 0x114;
+
 /// Translate Android's stable `KeyEvent.KEYCODE_*` values to Linux evdev scan codes.
 ///
 /// Winit normally gives the compositor a physical key code, but Android's accessibility bridge
@@ -91,8 +101,11 @@ pub fn android_keycode_to_scancode(key_code: u32) -> Option<u32> {
 /// A Wayland compositor receives key events rather than Unicode strings. This helper handles
 /// printable ASCII and leaves non-ASCII text for a text-input-v3/virtual-keyboard path instead
 /// of guessing a keyboard layout. Each tuple is `(scan_code, shift_required)`.
+///
+/// A CRLF line break (text pasted from Windows) is one Enter, not two; a lone CR or LF is one.
 pub fn committed_ascii_to_key_events(text: &str) -> Vec<(u32, bool)> {
-    text.chars()
+    text.replace("\r\n", "\n")
+        .chars()
         .filter_map(|ch| {
             let (scan_code, shift_required) = match ch {
                 'a' => (30, false),
@@ -234,6 +247,21 @@ mod tests {
                 (38, false),
                 (32, false),
                 (28, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn crlf_line_breaks_are_one_enter() {
+        assert_eq!(
+            committed_ascii_to_key_events("a\r\n\r\nb\rc\n"),
+            vec![
+                (30, false),
+                (28, false),
+                (28, false),
+                (48, false),
+                (28, false),
+                (46, false),
                 (28, false),
             ]
         );

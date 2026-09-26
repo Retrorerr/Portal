@@ -107,7 +107,13 @@ impl AhbTextureImporter {
         }
     }
 
-    pub fn import_ahb(
+    /// Import `ahb` as a GL texture through an EGLImage.
+    ///
+    /// # Safety
+    ///
+    /// `raw_display` must be the EGL display of `renderer`'s context, which
+    /// must be current, and `ahb` a valid `AHardwareBuffer*` for the call.
+    pub unsafe fn import_ahb(
         &self,
         renderer: &GlesRenderer,
         raw_display: *const c_void,

@@ -1,0 +1,69 @@
+name: Checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo test
+        run: cargo test --tests --locked
+
+  android-clippy:
+    name: Android clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Android NDK r28
+        run: |
+          curl -sSfL -o android-ndk-r28-linux.zip https://dl.google.com/android/repository/android-ndk-r28-linux.zip
+          unzip -q android-ndk-r28-linux.zip
+          rm android-ndk-r28-linux.zip
+
+      # Clippy's deny-by-default lints fail the job; warnings do not.
+      - name: cargo clippy (aarch64-linux-android)
+        run: |
+          rustup target add aarch64-linux-android
+          rustup component add clippy
+          TOOLCHAIN="$PWD/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android26-clang"
+          export CXX_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android26-clang++"
+          export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android26-clang"
+          cargo clippy --target aarch64-linux-android --lib --locked
+
+  native-assets:
+    name: Native assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 16 KB page compatibility of shipped ELF files
+        run: python3 scripts/check_elf_page_size.py assets
+
+      - name: PRoot regression cases
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libtalloc-dev lld
+          scripts/proot-regression/run.sh

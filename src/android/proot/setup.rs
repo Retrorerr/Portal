@@ -935,14 +935,17 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
                     rm -f /tmp/portal-chatgpt_arm64.deb)"#,
                 // Anthropic's signed apt repository, as its Linux install
                 // guide describes, so apt resolves the newest release now and
-                // delivers later ones with ordinary package updates. The key
-                // is accepted only with Anthropic's published fingerprint.
+                // delivers later ones with ordinary package updates. The whole
+                // key file becomes apt's keyring for this source, so it is
+                // accepted only if it holds exactly one key and that key has
+                // Anthropic's published fingerprint.
                 OptionalApp::Claude => r#"(apt-get install -y --no-install-recommends curl gnupg ca-certificates &&
                     curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
                         --output /tmp/portal-claude-desktop-key.asc.part \
                         https://downloads.claude.ai/claude-desktop/key.asc &&
                     test "$(gpg --batch --with-colons --show-keys /tmp/portal-claude-desktop-key.asc.part |
-                        awk -F: '$1 == "fpr" { print $10; exit }')" = 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE &&
+                        awk -F: '$1 == "pub" { keys++ } $1 == "fpr" && primary == "" { primary = $10 }
+                            END { if (keys == 1) print primary }')" = 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE &&
                     install -m 0644 /tmp/portal-claude-desktop-key.asc.part \
                         /usr/share/keyrings/claude-desktop-archive-keyring.asc &&
                     rm -f /tmp/portal-claude-desktop-key.asc.part &&
@@ -2531,7 +2534,6 @@ fn sync_initial_desktop_defaults(fs_root: &Path) {
     let username = get_application_context().local_config.user.username;
     let home_dir = chroot_home_dir(fs_root, &username);
 
-    sync_android_timezone(fs_root);
     // Small, verified Debian tools needed for triggers skipped by image extraction.
     // Embedded in the APK so the published base image also works after uninstall.
     tar::Archive::new(std::io::Cursor::new(include_bytes!(
@@ -2716,6 +2718,7 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     sync_portal_runtime_assets(fs_root, ui_scale);
 
     sync_guest_network_config(fs_root);
+    sync_android_timezone(fs_root);
 }
 
 /// Run Portal-owned session support behind the same recoverable boundary used
@@ -3193,49 +3196,23 @@ fn migrate_konsole_profile(home_dir: &Path, guest_home: &str) {
     fs::write(marker, "version=2\n").expect("Failed to record Konsole profile migration");
 }
 
+/// Follow Android's timezone on every launch (the APK is authoritative for it). A zone the
+/// guest cannot represent, or an unexpected /etc/localtime, keeps the current guest timezone
+/// rather than failing the launch.
 fn sync_android_timezone(fs_root: &Path) {
+    use crate::core::guest_timezone::{sync_guest_timezone, TimezoneSync};
+
     let Some(zone_id) = get_application_context().get_timezone_id() else {
         log::warn!("Android timezone was unavailable; retaining the guest timezone");
         return;
     };
-    let relative = Path::new(&zone_id);
-    if relative.as_os_str().is_empty()
-        || relative.is_absolute()
-        || relative
-            .components()
-            .any(|part| !matches!(part, std::path::Component::Normal(_)))
-    {
-        log::warn!("Ignoring invalid Android timezone identifier: {zone_id:?}");
-        return;
-    }
-    let zoneinfo = fs_root.join("usr/share/zoneinfo").join(relative);
-    if !zoneinfo.is_file() {
-        log::warn!("Android timezone is not present in the guest zoneinfo database: {zone_id}");
-        return;
-    }
-
-    let etc = fs_root.join("etc");
-    fs::create_dir_all(&etc).expect("Failed to create guest /etc for timezone sync");
-    let localtime = etc.join("localtime");
-    match fs::symlink_metadata(&localtime) {
-        Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
-            fs::remove_file(&localtime).expect("Failed to replace guest /etc/localtime");
+    match sync_guest_timezone(fs_root, &zone_id) {
+        Ok(TimezoneSync::Updated) => {
+            log::info!("Synchronized guest timezone from Android: {zone_id}");
         }
-        Ok(_) => {
-            log::warn!("Guest /etc/localtime is not a file; leaving it unchanged");
-            return;
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => {
-            log::warn!("Failed to inspect guest /etc/localtime: {error}");
-            return;
-        }
+        Ok(TimezoneSync::Unchanged) => {}
+        Err(error) => log::warn!("Retaining the guest timezone: {error}"),
     }
-    symlink(format!("/usr/share/zoneinfo/{zone_id}"), &localtime)
-        .expect("Failed to link guest timezone to Android's zone");
-    fs::write(etc.join("timezone"), format!("{zone_id}\n"))
-        .expect("Failed to write guest /etc/timezone");
-    log::info!("Synchronized guest timezone from Android: {zone_id}");
 }
 
 /// Keep guest network configuration (DNS resolver, NSS, hosts, SSL CA certificates)

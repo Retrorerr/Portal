@@ -1,5 +1,8 @@
 build/static-aarch64/
 build/root-aarch64/
 build/talloc-*/bin/
+# Written by waf configure / make-talloc-static.sh on every build.
+build/talloc-*/.lock-*
+build/talloc-*/cross-answers.txt
 **/__pycache__/
 .DS_Store

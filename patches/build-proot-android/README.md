@@ -32,7 +32,34 @@ Claude Code and by ordinary developer tools:
   with untranslated guest paths (glibc and callers fall back).
 - `-H` (hidden files) removes orphaned meta files from a directory that holds
   nothing else before `rmdir()`, so hidden bookkeeping never blocks `rm -rf`.
+- `-H` leaves failed `getdents()` results (a directory removed while open,
+  `ENOTDIR`) untouched and filters in heap buffers sized by the kernel's
+  result. It used to read an errno as a byte count into stack arrays sized by
+  the caller's buffer, which killed PRoot and every process it traced.
 
 Portal launches PRoot with `-H` and `PROOT_L2S_DIR=<rootfs>/.proot.l2s`.
+
+## Building Portal's binaries
+
+`assets/libs/arm64-v8a/libproot.so` and `libproot_loader.so` are built from
+this directory with Android NDK r27c and GNU awk (the loader step needs
+`strtonum`):
+
+    export ANDROID_NDK_HOME=/path/to/android-ndk-r27c
+    ./make-talloc-static.sh
+    ./make-proot.sh
+
+Then copy `build/root-aarch64/root/bin/proot-userland` to `libproot.so` and
+`build/root-aarch64/root/libexec/proot/loader` to `libproot_loader.so`.
+The checkout path only sets PRoot's fallback loader path, which Portal never
+uses (it always passes `PROOT_LOADER`); the shipped binaries were built from
+`/opt/pbuild/build-proot-android`.
+
+Always rebuild and commit the two together. On arm64 `libproot.so` embeds the
+offset of the loader's `pokedata_workaround` stub, so a PRoot paired with a
+loader from another build writes guest memory at the wrong address on kernels
+whose `PTRACE_POKEDATA` is broken. Both must keep 16 KB aligned LOAD segments
+(`scripts/check_elf_page_size.py assets`), and `scripts/proot-regression/run.sh`
+runs Portal's regression cases against a host build of the same sources.
 
 See https://github.com/green-green-avk/proot for more info.
