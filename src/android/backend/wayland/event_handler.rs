@@ -130,7 +130,7 @@ fn emit_pointer_motion(
         .logical_to_physical(crate::core::coordinate_transform::LogicalPoint { x, y });
     let error_px =
         ((round_trip.x - physical.x).powi(2) + (round_trip.y - physical.y).powi(2)).sqrt();
-    log::info!(
+    log::debug!(
         "input.alignment source=touch physical=({:.1},{:.1}) logical=({clamped_x:.1},{clamped_y:.1}) round_trip=({:.1},{:.1}) error_px={error_px:.3}",
         physical.x,
         physical.y,
@@ -378,7 +378,8 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 InputEvent::Keyboard { event } => {
                     let compositor = &mut backend.compositor;
                     // Diagnostic: prove key arrival on the guest path (H2).
-                    log::info!(
+                    // Trace only: keystrokes must not reach the persisted host.log.
+                    log::trace!(
                         "clipdiag key scancode={} state={:?} keyboard_focus={:?} kwin_surface={:?}",
                         event.key,
                         event.state,
@@ -568,7 +569,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                         event.android_source(),
                         event.android_tool_type(),
                     ) {
-                        log::info!(
+                        log::debug!(
                         "input.alignment device={dev} source={src:#x} tool={tool} physical=({:.1},{:.1}) logical=({clamped_x:.1},{clamped_y:.1}) round_trip=({:.1},{:.1}) error_px={error_px:.3} scale={kwin_scale:.3}",
                         event.physical_x(),
                         event.physical_y(),
@@ -576,7 +577,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                         round_trip.y
                     );
                     } else {
-                        log::info!(
+                        log::debug!(
                         "input.alignment physical=({:.1},{:.1}) logical=({clamped_x:.1},{clamped_y:.1}) round_trip=({:.1},{:.1}) error_px={error_px:.3} scale={kwin_scale:.3}",
                         event.physical_x(),
                         event.physical_y(),

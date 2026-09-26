@@ -218,7 +218,10 @@ pub fn dispatch_committed_text(text: String) -> bool {
     }
 
     // 2. Fallback to evdev key synthesis for non-text clients or if protocol bridge is unready
-    log::info!("Falling back to evdev key synthesis for text: {text:?}");
+    log::debug!(
+        "Falling back to evdev key synthesis ({} chars)",
+        text.chars().count()
+    );
     if enqueue_commit(text) {
         wake_event_loop();
         true
