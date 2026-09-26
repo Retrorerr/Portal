@@ -1,61 +1,37 @@
-//! In-process control for the provisioning WebView.
+//! In-process handoffs from background workers to the winit event loop.
 //!
-//! The NativeActivity does not need to be recreated when setup finishes. The popup's Looper is
-//! retained as a JVM global reference and can be asked to quit from the setup worker; the winit
-//! event-loop proxy then swaps to the Wayland backend. Keeping the references here also makes the
-//! handoff safe across a configuration change: the old popup is closed before a new one is shown.
+//! The NativeActivity is never recreated when setup finishes. The setup worker sets a handoff
+//! flag and wakes the event loop through its proxy; the event loop then swaps to the Wayland
+//! backend in the same activity.
 
-use super::ndk::run_in_jvm;
 use crate::android::accessibility::AppUserEvent;
-use jni::{
-    objects::{GlobalRef, JObject},
-    JNIEnv,
-};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
 };
 use winit::{event_loop::EventLoopProxy, platform::android::activity::AndroidApp};
 
-#[derive(Default)]
-struct PopupControl {
-    looper: Option<GlobalRef>,
-    popup: Option<GlobalRef>,
-}
-
-static CONTROL: OnceLock<Mutex<PopupControl>> = OnceLock::new();
 static EVENT_LOOP_PROXY: OnceLock<Mutex<Option<EventLoopProxy<AppUserEvent>>>> = OnceLock::new();
 /// Transient event-loop wake only. The durable runtime marker is the sole
 /// installation truth; this bit is never consulted as proof that setup
 /// succeeded.
 static SETUP_HANDOFF_PENDING: AtomicBool = AtomicBool::new(false);
-/// A provisional first-run Plasma launch must also wait for an HTML fallback
-/// popup to close, but it must not borrow `SETUP_HANDOFF_PENDING`: that flag
-/// means the durable completion marker already exists.  Keeping this edge
-/// distinct prevents a pending KScreen/appearance proof from triggering the
+/// A provisional first-run Plasma launch must not borrow `SETUP_HANDOFF_PENDING`:
+/// that flag means the durable completion marker already exists. Keeping this
+/// edge distinct prevents a pending KScreen/appearance proof from triggering the
 /// ordinary completed-install handoff.
 static INITIAL_PREFERENCES_HANDOFF_PENDING: AtomicBool = AtomicBool::new(false);
-
-fn control() -> &'static Mutex<PopupControl> {
-    CONTROL.get_or_init(|| Mutex::new(PopupControl::default()))
-}
 
 fn event_loop_proxy() -> &'static Mutex<Option<EventLoopProxy<AppUserEvent>>> {
     EVENT_LOOP_PROXY.get_or_init(|| Mutex::new(None))
 }
 
-/// Register the process-lifetime proxy before setup starts. The completion callback can then
-/// wake the waiting winit loop even while the WebView owns a separate Android Looper.
 pub fn register_event_loop_proxy(proxy: EventLoopProxy<AppUserEvent>) {
     if let Ok(mut current) = event_loop_proxy().lock() {
         *current = Some(proxy);
     }
 }
 
-/// Wake the lifecycle owner after a popup or WebSocket state transition.
-///
-/// The same proxy is used for setup completion and runtime recovery actions, so an event-loop in
-/// `ControlFlow::Wait` cannot miss a button press received by the WebSocket reader thread.
 pub fn wake_event_loop() {
     let proxy = event_loop_proxy()
         .lock()
@@ -63,133 +39,33 @@ pub fn wake_event_loop() {
         .and_then(|proxy| proxy.clone());
     if let Some(proxy) = proxy {
         if let Err(error) = proxy.send_event(AppUserEvent::AccessibilityInputReady) {
-            log::debug!("Failed to wake event loop after WebView handoff: {error}");
+            log::debug!("Failed to wake event loop for a handoff: {error}");
         }
     }
 }
 
-/// Signal that native setup has committed and ask the popup Looper to return.
-/// The event is only a transient wake; the event-loop revalidates the durable
-/// installation marker before constructing Wayland.
-pub fn complete_setup(android_app: AndroidApp) {
+pub fn complete_setup(_android_app: AndroidApp) {
     SETUP_HANDOFF_PENDING.store(true, Ordering::Release);
-    if !request_close(android_app) {
-        wake_event_loop();
-    }
+    wake_event_loop();
 }
 
-/// Consume the transient handoff event after the popup is closed. This is not
-/// an installed-state query.
 pub fn take_setup_handoff() -> bool {
     SETUP_HANDOFF_PENDING.swap(false, Ordering::AcqRel)
 }
 
-/// Close a fallback setup popup before Portal launches the provisional Plasma
-/// session that applies an accepted initial-preferences plan.  The separate
-/// pending bit ensures `clear()` wakes the event loop after the popup's
-/// Looper has actually exited.
-pub fn request_initial_preferences_handoff(android_app: AndroidApp) {
+pub fn request_initial_preferences_handoff(_android_app: AndroidApp) {
     INITIAL_PREFERENCES_HANDOFF_PENDING.store(true, Ordering::Release);
-    if !request_close(android_app) {
-        wake_event_loop();
-    }
+    wake_event_loop();
 }
 
-/// Consume the popup-close edge for the provisional-preferences handoff.
-/// Callers that observe a still-open popup must put it back so `clear()` can
-/// issue the post-close wake rather than losing the handoff.
 pub fn take_initial_preferences_handoff() -> bool {
     INITIAL_PREFERENCES_HANDOFF_PENDING.swap(false, Ordering::AcqRel)
 }
 
-/// Restore a provisional popup-close edge after an early event-loop wake.
 pub fn requeue_initial_preferences_handoff() {
     INITIAL_PREFERENCES_HANDOFF_PENDING.store(true, Ordering::Release);
 }
 
-/// Clear a provisional first-run handoff after launch or KScreen proof fails.
-/// This prevents the ordinary event loop from consuming a stale popup-close
-/// edge while setup remains retryable under the same persisted plan.
 pub fn cancel_initial_preferences_handoff() {
     INITIAL_PREFERENCES_HANDOFF_PENDING.store(false, Ordering::Release);
-}
-
-/// Register the Looper and PopupWindow owned by the WebView thread.
-///
-/// Replacing the old references is deliberate. Android may deliver `resumed` more than once;
-/// stale global references must not prevent the current activity from being closed.
-pub fn install(env: &mut JNIEnv<'_>, looper: &JObject<'_>, popup: &JObject<'_>) -> bool {
-    let Ok(looper) = env.new_global_ref(looper) else {
-        log::error!("Failed to retain WebView Looper global reference");
-        return false;
-    };
-    let Ok(popup) = env.new_global_ref(popup) else {
-        log::error!("Failed to retain WebView PopupWindow global reference");
-        return false;
-    };
-    if let Ok(mut control) = control().lock() {
-        control.looper = Some(looper);
-        control.popup = Some(popup);
-        if SETUP_HANDOFF_PENDING.load(Ordering::Acquire) {
-            if let Some(looper) = control.looper.as_ref() {
-                let _ = env.call_method(looper, "quitSafely", "()V", &[]);
-            }
-        }
-        true
-    } else {
-        false
-    }
-}
-
-/// Whether a provisioning/recovery popup currently owns a Looper.
-pub fn is_open() -> bool {
-    control()
-        .lock()
-        .map(|control| control.looper.is_some())
-        .unwrap_or(false)
-}
-
-/// Ask the popup thread's Looper to return. The popup remains owned by the WebView thread and is
-/// dismissed there, after all Java calls are serialized on that thread.
-pub fn request_close(android_app: AndroidApp) -> bool {
-    let looper = control()
-        .lock()
-        .ok()
-        .and_then(|control| control.looper.clone());
-    let Some(looper) = looper else { return false };
-    run_in_jvm(
-        move |env, _| {
-            env.call_method(&looper, "quitSafely", "()V", &[])
-                .map(|_| true)
-                .unwrap_or_else(|error| {
-                    log::warn!("Failed to close WebView Looper: {error}");
-                    false
-                })
-        },
-        android_app,
-    )
-}
-
-/// Clear global references after the WebView Looper exits.
-pub fn clear() {
-    if let Ok(mut control) = control().lock() {
-        control.looper = None;
-        control.popup = None;
-    }
-    if SETUP_HANDOFF_PENDING.load(Ordering::Acquire)
-        || INITIAL_PREFERENCES_HANDOFF_PENDING.load(Ordering::Acquire)
-    {
-        wake_event_loop();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn popup_control_starts_closed() {
-        // This remains a state-policy test; popup creation and closure are exercised on-device.
-        assert!(!is_open());
-    }
 }

@@ -10,13 +10,12 @@ use std::sync::Arc;
 pub struct PolarBearApp {
     pub frontend: PolarBearFrontend,
     pub backend: PolarBearBackend,
-    /// Runtime recovery actions wait for the old WebView Looper to exit before
-    /// the Wayland surface is rebound, preventing a stale popup from covering
-    /// the resumed desktop.
+    /// Retry Plasma waits for the failed guest session to stop before the
+    /// Wayland backend is rebuilt.
     pub pending_runtime_retry: bool,
-    /// A committed first install may fail while binding/resuming Wayland. The
-    /// Compose veil is dismissed before showing the existing runtime recovery
-    /// page so this state never looks like unfinished installation.
+    /// A committed install may fail while binding/resuming Wayland. The Compose
+    /// veil is dismissed before the recovery screen shows, so this state never
+    /// looks like unfinished installation.
     pub pending_runtime_error_page: bool,
 }
 
@@ -25,8 +24,8 @@ pub struct PolarBearFrontend {
 }
 
 pub enum PolarBearBackend {
-    /// Use a webview to report setup progress to the user
-    /// The setup progress should only be done once, when the user first installed the app
+    /// No desktop is running: setup, a setup failure, an unsupported device or
+    /// a runtime failure. Compose screens report these to the user.
     WebView(WebviewBackend),
 
     /// Use a wayland compositor to render Linux GUI applications back to the Android Native Activity
@@ -39,23 +38,7 @@ impl PolarBearApp {
         let completion: SetupCompletionCallback = Arc::new(move || {
             webview_handoff::complete_setup(completion_app.clone());
         });
-        let mut backend = setup_with_completion(android_app.clone(), Some(completion));
-        // The support probe may return the historical socket-less placeholder. Replace it with
-        // a real authenticated backend before the first `resumed` callback so even unsupported
-        // devices can use the graphical page's diagnostics export action.
-        if matches!(
-            &backend,
-            PolarBearBackend::WebView(webview)
-                if webview.socket_port == 0 && webview.error == crate::android::backend::webview::ErrorVariant::Unsupported
-        ) {
-            backend = PolarBearBackend::WebView(WebviewBackend::unsupported(android_app.clone()));
-        }
-        if let PolarBearBackend::WebView(webview) = &mut backend {
-            // Attach the activity here so export_diagnostics can invoke the Android Sharesheet
-            // for both supported and unsupported startup paths. The setup worker is owned by the
-            // native process coordinator, not by this backend or by Compose.
-            webview.attach_android_app(android_app.clone());
-        }
+        let backend = setup_with_completion(android_app.clone(), Some(completion));
         Self {
             backend,
             frontend: PolarBearFrontend { android_app },

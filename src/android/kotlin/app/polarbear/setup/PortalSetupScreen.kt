@@ -938,8 +938,9 @@ private fun InstallActionArea(
     }
 }
 
+/** Portal's primary glowing button, shared by setup and the recovery screen. */
 @Composable
-private fun BeginInstallButton(
+internal fun BeginInstallButton(
     palette: PortalPalette,
     centered: Boolean,
     onBeginInstall: () -> Unit,
@@ -1011,7 +1012,7 @@ private fun BeginInstallButton(
                                 indication = null,
                                 role = Role.Button,
                                 onClick = {
-                                    Log.d(PREVIEW_TAG, "compose-setup-preview: Begin Install pressed")
+                                    Log.d(PREVIEW_TAG, "compose-setup-preview: $label pressed")
                                     onBeginInstall()
                                 },
                             )

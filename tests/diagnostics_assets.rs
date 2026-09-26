@@ -9,8 +9,8 @@ const SETUP: &str = include_str!("../src/android/proot/setup.rs");
 const DIAGNOSTICS: &str = include_str!("../src/android/diagnostics.rs");
 const DIAGNOSTICS_DOC: &str = include_str!("../docs/diagnostics-integration.md");
 const GIT_ATTRIBUTES: &str = include_str!("../.gitattributes");
-const SETUP_PAGE: &str = include_str!("../assets/setup-progress-v2.html");
-const ERROR_PAGE: &str = include_str!("../assets/runtime-error.html");
+const RECOVERY_SCREEN: &str = include_str!("../src/android/kotlin/app/polarbear/RecoveryScreen.kt");
+const RECOVERY_BRIDGE: &str = include_str!("../src/android/utils/recovery_screen.rs");
 const ANDROID_MAIN: &str = include_str!("../src/android/main.rs");
 const DRMSHIM_SOURCE: &str = include_str!("../assets/guest-arm64/drmshim.c");
 const DRMSHIM_BINARY: &[u8] = include_bytes!("../assets/guest-arm64/drmshim.so");
@@ -258,11 +258,11 @@ fn diagnostics_export_uses_scoped_content_grants_and_cleans_up_failures() {
 }
 
 #[test]
-fn setup_and_error_pages_offer_one_tap_export() {
-    assert!(SETUP_PAGE.contains("Export diagnostics"));
-    assert!(SETUP_PAGE.contains("export_diagnostics"));
-    assert!(ERROR_PAGE.contains("Export diagnostics"));
-    assert!(ERROR_PAGE.contains("export_diagnostics"));
+fn recovery_screen_offers_one_tap_export() {
+    assert!(RECOVERY_SCREEN.contains("Export diagnostics"));
+    assert!(RECOVERY_SCREEN.contains("nativeExportDiagnostics()"));
+    assert!(RECOVERY_BRIDGE.contains("Java_app_polarbear_RecoveryScreen_nativeExportDiagnostics"));
+    assert!(RECOVERY_BRIDGE.contains("diagnostics::export_and_share(&app)"));
 }
 
 #[test]
