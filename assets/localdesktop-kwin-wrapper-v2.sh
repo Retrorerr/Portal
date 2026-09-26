@@ -198,6 +198,12 @@ else
     if [ -r /usr/local/lib/portal/drmshim.so ]; then
         export LD_PRELOAD="/usr/local/lib/portal/drmshim.so${LD_PRELOAD:+:$LD_PRELOAD}"
     fi
+    # Project Anland damage hint (Anland only): forwards KWin's repaint
+    # requests to the host so animations without input present at full rate.
+    # Optional: absent, the host falls back to input/heartbeat pacing.
+    if [ -r /usr/local/lib/portal/anland-damage.so ]; then
+        export LD_PRELOAD="/usr/local/lib/portal/anland-damage.so${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
 fi
 export QT_FORCE_STDERR_LOGGING=1
 export QT_LOGGING_RULES="kwin_core.warning=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"

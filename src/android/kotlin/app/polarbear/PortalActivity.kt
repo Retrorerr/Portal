@@ -40,7 +40,9 @@ package app.polarbear
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
+import android.view.Display
 import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -121,6 +123,74 @@ open class PortalActivity : GameActivity() {
      * or recreate the SurfaceView.
      */
     fun overlayHost(): FrameLayout = findViewById(contentViewId)
+
+    /**
+     * Native (any thread): ask for the fastest display mode the user allows
+     * while the desktop is actively presenting, and drop the request when it
+     * goes idle.
+     *
+     * OxygenOS votes unrecognised GameActivity windows down to 60 Hz at the
+     * window/app-request level, which the SurfaceView's
+     * ANativeWindow_setFrameRate hint cannot outrank. A window
+     * preferredDisplayModeId is the supported app-level request that the
+     * platform (and OxygenOS's "app request first" policy) honours; the
+     * user's peak-refresh setting still caps it. Releasing it when idle
+     * returns the panel to the system's normal low-rate policy.
+     */
+    fun setHighRefreshPreferred(enable: Boolean) {
+        runOnUiThread {
+            try {
+                val modeId = if (enable) highRefreshModeId() else 0
+                val attributes = window.attributes
+                if (attributes.preferredDisplayModeId != modeId) {
+                    window.attributes = attributes.apply { preferredDisplayModeId = modeId }
+                    Log.i(TAG, "display mode request: enable=$enable modeId=$modeId")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "display mode request failed (enable=$enable)", e)
+            }
+        }
+    }
+
+    /**
+     * Native (any thread): refresh rate in millihertz of the mode
+     * [setHighRefreshPreferred] requests, re-resolved against the current
+     * peak-refresh setting, so the output rate advertised to KWin follows a
+     * setting changed while Portal runs. 0 when unavailable.
+     */
+    fun highRefreshTargetMillihz(): Int = try {
+        highRefreshMode()?.let { Math.round(it.refreshRate * 1000f) } ?: 0
+    } catch (e: Exception) {
+        0
+    }
+
+    private fun highRefreshModeId(): Int = highRefreshMode()?.modeId ?: 0
+
+    /**
+     * Same physical size as the active mode, highest refresh within the
+     * user's peak-refresh setting (absent/unreadable = no cap).
+     */
+    private fun highRefreshMode(): Display.Mode? {
+        @Suppress("DEPRECATION")
+        val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display
+        } else {
+            windowManager.defaultDisplay
+        } ?: return null
+        val active = display.mode
+        val peak = try {
+            Settings.System.getFloat(contentResolver, "peak_refresh_rate", Float.POSITIVE_INFINITY)
+        } catch (e: Exception) {
+            Float.POSITIVE_INFINITY
+        }
+        return display.supportedModes
+            .filter {
+                it.physicalWidth == active.physicalWidth &&
+                    it.physicalHeight == active.physicalHeight &&
+                    it.refreshRate <= peak + 0.5f
+            }
+            .maxByOrNull { it.refreshRate }
+    }
 
     private fun applyImmersive(reason: String) {
         try {

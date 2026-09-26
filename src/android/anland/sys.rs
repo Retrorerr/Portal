@@ -611,6 +611,17 @@ pub fn poll_readable(fd: &OwnedFd, timeout_ms: i32) -> io::Result<bool> {
     Ok(pfd.revents & libc::POLLIN != 0)
 }
 
+/// Non-blocking probe: whether a sync-file fence fd has already signalled.
+/// Does not take ownership of `fence_fd`.
+pub fn fence_signaled(fence_fd: libc::c_int) -> bool {
+    let mut pfd = libc::pollfd {
+        fd: fence_fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    unsafe { libc::poll(&mut pfd, 1, 0) == 1 && pfd.revents & libc::POLLIN != 0 }
+}
+
 /// Wait (up to `timeout_ms`) for a sync-file fence fd to signal, then close it.
 /// A sync file signals POLLIN when the GPU work completes.
 pub fn wait_fence(fence_fd: OwnedFd, timeout_ms: i32) -> io::Result<()> {

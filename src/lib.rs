@@ -53,6 +53,7 @@ pub mod android {
     pub mod utils {
         pub mod application_context;
         pub mod compose_overlay;
+        pub mod display_mode_request;
         pub mod frame_pacing;
         pub mod frame_rate;
         pub mod fullscreen_immersive;

@@ -7,6 +7,16 @@ socket=${XDG_RUNTIME_DIR:-/run/user/1000}/${WAYLAND_DISPLAY:-wayland-1}
 child=
 stopping=0
 
+# plasma_session exports QT_AUTO_SCREEN_SCALE_FACTOR=0, which vetoes Qt5's
+# high-DPI scaling: Qt5 apps (xcb only; the guest has no Qt5 Wayland plugin)
+# drew 1x icons and toolbars around Xft.dpi-scaled text. Qt6 ignores it.
+# Qt5 then scales from Xft.dpi (KWin's XWayland scale), kept fractional as
+# Qt6 does by default. Apps launched from the shell and through D-Bus
+# activation inherit both.
+export QT_AUTO_SCREEN_SCALE_FACTOR=1 QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough
+dbus-update-activation-environment QT_AUTO_SCREEN_SCALE_FACTOR=1 \
+    QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough >/dev/null 2>&1 || true
+
 stop() {
     stopping=1
     if [ -n "$child" ]; then

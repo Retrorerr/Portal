@@ -178,7 +178,7 @@ fn nominal_output_refresh_is_independent_of_physical_vrr() {
     // for the output mode and the frame-rate hint.
     assert!(NDK.contains("getSupportedModes"));
     assert!(NDK.contains("preferred_high_refresh_millihz"));
-    assert!(NDK.contains("select_preferred_refresh_millihz"));
+    assert!(NDK.contains("select_preferred_refresh_with_peak_millihz"));
     assert!(RUN.contains("ndk::refresh_rate_millihz"));
     assert!(RUN.contains("preferred_high_refresh_millihz"));
     assert!(RUN.contains("ensure_high_refresh_rate_hz"));
@@ -186,14 +186,18 @@ fn nominal_output_refresh_is_independent_of_physical_vrr() {
     assert!(FRAME_RATE.contains("preferred_frame_rate_hz"));
     assert!(FRAME_RATE.contains("ensure_high_refresh_rate_hz"));
     // No device-name checks, OEM APIs, or global-setting writes: selection is
-    // purely from the supported-mode list. (`Build`/`MODEL` gating would show
-    // up as these strings; doc-comment device mentions are fine.)
+    // from the supported-mode list, capped only by the user's own Android
+    // peak-refresh setting, which is read and never written. (`Build`/`MODEL`
+    // gating would show up as these strings; doc-comment mentions are fine.)
     for src in [NDK, FRAME_RATE, RUN, SETUP] {
         assert!(!src.contains("os/Build"));
         assert!(!src.contains("MANUFACTURER"));
         assert!(!src.contains("Build.MODEL"));
         assert!(!src.contains("Settings.Global"));
-        assert!(!src.contains("Settings.System"));
+        assert!(!src.contains("Settings$Global"));
+        for write in ["putFloat", "putInt", "putString", "putLong"] {
+            assert!(!src.contains(write), "Portal must not write Android settings");
+        }
     }
     // The periodic poll must never publish physical VRR as a nominal mode.
     let poll_start = EVENT_HANDLER
@@ -345,9 +349,11 @@ fn nested_kwin_text_input_uses_protocol_commits_and_authoritative_hotplug() {
 
 #[test]
 fn nested_android_owned_settings_are_truthful() {
-    // Firefox must use its normal GTK/Wayland client-side chrome; no Portal
-    // titlebar workaround may force a KWin/Breeze server-side decoration.
-    assert!(!ANDROID_SETUP_SOURCE.contains("browser.tabs.inTitlebar"));
+    // Mozilla apps run through XWayland, where tabs drawn into their own
+    // title bar left black strips along growing edges during resizes; KWin
+    // decorates them instead, as a default users can still change.
+    assert!(ANDROID_SETUP_SOURCE.contains("defaultPref(\"browser.tabs.inTitlebar\", 0)"));
+    assert!(ANDROID_SETUP_SOURCE.contains("mail.tabs.drawInTitlebar"));
     assert!(ANDROID_SETUP_SOURCE.contains("sync_firefox_config"));
     // Sandbox/audio/runtime compatibility prefs must remain.
     assert!(ANDROID_SETUP_SOURCE.contains("media.cubeb.sandbox"));
@@ -475,7 +481,8 @@ fn anland_session_forces_wayland_qpa_for_plasma_clients() {
     // backend explicitly; otherwise ksmserver/plasmashell can fall back to
     // xcb, fail to start, and plasma_session waits forever for
     // org.kde.ksmserver. DISPLAY stays set for XWayland/Firefox (X11).
-    assert!(STARTPLASMA_SOURCE.contains("QT_QPA_PLATFORM=wayland"));
+    // Wayland must come first; xcb is only the fallback for Qt5 apps.
+    assert!(STARTPLASMA_SOURCE.contains("QT_QPA_PLATFORM=\"wayland;xcb\""));
 }
 
 #[test]

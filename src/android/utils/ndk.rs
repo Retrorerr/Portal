@@ -3,7 +3,9 @@ use jni::sys::{_jobject, JNIInvokeInterface_};
 use jni::{JNIEnv, JavaVM};
 use winit::platform::android::activity::AndroidApp;
 
-use crate::core::android_integration::{density_scale_factor, select_preferred_refresh_millihz};
+use crate::core::android_integration::{
+    density_scale_factor, select_preferred_refresh_with_peak_millihz,
+};
 
 /// A higher-order function to run a provided JNI function within the JVM context.
 pub fn run_in_jvm<F, T>(jni_function: F, android_app: AndroidApp) -> T
@@ -157,7 +159,7 @@ pub fn active_refresh_millihz(android_app: &AndroidApp) -> i32 {
 /// failure, or a null/empty mode array so callers fall back to the active
 /// rate and finally to the sane default. Never panics, never contains
 /// non-positive entries (those are filtered here; full validity filtering
-/// stays in [`select_preferred_refresh_millihz`]).
+/// stays in [`select_preferred_refresh_with_peak_millihz`]).
 pub fn supported_refresh_rates_millihz(android_app: &AndroidApp) -> Vec<i32> {
     run_in_jvm(
         |env, app| {
@@ -229,11 +231,49 @@ pub fn supported_refresh_rates_millihz(android_app: &AndroidApp) -> Vec<i32> {
     .collect()
 }
 
+/// The user's Android peak refresh setting (`Settings.System.peak_refresh_rate`)
+/// in millihertz. `None` when the key is absent, unreadable on this release,
+/// or "unlimited" (`Infinity`). Best-effort; never panics.
+pub fn user_peak_refresh_millihz(android_app: &AndroidApp) -> Option<i32> {
+    run_in_jvm(
+        |env, app| {
+            let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            let resolver = env
+                .call_method(
+                    activity,
+                    "getContentResolver",
+                    "()Landroid/content/ContentResolver;",
+                    &[],
+                )
+                .and_then(|value| value.l())
+                .ok()?;
+            let key = env.new_string("peak_refresh_rate").ok()?;
+            let peak = env
+                .call_static_method(
+                    "android/provider/Settings$System",
+                    "getFloat",
+                    "(Landroid/content/ContentResolver;Ljava/lang/String;F)F",
+                    &[
+                        JValue::Object(&resolver),
+                        JValue::Object(&key),
+                        JValue::Float(f32::INFINITY),
+                    ],
+                )
+                .and_then(|value| value.f());
+            let _ = env.exception_clear();
+            let peak = peak.ok()?;
+            (peak.is_finite() && peak > 0.0).then(|| (peak * 1000.0).round() as i32)
+        },
+        android_app.clone(),
+    )
+}
+
 /// Preferred stable high-refresh target in millihertz.
 ///
-/// Resolves [`select_preferred_refresh_millihz`] over
-/// `Display.getSupportedModes()` so a 144 Hz panel yields 144000 while
-/// 120/90/60 Hz devices yield their own maximum. Uses a
+/// Resolves [`select_preferred_refresh_with_peak_millihz`] over
+/// `Display.getSupportedModes()` and the user's peak-refresh setting, so a
+/// 144 Hz panel yields 144000 unless the user limited Android to (say)
+/// 120 Hz, while 120/90/60 Hz devices yield their own maximum. Uses a
 /// stable fallback when enumeration is empty/unusable, never the active VRR rate.
 /// Never panics; always returns a valid millihertz value.
 pub fn preferred_high_refresh_millihz(android_app: &AndroidApp) -> i32 {
@@ -242,7 +282,10 @@ pub fn preferred_high_refresh_millihz(android_app: &AndroidApp) -> i32 {
         .iter()
         .any(|rate| crate::core::android_integration::is_valid_refresh_millihz(*rate))
     {
-        return select_preferred_refresh_millihz(&supported);
+        return select_preferred_refresh_with_peak_millihz(
+            &supported,
+            user_peak_refresh_millihz(android_app),
+        );
     }
     crate::core::android_integration::NOMINAL_OUTPUT_REFRESH_MILLIHZ
 }
@@ -254,8 +297,9 @@ pub fn preferred_high_refresh_millihz(android_app: &AndroidApp) -> i32 {
 /// hint and which refresh rates the panel reports as supported. Best-effort;
 /// never fails the caller.
 pub fn log_display_modes(android_app: &AndroidApp) {
+    let peak_millihz = user_peak_refresh_millihz(android_app);
     run_in_jvm(
-        |env, app| {
+        move |env, app| {
             let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
             let window_manager = match env
                 .call_method(
@@ -384,18 +428,20 @@ pub fn log_display_modes(android_app: &AndroidApp) {
                 let _ = env.exception_clear();
             }
             // Preferred target evidence: what the nominal `wl_output` mode and
-            // the frame-rate hint will use (highest valid supported rate).
-            let preferred_millihz =
-                crate::core::android_integration::select_preferred_refresh_millihz(
-                    &supported_rates,
-                );
+            // the frame-rate hint will use (highest supported rate within the
+            // user's peak-refresh setting).
+            let preferred_millihz = select_preferred_refresh_with_peak_millihz(
+                &supported_rates,
+                peak_millihz,
+            );
+            let peak = peak_millihz.map_or_else(|| "unset".to_string(), |p| p.to_string());
             log::info!(
-                "display.modes active={active_hz:.2}Hz mode=[{mode_detail}] supported=[{supported_detail}] preferred_millihz={preferred_millihz}"
+                "display.modes active={active_hz:.2}Hz mode=[{mode_detail}] supported=[{supported_detail}] user_peak_millihz={peak} preferred_millihz={preferred_millihz}"
             );
             crate::android::diagnostics::host_event(
                 "display-modes",
                 &format!(
-                    "active_hz={active_hz:.2} mode=[{mode_detail}] supported=[{supported_detail}] preferred_millihz={preferred_millihz}"
+                    "active_hz={active_hz:.2} mode=[{mode_detail}] supported=[{supported_detail}] user_peak_millihz={peak} preferred_millihz={preferred_millihz}"
                 ),
             );
         },

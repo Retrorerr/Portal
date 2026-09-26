@@ -100,6 +100,31 @@ pub fn select_preferred_refresh_millihz(supported_millihz: &[i32]) -> i32 {
         .unwrap_or(NOMINAL_OUTPUT_REFRESH_MILLIHZ)
 }
 
+/// Select the preferred refresh target while honouring the user's Android
+/// peak-refresh setting (`Settings.System.peak_refresh_rate`, millihertz).
+///
+/// Android never scans out above the user's peak, so advertising a faster
+/// mode only misleads KWin: its RenderLoop paces and predicts presentation
+/// against the advertised period, and Plasma's display settings report it.
+/// A missing/invalid peak (unreadable setting, `Infinity`) keeps the plain
+/// [`select_preferred_refresh_millihz`] result. A peak below every supported
+/// mode also keeps it rather than inventing an unsupported rate. Half a hertz
+/// of tolerance absorbs Android's float noise (`120.00001`).
+pub fn select_preferred_refresh_with_peak_millihz(
+    supported_millihz: &[i32],
+    peak_millihz: Option<i32>,
+) -> i32 {
+    let Some(peak) = peak_millihz.filter(|peak| is_valid_refresh_millihz(*peak)) else {
+        return select_preferred_refresh_millihz(supported_millihz);
+    };
+    supported_millihz
+        .iter()
+        .copied()
+        .filter(|rate| is_valid_refresh_millihz(*rate) && *rate <= peak + 500)
+        .max()
+        .unwrap_or_else(|| select_preferred_refresh_millihz(supported_millihz))
+}
+
 /// Hysteresis for host refresh-change detection (millihertz).
 ///
 /// Fractional modes (e.g. 59.94 Hz vs 60 Hz differ by ~60 millihertz) must not
@@ -248,6 +273,32 @@ mod tests {
         assert_eq!(
             select_preferred_refresh_millihz(&[]),
             NOMINAL_OUTPUT_REFRESH_MILLIHZ
+        );
+    }
+
+    #[test]
+    fn preferred_refresh_honours_user_peak() {
+        let pad3 = [120_000, 30_000, 48_000, 50_000, 60_000, 90_000, 144_000];
+        // Android reports the 120 Hz peak as 120.00001 Hz.
+        assert_eq!(
+            select_preferred_refresh_with_peak_millihz(&pad3, Some(120_000)),
+            120_000
+        );
+        assert_eq!(
+            select_preferred_refresh_with_peak_millihz(&pad3, Some(90_000)),
+            90_000
+        );
+        assert_eq!(
+            select_preferred_refresh_with_peak_millihz(&pad3, Some(144_000)),
+            144_000
+        );
+        // Unreadable / "no limit" peaks keep the panel maximum.
+        assert_eq!(select_preferred_refresh_with_peak_millihz(&pad3, None), 144_000);
+        assert_eq!(select_preferred_refresh_with_peak_millihz(&pad3, Some(0)), 144_000);
+        // A peak below every mode never invents an unsupported rate.
+        assert_eq!(
+            select_preferred_refresh_with_peak_millihz(&[90_000, 120_000], Some(60_000)),
+            120_000
         );
     }
 

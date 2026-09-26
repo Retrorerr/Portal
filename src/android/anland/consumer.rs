@@ -13,7 +13,7 @@
 use std::ffi::c_void;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
@@ -58,8 +58,40 @@ const START_BURST_MS: u64 = 5000;
 /// Idle ceiling: at most one select per second (clock minute-updates land
 /// within a second — fine for a clock; cursor blink resumes on input).
 const HEARTBEAT_NS: u64 = 1_000_000_000;
+/// Presentation demand granted per KWin damage hint. Continuous animations
+/// re-hint every frame (each presented frame releases the client's next
+/// frame callback), so this only needs to bridge one frame at the slowest
+/// panel rate, plus KWin's catch-up repaints of the other window buffers.
+const DAMAGE_BURST_NS: u64 = 40_000_000;
+/// Hints closer together than this belong to one continuous animation.
+const DAMAGE_STREAK_GAP_NS: u64 = 50_000_000;
+/// Continuous damage this long counts as an animation and also requests the
+/// high-refresh display mode.
+const DAMAGE_STREAK_HIGH_REFRESH_NS: u64 = 100_000_000;
+/// How long the window keeps its high-refresh display-mode request after
+/// demand lapses (see `display_mode_request`).
+const HIGH_REFRESH_HOLD_NS: u64 = 1_000_000_000;
 /// Instrumentation window for the `anland.fps` line.
 const FPS_WINDOW_NS: u64 = 2_000_000_000;
+
+/// Output rate (millihertz) from which the window queue gets its extra slot.
+const HIGH_RATE_QUEUE_MHZ: u32 = 140_000;
+
+/// BufferQueue size for the presentation window: SurfaceFlinger's
+/// `min_undequeued` slots, the held stop-time spare, and the producer slots.
+///
+/// On the OnePlus Pad 3 a dequeued slot's release fence signals at the next
+/// hardware vsync, so KWin can only start after it, while SurfaceFlinger's
+/// presentation deadline in the 144 Hz mode is ~11.3 ms. With one slot of
+/// slack (4 slots) that leaves ~2.6 ms per frame at 144 Hz and ~7% of frames
+/// slipped a vsync; a fifth slot moves the target one vsync later and
+/// measured 124/124 frames on consecutive vsyncs. At 120 Hz and below the
+/// deadline is comfortable, so the extra slot would only add a frame of
+/// latency (measured 14.5 ms -> 22 ms queue->present) and ~32 MB.
+fn window_buffer_count(min_undequeued: i32, refresh_mhz: u32) -> usize {
+    let slack = if refresh_mhz >= HIGH_RATE_QUEUE_MHZ { 3 } else { 2 };
+    (min_undequeued + slack).clamp(3, MAX_BUFS as i32) as usize
+}
 
 /// One collected window slot handed to the producer.
 struct SlotInfo {
@@ -106,7 +138,10 @@ struct Inner {
     buffers: Mutex<Vec<SlotInfo>>,
     spare: Mutex<Option<*mut ANativeWindowBuffer>>,
     screen: Mutex<(u32, u32)>,
-    refresh_mhz: u32,
+    /// Advertised output refresh (millihertz). Re-resolved on every surface
+    /// attachment so a changed Android peak-refresh setting reaches KWin's
+    /// RenderLoop/OutputMode through the existing DISPLAY_REFRESH seed.
+    refresh_mhz: AtomicU32,
     /// Native-window epoch minted for each surface attachment (see
     /// [`surface_geometry::mint_surface_epoch`]). Delayed resize events from
     /// a destroyed surface carry the old epoch and are rejected as stale.
@@ -162,6 +197,12 @@ struct Inner {
     /// Monotonic-nanos deadline (CLOCK_MONOTONIC) until which the loop
     /// selects every vsync tick. Past it, only the 1Hz heartbeat selects.
     demand_until_ns: AtomicU64,
+    /// Monotonic-nanos deadline for the window's high-refresh display-mode
+    /// request. Input and client activity extend it together with demand;
+    /// KWin damage hints only extend it once they are sustained (an actual
+    /// animation), so an isolated repaint such as a blinking text cursor
+    /// renders promptly without pinning the panel at its peak refresh.
+    high_refresh_until_ns: AtomicU64,
     /// Last forwarded pointer position (buffer pixels) for relative-delta
     /// synthesis, tagged with the observing surface generation. The KWin
     /// backend emits both absolute and relative motion from each
@@ -190,6 +231,7 @@ struct Inner {
 fn kick(inner: &Arc<Inner>, burst_ms: u64) {
     let until = sys::now_ns().wrapping_add(burst_ms.wrapping_mul(1_000_000));
     inner.demand_until_ns.fetch_max(until, Ordering::AcqRel);
+    inner.high_refresh_until_ns.fetch_max(until, Ordering::AcqRel);
     let _ = sys::eventfd_write(&inner.wake, 1);
 }
 
@@ -201,6 +243,8 @@ pub struct AnlandSession {
     render_thread: Option<JoinHandle<()>>,
     event_thread: Option<JoinHandle<()>>,
     broker_thread: Option<JoinHandle<()>>,
+    /// Session-scoped KWin damage-hint listener (see `damage_listener`).
+    damage_thread: Option<JoinHandle<()>>,
     /// The winit holder is surface-scoped. The broker/session remains alive
     /// while this is `None` between Android surface lifetimes.
     window_holder: Option<Arc<winit::window::Window>>,
@@ -289,7 +333,7 @@ fn configure_window(
             return Err(format!("ANativeWindow_setBuffersGeometry failed: {r}"));
         }
         let min_undequeued = unsafe { anw.query_min_undequeued(window) }?;
-        let total = (min_undequeued + 2).clamp(3, MAX_BUFS as i32) as usize;
+        let total = window_buffer_count(min_undequeued, cfg.refresh_mhz);
         let r = unsafe { anw.set_buffer_count(window, total) };
         if r != 0 {
             return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
@@ -392,7 +436,7 @@ impl AnlandSession {
             buffers: Mutex::new(Vec::new()),
             spare: Mutex::new(None),
             screen: Mutex::new((w, h)),
-            refresh_mhz: cfg.refresh_mhz,
+            refresh_mhz: AtomicU32::new(cfg.refresh_mhz),
             surface_epoch: AtomicU64::new(surface_epoch),
             surface_gen: Mutex::new(1),
             rebind_active: AtomicBool::new(false),
@@ -410,6 +454,7 @@ impl AnlandSession {
             client_active: AtomicBool::new(false),
             wake,
             demand_until_ns: AtomicU64::new(0),
+            high_refresh_until_ns: AtomicU64::new(0),
             last_pointer: Mutex::new(None),
             finger_axes: Mutex::new(0),
             held_inputs: Mutex::new(std::collections::BTreeSet::new()),
@@ -437,11 +482,13 @@ impl AnlandSession {
                 return Err(error);
             }
         };
+        let damage_thread = spawn_damage_listener(&inner, &cfg.socket_path);
         let mut session = Self {
             inner,
             render_thread: None,
             event_thread: None,
             broker_thread: Some(broker_thread),
+            damage_thread,
             window_holder: Some(window_holder),
         };
         if let Err(error) = session.start_surface_threads() {
@@ -530,15 +577,17 @@ impl AnlandSession {
         *inner.rebind_request.lock().unwrap() = None;
         inner.rebind_active.store(false, Ordering::Release);
         inner.demand_until_ns.store(0, Ordering::Release);
+        inner.high_refresh_until_ns.store(0, Ordering::Release);
         *inner.screen.lock().unwrap() = (w, h);
+        inner.refresh_mhz.store(cfg.refresh_mhz, Ordering::Release);
         inner.broker.set_screen(ScreenInfo {
             width: w,
             height: h,
             format: PIXEL_FORMAT_RGBA_8888,
-            refresh: inner.refresh_mhz,
+            refresh: cfg.refresh_mhz,
         });
 
-        let vsync = match sys::VsyncPump::start(inner.refresh_mhz) {
+        let vsync = match sys::VsyncPump::start(cfg.refresh_mhz) {
             Ok(vsync) => vsync,
             Err(error) => {
                 self.suspend_surface();
@@ -614,6 +663,7 @@ impl AnlandSession {
         self.inner.rebind_active.store(false, Ordering::Release);
         self.inner.rebind_request.lock().unwrap().take();
         self.inner.demand_until_ns.store(0, Ordering::Release);
+        self.inner.high_refresh_until_ns.store(0, Ordering::Release);
         let _ = sys::eventfd_write(&self.inner.wake, 1);
 
         // Return the one dequeued spare before joining. This is the explicit
@@ -996,7 +1046,7 @@ impl AnlandSession {
             width: w,
             height: h,
             format: PIXEL_FORMAT_RGBA_8888,
-            refresh: inner.refresh_mhz,
+            refresh: inner.refresh_mhz.load(Ordering::Acquire),
         });
         let r = unsafe {
             anw::set_buffers_geometry(
@@ -1014,7 +1064,10 @@ impl AnlandSession {
         }
         let min_undequeued = unsafe { inner.anw.query_min_undequeued(window) }
             .map_err(|e| format!("ANativeWindow query min-undequeued after resize: {e}"))?;
-        let total = (min_undequeued + 2).clamp(3, MAX_BUFS as i32) as usize;
+        let total = window_buffer_count(
+            min_undequeued,
+            inner.refresh_mhz.load(Ordering::Acquire),
+        );
         let r = unsafe { inner.anw.set_buffer_count(window, total) };
         if r != 0 {
             return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
@@ -1049,6 +1102,9 @@ impl AnlandSession {
         if let Some(h) = self.broker_thread.take() {
             inner.broker_stop.store(true, Ordering::Release);
             join_surface_thread(h, "broker");
+        }
+        if let Some(h) = self.damage_thread.take() {
+            join_surface_thread(h, "damage");
         }
         let (q, f, b, fb) = (
             inner.frames_queued.load(Ordering::Relaxed),
@@ -1367,13 +1423,141 @@ fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receive
     let sgen = *inner.surface_gen.lock().unwrap();
     log::info!("anland.session=connected generation={generation} sgen={sgen} bufs={count}");
     // Seed the producer's render-loop pacing with the live display rate.
-    let refresh = inner.refresh_mhz;
+    let _ = send_display_refresh(&gen.data, inner.refresh_mhz.load(Ordering::Acquire));
+}
+
+/// DISPLAY_REFRESH: KWin's Anland backend applies it to its RenderLoop and
+/// OutputMode (what Plasma's display settings report). Caller holds `io_lock`.
+fn send_display_refresh(data: &OwnedFd, refresh_mhz: u32) -> std::io::Result<()> {
     let mut wire = [0u8; 8 + 20];
     wire[0..4].copy_from_slice(&DATA_MSG_INPUT_EVENT.to_ne_bytes());
     wire[4..8].copy_from_slice(&20u32.to_ne_bytes());
     wire[8..12].copy_from_slice(&INPUT_TYPE_DISPLAY_REFRESH.to_ne_bytes());
-    wire[12..16].copy_from_slice(&refresh.to_ne_bytes());
-    let _ = sys::send_all(&gen.data, &wire);
+    wire[12..16].copy_from_slice(&refresh_mhz.to_ne_bytes());
+    sys::send_all(data, &wire)
+}
+
+/// Follow a peak-refresh setting changed while the session runs: adopt the
+/// display-mode target re-resolved at the latest high-refresh request as the
+/// advertised output rate, for new producers (broker screen info) and for the
+/// connected KWin (DISPLAY_REFRESH). Render thread only.
+fn follow_refresh_target(inner: &Arc<Inner>) {
+    let Some(target) = crate::android::utils::display_mode_request::target_millihz() else {
+        return;
+    };
+    let current = inner.refresh_mhz.load(Ordering::Acquire);
+    if target.abs_diff(current) < 500 {
+        return;
+    }
+    inner.refresh_mhz.store(target, Ordering::Release);
+    let (w, h) = *inner.screen.lock().unwrap();
+    inner.broker.set_screen(ScreenInfo {
+        width: w,
+        height: h,
+        format: PIXEL_FORMAT_RGBA_8888,
+        refresh: target,
+    });
+    let _guard = inner.io_lock.lock().unwrap();
+    let gen = inner.gen.lock().unwrap();
+    let sent = match gen.as_ref() {
+        Some(g) if inner.connected_gen.lock().unwrap().as_ref() == Some(&g.id) => {
+            send_display_refresh(&g.data, target).is_ok()
+        }
+        // Not connected: the next BUFS_READY handshake seeds the new rate.
+        _ => false,
+    };
+    drop(gen);
+    drop(_guard);
+    log::info!("anland.refresh output rate {current} -> {target} mHz (sent_to_kwin={sent})");
+    // The queue depth depends on the rate (see `window_buffer_count`):
+    // rebuild it through the render-thread rebind at the same geometry and
+    // surface generation, exactly like a rotation that changes no size.
+    if (current >= HIGH_RATE_QUEUE_MHZ) != (target >= HIGH_RATE_QUEUE_MHZ) {
+        let sgen = *inner.surface_gen.lock().unwrap();
+        let mut request = inner.rebind_request.lock().unwrap();
+        if request.is_none() {
+            inner.rebind_active.store(true, Ordering::Release);
+            *request = Some((w, h, sgen));
+            log::info!("anland.refresh rebuilding window queue for {target} mHz (sgen={sgen})");
+        }
+    }
+}
+
+/// Host path of the KWin damage-hint socket (guest `/tmp/anland/damage.sock`
+/// through the same bind as the broker socket).
+fn damage_socket_path(broker_socket: &std::path::Path) -> std::path::PathBuf {
+    broker_socket.with_file_name("damage.sock")
+}
+
+/// Bind the damage-hint socket and start its listener. Failure is logged and
+/// tolerated: without hints the session keeps input/heartbeat pacing.
+fn spawn_damage_listener(
+    inner: &Arc<Inner>,
+    broker_socket: &std::path::Path,
+) -> Option<JoinHandle<()>> {
+    let path = damage_socket_path(broker_socket);
+    let _ = std::fs::remove_file(&path);
+    let socket = match std::os::unix::net::UnixDatagram::bind(&path) {
+        Ok(socket) => socket,
+        Err(error) => {
+            log::warn!("anland.damage listener unavailable ({}): {error}", path.display());
+            return None;
+        }
+    };
+    if let Err(error) = socket.set_read_timeout(Some(Duration::from_millis(250))) {
+        log::warn!("anland.damage listener timeout setup failed: {error}");
+        return None;
+    }
+    let inner = inner.clone();
+    thread::Builder::new()
+        .name("anland-damage".into())
+        .spawn(move || damage_listener(inner, socket))
+        .map_err(|error| log::warn!("anland.damage listener thread failed: {error}"))
+        .ok()
+}
+
+/// KWin damage hints (guest preload `anland-damage.so`): KWin asked for a
+/// repaint of real scene content. Grant a short presentation burst so the
+/// next vsync tick selects; continuous animations keep re-hinting each frame.
+/// No eventfd wake: damage presents on the vsync grid, only input bypasses it.
+fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) {
+    log::info!("anland.damage listener started");
+    let mut buf = [0u8; 64];
+    let mut streak_start_ns: u64 = 0;
+    let mut last_hint_ns: u64 = 0;
+    let mut hints: u64 = 0;
+    while inner.running.load(Ordering::Acquire) {
+        match socket.recv(&mut buf) {
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => {
+                log::warn!("anland.damage listener stopped: {error}");
+                break;
+            }
+        }
+        let now = sys::now_ns();
+        if hints == 0 {
+            log::info!("anland.damage first KWin damage hint received");
+        }
+        hints += 1;
+        let until = now.wrapping_add(DAMAGE_BURST_NS);
+        inner.demand_until_ns.fetch_max(until, Ordering::AcqRel);
+        if now.wrapping_sub(last_hint_ns) > DAMAGE_STREAK_GAP_NS {
+            streak_start_ns = now;
+        }
+        last_hint_ns = now;
+        if now.wrapping_sub(streak_start_ns) >= DAMAGE_STREAK_HIGH_REFRESH_NS {
+            inner.high_refresh_until_ns.fetch_max(until, Ordering::AcqRel);
+        }
+    }
+    log::info!("anland.damage listener stopped hints={hints}");
 }
 
 fn render_loop(inner: Arc<Inner>) {
@@ -1406,6 +1590,9 @@ fn render_loop(inner: Arc<Inner>) {
     let mut win_comp_max_us: u64 = 0;
     let mut win_skips: u64 = 0;
     let mut win_stalls: u64 = 0;
+    let mut win_acq_us: u64 = 0;
+    let mut win_acq_max_us: u64 = 0;
+    let mut win_acq_ready: u64 = 0;
     // Temporary gate tracing (demand-tuning build): first decisions + alive.
     let mut iters: u64 = 0;
     let mut selects: u64 = 0;
@@ -1496,6 +1683,16 @@ fn render_loop(inner: Arc<Inner>) {
         }
         let now = sys::now_ns();
         let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
+        follow_refresh_target(&inner);
+        // Window-level display-mode request follows interactive demand (plus
+        // a short hold so bursty input does not flap Android's mode choice).
+        crate::android::utils::display_mode_request::request(
+            inner
+                .high_refresh_until_ns
+                .load(Ordering::Acquire)
+                .saturating_add(HIGH_REFRESH_HOLD_NS)
+                > now,
+        );
         let since_last = now.wrapping_sub(last_select_ns);
         let want = wake_ready
             || (tick_ready && (demanding || since_last >= HEARTBEAT_NS))
@@ -1529,6 +1726,9 @@ fn render_loop(inner: Arc<Inner>) {
                 &mut win_comp_max_us,
                 &mut win_skips,
                 &mut win_stalls,
+                &mut win_acq_us,
+                &mut win_acq_max_us,
+                &mut win_acq_ready,
             );
             continue;
         }
@@ -1550,6 +1750,9 @@ fn render_loop(inner: Arc<Inner>) {
                 &mut win_comp_max_us,
                 &mut win_skips,
                 &mut win_stalls,
+                &mut win_acq_us,
+                &mut win_acq_max_us,
+                &mut win_acq_ready,
             );
             continue;
         }
@@ -1569,13 +1772,17 @@ fn render_loop(inner: Arc<Inner>) {
             }
         };
         if !inner.window_live.load(Ordering::Acquire) {
-            unsafe { inner.anw.cancel(window, anb, -1) };
+            unsafe { inner.anw.cancel(window, anb, acquire) };
             break;
         }
         // The surface generation this frame belongs to. A rotation that
         // lands between here and queueBuffer must cancel, never present,
         // a buffer produced for the old dimensions.
         let frame_sgen = *inner.surface_gen.lock().unwrap();
+        let t_acquire_ns = sys::now_ns();
+        if acquire < 0 || sys::fence_signaled(acquire) {
+            win_acq_ready += 1;
+        }
         if acquire >= 0 {
             // Blocking acquire wait (see ACQUIRE_WAIT_MS). Never queue-back:
             // presenting a buffer SF hasn't released invites KWin to render
@@ -1592,6 +1799,9 @@ fn render_loop(inner: Arc<Inner>) {
                 continue;
             }
         }
+        let acq_us = sys::now_ns().wrapping_sub(t_acquire_ns) / 1000;
+        win_acq_us += acq_us;
+        win_acq_max_us = win_acq_max_us.max(acq_us);
         if !inner.window_live.load(Ordering::Acquire) {
             unsafe { inner.anw.cancel(window, anb, -1) };
             break;
@@ -1790,6 +2000,9 @@ fn render_loop(inner: Arc<Inner>) {
                 &mut win_comp_max_us,
                 &mut win_skips,
                 &mut win_stalls,
+                &mut win_acq_us,
+                &mut win_acq_max_us,
+                &mut win_acq_ready,
             );
         }
     }
@@ -1813,6 +2026,9 @@ fn log_fps_window(
     win_comp_max_us: &mut u64,
     win_skips: &mut u64,
     win_stalls: &mut u64,
+    win_acq_us: &mut u64,
+    win_acq_max_us: &mut u64,
+    win_acq_ready: &mut u64,
 ) {
     let now = sys::now_ns();
     if now.wrapping_sub(*win_start_ns) < FPS_WINDOW_NS {
@@ -1823,11 +2039,14 @@ fn log_fps_window(
     let skips = *win_skips;
     let hz = frames as f64 * 1_000_000_000.0 / elapsed_ns as f64;
     let avg_us = if frames > 0 { *win_comp_us / frames } else { 0 };
+    let acq_avg_us = if frames > 0 { *win_acq_us / frames } else { 0 };
+    let acq_ready_pct = *win_acq_ready * 100 / frames.max(1);
     let skip_pct = skips * 100 / (frames + skips).max(1);
     let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
     log::info!(
-        "anland.fps hz={hz:.1} comp_avg_us={avg_us} comp_max_us={} skip_pct={skip_pct} acquire_stalls={} demanding={demanding}",
+        "anland.fps hz={hz:.1} comp_avg_us={avg_us} comp_max_us={} acq_avg_us={acq_avg_us} acq_max_us={} acq_ready_pct={acq_ready_pct} skip_pct={skip_pct} acquire_stalls={} demanding={demanding}",
         *win_comp_max_us,
+        *win_acq_max_us,
         *win_stalls,
     );
     *win_start_ns = now;
@@ -1836,6 +2055,9 @@ fn log_fps_window(
     *win_comp_max_us = 0;
     *win_skips = 0;
     *win_stalls = 0;
+    *win_acq_us = 0;
+    *win_acq_max_us = 0;
+    *win_acq_ready = 0;
 }
 
 const FENCE_LOST: i32 = -2;
