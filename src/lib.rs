@@ -6,6 +6,7 @@ pub mod core {
     pub mod clipboard_sync;
     pub mod config;
     pub mod coordinate_transform;
+    pub mod guest_timezone;
     pub mod ime_policy;
     pub mod install_plan;
     pub mod mesa_layer;
