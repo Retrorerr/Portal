@@ -95,8 +95,10 @@ impl ExternalBuffer for WleglBufferData {
                     .map_err(|err| -> ExternalBufferImportError { Box::new(err) })?;
             }
             let display = renderer.egl_context().display().get_display_handle();
-            self.importer
-                .import_ahb(
+            // SAFETY: `display` belongs to the context made current above, and
+            // `self.ahb` stays owned by this buffer until its Drop releases it.
+            unsafe {
+                self.importer.import_ahb(
                     renderer,
                     **display,
                     self.ahb,
@@ -104,9 +106,10 @@ impl ExternalBuffer for WleglBufferData {
                     self.height,
                     self.is_external,
                 )
-                .map_err(|err| -> ExternalBufferImportError {
-                    std::io::Error::new(std::io::ErrorKind::Other, err).into()
-                })
+            }
+            .map_err(|err| -> ExternalBufferImportError {
+                std::io::Error::new(std::io::ErrorKind::Other, err).into()
+            })
         })();
 
         let texture = match texture {
