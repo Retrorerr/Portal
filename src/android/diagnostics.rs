@@ -836,7 +836,7 @@ fn share_file(env: &mut JNIEnv, android_app: &AndroidApp, path: &Path) -> Result
         env.call_method(
             &intent,
             "setClipData",
-            "(Landroid/content/ClipData;)Landroid/content/Intent;",
+            "(Landroid/content/ClipData;)V",
             &[JValue::Object(&clip_data)],
         )
         .map_err(|error| error.to_string())?;
