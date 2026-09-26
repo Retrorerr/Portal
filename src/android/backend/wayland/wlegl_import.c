@@ -15,6 +15,7 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -67,7 +68,8 @@ static void load_symbols(void) {
 
 // Import a client-allocated gralloc buffer. Returns an AHardwareBuffer* that
 // the caller owns (release with tawc_wlegl_buffer_release). Returns NULL on
-// failure.
+// failure. `fds` stay owned by the caller on every path: the handle given to
+// AHardwareBuffer_createFromHandle carries duplicates of them.
 AHardwareBuffer *tawc_wlegl_import(
     uint32_t width, uint32_t height, uint32_t stride,
     uint32_t format, uint64_t usage,
@@ -89,7 +91,19 @@ AHardwareBuffer *tawc_wlegl_import(
     h->version = (int)sizeof(struct tawc_native_handle);
     h->numFds  = num_fds;
     h->numInts = num_ints;
-    for (int i = 0; i < num_fds;  i++) h->data[i]           = fds[i];
+    // REGISTER hands the handle's fds to the AHB, which closes them, including
+    // when a desc mismatch below releases it again. Duplicates keep that from
+    // ever closing the caller's fds (a double close once Rust drops them).
+    for (int i = 0; i < num_fds; i++) {
+        h->data[i] = fcntl(fds[i], F_DUPFD_CLOEXEC, 0);
+        if (h->data[i] < 0) {
+            LOGE("tawc_wlegl_import: dup of fd %d failed (%d %s)",
+                 fds[i], errno, strerror(errno));
+            for (int j = 0; j < i; j++) close(h->data[j]);
+            free(h);
+            return NULL;
+        }
+    }
     for (int i = 0; i < num_ints; i++) h->data[num_fds + i] = ints[i];
 
     AHardwareBuffer_Desc desc;
@@ -103,14 +117,15 @@ AHardwareBuffer *tawc_wlegl_import(
 
     AHardwareBuffer *ahb = NULL;
     // REGISTER: AHB takes ownership of `h` (both the handle memory and its
-    // fds). Do NOT free(h) on success — the underlying GraphicBuffer will
-    // close+delete the handle when the AHB is released, and double-freeing
-    // trips Scudo's chunk-state check. On failure, AHB doesn't retain
-    // anything, so we free.
+    // duplicated fds). Do NOT free(h) on success — the underlying GraphicBuffer
+    // closes and deletes the handle, and double-freeing trips Scudo's
+    // chunk-state check. On failure, AHB doesn't retain anything, so we close
+    // the duplicates and free.
     int rc = g_create_from_handle(&desc, h, AHB_METHOD_REGISTER, &ahb);
     if (rc != 0 || !ahb) {
         LOGE("AHardwareBuffer_createFromHandle failed: rc=%d (%d %s)",
              rc, errno, strerror(errno));
+        for (int i = 0; i < num_fds; i++) close(h->data[i]);
         free(h);
         return NULL;
     }
