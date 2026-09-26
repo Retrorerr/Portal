@@ -382,10 +382,13 @@ impl AnlandSession {
     /// Take over `window` for zero-copy GPU presentation.
     ///
     /// `window_holder` keeps the winit Window alive for this surface lifetime.
-    /// The caller must guarantee `window` is a valid, current `ANativeWindow*`
-    /// and must call [`Self::stop`] while it is still valid (Portal's
+    ///
+    /// # Safety
+    ///
+    /// `window` must be a valid, current `ANativeWindow*`, and the caller
+    /// must call [`Self::stop`] while it is still valid (Portal's
     /// `suspended()` runs while the lifecycle window is alive).
-    pub fn start(
+    pub unsafe fn start(
         window: *mut c_void,
         window_holder: Arc<winit::window::Window>,
         cfg: &AnlandConfig,
@@ -546,7 +549,12 @@ impl AnlandSession {
     /// Reattach a newly-created Android surface to this still-running
     /// Anland session. The broker, KWin producer and guest Plasma process are
     /// deliberately not recreated here; only the surface generation is.
-    pub fn resume_surface(
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::start`]: `window` must be a valid, current
+    /// `ANativeWindow*` that stays valid until the surface is suspended.
+    pub unsafe fn resume_surface(
         &mut self,
         window: *mut c_void,
         window_holder: Arc<winit::window::Window>,

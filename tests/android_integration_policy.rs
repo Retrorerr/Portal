@@ -1011,7 +1011,7 @@ fn anland_resume_rebinds_a_fresh_surface_without_relaunching_plasma() {
     assert!(resume.contains("AnlandSession::start"));
 
     let session_resume = ANLAND_CONSUMER_SOURCE
-        .split("pub fn resume_surface")
+        .split("pub unsafe fn resume_surface")
         .nth(1)
         .and_then(|source| source.split("fn release_surface_inputs").next())
         .expect("surface resume operation must exist");
@@ -1044,7 +1044,7 @@ fn anland_generation_and_readiness_are_scoped_to_the_current_surface() {
         .and_then(|source| source.split("/// Forward one fixed-size input").next())
         .expect("surface suspend operation must exist");
     let resume = ANLAND_CONSUMER_SOURCE
-        .split("pub fn resume_surface")
+        .split("pub unsafe fn resume_surface")
         .nth(1)
         .and_then(|source| source.split("fn release_surface_inputs").next())
         .expect("surface resume operation must exist");

@@ -347,7 +347,9 @@ fn resume_anland(
         let Some(session) = backend.anland.as_mut() else {
             return false;
         };
-        if let Err(error) = session.resume_surface(raw, window, &config) {
+        // SAFETY: `raw` is the ANativeWindow of `window`, created above and
+        // kept alive by the session; `suspended()` detaches it before it goes.
+        if let Err(error) = unsafe { session.resume_surface(raw, window, &config) } {
             log::error!("anland.surface resume failed (guest session preserved): {error}");
             accessibility::set_runtime_active(false);
             event_loop.set_control_flow(ControlFlow::Wait);
@@ -360,7 +362,9 @@ fn resume_anland(
             refresh_mhz
         );
     } else {
-        match crate::android::anland::AnlandSession::start(raw, window, &config) {
+        // SAFETY: as above; `suspended()` stops the session while `window`
+        // is still alive.
+        match unsafe { crate::android::anland::AnlandSession::start(raw, window, &config) } {
             Ok(session) => {
                 log::info!(
                     "anland.session=active compositor=kwin-opengl(expected) driver=freedreno(expected) window={}x{} refresh_mhz={}",
