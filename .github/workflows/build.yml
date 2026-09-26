@@ -153,33 +153,6 @@ jobs:
       - name: Install LLVM
         run: sudo apt-get update && sudo apt-get install -y llvm
 
-      - name: Download Android NDK r28 # Xbuild does this automatically, but at the moment it does not yet support NDK r28, and we need it for 16 KB ELF alignment.
-        run: |
-          curl -o android-ndk-r28-linux.zip https://dl.google.com/android/repository/android-ndk-r28-linux.zip
-          unzip android-ndk-r28-linux.zip
-          rm android-ndk-r28-linux.zip
-
-      - name: Prepare Android.ndk # Replicate these steps from Xbuild's release workflow, so a fully compatible Android.ndk folder with NDK r28 is available offline in the working directory where Xbuild proceeds.
-        run: |
-          TOOLCHAIN=android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64
-          CLANG_VERSION=$(ls $TOOLCHAIN/lib/clang | head -n 1)
-          CLANG=$TOOLCHAIN/lib/clang/$CLANG_VERSION
-
-          mkdir Android.ndk
-          cp -r $TOOLCHAIN/sysroot/usr Android.ndk/
-          cp -r $CLANG/lib/linux/aarch64/* Android.ndk/usr/lib/aarch64-linux-android/
-          cp -r $CLANG/lib/linux/arm/* Android.ndk/usr/lib/arm-linux-androideabi/
-          cp -r $CLANG/lib/linux/x86_64/* Android.ndk/usr/lib/x86_64-linux-android/
-          cp -r $CLANG/lib/linux/i386/* Android.ndk/usr/lib/i686-linux-android/
-
-          echo "INPUT(-lunwind)" > Android.ndk/usr/lib/aarch64-linux-android/libgcc.a
-          echo "INPUT(-lunwind)" > Android.ndk/usr/lib/arm-linux-androideabi/libgcc.a
-          echo "INPUT(-lunwind)" > Android.ndk/usr/lib/x86_64-linux-android/libgcc.a
-          echo "INPUT(-lunwind)" > Android.ndk/usr/lib/i686-linux-android/libgcc.a
-
-          mkdir -p ~/.cache/x/
-          mv Android.ndk ~/.cache/x/
-
       - name: Build xbuild
         working-directory: patches/xbuild
         run: cargo install --path xbuild
