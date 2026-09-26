@@ -1262,6 +1262,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let WindowEvent::Focused(focused) = event {
+            accessibility::set_window_focused(focused);
+        }
         let mut runtime_failed = false;
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             // Anland GPU mode owns no Smithay renderer; the session on
