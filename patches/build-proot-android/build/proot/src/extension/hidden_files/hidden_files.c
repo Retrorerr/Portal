@@ -7,9 +7,18 @@
  * deleted by wildcard expressions.
  */
 
+#include <dirent.h>      /* opendir(3), readdir(3), */
+#include <fcntl.h>       /* AT_REMOVEDIR, */
+#include <stdbool.h>
+#include <stdio.h>       /* snprintf(3), */
+#include <string.h>      /* strcmp(3), strncmp(3), */
+#include <unistd.h>      /* unlink(2), */
+
 #include "extension/extension.h"
 #include "tracee/mem.h"
 #include "syscall/chain.h"
+#include "syscall/syscall.h"
+#include "syscall/sysnum.h"
 #include "path/path.h"
 
 /* Change the HIDDEN_PREFIX to change which files are hidden */
@@ -168,6 +177,71 @@ static int handle_getdents(Tracee *tracee)
     }
 }
 
+#define META_PREFIX ".proot-meta-file."
+
+/**
+ * Before a directory is removed, delete fake_id0 meta files left inside it
+ * for files that no longer exist (removed outside PRoot).  Hidden from
+ * getdents, they would otherwise make an apparently empty directory fail
+ * rmdir with ENOTEMPTY.  Only meta files are removed, and only when they
+ * are the sole entries: link2symlink data files may still back hard links
+ * elsewhere, and any other entry must keep the kernel's ENOTEMPTY.
+ */
+static void drop_orphan_meta_files(const char *dir_path)
+{
+    DIR *dir;
+    struct dirent *entry;
+    bool only_meta = true;
+    char path[PATH_MAX];
+
+    dir = opendir(dir_path);
+    if (dir == NULL)
+        return;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        if (strncmp(entry->d_name, META_PREFIX, strlen(META_PREFIX)) != 0) {
+            only_meta = false;
+            break;
+        }
+    }
+    if (only_meta) {
+        rewinddir(dir);
+        while ((entry = readdir(dir)) != NULL) {
+            if (strncmp(entry->d_name, META_PREFIX, strlen(META_PREFIX)) != 0)
+                continue;
+            if ((size_t) snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name) < sizeof(path))
+                (void) unlink(path);
+        }
+    }
+    closedir(dir);
+}
+
+static int handle_rmdir_enter(Tracee *tracee)
+{
+    char path[PATH_MAX];
+    Reg sysarg;
+
+    switch (get_sysnum(tracee, CURRENT)) {
+    case PR_rmdir:
+        sysarg = SYSARG_1;
+        break;
+    case PR_unlinkat:
+        if ((peek_reg(tracee, CURRENT, SYSARG_3) & AT_REMOVEDIR) == 0)
+            return 0;
+        sysarg = SYSARG_2;
+        break;
+    default:
+        return 0;
+    }
+
+    /* The path is already translated to an absolute host path.  */
+    if (get_sysarg_path(tracee, path, sysarg) < 0 || path[0] != '/')
+        return 0;
+    drop_orphan_meta_files(path);
+    return 0;
+}
+
 /**
  * Handler for this @extension.  It is triggered each time an @event
  * occured.  See ExtensionEvent for the meaning of @data1 and @data2.
@@ -181,11 +255,16 @@ int hidden_files_callback(Extension *extension, ExtensionEvent event,
         static FilteredSysnum filtered_sysnums[] = {
             { PR_getdents,    FILTER_SYSEXIT },
             { PR_getdents64,  FILTER_SYSEXIT },
+            { PR_rmdir,       0 },
+            { PR_unlinkat,    0 },
             FILTERED_SYSNUM_END,
         };
         extension->filtered_sysnums = filtered_sysnums;
         return 0;
     }
+
+    case SYSCALL_ENTER_END:
+        return handle_rmdir_enter(TRACEE(extension));
 
     case SYSCALL_CHAINED_EXIT:
     case SYSCALL_EXIT_END: {

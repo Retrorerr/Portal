@@ -159,8 +159,31 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 
 int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t statx_state_raw) {
 	(void) tracee;
-	// TODO: USERLAND
 	struct statx_syscall_state *state = (struct statx_syscall_state *) statx_state_raw;
+#ifdef USERLAND
+	/* Apply the same meta file that stat()/lstat()/fstat() report, so
+	 * statx() callers (coreutils, libuv/Node, Bun) see the mode and
+	 * ownership chmod()/chown() recorded rather than the host inode's.  */
+	if (state->host_path[0] == '/') {
+		char meta_path[PATH_MAX];
+		mode_t mode;
+		uid_t uid;
+		gid_t gid;
+
+		if (get_meta_path(state->host_path, meta_path) == 0 && path_exists(meta_path) == 0) {
+			read_meta_file(meta_path, &mode, &uid, &gid, config);
+			if (state->statx_buf.stx_mask & STATX_MODE)
+				state->statx_buf.stx_mode = (mode & 0777)
+					| (state->statx_buf.stx_mode & (S_IFMT | 07000));
+			if (state->statx_buf.stx_mask & STATX_UID)
+				state->statx_buf.stx_uid = uid;
+			if (state->statx_buf.stx_mask & STATX_GID)
+				state->statx_buf.stx_gid = gid;
+			state->updated_stats = true;
+			return 0;
+		}
+	}
+#endif
 	if (state->statx_buf.stx_mask & STATX_UID) {
 		if (state->statx_buf.stx_uid == getuid()) {
 			state->statx_buf.stx_uid = config->suid;
@@ -168,7 +191,7 @@ int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t stat
 		}
 	}
 	if (state->statx_buf.stx_mask & STATX_GID) {
-		if (state->statx_buf.stx_gid == getuid()) {
+		if (state->statx_buf.stx_gid == getgid()) {
 			state->statx_buf.stx_gid = config->sgid;
 			state->updated_stats = true;
 		}

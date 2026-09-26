@@ -320,6 +320,19 @@ impl LinuxRuntime for PRootRuntime {
             )
             .env("PROOT_TMP_DIR", &context.data_dir);
 
+        // link2symlink otherwise keeps a hard link's data beside its first
+        // name, so that directory cannot be removed while another link
+        // survives (a local `git clone` links every object of its source).
+        // A central directory, hidden by `-H`, keeps user trees removable;
+        // pairs created before this still resolve by their absolute paths.
+        let l2s_dir = self.rootfs.join(".proot.l2s");
+        match fs::create_dir_all(&l2s_dir) {
+            Ok(()) => {
+                process.env("PROOT_L2S_DIR", &l2s_dir);
+            }
+            Err(error) => log::warn!("PRoot link2symlink directory unavailable: {error}"),
+        }
+
         let rootfs_str = self.rootfs.to_string_lossy().to_string();
 
         process
@@ -332,6 +345,11 @@ impl LinuxRuntime for PRootRuntime {
             .arg("-w")
             .arg(&working_dir)
             .arg("-L")
+            // Hide PRoot's own `.proot-meta-file.*` (fake root) and
+            // `.proot.l2s.*` (link2symlink) bookkeeping from directory
+            // listings, so git, ripgrep and globbing tools never see or
+            // commit them. They stay reachable by name for PRoot itself.
+            .arg("-H")
             .arg("--link2symlink")
             .arg("--sysvipc")
             .arg("--kill-on-exit")

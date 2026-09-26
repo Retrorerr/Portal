@@ -308,6 +308,35 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
 }
 
 /**
+ * Whether the descriptor @fd of process @pid still names a file-system
+ * object by its link in /proc/@pid/fd: the link target is an absolute
+ * path that resolves to the same inode as the descriptor itself.
+ * Sockets, pipes, epoll/eventfd/inotify inodes, deleted files and
+ * pseudo files (memfd, dmabuf) do not, and must be stat'ed through the
+ * descriptor rather than through a path.
+ */
+bool fd_has_reachable_path(pid_t pid, int fd)
+{
+	char link[32]; /* 32 > sizeof("/proc//cwd") + sizeof(#ULONG_MAX) */
+	char target[PATH_MAX];
+	struct stat by_fd;
+	struct stat by_path;
+	int status;
+
+	status = snprintf(link, sizeof(link), "/proc/%d/fd/%d", pid, fd);
+	if (status < 0 || (size_t) status >= sizeof(link))
+		return false;
+
+	if (readlink_proc_pid_fd(pid, fd, target) < 0 || target[0] != '/')
+		return false;
+
+	if (stat(link, &by_fd) < 0 || stat(target, &by_path) < 0)
+		return false;
+
+	return by_fd.st_dev == by_path.st_dev && by_fd.st_ino == by_path.st_ino;
+}
+
+/**
  * Copy in @result the equivalent of "@tracee->root + canon(@dir_fd +
  * @user_path)".  If @user_path is not absolute then it is relative to
  * the directory referred by the descriptor @dir_fd (AT_FDCWD is for
