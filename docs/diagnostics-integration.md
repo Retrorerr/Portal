@@ -13,8 +13,8 @@ not as a process-name heuristic.
    `diagnostics::guest_process_line`. The guest mirror is
    `/var/lib/localdesktop/guest.log` and is included in the ZIP.
 3. Emit `diagnostics::setup_stage(index, name, "start|complete|failed")`
-   around each setup stage. Setup errors must send an explicit error message
-   and keep the WebView on an actionable error screen.
+   around each setup stage. Setup errors must publish an explicit error message
+   so the Compose installer shows it with its Retry action.
 4. Use `assets/localdesktop-startplasma.sh` (with `@UI_SCALE@` substituted)
    for the classic `dbus-run-session -- startplasma-wayland` path. It waits
    only for `/var/lib/localdesktop/plasma-ready`, which the Android host writes
@@ -35,12 +35,12 @@ not as a process-name heuristic.
    The UI is kdialog-only (retry or view captured logs); it never launches
    Konsole automatically. Install the supplied Konsole profile files for
    normal user launches.
-7. Add a WebSocket action handler for `{ "action": "export_diagnostics" }`
-   in `WebviewBackend`. Call `diagnostics::export_and_share` and reply with a
-   success/error message. `assets/runtime-error.html` already provides Export
-   and Retry controls.
-8. Prefer an in-process setup handoff: after the final stage, dismiss the
-   WebView popup and send an event through the event-loop proxy. Construct the
+7. The Compose recovery screen (`RecoveryScreen.kt`, `utils/recovery_screen.rs`)
+   provides Retry Plasma and Export diagnostics. Export calls
+   `diagnostics::export_and_share` over JNI and shows the success or error
+   message on the screen.
+8. Prefer an in-process setup handoff: after the final stage, send an event
+   through the event-loop proxy (`webview_handoff`). Construct the
    Wayland backend in the current activity. If an activity recreation fallback
    is unavoidable on a platform build, it must be event-triggered after this
    handoff and must not use a fixed sleep.

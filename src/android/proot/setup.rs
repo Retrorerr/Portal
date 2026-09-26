@@ -14,7 +14,7 @@ use crate::{
         },
     },
     core::{
-        config::{DESKTOP_USER, DOCS_HOME_URL, PRODUCTION_FS_ROOT},
+        config::{APP_FILES_ROOT, DESKTOP_USER, DOCS_HOME_URL, PRODUCTION_FS_ROOT},
         install_plan::{
             validate_initial_setup_proof, AppliedAppearance, AppearanceChoice, InstallPlan,
             InstallPlanState, OptionalApp, PersistedInstallPlan, INSTALL_PLAN_FILE,
@@ -2542,6 +2542,7 @@ fn sync_initial_desktop_defaults(fs_root: &Path) {
     .unpack(fs_root)
     .expect("Failed to install desktop cache tools");
     sync_firefox_config(fs_root);
+    seed_plasma_locale(fs_root);
     // Repair Portal's own launcher to use Debian's installed browser/icon name.
     let docs_entry = home_dir.join("Desktop/localdesktop-online-docs.desktop");
     if fs_root.join("usr/bin/firefox-esr").exists() {
@@ -3194,6 +3195,28 @@ fn migrate_konsole_profile(home_dir: &Path, guest_home: &str) {
         fs::create_dir_all(parent).expect("Failed to create Konsole migration state directory");
     }
     fs::write(marker, "version=2\n").expect("Failed to record Konsole profile migration");
+}
+
+/// Start the desktop in Android's language. First install only, and only when the user has no
+/// Region & Language settings yet: after that, Plasma's settings own it.
+fn seed_plasma_locale(fs_root: &Path) {
+    let localerc = chroot_home_dir(fs_root, DESKTOP_USER).join(".config/plasma-localerc");
+    if localerc.exists() {
+        return;
+    }
+    let Some(tag) = get_application_context().get_language_tag() else {
+        return;
+    };
+    let Some(locale) = crate::core::guest_locale::plasma_locale_for(&tag) else {
+        return;
+    };
+    if let Some(parent) = localerc.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match fs::write(&localerc, crate::core::guest_locale::plasma_localerc(&locale)) {
+        Ok(()) => log::info!("Seeded Plasma language {} from Android {tag}", locale.language),
+        Err(error) => log::warn!("Could not seed Plasma language from Android {tag}: {error}"),
+    }
 }
 
 /// Follow Android's timezone on every launch (the APK is authoritative for it). A zone the
@@ -4842,10 +4865,27 @@ pub fn setup_with_completion(
     let (sender, receiver) = mpsc::channel();
     let progress = Arc::new(Mutex::new(0));
 
+    // Before the PRoot probe, which would fail here too and blame the device.
+    let files_dir = get_application_context().data_dir;
+    if !crate::core::config::runs_in_primary_profile(&files_dir, Path::new(APP_FILES_ROOT)) {
+        log::error!(
+            "Portal runs outside the primary Android profile: files dir {}",
+            files_dir.display()
+        );
+        diagnostics::host_event("setup-unsupported", "not the primary Android profile");
+        return PolarBearBackend::WebView(WebviewBackend::unsupported(
+            android_app,
+            "Portal only runs in your device's main profile. Open it there instead of a work \
+             profile, Private Space or another user.",
+        ));
+    }
     if !ArchProcess::is_supported(&android_app) {
         log::info!("PRoot support check failed, showing Device Unsupported page");
         diagnostics::host_event("setup-unsupported", "PRoot support probe failed");
-        return PolarBearBackend::WebView(WebviewBackend::unsupported(android_app));
+        return PolarBearBackend::WebView(WebviewBackend::unsupported(
+            android_app,
+            "This device can't run Portal's Linux environment.",
+        ));
     }
     let _ = sender.send(SetupMessage::Progress("✅ Your device is supported!".to_string()));
 

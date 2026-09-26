@@ -6,6 +6,8 @@ pub mod core {
     pub mod clipboard_sync;
     pub mod config;
     pub mod coordinate_transform;
+    pub mod guest_locale;
+    #[cfg(unix)]
     pub mod guest_timezone;
     pub mod ime_policy;
     pub mod install_plan;
@@ -59,7 +61,7 @@ pub mod android {
         pub mod frame_rate;
         pub mod fullscreen_immersive;
         pub mod ndk;
-        pub mod webview;
+        pub mod recovery_screen;
         pub mod webview_handoff;
     }
 }

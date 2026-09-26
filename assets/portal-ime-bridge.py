@@ -12,6 +12,7 @@ import os
 import select
 import socket
 import struct
+import subprocess
 import sys
 import time
 
@@ -50,6 +51,28 @@ def notify_portal(active: bool):
                 os.close(fd)
         except Exception as e:
             log(f"Could not write to FIFO {path}: {e}")
+
+
+def set_tablet_mode(mode: str):
+    """Follow Android's input devices: tablet mode without a keyboard or pointer.
+
+    This bridge runs inside the Plasma session, so kwriteconfig6 writes this
+    user's kwinrc and --notify tells KWin (and Plasma) to apply it now.
+    """
+    if mode not in ("on", "off"):
+        log(f"Ignoring invalid tablet mode: {mode!r}")
+        return
+    try:
+        # Rare (accessory hotplug) and quick; waiting also reaps the child.
+        subprocess.run(
+            ["kwriteconfig6", "--file", "kwinrc", "--group", "Input",
+             "--key", "TabletMode", mode, "--notify"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=5, check=True,
+        )
+        log(f"Tablet mode set to {mode}")
+    except Exception as e:
+        log(f"Failed to set tablet mode: {e}")
 
 
 def main():
@@ -191,6 +214,8 @@ def main():
             except Exception:
                 count = 1
             send_delete_surrounding_text(count)
+        elif line.startswith("TABLET_MODE:"):
+            set_tablet_mode(line[12:])
         else:
             log(f"Unknown command: {line}")
 

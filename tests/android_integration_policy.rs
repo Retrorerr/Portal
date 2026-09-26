@@ -1085,14 +1085,14 @@ fn anland_surface_resume_failures_use_committed_runtime_recovery() {
     assert!(ANDROID_SETUP_RUN_SOURCE.contains(
         "Portal is installed, but Wayland lost its renderer. Tap Retry Plasma."
     ));
-    // The recovery helper stops/reaps the session and swaps to the existing
-    // runtime-error page; it contains no provisioning-marker mutation.
+    // The recovery helper stops/reaps the session and swaps to the recovery
+    // screen; it contains no provisioning-marker mutation.
     let recovery = ANDROID_SETUP_RUN_SOURCE
         .split("fn enter_committed_install_runtime_error")
         .nth(1)
         .and_then(|source| source.split("fn enter_runtime_error_with_mode").next())
         .expect("committed runtime recovery helper must exist");
-    assert!(recovery.contains("enter_runtime_error_with_mode(reason.into(), true, false)"));
+    assert!(recovery.contains("enter_runtime_error_with_mode(reason.into(), false)"));
 }
 
 #[test]

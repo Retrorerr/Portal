@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     sync::{Mutex, OnceLock},
 };
 
@@ -41,6 +41,13 @@ pub struct AccessibilityKeyEvent {
 struct AccessibilityBridgeState {
     proxy: Option<EventLoopProxy<AppUserEvent>>,
     runtime_active: bool,
+    /// The service filters hardware keys system-wide. In split screen or a
+    /// freeform window Portal stays resumed while another app has focus, so
+    /// keys are only taken while Portal's own window is focused.
+    window_unfocused: bool,
+    /// Android key codes whose press went to the guest. Their release is
+    /// still forwarded after focus moves, so no guest key is left held down.
+    held_keys: HashSet<jint>,
     service_connected: bool,
     pending_events: VecDeque<AccessibilityKeyEvent>,
 }
@@ -79,7 +86,16 @@ pub fn set_runtime_active(active: bool) {
     bridge.runtime_active = active;
     if !active {
         bridge.pending_events.clear();
+        bridge.held_keys.clear();
     }
+}
+
+/// Follow the Portal window's input focus (winit `WindowEvent::Focused`).
+pub fn set_window_focused(focused: bool) {
+    let mut bridge = bridge()
+        .lock()
+        .expect("Failed to lock accessibility bridge");
+    bridge.window_unfocused = !focused;
 }
 
 pub fn drain_pending_events() -> Vec<AccessibilityKeyEvent> {
@@ -139,6 +155,14 @@ fn enqueue_key_event(action: jint, key_code: jint, scan_code: jint, event_time_m
         .lock()
         .expect("Failed to lock accessibility bridge");
     if !bridge.runtime_active {
+        return false;
+    }
+    if state == ElementState::Pressed {
+        if bridge.window_unfocused {
+            return false;
+        }
+        bridge.held_keys.insert(key_code);
+    } else if !bridge.held_keys.remove(&key_code) && bridge.window_unfocused {
         return false;
     }
 

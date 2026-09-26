@@ -50,6 +50,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.google.androidgamesdk.GameActivity
+import kotlin.math.abs
 
 open class PortalActivity : GameActivity() {
     override fun onSetUpWindow() {
@@ -168,7 +169,11 @@ open class PortalActivity : GameActivity() {
 
     /**
      * Same physical size as the active mode, highest refresh within the
-     * user's peak-refresh setting (absent/unreadable = no cap).
+     * user's peak-refresh setting (absent/unreadable = no cap). On API 31+
+     * only rates the panel can switch to seamlessly qualify: the request
+     * follows every interaction burst, and a preferredDisplayModeId outranks
+     * the surface's ONLY_IF_SEAMLESS hint, so a non-seamless mode would blank
+     * the panel each time it toggles.
      */
     private fun highRefreshMode(): Display.Mode? {
         @Suppress("DEPRECATION")
@@ -183,11 +188,21 @@ open class PortalActivity : GameActivity() {
         } catch (e: Exception) {
             Float.POSITIVE_INFINITY
         }
+        val seamless = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            active.alternativeRefreshRates
+        } else {
+            null
+        }
         return display.supportedModes
             .filter {
                 it.physicalWidth == active.physicalWidth &&
                     it.physicalHeight == active.physicalHeight &&
-                    it.refreshRate <= peak + 0.5f
+                    it.refreshRate <= peak + 0.5f &&
+                    (
+                        seamless == null ||
+                            it.modeId == active.modeId ||
+                            seamless.any { rate -> abs(rate - it.refreshRate) < 0.5f }
+                        )
             }
             .maxByOrNull { it.refreshRate }
     }
