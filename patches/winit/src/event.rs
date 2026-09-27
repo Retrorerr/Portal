@@ -287,6 +287,11 @@ pub enum WindowEvent {
         secondary_button: bool,
     },
 
+    /// A two-finger pinch on an Android touchpad (`CLASSIFICATION_PINCH`), as
+    /// its scale relative to the start of the pinch.
+    #[cfg(target_os = "android")]
+    AndroidTouchpadPinch { device_id: DeviceId, phase: TouchPhase, scale: f64 },
+
     /// The cursor has entered the window.
     ///
     /// ## Platform-specific

@@ -521,6 +521,19 @@ fn forward_anland_input(
                 flags,
             ));
         }
+        WindowEvent::AndroidTouchpadPinch { phase, scale, .. } => {
+            use crate::android::anland::protocol as wire;
+            let phase = match phase {
+                TouchPhase::Started => wire::PINCH_BEGIN,
+                TouchPhase::Moved => wire::PINCH_UPDATE,
+                TouchPhase::Ended => wire::PINCH_END,
+                TouchPhase::Cancelled => wire::PINCH_CANCEL,
+            };
+            if phase != wire::PINCH_UPDATE {
+                log::info!("anland.input pinch phase={phase} scale={scale:.3}");
+            }
+            session.send_input(&AnlandInput::pointer_pinch(phase, *scale as f32));
+        }
         WindowEvent::MouseInput { state, button, .. } => {
             let code = match button {
                 MouseButton::Left => 0x110,

@@ -64,6 +64,14 @@ pub const INPUT_TYPE_TABLET_TOOL_AXES: u32 = 15;
 /// Portal Stylus: commits one pen sample (position, pressure, state flags from
 /// `core::stylus`).
 pub const INPUT_TYPE_TABLET_TOOL: u32 = 16;
+/// Touchpad pinch: phase (`PINCH_*`) and the scale since its start, which KWin
+/// gives clients as a pointer-gestures pinch.
+pub const INPUT_TYPE_POINTER_PINCH: u32 = 17;
+
+pub const PINCH_BEGIN: u32 = 0;
+pub const PINCH_UPDATE: u32 = 1;
+pub const PINCH_END: u32 = 2;
+pub const PINCH_CANCEL: u32 = 3;
 
 pub const INPUT_ACTION_DOWN: i32 = 0;
 pub const INPUT_ACTION_UP: i32 = 1;
@@ -271,6 +279,16 @@ impl InputEvent {
         put_u32(&mut payload, 12, flags);
         Self {
             ev_type: INPUT_TYPE_TABLET_TOOL,
+            payload,
+        }
+    }
+
+    pub fn pointer_pinch(phase: u32, scale: f32) -> Self {
+        let mut payload = [0u8; 16];
+        put_u32(&mut payload, 0, phase);
+        put_f32(&mut payload, 4, scale);
+        Self {
+            ev_type: INPUT_TYPE_POINTER_PINCH,
             payload,
         }
     }

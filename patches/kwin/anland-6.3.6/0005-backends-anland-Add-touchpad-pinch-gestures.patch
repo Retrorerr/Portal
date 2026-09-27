@@ -1,0 +1,123 @@
+From 37a330144a27b8ba946a7068a7dc52aaaa31a5eb Mon Sep 17 00:00:00 2001
+From: Portal <masobazee@gmail.com>
+Date: Sun, 27 Sep 2026 15:37:42 +0100
+Subject: [PATCH] backends/anland: Add touchpad pinch gestures
+
+INPUT_TYPE_POINTER_PINCH (17) carries a pinch phase and the scale since
+the pinch began, from Android's touchpad pinch. The Portal Touchpad emits
+it as a two-finger pinch gesture, which KWin gives clients through
+zwp_pointer_gestures_v1 (and Xwayland as XI 2.4 gestures).
+---
+ src/backends/anland/anland_backend.cpp |  3 +++
+ src/backends/anland/anland_input.cpp   | 31 ++++++++++++++++++++++++++
+ src/backends/anland/anland_input.h     |  3 +++
+ src/backends/anland/protocol.h         | 12 ++++++++++
+ 4 files changed, 49 insertions(+)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index 100f025..706ec40 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -385,6 +385,9 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
+             m_tabletDevice->toolState(pos, ev.tablet_tool.pressure, ev.tablet_tool.flags);
+         }
+         break;
++    case INPUT_TYPE_POINTER_PINCH:
++        m_inputDevice->pointerPinch(ev.pointer_pinch.phase, ev.pointer_pinch.scale);
++        break;
+     case INPUT_TYPE_TOUCH_FRAME:
+         m_inputDevice->touchFrame();
+         break;
+diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
+index b7e06bf..98464d3 100644
+--- a/src/backends/anland/anland_input.cpp
++++ b/src/backends/anland/anland_input.cpp
+@@ -338,6 +338,37 @@ void AnlandInputDevice::cancelFling()
+     m_flingVelocity = QPointF();
+ }
+ 
++void AnlandInputDevice::pointerPinch(quint32 phase, qreal scale)
++{
++    cancelFling();
++    const auto time = now();
++    switch (phase) {
++    case PINCH_BEGIN:
++        if (m_pinching) {
++            Q_EMIT pinchGestureCancelled(time, this);
++        }
++        m_pinching = true;
++        Q_EMIT pinchGestureBegin(2, time, this);
++        Q_EMIT pinchGestureUpdate(scale, 0, QPointF(), time, this);
++        break;
++    case PINCH_UPDATE:
++        if (m_pinching) {
++            Q_EMIT pinchGestureUpdate(scale, 0, QPointF(), time, this);
++        }
++        break;
++    case PINCH_END:
++        if (std::exchange(m_pinching, false)) {
++            Q_EMIT pinchGestureEnd(time, this);
++        }
++        break;
++    default:
++        if (std::exchange(m_pinching, false)) {
++            Q_EMIT pinchGestureCancelled(time, this);
++        }
++        break;
++    }
++}
++
+ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
+ {
+     cancelFling();
+diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
+index 2d4ff4c..72b6970 100644
+--- a/src/backends/anland/anland_input.h
++++ b/src/backends/anland/anland_input.h
+@@ -141,6 +141,8 @@ public:
+     // Terminates an active finger scroll stream (zero-delta Finger event so
+     // SeatInterface emits wl_pointer.axis_stop and kinetic scrolling settles).
+     void pointerAxisStop(PointerAxis axis);
++    // Touchpad pinch, given to clients as a two-finger pointer-gestures pinch.
++    void pointerPinch(quint32 phase, qreal scale);
+     void keyboardKey(quint32 keycode, bool pressed);
+     void touchDown(qint32 id, const QPointF &position);
+     void touchMotion(qint32 id, const QPointF &position);
+@@ -172,6 +174,7 @@ private:
+     qreal m_scrollGain = 1.0;
+     QPointF m_scrollCarry;
+     bool m_fingerScrolling = false;
++    bool m_pinching = false;
+     std::deque<ScrollSample> m_scrollSamples;
+     QTimer m_flingTimer;
+     QPointF m_flingVelocity;
+diff --git a/src/backends/anland/protocol.h b/src/backends/anland/protocol.h
+index e980595..29fc4e1 100644
+--- a/src/backends/anland/protocol.h
++++ b/src/backends/anland/protocol.h
+@@ -85,6 +85,14 @@ struct buf_info {
+ #define TABLET_TOOL_BUTTON1      (1u << 3) /* BTN_STYLUS */
+ #define TABLET_TOOL_BUTTON2      (1u << 4) /* BTN_STYLUS2 */
+ 
++/* Touchpad pinch: a PINCH_* phase and the scale since the pinch began. */
++#define INPUT_TYPE_POINTER_PINCH 17
++
++#define PINCH_BEGIN  0
++#define PINCH_UPDATE 1
++#define PINCH_END    2
++#define PINCH_CANCEL 3
++
+ /* Service identifiers used by OUTPUT_TYPE_RESOURCES_REQUEST / INPUT_TYPE_RESOURCE. */
+ #define SERVICE_TYPE_CAMERA 1
+ 
+@@ -132,6 +140,10 @@ struct InputEvent {
+             float    pressure; /* 0..1 */
+             uint32_t flags;    /* TABLET_TOOL_* */
+         } tablet_tool;
++        struct {
++            uint32_t phase; /* PINCH_* */
++            float    scale; /* relative to the start of the pinch */
++        } pointer_pinch;
+         struct {
+             uint32_t refresh_mhz; // current display refresh rate, milli-Hz
+         } display;

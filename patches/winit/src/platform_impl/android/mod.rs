@@ -146,11 +146,15 @@ fn action_pointer<'a>(motion_event: &'a input::MotionEvent<'a>) -> Option<input:
 /// on by default.
 const GESTURE_X_AXIS: u32 = 50;
 const GESTURE_Y_AXIS: u32 = 51;
+/// `AXIS_GESTURE_PINCH_SCALE_FACTOR`: a pinch's span relative to the previous
+/// sample.
+const GESTURE_PINCH_SCALE_AXIS: u32 = 52;
 
 /// The exact gesture-axis set Portal requires from GameActivity. Single
 /// source for both enablement and coverage: enabling anything else is a
 /// conscious decision, not drift.
-const TOUCHPAD_GESTURE_AXIS_IDS: [u32; 2] = [GESTURE_X_AXIS, GESTURE_Y_AXIS];
+const TOUCHPAD_GESTURE_AXIS_IDS: [u32; 3] =
+    [GESTURE_X_AXIS, GESTURE_Y_AXIS, GESTURE_PINCH_SCALE_AXIS];
 
 /// Pure fold for gesture samples: historical samples oldest-first, then the
 /// current sample. Separated from `Pointer::history()` for unit coverage.
@@ -269,10 +273,10 @@ mod pointer_selection_tests {
     }
 
     #[test]
-    fn game_activity_enables_exactly_gesture_axes_50_51() {
+    fn game_activity_enables_exactly_gesture_axes_50_to_52() {
         // The init path iterates this exact set: no more, no fewer. Axis
-        // 48/49/52 stay disabled until Portal needs them.
-        assert_eq!(TOUCHPAD_GESTURE_AXIS_IDS, [50, 51]);
+        // 48/49 stay disabled until Portal needs them.
+        assert_eq!(TOUCHPAD_GESTURE_AXIS_IDS, [50, 51, 52]);
     }
 
     #[test]
@@ -404,6 +408,8 @@ pub struct EventLoop<T: 'static> {
     combining_accent: Option<char>,
     pressed_mouse_buttons: std::collections::HashSet<MouseButton>,
     touchpad_scrolling: bool,
+    /// Scale of the touchpad pinch in progress, relative to its start.
+    touchpad_pinch: Option<f64>,
     last_touchpad_device_id: Option<event::DeviceId>,
     stylus_down: bool,
 }
@@ -471,6 +477,7 @@ impl<T: 'static> EventLoop<T> {
             combining_accent: None,
             pressed_mouse_buttons: std::collections::HashSet::new(),
             touchpad_scrolling: false,
+            touchpad_pinch: None,
             last_touchpad_device_id: None,
             stylus_down: false,
         })
@@ -486,7 +493,39 @@ impl<T: 'static> EventLoop<T> {
             return;
         };
         self.end_touchpad_scroll(callback, device_id, event::TouchPhase::Cancelled);
+        self.end_touchpad_pinch(callback, device_id, event::TouchPhase::Cancelled);
         self.release_mouse_buttons(callback, device_id);
+    }
+
+    fn send_touchpad_pinch<F>(
+        &mut self,
+        callback: &mut F,
+        device_id: event::DeviceId,
+        phase: event::TouchPhase,
+        scale: f64,
+    ) where
+        F: FnMut(Event<T>, &RootAEL),
+    {
+        callback(
+            Event::WindowEvent {
+                window_id: window::WindowId(WindowId),
+                event: WindowEvent::AndroidTouchpadPinch { device_id, phase, scale },
+            },
+            self.window_target(),
+        );
+    }
+
+    fn end_touchpad_pinch<F>(
+        &mut self,
+        callback: &mut F,
+        device_id: event::DeviceId,
+        phase: event::TouchPhase,
+    ) where
+        F: FnMut(Event<T>, &RootAEL),
+    {
+        if let Some(scale) = self.touchpad_pinch.take() {
+            self.send_touchpad_pinch(callback, device_id, phase, scale);
+        }
     }
 
     /// Ends a two-finger scroll in progress, so KWin sends axis-stop.
@@ -882,9 +921,33 @@ impl<T: 'static> EventLoop<T> {
                         }
                     }
 
+                    // Android reports a touchpad pinch as two fake fingers around
+                    // the cursor, with the change in their span on each sample.
+                    let pinching = is_touchpad && motion_event.pointer_count() == 2;
+                    if pinching && action == MotionAction::Move {
+                        let axis = input::Axis::from(GESTURE_PINCH_SCALE_AXIS);
+                        let mut scale = self.touchpad_pinch.unwrap_or(1.0);
+                        for factor in pointer
+                            .history()
+                            .map(|historical| historical.axis_value(axis))
+                            .chain(std::iter::once(pointer.axis_value(axis)))
+                        {
+                            if factor.is_finite() && factor > 0.0 {
+                                scale *= factor as f64;
+                            }
+                        }
+                        let phase = if self.touchpad_pinch.replace(scale).is_some() {
+                            event::TouchPhase::Moved
+                        } else {
+                            event::TouchPhase::Started
+                        };
+                        self.send_touchpad_pinch(callback, device_id, phase, scale);
+                    }
+
                     // 2. Mouse / Touchpad Pointer Movement
                     if (action == MotionAction::HoverMove || action == MotionAction::Move)
                         && !has_gesture_scroll
+                        && !pinching
                     {
                         if is_touchpad {
                             self.end_touchpad_scroll(callback, device_id, event::TouchPhase::Ended);
@@ -963,6 +1026,7 @@ impl<T: 'static> EventLoop<T> {
                                 } else {
                                     event::TouchPhase::Ended
                                 };
+                                self.end_touchpad_pinch(callback, device_id, phase);
                                 if !self.end_touchpad_scroll(callback, device_id, phase)
                                     && action == MotionAction::Cancel
                                 {
@@ -982,8 +1046,20 @@ impl<T: 'static> EventLoop<T> {
                                 // one that never arrived.
                                 self.release_mouse_buttons(callback, device_id);
                             },
-                            MotionAction::PointerDown | MotionAction::PointerUp => {
+                            MotionAction::PointerDown => {
                                 self.end_touchpad_scroll(
+                                    callback,
+                                    device_id,
+                                    event::TouchPhase::Ended,
+                                );
+                            },
+                            MotionAction::PointerUp => {
+                                self.end_touchpad_scroll(
+                                    callback,
+                                    device_id,
+                                    event::TouchPhase::Ended,
+                                );
+                                self.end_touchpad_pinch(
                                     callback,
                                     device_id,
                                     event::TouchPhase::Ended,
