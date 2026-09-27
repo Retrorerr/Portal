@@ -1,4 +1,4 @@
-From f37fd321c0e3e269f09ed09e4a007a8d85e4d0f1 Mon Sep 17 00:00:00 2001
+From 9e737a8dae6707d40615a97c176e7226b42fcea1 Mon Sep 17 00:00:00 2001
 From: Portal <masobazee@gmail.com>
 Date: Sun, 27 Sep 2026 12:29:50 +0100
 Subject: [PATCH] backends/anland: Fix touchpad cursor drift, scroll units and
@@ -12,13 +12,14 @@ Subject: [PATCH] backends/anland: Fix touchpad cursor drift, scroll units and
   raw buffer px, which scrolled output-scale times too far.
 - Keep scrolling X11 windows after the fingers lift, decaying from the
   fingers' speed. X11 has no axis-stop, so X11 clients cannot do kinetic
-  scrolling themselves.
+  scrolling themselves. Fingers landing on the pad (a scroll end without
+  a scroll) stop it.
 ---
  src/backends/anland/anland_backend.cpp |  27 +++--
  src/backends/anland/anland_backend.h   |   1 +
- src/backends/anland/anland_input.cpp   | 131 ++++++++++++++++++++++++-
- src/backends/anland/anland_input.h     |  19 ++++
- 4 files changed, 169 insertions(+), 9 deletions(-)
+ src/backends/anland/anland_input.cpp   | 142 ++++++++++++++++++++++++-
+ src/backends/anland/anland_input.h     |  20 ++++
+ 4 files changed, 181 insertions(+), 9 deletions(-)
 
 diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
 index 15366cd..100f025 100644
@@ -86,7 +87,7 @@ index 3a1f002..8df71bb 100644
      void enterFallback();
  
 diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
-index ac79888..993a291 100644
+index ac79888..a911678 100644
 --- a/src/backends/anland/anland_input.cpp
 +++ b/src/backends/anland/anland_input.cpp
 @@ -9,6 +9,7 @@
@@ -194,11 +195,21 @@ index ac79888..993a291 100644
      Q_EMIT InputDevice::pointerFrame(this);
  }
  
-@@ -173,10 +218,91 @@ void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
+@@ -173,10 +218,102 @@ void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
  {
      Q_EMIT pointerAxisChanged(axis, 0, 0, PointerAxisSource::Finger, false, now(), this);
      Q_EMIT InputDevice::pointerFrame(this);
-+    startFling(axis);
++    const bool scrolled = std::any_of(m_scrollSamples.cbegin(), m_scrollSamples.cend(), [axis](const ScrollSample &sample) {
++        return sample.axis == axis;
++    });
++    if (scrolled) {
++        startFling(axis);
++    } else if (now() - m_flingStart > FlingMaxIdle) {
++        // Fingers landing on the pad during momentum end a scroll that never
++        // moved, which stops it. The host ends a real scroll on both axes at
++        // once, so a younger fling was just started by the other axis.
++        cancelFling();
++    }
 +}
 +
 +// Wayland toolkits keep scrolling after the fingers lift (wl_pointer.axis_stop
@@ -244,6 +255,7 @@ index ac79888..993a291 100644
 +        m_flingVelocity.setX(speed);
 +    }
 +    if (!m_flingTimer.isActive()) {
++        m_flingStart = time;
 +        m_flingLastStep = time;
 +        m_flingMotion = 0;
 +        m_flingTimer.start();
@@ -286,7 +298,7 @@ index ac79888..993a291 100644
      Q_EMIT keyChanged(keycode,
                        pressed ? KeyboardKeyState::Pressed : KeyboardKeyState::Released,
                        now(), this);
-@@ -184,6 +310,7 @@ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
+@@ -184,6 +321,7 @@ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
  
  void AnlandInputDevice::touchDown(qint32 id, const QPointF &position)
  {
@@ -295,7 +307,7 @@ index ac79888..993a291 100644
  }
  
 diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
-index abbad73..fc5a26c 100644
+index abbad73..a46bbf9 100644
 --- a/src/backends/anland/anland_input.h
 +++ b/src/backends/anland/anland_input.h
 @@ -26,6 +26,9 @@
@@ -308,7 +320,7 @@ index abbad73..fc5a26c 100644
  namespace KWin
  {
  
-@@ -150,10 +153,26 @@ Q_SIGNALS:
+@@ -150,10 +153,27 @@ Q_SIGNALS:
      void scrollFactorChanged();
  
  private:
@@ -330,6 +342,7 @@ index abbad73..fc5a26c 100644
 +    std::deque<ScrollSample> m_scrollSamples;
 +    QTimer m_flingTimer;
 +    QPointF m_flingVelocity;
++    std::chrono::microseconds m_flingStart{0};
 +    std::chrono::microseconds m_flingLastStep{0};
 +    qreal m_flingMotion = 0;
  };
