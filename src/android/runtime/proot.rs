@@ -399,6 +399,20 @@ impl LinuxRuntime for PRootRuntime {
 
         #[cfg(target_os = "android")]
         process.process_group(0);
+        // Children inherit the spawning thread's nice value, and Android runs
+        // a foreground app's main thread at -10, above SystemUI's and the
+        // launcher's main threads (0). The whole guest, PRoot's syscall
+        // tracer included, then outranked them: a busy guest starved them of
+        // input handling until Android declared them not responding. Start
+        // the guest at the normal priority for app work instead. Guests
+        // cannot raise it again (RLIMIT_NICE is 0), only lower it.
+        #[cfg(target_os = "android")]
+        unsafe {
+            process.pre_exec(|| {
+                libc::setpriority(libc::PRIO_PROCESS, 0, 0);
+                Ok(())
+            });
+        }
 
         process.arg("/usr/bin/env").arg("-i");
         if user == "root" {
