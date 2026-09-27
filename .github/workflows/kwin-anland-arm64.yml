@@ -1,0 +1,79 @@
+# Portal's Anland libkwin, built from source on ARM64.
+#
+# Builds assets/kwin-anland-arm64/libkwin.so.6.3.6 with
+# patches/kwin/anland-6.3.6/build.sh inside a digest-pinned Debian 13 (trixie)
+# container on a native ARM64 runner, and uploads the library, the exact
+# patched source tree and their SHA-256 sums. The source tarball is the GPL
+# corresponding source for the library the APK ships.
+#
+# "baseline" builds the pinned lfdevs source without Portal's patches, to
+# compare against lfdevs' own libkwin6 4:6.3.6-95.
+#
+# permissions: contents:read. No secrets, releases or pushes.
+
+name: KWin Anland ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: Which tree to build
+        required: true
+        default: portal
+        type: choice
+        options:
+          - portal
+          - baseline
+  pull_request:
+    paths:
+      - patches/kwin/anland-6.3.6/**
+      - .github/workflows/kwin-anland-arm64.yml
+  push:
+    branches:
+      - main
+    paths:
+      - patches/kwin/anland-6.3.6/**
+      - .github/workflows/kwin-anland-arm64.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ github.event.inputs.variant || 'portal' }} libkwin (ARM64 trixie)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    container:
+      # Same digest-pinned trixie image as the XWayland audit workflow.
+      image: debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install git (trixie base has none)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+        with:
+          path: portal
+
+      - name: Build
+        run: portal/patches/kwin/anland-6.3.6/build.sh portal out "${{ github.event.inputs.variant || 'portal' }}"
+
+      - name: Compare with the library in the APK
+        if: ${{ (github.event.inputs.variant || 'portal') == 'portal' }}
+        run: |
+          echo "built:   $(sha256sum < out/libkwin.so.6.3.6)"
+          echo "shipped: $(sha256sum < portal/assets/kwin-anland-arm64/libkwin.so.6.3.6)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kwin-anland-6.3.6-${{ github.event.inputs.variant || 'portal' }}
+          path: out/
+          if-no-files-found: error
