@@ -11,7 +11,7 @@ directory inside Debian 13 (trixie) on a native ARM64 runner.
 | --- | --- |
 | Debian KWin 6.3.6 | `kwin_6.3.6.orig.tar.xz`, SHA-256 `27f2205f06d58f1d1f480d2a94ae24022c2f95b9c1fdc5a549f8e143713fce12` |
 | lfdevs Debian packaging with the Anland backend | [lfdevs/kwin](https://github.com/lfdevs/kwin) tag `anland-5.13-debian-4_6.3.6-95`, commit `beea4c3d22f08100b1b3acda1bd502e87bb1a347` |
-| Portal patches | `0001-*.patch`, `0002-*.patch` here, appended to the lfdevs quilt series |
+| Portal patches | `0001-*.patch` to `0004-*.patch` here, appended to the lfdevs quilt series |
 
 The lfdevs tag is the source of the `kwin` 4:6.3.6-95 packages installed in
 Portal's guest (lfdevs/anland-termux release 5.13.3, pinned in
@@ -27,6 +27,13 @@ Portal's guest (lfdevs/anland-termux release 5.13.3, pinned in
   wire-identical to `src/android/anland/protocol.rs`) with NaturalScroll and
   ScrollFactor from `kcminputrc` group `Libinput/0/0/Portal Touchpad`, exported
   over D-Bus so Plasma's touchpad settings can change them.
+* `0003` adds the Portal Stylus, a zwp_tablet_v2 tool with pressure, tilt,
+  hover distance and the eraser (`INPUT_TYPE_TABLET_TOOL_AXES` 15,
+  `INPUT_TYPE_TABLET_TOOL` 16).
+* `0004` fixes the touchpad: the cursor landed a motion step ahead of the
+  host's, finger scrolling was output-scale times too fast, and X11 windows
+  get momentum after the fingers lift (X11 has no axis-stop, so they cannot
+  scroll kinetically themselves).
 
 The library is linked without `-Bsymbolic`, as Debian builds it, which
 `assets/guest-arm64/anland-damage.c` relies on to interpose KWin's repaint

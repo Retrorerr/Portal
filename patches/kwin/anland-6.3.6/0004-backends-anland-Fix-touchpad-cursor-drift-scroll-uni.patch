@@ -1,0 +1,337 @@
+From f37fd321c0e3e269f09ed09e4a007a8d85e4d0f1 Mon Sep 17 00:00:00 2001
+From: Portal <masobazee@gmail.com>
+Date: Sun, 27 Sep 2026 12:29:50 +0100
+Subject: [PATCH] backends/anland: Fix touchpad cursor drift, scroll units and
+ X11 momentum
+
+- Emit the relative motion before the absolute one. KWin moves the
+  cursor by a relative motion's delta, so the old order left the cursor
+  one step ahead of the host's.
+- Map motion and finger-scroll deltas as vectors to logical space. Scroll
+  values are in the logical space of pointer motion, but were passed as
+  raw buffer px, which scrolled output-scale times too far.
+- Keep scrolling X11 windows after the fingers lift, decaying from the
+  fingers' speed. X11 has no axis-stop, so X11 clients cannot do kinetic
+  scrolling themselves.
+---
+ src/backends/anland/anland_backend.cpp |  27 +++--
+ src/backends/anland/anland_backend.h   |   1 +
+ src/backends/anland/anland_input.cpp   | 131 ++++++++++++++++++++++++-
+ src/backends/anland/anland_input.h     |  19 ++++
+ 4 files changed, 169 insertions(+), 9 deletions(-)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index 15366cd..100f025 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -297,6 +297,13 @@ QPointF AnlandBackend::mapInputToLogical(const QPointF &devicePoint) const
+     return logical / output->scale();
+ }
+ 
++QPointF AnlandBackend::mapInputDeltaToLogical(const QPointF &deviceDelta) const
++{
++    // A delta is a vector: rotate and scale it like a point, without the
++    // translation that the output transform adds to points.
++    return mapInputToLogical(deviceDelta) - mapInputToLogical(QPointF(0, 0));
++}
++
+ void AnlandBackend::processInputEvent(const InputEvent &ev)
+ {
+     if (!m_inputDevice) {
+@@ -306,11 +313,9 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
+     switch (ev.type) {
+     case INPUT_TYPE_POINTER_MOTION: {
+         // Both absolute position (x, y) and relative delta (dx, dy) come from the
+-        // consumer. Use the same mapInputToLogical for both so that dx/dy delivered
+-        // via wl_pointer.relative_motion match the cursor's position space, giving
+-        // Wayland clients correct velocity for momentum/kinetic scrolling.
++        // consumer, so wl_pointer.relative_motion matches the cursor's movement.
+         const QPointF pos = mapInputToLogical(QPointF(ev.pointer_motion.x, ev.pointer_motion.y));
+-        const QPointF delta = mapInputToLogical(QPointF(ev.pointer_motion.dx, ev.pointer_motion.dy));
++        const QPointF delta = mapInputDeltaToLogical(QPointF(ev.pointer_motion.dx, ev.pointer_motion.dy));
+         m_inputDevice->pointerMotion(pos, delta, delta);
+         break;
+     }
+@@ -328,9 +333,17 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
+         // Touchpad finger-source smooth scroll (raw buffer-px delta from the
+         // consumer). Emitted with PointerAxisSource::Finger so Wayland clients
+         // get kinetic scrolling; unlike POINTER_AXIS there is no discrete part.
+-        const PointerAxis axis =
+-            ev.pointer_axis.axis == 0 ? PointerAxis::Vertical : PointerAxis::Horizontal;
+-        m_inputDevice->pointerAxisFinger(axis, ev.pointer_axis.value);
++        // Scroll values share the logical space of pointer motion, so the
++        // delta is scaled (and rotated) like one: raw buffer px scrolled
++        // content output-scale times further than the fingers moved.
++        const qreal value = ev.pointer_axis.value;
++        const QPointF delta = mapInputDeltaToLogical(ev.pointer_axis.axis == 0 ? QPointF(0, value) : QPointF(value, 0));
++        if (delta.y() != 0) {
++            m_inputDevice->pointerAxisFinger(PointerAxis::Vertical, delta.y());
++        }
++        if (delta.x() != 0) {
++            m_inputDevice->pointerAxisFinger(PointerAxis::Horizontal, delta.x());
++        }
+         break;
+     }
+     case INPUT_TYPE_POINTER_AXIS_STOP: {
+diff --git a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
+index 3a1f002..8df71bb 100644
+--- a/src/backends/anland/anland_backend.h
++++ b/src/backends/anland/anland_backend.h
+@@ -97,6 +97,7 @@ private:
+     void onBufferReady();
+     void processInputEvent(const InputEvent &ev);
+     QPointF mapInputToLogical(const QPointF &devicePoint) const;
++    QPointF mapInputDeltaToLogical(const QPointF &deviceDelta) const;
+     void onReconnectTimer();
+     void enterFallback();
+ 
+diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
+index ac79888..993a291 100644
+--- a/src/backends/anland/anland_input.cpp
++++ b/src/backends/anland/anland_input.cpp
+@@ -9,6 +9,7 @@
+ #include "anland_logging.h"
+ 
+ #include "wayland/seat.h"
++#include "wayland/surface.h"
+ #include "wayland/tablet_v2.h"
+ #include "wayland_server.h"
+ 
+@@ -16,7 +17,9 @@
+ 
+ #include <QDBusConnection>
+ 
++#include <algorithm>
+ #include <chrono>
++#include <cmath>
+ 
+ namespace KWin
+ {
+@@ -27,6 +30,26 @@ static std::chrono::microseconds now()
+         std::chrono::steady_clock::now().time_since_epoch());
+ }
+ 
++// Momentum for X11 windows (see startFling). Speeds are logical px per second.
++using namespace std::chrono_literals;
++static constexpr std::chrono::microseconds FlingSampleWindow = 100ms;
++// Fingers resting before the lift mean no momentum, as on any touchpad.
++static constexpr std::chrono::microseconds FlingMaxIdle = 50ms;
++static constexpr std::chrono::milliseconds FlingInterval = 8ms;
++static constexpr qreal FlingTimeConstant = 0.325;
++static constexpr qreal FlingMinSpeed = 150;
++static constexpr qreal FlingStopSpeed = 20;
++static constexpr qreal FlingMaxSpeed = 8000;
++// Pointer travel (logical px) that counts as touching the pad again.
++static constexpr qreal FlingCancelMotion = 3;
++
++static bool pointerOverXwayland()
++{
++    SeatInterface *seat = waylandServer()->seat();
++    SurfaceInterface *surface = seat ? seat->focusedPointerSurface() : nullptr;
++    return surface && surface->client() == waylandServer()->xWaylandConnection();
++}
++
+ AnlandInputDevice::AnlandInputDevice(QObject *parent)
+     : InputDevice(parent)
+ {
+@@ -38,6 +61,10 @@ AnlandInputDevice::AnlandInputDevice(QObject *parent)
+     m_naturalScroll = m_config.readEntry("NaturalScroll", false);
+     m_scrollFactor = m_config.readEntry("ScrollFactor", 1.0);
+ 
++    m_flingTimer.setTimerType(Qt::PreciseTimer);
++    m_flingTimer.setInterval(FlingInterval);
++    connect(&m_flingTimer, &QTimer::timeout, this, &AnlandInputDevice::flingStep);
++
+     const bool registered = QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice/") + sysName(),
+                                                                          QStringLiteral("org.kde.KWin.InputDevice"),
+                                                                          this,
+@@ -133,13 +160,24 @@ void AnlandInputDevice::pointerMotionAbsolute(const QPointF &position)
+ 
+ void AnlandInputDevice::pointerMotion(const QPointF &pos, const QPointF &delta, const QPointF &deltaUnaccel)
+ {
+-    Q_EMIT InputDevice::pointerMotionAbsolute(pos, now(), this);
++    if (m_flingTimer.isActive()) {
++        m_flingMotion += std::hypot(delta.x(), delta.y());
++        if (m_flingMotion > FlingCancelMotion) {
++            cancelFling();
++        }
++    }
++    // KWin moves the cursor by a relative motion's delta. The relative motion
++    // goes first for wl_pointer.relative_motion, then the absolute one puts
++    // the cursor exactly where the host's is; the other way round left the
++    // cursor a step ahead of the host's.
+     Q_EMIT InputDevice::pointerMotion(delta, deltaUnaccel, now(), this);
++    Q_EMIT InputDevice::pointerMotionAbsolute(pos, now(), this);
+     Q_EMIT InputDevice::pointerFrame(this);
+ }
+ 
+ void AnlandInputDevice::pointerButton(quint32 button, bool pressed)
+ {
++    cancelFling();
+     Q_EMIT pointerButtonChanged(button,
+                                 pressed ? PointerButtonState::Pressed : PointerButtonState::Released,
+                                 now(), this);
+@@ -148,6 +186,7 @@ void AnlandInputDevice::pointerButton(quint32 button, bool pressed)
+ 
+ void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120)
+ {
++    cancelFling();
+     const PointerAxisSource source =
+         deltaV120 != 0 ? PointerAxisSource::Wheel : PointerAxisSource::Continuous;
+     // 6.x pointerAxisChanged carries an explicit "inverted" (natural scroll) flag;
+@@ -165,7 +204,13 @@ void AnlandInputDevice::pointerAxisFinger(PointerAxis axis, qreal delta)
+     if (m_naturalScroll) {
+         delta = -delta;
+     }
+-    Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Finger, m_naturalScroll, now(), this);
++    cancelFling();
++    const auto time = now();
++    while (!m_scrollSamples.empty() && time - m_scrollSamples.front().time > FlingSampleWindow * 2) {
++        m_scrollSamples.pop_front();
++    }
++    m_scrollSamples.push_back({time, axis, delta});
++    Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Finger, m_naturalScroll, time, this);
+     Q_EMIT InputDevice::pointerFrame(this);
+ }
+ 
+@@ -173,10 +218,91 @@ void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
+ {
+     Q_EMIT pointerAxisChanged(axis, 0, 0, PointerAxisSource::Finger, false, now(), this);
+     Q_EMIT InputDevice::pointerFrame(this);
++    startFling(axis);
++}
++
++// Wayland toolkits keep scrolling after the fingers lift (wl_pointer.axis_stop
++// tells them when), but X11 has no such event, so X11 windows (Firefox among
++// them) stop dead. For those, keep scrolling here at the fingers' speed and
++// let it decay, until anything touches the pad again.
++void AnlandInputDevice::startFling(PointerAxis axis)
++{
++    const auto time = now();
++    qreal speed = 0;
++    const auto latest = std::find_if(m_scrollSamples.rbegin(), m_scrollSamples.rend(), [axis](const ScrollSample &sample) {
++        return sample.axis == axis;
++    });
++    if (latest != m_scrollSamples.rend() && time - latest->time <= FlingMaxIdle) {
++        // Android batches samples per frame, so the oldest instant in the
++        // window only marks the start: the distance is everything after it.
++        std::chrono::microseconds oldest = latest->time;
++        for (const ScrollSample &sample : m_scrollSamples) {
++            if (sample.axis == axis && latest->time - sample.time <= FlingSampleWindow) {
++                oldest = std::min(oldest, sample.time);
++            }
++        }
++        qreal distance = 0;
++        for (const ScrollSample &sample : m_scrollSamples) {
++            if (sample.axis == axis && sample.time > oldest) {
++                distance += sample.delta;
++            }
++        }
++        const qreal span = std::chrono::duration<qreal>(latest->time - oldest).count();
++        if (span > 0) {
++            speed = std::clamp(distance / span, -FlingMaxSpeed, FlingMaxSpeed);
++        }
++    }
++    std::erase_if(m_scrollSamples, [axis](const ScrollSample &sample) {
++        return sample.axis == axis;
++    });
++    if (std::abs(speed) < FlingMinSpeed || !pointerOverXwayland()) {
++        return;
++    }
++    if (axis == PointerAxis::Vertical) {
++        m_flingVelocity.setY(speed);
++    } else {
++        m_flingVelocity.setX(speed);
++    }
++    if (!m_flingTimer.isActive()) {
++        m_flingLastStep = time;
++        m_flingMotion = 0;
++        m_flingTimer.start();
++    }
++}
++
++void AnlandInputDevice::flingStep()
++{
++    if (!pointerOverXwayland()) {
++        cancelFling();
++        return;
++    }
++    const auto time = now();
++    const qreal elapsed = std::chrono::duration<qreal>(time - m_flingLastStep).count();
++    m_flingLastStep = time;
++    const qreal decay = std::exp(-elapsed / FlingTimeConstant);
++    const QPointF distance = m_flingVelocity * FlingTimeConstant * (1 - decay);
++    m_flingVelocity *= decay;
++    if (distance.y() != 0) {
++        Q_EMIT pointerAxisChanged(PointerAxis::Vertical, distance.y(), 0, PointerAxisSource::Continuous, m_naturalScroll, time, this);
++    }
++    if (distance.x() != 0) {
++        Q_EMIT pointerAxisChanged(PointerAxis::Horizontal, distance.x(), 0, PointerAxisSource::Continuous, m_naturalScroll, time, this);
++    }
++    Q_EMIT InputDevice::pointerFrame(this);
++    if (std::hypot(m_flingVelocity.x(), m_flingVelocity.y()) < FlingStopSpeed) {
++        cancelFling();
++    }
++}
++
++void AnlandInputDevice::cancelFling()
++{
++    m_flingTimer.stop();
++    m_flingVelocity = QPointF();
+ }
+ 
+ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
+ {
++    cancelFling();
+     Q_EMIT keyChanged(keycode,
+                       pressed ? KeyboardKeyState::Pressed : KeyboardKeyState::Released,
+                       now(), this);
+@@ -184,6 +310,7 @@ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
+ 
+ void AnlandInputDevice::touchDown(qint32 id, const QPointF &position)
+ {
++    cancelFling();
+     Q_EMIT InputDevice::touchDown(id, position, now(), this);
+ }
+ 
+diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
+index abbad73..fc5a26c 100644
+--- a/src/backends/anland/anland_input.h
++++ b/src/backends/anland/anland_input.h
+@@ -26,6 +26,9 @@
+ 
+ #include <QTimer>
+ 
++#include <chrono>
++#include <deque>
++
+ namespace KWin
+ {
+ 
+@@ -150,10 +153,26 @@ Q_SIGNALS:
+     void scrollFactorChanged();
+ 
+ private:
++    void startFling(PointerAxis axis);
++    void flingStep();
++    void cancelFling();
++
++    struct ScrollSample
++    {
++        std::chrono::microseconds time;
++        PointerAxis axis;
++        qreal delta;
++    };
++
+     bool m_enabled = true;
+     KConfigGroup m_config;
+     bool m_naturalScroll = false;
+     qreal m_scrollFactor = 1.0;
++    std::deque<ScrollSample> m_scrollSamples;
++    QTimer m_flingTimer;
++    QPointF m_flingVelocity;
++    std::chrono::microseconds m_flingLastStep{0};
++    qreal m_flingMotion = 0;
+ };
+ 
+ class AnlandTabletTool : public InputDeviceTabletTool
