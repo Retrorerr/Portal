@@ -17,6 +17,7 @@ import android.util.Log;
 import android.view.InputDevice;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import java.util.regex.Pattern;
 
 /**
  * A tiny editor used solely to give Android's IME an InputConnection while the native Wayland
@@ -110,12 +111,24 @@ public final class SoftKeyboardBridge {
                 && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC;
             boolean isPointer = (sources & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE
                 || (sources & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD;
-            if (isAlphaKeyb || isPointer) {
+            if (isAlphaKeyb || (isPointer && !isStylusCompanion(device))) {
                 return true;
             }
         }
         return false;
     }
+
+    /**
+     * Bluetooth styluses such as the OnePlus Stylo 2 register an external "mouse" for their
+     * buttons while paired. It is not desktop input, so it must not end tablet mode.
+     */
+    private static boolean isStylusCompanion(InputDevice device) {
+        String name = device.getName();
+        return name != null && STYLUS_NAME.matcher(name).find();
+    }
+
+    private static final Pattern STYLUS_NAME =
+        Pattern.compile("\\b(stylus|stylo|pen)\\b", Pattern.CASE_INSENSITIVE);
 
     /** Show the IME on the Android UI thread without a timing-dependent sleep. */
     public static void show(final Activity activity) {
