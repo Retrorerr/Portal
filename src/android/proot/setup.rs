@@ -1190,11 +1190,13 @@ defaultPref("media.rdd-process.enabled", false);
 // no DRM render node in PRoot, so Firefox's gfxInfo concludes SOFTWARE_GL
 // and blocklists hardware compositing — even though real Adreno contexts
 // work (proven: WebGL freedreno, glxtest EGL freedreno). These prefs force
-// the GPU path back on for the X11/XWayland backend (KGSL glamor), where
-// basic compositing needs no GBM allocation. Native Wayland stays SWGL
-// until a render node exists (dmabuf-GBM is unavoidable there).
+// the GPU path back on; on native Wayland it composites through EGL window
+// surfaces and needs no GBM allocation.
 defaultPref("gfx.webrender.all", true);
 defaultPref("layers.acceleration.force-enabled", true);
+// Render at KWin's fractional scale (2.5 on the Pad 3) rather than the next
+// integer (3) that KWin then scales down: fewer pixels, and sharp.
+defaultPref("widget.wayland.fractional-scale.enabled", true);
 // Server-side (KWin) title bar by default. With tabs drawn in the title bar
 // the X11 window grows before Firefox repaints, leaving black strips along
 // the new edges for the whole interactive resize; with KWin decorating the
@@ -1208,8 +1210,14 @@ defaultPref("browser.tabs.inTitlebar", 0);
         if dir.exists() || dir.parent().map_or(false, |p| p.exists()) {
             let pref_dir = dir.join("defaults/pref");
             let _ = fs::create_dir_all(&pref_dir);
-            let _ = fs::write(pref_dir.join("autoconfig.js"), autoconfig_js);
-            let _ = fs::write(dir.join("localdesktop.cfg"), firefox_cfg);
+            for (path, contents) in [
+                (pref_dir.join("autoconfig.js"), autoconfig_js),
+                (dir.join("localdesktop.cfg"), firefox_cfg),
+            ] {
+                if fs::read_to_string(&path).ok().as_deref() != Some(contents) {
+                    let _ = fs::write(path, contents);
+                }
+            }
         }
     }
 }
@@ -1481,6 +1489,7 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     sync_guest_host_path_alias(fs_root);
     sync_chromium_entries(fs_root);
     sync_default_applications(fs_root);
+    sync_firefox_config(fs_root);
     sync_thunderbird_defaults(fs_root);
 }
 
@@ -1628,14 +1637,16 @@ application/vnd.openxmlformats-officedocument.presentationml.presentation=libreo
     }
 }
 
-/// Thunderbird default preferences. Like Firefox (see `sync_firefox_config`),
-/// Thunderbird runs through XWayland and, with tabs drawn in its own title
-/// bar, left black strips along the growing edges during interactive
-/// resizes; with KWin decorating the window, resizes stay in sync. Users can
-/// still switch the title bar off again in Thunderbird's settings.
+/// Thunderbird default preferences. With tabs drawn in its own title bar,
+/// Thunderbird under XWayland left black strips along the growing edges
+/// during interactive resizes; with KWin decorating the window, resizes stay
+/// in sync. Users can still switch the title bar off again in Thunderbird's
+/// settings. Like Firefox (see `sync_firefox_config`), it renders at KWin's
+/// fractional scale on Wayland.
 fn sync_thunderbird_defaults(fs_root: &Path) {
     const PREFS: &str = "// Managed by Portal: Thunderbird defaults (user settings still win).\n\
-pref(\"mail.tabs.drawInTitlebar\", false);\n";
+pref(\"mail.tabs.drawInTitlebar\", false);\n\
+pref(\"widget.wayland.fractional-scale.enabled\", true);\n";
     let dir = fs_root.join("usr/lib/thunderbird/defaults/pref");
     if !dir.is_dir() {
         return;

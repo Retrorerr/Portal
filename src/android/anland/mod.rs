@@ -146,8 +146,8 @@ pub fn guest_socket_path() -> &'static str {
 /// - `XWAYLAND_FORCE_KGSL_SURFACELESS=1`: the `-91` XWayland's KGSL glamor
 ///   backend instead of GBM (which cannot work without a render node).
 ///   Proven: `Xwayland glamor: using KGSL surfaceless EGL backend`.
-/// - `MOZ_ENABLE_WAYLAND=1`: explicit native backend for Firefox
-///   (per-launch overrides can still force X11 for A/B tests).
+/// - `MOZ_ENABLE_WAYLAND=1`: native Wayland backend for Firefox and
+///   Thunderbird (per-launch overrides can still force X11 for A/B tests).
 pub fn guest_mesa_env() -> Vec<(String, String)> {
     vec![
         ("MESA_LOADER_DRIVER_OVERRIDE".into(), "kgsl".into()),
@@ -157,13 +157,20 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         ("FD_KGSL_ENABLE_DMABUF".into(), "1".into()),
         ("TURNIP_KMD".into(), "kgsl".into()),
         ("XWAYLAND_FORCE_KGSL_SURFACELESS".into(), "1".into()),
-        // Firefox backend selection: X11. Proven by A/B (about:support via
-        // Marionette): native Wayland = WebRender (Software) — its dmabuf
-        // compositor needs GBM/a render node (absent in PRoot, no override
-        // possible). X11 + KGSL glamor + forced WR prefs (see setup.rs
-        // sync_firefox_config) = real GPU `Compositing: WebRender` on
-        // Adreno 830 with correct rendering (screenshot-verified).
-        ("MOZ_ENABLE_WAYLAND".into(), "0".into()),
+        // Firefox backend selection: native Wayland. With the forced
+        // WebRender prefs (see setup.rs sync_firefox_config), Firefox 140 on
+        // Wayland composites on the GPU (about:support `Compositing:
+        // WebRender`, WebGL on freedreno); only its DMABUF feature fails
+        // (no DRM device), which gates VA-API but not compositing. Against
+        // X11 it paces to KWin's frame callbacks instead of a free-running
+        // timer and skips the Xwayland hop: an animated page cost ~6 s of
+        // CPU per 10 s instead of ~11 s (Pad 3, 2026-09-27).
+        ("MOZ_ENABLE_WAYLAND".into(), "1".into()),
+        // SDL2 prefers X11 even under Wayland. Through Xwayland a
+        // SuperTuxKart race cost ~17% of a core in Xwayland alone; natively
+        // it runs at the same full-panel resolution and frame rate without
+        // it. X11 stays as the fallback for SDL builds without Wayland.
+        ("SDL_VIDEODRIVER".into(), "wayland,x11".into()),
         // XInput2 for X11 clients: KWin forwards native touch through the
         // xwayland-touch XI2 device (direct touch, 20 slots, server-verified
         // via xinput). Without this Firefox X11 only sees KWin's pointer
@@ -218,10 +225,8 @@ pub fn validate_launch_contract() -> anyhow::Result<()> {
         ("FD_KGSL_ENABLE_DMABUF", "1"),
         ("TURNIP_KMD", "kgsl"),
         ("XWAYLAND_FORCE_KGSL_SURFACELESS", "1"),
-        // Firefox intentionally uses X11/XWayland on the accelerated path;
-        // native Firefox Wayland requires a GBM render node that PRoot does
-        // not expose on the supported Android devices.
-        ("MOZ_ENABLE_WAYLAND", "0"),
+        // Firefox runs natively on Wayland; see guest_mesa_env.
+        ("MOZ_ENABLE_WAYLAND", "1"),
         ("ANLAND", "1"),
         ("ANLAND_SOCKET", guest_socket_path()),
     ] {
