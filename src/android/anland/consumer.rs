@@ -89,8 +89,22 @@ const HIGH_RATE_QUEUE_MHZ: u32 = 140_000;
 /// deadline is comfortable, so the extra slot would only add a frame of
 /// latency (measured 14.5 ms -> 22 ms queue->present) and ~32 MB.
 fn window_buffer_count(min_undequeued: i32, refresh_mhz: u32) -> usize {
-    let slack = if refresh_mhz >= HIGH_RATE_QUEUE_MHZ { 3 } else { 2 };
+    let slack = tuning_value("slack")
+        .map(|v| v as i32)
+        .unwrap_or(if refresh_mhz >= HIGH_RATE_QUEUE_MHZ { 3 } else { 2 });
     (min_undequeued + slack).clamp(3, MAX_BUFS as i32) as usize
+}
+
+/// Optional presentation overrides for on-device tuning, read from
+/// `<files>/anland-tuning` (`key=value` lines) when a surface is configured.
+/// Absent file or key: the built-in policy applies.
+fn tuning_value(key: &str) -> Option<i64> {
+    let path = std::path::Path::new(crate::core::config::APP_FILES_ROOT).join("anland-tuning");
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines().find_map(|line| {
+        let (k, v) = line.split_once('=')?;
+        (k.trim() == key).then(|| v.trim().parse().ok()).flatten()
+    })
 }
 
 /// One collected window slot handed to the producer.
@@ -337,6 +351,10 @@ fn configure_window(
         let r = unsafe { anw.set_buffer_count(window, total) };
         if r != 0 {
             return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
+        }
+        if let Some(interval) = tuning_value("swap_interval") {
+            let r = unsafe { anw.set_swap_interval(window, interval as i32) };
+            log::info!("anland.tuning swap_interval={interval} result={r:?}");
         }
         Ok((w, h, total))
     })();
@@ -1576,14 +1594,14 @@ fn render_loop(inner: Arc<Inner>) {
     let mut pending: Option<u64> = None; // generation a select was issued on
     let mut idle_logged = false;
     // Thread-local dups of the pacing fds (same immunity rationale).
-    let (tick, wake) = {
+    let (tick, wake, vsync_gate) = {
         let vsync = inner.vsync.lock().unwrap();
         let Some(pump) = vsync.as_ref() else {
             log::error!("anland.render no vsync pump; stopping (no silent free-spin)");
             return;
         };
         match (dup_owned(pump.tick_fd()), dup_owned(&inner.wake)) {
-            (Ok(t), Ok(w)) => (t, w),
+            (Ok(t), Ok(w)) => (t, w, pump.gate()),
             _ => {
                 log::error!("anland.render pacing dup failed; stopping");
                 return;
@@ -1691,6 +1709,11 @@ fn render_loop(inner: Arc<Inner>) {
         }
         let now = sys::now_ns();
         let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
+        // Display ticks only while presenting at full rate: an idle desktop
+        // otherwise woke this thread and the pump on every vsync (144/s)
+        // just to skip. The heartbeat below runs off the poll timeout, and a
+        // kick selects at once and re-arms the ticks for the next frame.
+        vsync_gate.set_armed(demanding);
         follow_refresh_target(&inner);
         // Window-level display-mode request follows interactive demand (plus
         // a short hold so bursty input does not flap Android's mode choice).

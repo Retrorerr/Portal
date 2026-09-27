@@ -8,7 +8,7 @@ use std::io;
 use std::mem;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, OnceLock,
 };
 
@@ -336,6 +336,7 @@ struct ChoreoApi {
     looper_prepare: unsafe extern "C" fn(i32) -> *mut libc::c_void,
     looper_poll_once: unsafe extern "C" fn(i32, *mut i32, *mut i32, *mut *mut libc::c_void) -> i32,
     looper_release: unsafe extern "C" fn(*mut libc::c_void),
+    looper_wake: unsafe extern "C" fn(*mut libc::c_void),
     get_instance: unsafe extern "C" fn() -> *mut libc::c_void,
     post_frame_callback64:
         unsafe extern "C" fn(*mut libc::c_void, FrameCallback64, *mut libc::c_void),
@@ -388,6 +389,10 @@ fn load_choreo() -> Option<ChoreoApi> {
                 b"ALooper_release\0",
                 unsafe extern "C" fn(*mut libc::c_void)
             ),
+            looper_wake: load!(
+                b"ALooper_wake\0",
+                unsafe extern "C" fn(*mut libc::c_void)
+            ),
             get_instance: load!(
                 b"AChoreographer_getInstance\0",
                 unsafe extern "C" fn() -> *mut libc::c_void
@@ -432,7 +437,12 @@ unsafe extern "C" fn frame_trampoline(_when_ns: i64, data: *mut libc::c_void) {
     }
 }
 
-fn pump_thread_choreo(api: ChoreoApi, tick_fd: libc::c_int, running: Arc<AtomicBool>) {
+fn pump_thread_choreo(
+    api: ChoreoApi,
+    tick_fd: libc::c_int,
+    running: Arc<AtomicBool>,
+    gate: VsyncGate,
+) {
     unsafe {
         let looper = (api.looper_prepare)(1); // ALOOPER_PREPARE_ALLOW_NON_CALLBACKS
         if looper.is_null() {
@@ -440,8 +450,10 @@ fn pump_thread_choreo(api: ChoreoApi, tick_fd: libc::c_int, running: Arc<AtomicB
             pump_thread_timer(tick_fd, running, 16_666_666);
             return;
         }
+        gate.looper.store(looper as usize, Ordering::Release);
         let choreo = (api.get_instance)();
         if choreo.is_null() {
+            gate.looper.store(0, Ordering::Release);
             log::warn!("anland.vsync choreographer instance null; timer fallback");
             (api.looper_release)(looper);
             pump_thread_timer(tick_fd, running, 16_666_666);
@@ -453,9 +465,14 @@ fn pump_thread_choreo(api: ChoreoApi, tick_fd: libc::c_int, running: Arc<AtomicB
         let mut last_count: u64 = 0;
         let mut last_log_ns = now_ns();
         while running.load(Ordering::Acquire) {
-            (api.post_frame_callback64)(choreo, frame_trampoline, holder_ptr);
-            // Returns on callback dispatch, or after 250ms so stop() stays
-            // bounded without cross-thread looper wakeups.
+            // Disarmed (nothing to present): no callback, so the display's
+            // vsync stops waking this thread and the render loop. Arming
+            // wakes the looper, and the next vsync ticks again.
+            if gate.armed.load(Ordering::Acquire) {
+                (api.post_frame_callback64)(choreo, frame_trampoline, holder_ptr);
+            }
+            // Returns on callback dispatch or wake, or after 250ms so stop()
+            // stays bounded.
             let r = (api.looper_poll_once)(
                 250,
                 std::ptr::null_mut(),
@@ -476,6 +493,7 @@ fn pump_thread_choreo(api: ChoreoApi, tick_fd: libc::c_int, running: Arc<AtomicB
         }
         // A callback posted but never dispatched (stop raced it) simply never
         // fires: the looper is no longer pumped after this thread exits.
+        gate.looper.store(0, Ordering::Release);
         let _ = Box::from_raw(holder_ptr as *mut TickHolder);
         (api.looper_release)(looper);
     }
@@ -517,8 +535,41 @@ fn pump_thread_timer(tick_fd: libc::c_int, running: Arc<AtomicBool>, period_ns: 
 /// symbols are unavailable it degrades to a nanosleep timer at the panel
 /// rate. The render loop polls the tick fd alongside its kick fd, so both
 /// modes share the pacing logic.
+/// Arms and disarms a [`VsyncPump`]'s display ticks from another thread.
+#[derive(Clone)]
+pub struct VsyncGate {
+    armed: Arc<AtomicBool>,
+    /// The Choreographer pump's `ALooper` (0 before it exists, and always
+    /// with the timer pump, which ignores the gate).
+    looper: Arc<AtomicUsize>,
+}
+
+impl VsyncGate {
+    fn new() -> Self {
+        Self {
+            armed: Arc::new(AtomicBool::new(true)),
+            looper: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Request display ticks (`true`), or let the pump sleep until re-armed.
+    pub fn set_armed(&self, armed: bool) {
+        if self.armed.swap(armed, Ordering::AcqRel) == armed || !armed {
+            return;
+        }
+        let looper = self.looper.load(Ordering::Acquire);
+        if looper != 0 {
+            if let Some(api) = choreo_api() {
+                // Thread-safe; the looper lives until the pump clears it.
+                unsafe { (api.looper_wake)(looper as *mut libc::c_void) };
+            }
+        }
+    }
+}
+
 pub struct VsyncPump {
     tick: OwnedFd,
+    gate: VsyncGate,
     running: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
     mode: &'static str,
@@ -535,14 +586,16 @@ impl VsyncPump {
             16_666_666
         };
         let running = Arc::new(AtomicBool::new(true));
+        let gate = VsyncGate::new();
         let tick_fd = tick.as_raw_fd();
         let (mode, handle) = match choreo_api() {
             Some(api) => {
                 let api = *api;
                 let running = running.clone();
+                let gate = gate.clone();
                 let h = std::thread::Builder::new()
                     .name("anland-vsync".into())
-                    .spawn(move || pump_thread_choreo(api, tick_fd, running))
+                    .spawn(move || pump_thread_choreo(api, tick_fd, running, gate))
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 ("choreographer", h)
             }
@@ -558,6 +611,7 @@ impl VsyncPump {
         log::info!("anland.vsync mode={mode} period_ns={period_ns}");
         Ok(Self {
             tick,
+            gate,
             running,
             handle: Some(handle),
             mode,
@@ -567,6 +621,10 @@ impl VsyncPump {
 
     pub fn tick_fd(&self) -> &OwnedFd {
         &self.tick
+    }
+
+    pub fn gate(&self) -> VsyncGate {
+        self.gate.clone()
     }
 
     pub fn mode(&self) -> &'static str {

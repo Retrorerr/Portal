@@ -153,6 +153,9 @@ pub struct AnwApi {
         'static,
         unsafe extern "C" fn(*mut c_void, *mut ANativeWindowBuffer, c_int) -> c_int,
     >,
+    /// Platform `ANativeWindow_setSwapInterval` (API 30+); optional.
+    set_swap_interval:
+        Option<libloading::Symbol<'static, unsafe extern "C" fn(*mut c_void, c_int) -> c_int>>,
 }
 
 unsafe impl Send for AnwApi {}
@@ -186,6 +189,7 @@ impl AnwApi {
             dequeue_buffer: sym!(b"ANativeWindow_dequeueBuffer"),
             queue_buffer: sym!(b"ANativeWindow_queueBuffer"),
             cancel_buffer: sym!(b"ANativeWindow_cancelBuffer"),
+            set_swap_interval: leaked.get(b"ANativeWindow_setSwapInterval").ok(),
         })
     }
 
@@ -258,6 +262,14 @@ impl AnwApi {
             Some(perform) => perform(w, ANW_API_DISCONNECT, api),
             None => -1,
         }
+    }
+
+    /// Swap interval 0 puts the BufferQueue in async mode: a queued buffer
+    /// that SurfaceFlinger has not latched yet is replaced by the next one
+    /// instead of waiting behind it. Returns `None` when the platform does
+    /// not export the entry point.
+    pub unsafe fn set_swap_interval(&self, window: *mut c_void, interval: c_int) -> Option<c_int> {
+        self.set_swap_interval.as_ref().map(|f| f(window, interval))
     }
 
     pub unsafe fn set_buffer_count(&self, window: *mut c_void, count: usize) -> c_int {
