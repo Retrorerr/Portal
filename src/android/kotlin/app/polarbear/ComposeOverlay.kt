@@ -65,6 +65,8 @@ object ComposeOverlay {
     @JvmStatic external fun nativeRepairEnableAnland(): Boolean
     /** Return to the existing committed-runtime recovery page after a repair failure. */
     @JvmStatic external fun nativeRequestAnlandRepairRecovery(): Boolean
+    /** Install the Debian updates offered on the Return screen. */
+    @JvmStatic external fun nativeBeginSystemUpdate(): Boolean
 
     // Native readiness is independent of installation progress. A KWin frame
     // can latch this before the Compose hierarchy has finished presenting.
@@ -99,6 +101,31 @@ object ComposeOverlay {
         val complete: Boolean get() = status == ANLAND_REPAIR_COMPLETE
     }
 
+    const val SYSTEM_UPDATE_NONE = 0
+    const val SYSTEM_UPDATE_AVAILABLE = 1
+    const val SYSTEM_UPDATE_RUNNING = 2
+    const val SYSTEM_UPDATE_FAILED = 3
+    const val SYSTEM_UPDATE_COMPLETE = 4
+
+    data class PendingPackage(val name: String, val security: Boolean)
+
+    data class SystemUpdateUiState(
+        val status: Int,
+        val progress: Int,
+        val message: String,
+        val total: Int,
+        val security: Int,
+        /** A previous update stopped before it finished. */
+        val interrupted: Boolean,
+        /** Security fixes first; the Return screen previews the head of it. */
+        val packages: List<PendingPackage>,
+    ) {
+        val available: Boolean get() = status == SYSTEM_UPDATE_AVAILABLE
+        val running: Boolean get() = status == SYSTEM_UPDATE_RUNNING
+        val failed: Boolean get() = status == SYSTEM_UPDATE_FAILED
+        val complete: Boolean get() = status == SYSTEM_UPDATE_COMPLETE
+    }
+
     private val defaultInstallState = InstallUiState(
         phase = "Idle",
         progress = 0,
@@ -119,6 +146,17 @@ object ComposeOverlay {
     )
     @Volatile private var anlandRepairStateSnapshot = defaultAnlandRepairState
     private val anlandRepairStateValue = mutableStateOf(defaultAnlandRepairState)
+    private val defaultSystemUpdateState = SystemUpdateUiState(
+        status = SYSTEM_UPDATE_NONE,
+        progress = 0,
+        message = "",
+        total = 0,
+        security = 0,
+        interrupted = false,
+        packages = emptyList(),
+    )
+    @Volatile private var systemUpdateStateSnapshot = defaultSystemUpdateState
+    private val systemUpdateStateValue = mutableStateOf(defaultSystemUpdateState)
     // First app-owned frame handshake for the system splash: set on the
     // Compose content pre-draw (CONFIGURE and launch destination measured), or when
     // showing fails so the fallback screen can draw instead. PortalActivity
@@ -242,6 +280,50 @@ object ComposeOverlay {
         )
         anlandRepairStateSnapshot = next
         composeView?.post { anlandRepairStateValue.value = anlandRepairStateSnapshot }
+    }
+
+    /** Subscribe to the Debian update state shown on the Return screen. */
+    @Composable
+    fun systemUpdateState(): State<SystemUpdateUiState> = systemUpdateStateValue
+
+    /** Native update bridge; `packages` holds one `name	security` line per update. */
+    @JvmStatic fun updateSystemUpdateState(
+        status: Int,
+        progress: Int,
+        message: String,
+        total: Int,
+        security: Int,
+        interrupted: Boolean,
+        packages: String,
+    ) {
+        val next = SystemUpdateUiState(
+            status = status.coerceIn(SYSTEM_UPDATE_NONE, SYSTEM_UPDATE_COMPLETE),
+            progress = progress.coerceIn(0, 100),
+            message = message,
+            total = total.coerceAtLeast(0),
+            security = security.coerceAtLeast(0),
+            interrupted = interrupted,
+            packages = packages.lineSequence()
+                .filter { it.isNotBlank() }
+                .map { line ->
+                    val name = line.substringBefore('	')
+                    PendingPackage(name, line.substringAfter('	', "0") == "1")
+                }
+                .toList(),
+        )
+        systemUpdateStateSnapshot = next
+        composeView?.post { systemUpdateStateValue.value = systemUpdateStateSnapshot }
+    }
+
+    /** Ask the native coordinator to stop Plasma and install updates. */
+    @JvmStatic fun beginSystemUpdate(): Boolean = try {
+        nativeBeginSystemUpdate()
+    } catch (_: UnsatisfiedLinkError) {
+        Log.e(TAG, "nativeBeginSystemUpdate unavailable")
+        false
+    } catch (e: Exception) {
+        Log.e(TAG, "nativeBeginSystemUpdate failed", e)
+        false
     }
 
     /** Persist and start exactly the immutable first-run plan accepted by the user. */
@@ -418,6 +500,7 @@ object ComposeOverlay {
             desktopReadyState.value = desktopReadyLatched.get()
             installStateValue.value = installStateSnapshot
             anlandRepairStateValue.value = anlandRepairStateSnapshot
+            systemUpdateStateValue.value = systemUpdateStateSnapshot
             frame.alpha = 1f
             Log.i(
                 TAG,

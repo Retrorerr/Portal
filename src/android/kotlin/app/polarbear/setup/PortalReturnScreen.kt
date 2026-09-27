@@ -6,7 +6,8 @@ package app.polarbear.setup
 // drift, same 720 ms scatter, same 1.0 -> 0.83 alpha), the official Portal
 // mark, and two lines of text. A quiet inline graphics affordance is added
 // only when native state says an explicit Anland repair is available; it is
-// part of this layout rather than a separate control.
+// part of this layout rather than a separate control. Pending Debian updates
+// use the same slot (ReturnUpdatePanel.kt).
 //
 // READY uses the SAME path as the installer: a simple 3 second timer,
 // started once this screen is presented, sets the shared readyPrelude, which
@@ -20,7 +21,9 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
@@ -137,12 +140,14 @@ private fun ReturnAnlandAffordance(
 
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(420, delayMillis = 60, easing = PortalEmphasizedDecelerate)) +
+        enter = expandVertically(tween(420, easing = FastOutSlowInEasing), expandFrom = Alignment.Top) +
+            fadeIn(tween(420, delayMillis = 60, easing = PortalEmphasizedDecelerate)) +
             slideInVertically(tween(560, easing = PortalEmphasized)) { it / 3 } +
             scaleIn(tween(560, easing = PortalEmphasized), initialScale = 0.97f),
         exit = fadeOut(tween(220, easing = PortalEmphasizedAccelerate)) +
             slideOutVertically(tween(260, easing = PortalEmphasizedAccelerate)) { -it / 5 } +
-            scaleOut(tween(260), targetScale = 0.98f),
+            scaleOut(tween(260), targetScale = 0.98f) +
+            shrinkVertically(tween(420, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top),
     ) {
         AnimatedContent(
             targetState = phase,
@@ -350,12 +355,12 @@ internal fun PortalReturnScreen(
         repairState.available -> ReturnRepairPhase.Available
         else -> ReturnRepairPhase.Hidden
     }
-    LaunchedEffect(repairPhase) {
-        currentRepairBlocked(
-            repairPhase == ReturnRepairPhase.Running ||
-                repairPhase == ReturnRepairPhase.Failed ||
-                repairPhase == ReturnRepairPhase.RecoveryRequested,
-        )
+    val repairBlocked = repairPhase == ReturnRepairPhase.Running ||
+        repairPhase == ReturnRepairPhase.Failed ||
+        repairPhase == ReturnRepairPhase.RecoveryRequested
+    var updateBlocked by remember { mutableStateOf(false) }
+    LaunchedEffect(repairBlocked, updateBlocked) {
+        currentRepairBlocked(repairBlocked || updateBlocked)
     }
     LaunchedEffect(Unit) {
         delay(RETURN_READY_DELAY_MS)
@@ -367,7 +372,7 @@ internal fun PortalReturnScreen(
         PortalAmbientBackground(
             palette = palette,
             cardBounds = { Rect.Zero },
-            readyPrelude = returnReady,
+            readyPrelude = returnReady && !repairBlocked && !updateBlocked,
         )
         Column(
             modifier = Modifier
@@ -376,11 +381,10 @@ internal fun PortalReturnScreen(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // No animateContentSize here: it anchors top-start and clips, which
+            // cut off the update card's bottom-right edge while it grew. The
+            // affordances below animate their own size instead.
             Column(
-                modifier = Modifier
-                    .animateContentSize(
-                        animationSpec = tween(420, easing = FastOutSlowInEasing),
-                    ),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Image(
@@ -439,6 +443,13 @@ internal fun PortalReturnScreen(
                             recoveryRequested = true
                         }
                     },
+                )
+                // Debian updates share this slot; the graphics repair wins.
+                ReturnUpdatePanel(
+                    palette = palette,
+                    desktopReady = veil.eligible,
+                    suppressed = repairPhase != ReturnRepairPhase.Hidden,
+                    onBlockedChanged = { updateBlocked = it },
                 )
             }
         }

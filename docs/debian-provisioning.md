@@ -76,6 +76,39 @@ interpolate between real updates for visual continuity, but it never reports
 100% or leaves the installer until the final marker has been written and
 revalidated.
 
+## Updates after installation
+
+An installed runtime is never replaced by a newer image: `is_bootable` accepts
+any completed runtime, so a new image only reaches fresh installs. Existing
+installs are updated in two layers.
+
+- **Portal's platform layer** (the lfdevs Anland KWin/XWayland packages, the
+  Mesa KGSL layer, the libkwin overlay and session files) ships with the APK
+  and is re-synchronised on launch. Every launch rewrites
+  `/etc/apt/preferences.d/portal-platform`, which pins `kwin-common`,
+  `kwin-data`, `kwin-wayland`, `kwin-x11`, `libkwin6` and `xwayland` to
+  priority -1 for every Debian archive (`o=Debian`). Debian's builds have no
+  Anland backend; without the pin, a Debian KWin 6.3.7 would outrank the
+  installed `4:6.3.6-95` and replace it.
+- **Everything else is ordinary Debian**, updated in place from trixie,
+  trixie-updates and trixie-security. Portal only runs
+  `apt-get upgrade --with-new-pkgs`, which never removes packages. When
+  Debian moves something the pinned KWin depends on exactly (it requires
+  `qt6-base-private-abi (= 6.8.2)`), apt keeps that package back instead of
+  removing KWin.
+
+Ninety seconds after the first desktop frame, at most every 12 hours and never
+on a metered network, Portal runs `apt-get update` and records what an
+upgrade would install in `/var/lib/localdesktop/system-updates.json`. The next
+Return-to-Plasma screen offers those updates in a capsule that expands into
+the package list. Choosing Update stops Plasma, runs `dpkg --configure -a`,
+`apt-get update` and the upgrade with apt's machine-readable progress, checks
+that no pinned package changed, and starts a fresh Plasma session on either
+outcome. `/var/lib/localdesktop/system-update-in-progress` survives an
+interrupted upgrade, so the next launch offers to finish it. The apt
+transcript is `/var/log/portal-updates.log`. The parsing and policy are in
+`src/core/system_updates.rs` and are covered by `tests/system_updates.rs`.
+
 ## Required Android integration
 
 The APK remains authoritative for timezone, DNS, certificates, machine ID,

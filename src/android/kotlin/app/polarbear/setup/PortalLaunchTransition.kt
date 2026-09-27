@@ -151,11 +151,13 @@ fun PortalLaunchTransition(
             Log.i(TAG, "Compose pre-draw ready; holding intro at t=0 until system splash removed")
         }
     }
-    LaunchedEffect(resolved, setupReady) {
+    LaunchedEffect(resolved, setupReady, returnRepairBlocked) {
         // Host transparency follows Compose setup completion, independently
         // of the native first-frame latch. The ambient scene is still fully
         // opaque internally and owns the controlled final 0.83 compositing.
-        currentReadyPreludeChanged(resolved && setupReady)
+        // A Return-screen update or repair stops Plasma, so the host turns
+        // opaque again rather than showing its frozen last frame.
+        currentReadyPreludeChanged(resolved && setupReady && !returnRepairBlocked)
     }
 
     val active = !resolved

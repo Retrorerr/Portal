@@ -21,6 +21,7 @@ pub mod core {
     pub mod startup;
     pub mod stylus;
     pub mod surface_geometry;
+    pub mod system_updates;
     pub mod tablet_mode;
     pub mod wayland_protocol;
 }
@@ -50,6 +51,7 @@ pub mod android {
         pub mod mesa_layer;
         pub mod process;
         pub mod setup;
+        pub mod system_updates;
     }
     pub mod runtime {
         pub mod proot;

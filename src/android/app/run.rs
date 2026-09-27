@@ -408,7 +408,7 @@ fn resume_anland(
         // process and KWin producer are still alive and reconnect through the
         // persistent broker. A missing worker is a runtime failure, not a
         // reason to create a second desktop session.
-        if !is_running() {
+        if !is_running() && !crate::android::proot::system_updates::update_in_progress() {
             log::error!("anland.surface resumed but the tracked guest session is not running");
             accessibility::set_runtime_active(false);
             event_loop.set_control_flow(ControlFlow::Wait);
@@ -825,65 +825,100 @@ impl PolarBearApp {
                 true
             }
             crate::android::proot::setup::AnlandRepairResult::Succeeded => {
-                self.pending_runtime_retry = false;
-                let android_app = self.frontend.android_app.clone();
                 // The old QPainter compositor still owns the guest Wayland
-                // listener while the Return veil is up. Drop that complete
-                // backend before constructing Anland, otherwise the second
-                // compositor can fail to bind the same socket even though
-                // the guest-side Plasma process was stopped successfully.
-                compose_overlay::notify_desktop_suspended(&android_app);
-                let old_backend = std::mem::replace(
-                    &mut self.backend,
-                    PolarBearBackend::WebView(WebviewBackend::runtime_error(
-                        android_app.clone(),
-                        "Portal is switching to accelerated graphics…",
-                    )),
-                );
-                drop(old_backend);
-                let backend = match crate::android::proot::setup::build_committed_wayland_backend(
-                    android_app.clone(),
-                ) {
-                    Ok(backend) => backend,
-                    Err(error) => {
-                        crate::android::proot::setup::cancel_prepared_anland_launch();
-                        log::error!(
-                            "Repaired Anland installation could not build the Wayland backend: {error:#}"
-                        );
-                        self.enter_committed_install_runtime_error(
-                            "Portal is installed, but Anland graphics could not start. Tap Retry Plasma.",
-                        );
-                        return true;
-                    }
-                };
-                self.backend = backend;
-                let runtime = crate::android::runtime::proot::PRootRuntime::active();
-                crate::android::proot::setup::sync_guest_network_config(runtime.rootfs_path());
+                // listener while the Return veil is up; the relaunch drops
+                // that backend before constructing Anland.
                 crate::android::proot::setup::mark_anland_repair_handoff_active();
-                let resume_failed = if let PolarBearBackend::Wayland(backend) = &mut self.backend
-                {
-                    !resume_wayland(backend, event_loop, &self.frontend.android_app)
-                } else {
-                    true
-                };
-                if resume_failed {
+                let relaunched = self.relaunch_committed_plasma(
+                    event_loop,
+                    "Portal is switching to accelerated graphics…",
+                    "Portal is installed, but Anland graphics could not start. Tap Retry Plasma.",
+                );
+                if !relaunched {
                     crate::android::proot::setup::cancel_prepared_anland_launch();
-                    log::error!(
-                        "Anland graphics repair committed, but Wayland could not be resumed"
-                    );
-                    self.enter_committed_install_runtime_error(
-                        "Portal is installed, but Anland graphics could not start. Tap Retry Plasma.",
-                    );
-                    return true;
-                }
-                if let PolarBearBackend::Wayland(_) = &mut self.backend {
-                    crate::android::tablet_mode_manager::apply_kwin_tablet_mode(
-                        ime::is_desktop_input_present(),
-                    );
                 }
                 true
             }
         }
+    }
+
+    /// Restart Plasma after a system update. The worker stopped the session
+    /// before touching packages, so a fresh one starts on either outcome;
+    /// the Return screen already shows what happened.
+    fn handle_system_update_result(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let Some(result) = crate::android::proot::system_updates::take_update_result() else {
+            return false;
+        };
+        if let crate::android::proot::system_updates::UpdateResult::Failed(reason) = &result {
+            log::error!("System update did not complete: {reason}");
+        }
+        self.relaunch_committed_plasma(
+            event_loop,
+            "Portal is restarting Plasma…",
+            "Portal is installed, but Plasma could not restart after the update. Tap Retry Plasma.",
+        );
+        true
+    }
+
+    /// Replace the committed Wayland backend and start a fresh Plasma
+    /// session after a native worker stopped the previous one. The old
+    /// compositor is dropped first so the new one can bind the guest
+    /// Wayland socket. On failure this enters the Retry Plasma page with
+    /// `failure_message` and returns false.
+    fn relaunch_committed_plasma(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        placeholder: &str,
+        failure_message: &str,
+    ) -> bool {
+        self.pending_runtime_retry = false;
+        let android_app = self.frontend.android_app.clone();
+        compose_overlay::notify_desktop_suspended(&android_app);
+        // An Anland session has no Drop: its broker, render and event
+        // threads run until stopped, so stop it before the backend goes.
+        if let PolarBearBackend::Wayland(backend) = &mut self.backend {
+            backend.graphic_renderer = None;
+            if let Some(session) = backend.anland.take() {
+                session.stop();
+            }
+        }
+        let old_backend = std::mem::replace(
+            &mut self.backend,
+            PolarBearBackend::WebView(WebviewBackend::runtime_error(
+                android_app.clone(),
+                placeholder,
+            )),
+        );
+        drop(old_backend);
+        let backend = match crate::android::proot::setup::build_committed_wayland_backend(
+            android_app.clone(),
+        ) {
+            Ok(backend) => backend,
+            Err(error) => {
+                log::error!("Could not rebuild the Wayland backend for Plasma: {error:#}");
+                self.enter_committed_install_runtime_error(failure_message);
+                return false;
+            }
+        };
+        self.backend = backend;
+        let runtime = crate::android::runtime::proot::PRootRuntime::active();
+        crate::android::proot::setup::sync_guest_network_config(runtime.rootfs_path());
+        let resumed = if let PolarBearBackend::Wayland(backend) = &mut self.backend {
+            resume_wayland(backend, event_loop, &self.frontend.android_app)
+        } else {
+            false
+        };
+        if !resumed {
+            log::error!("Wayland could not be resumed for the relaunched Plasma session");
+            self.enter_committed_install_runtime_error(failure_message);
+            return false;
+        }
+        if let PolarBearBackend::Wayland(_) = &mut self.backend {
+            crate::android::tablet_mode_manager::apply_kwin_tablet_mode(
+                ime::is_desktop_input_present(),
+            );
+        }
+        true
     }
 
     /// Start the one provisional Plasma session needed to apply the accepted
@@ -1011,6 +1046,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         if self.handle_anland_repair_result(event_loop) {
             return;
         }
+        if self.handle_system_update_result(event_loop) {
+            return;
+        }
         if self.handle_initial_preferences_failure() {
             return;
         }
@@ -1131,6 +1169,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             return;
         }
         if self.handle_anland_repair_result(event_loop) {
+            return;
+        }
+        if self.handle_system_update_result(event_loop) {
             return;
         }
         if self.handle_initial_preferences_failure() {

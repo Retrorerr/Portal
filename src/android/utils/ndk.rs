@@ -602,3 +602,35 @@ pub fn set_android_system_cursor_visible(android_app: &AndroidApp, visible: bool
         android_app.clone(),
     );
 }
+
+/// Whether Android treats the active network as metered (mobile data, a
+/// hotspot, or Wi-Fi the user marked metered). Unknown counts as metered, so
+/// background downloads never run on a guess.
+pub fn is_active_network_metered(android_app: &AndroidApp) -> bool {
+    run_in_jvm(
+        |env, app| {
+            let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            let Ok(service_name) = env.new_string("connectivity") else {
+                return true;
+            };
+            let Ok(manager) = env
+                .call_method(
+                    &activity,
+                    "getSystemService",
+                    "(Ljava/lang/String;)Ljava/lang/Object;",
+                    &[JValue::Object(&service_name)],
+                )
+                .and_then(|value| value.l())
+            else {
+                return true;
+            };
+            if manager.is_null() {
+                return true;
+            }
+            env.call_method(&manager, "isActiveNetworkMetered", "()Z", &[])
+                .and_then(|value| value.z())
+                .unwrap_or(true)
+        },
+        android_app.clone(),
+    )
+}

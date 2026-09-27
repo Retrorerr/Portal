@@ -425,6 +425,66 @@ fn show_compose_overlay_with(android_app: &AndroidApp, method: &str) {
     }
     crate::android::proot::setup::publish_current_install_state(android_app);
     publish_current_anland_repair_state(android_app);
+    if method == "showReturn" {
+        crate::android::proot::system_updates::publish_current(android_app);
+    }
+}
+
+/// Publish the Debian update state to the Return screen. `packages` carries
+/// one `name\tsecurity` line per pending update, security fixes first.
+pub fn publish_system_update_state(
+    android_app: &AndroidApp,
+    snapshot: &crate::android::proot::system_updates::UpdateSnapshot,
+) {
+    let status = snapshot.status.code();
+    let progress = snapshot.progress as i32;
+    let message = snapshot.message.clone();
+    let total = snapshot.updates.len() as i32;
+    let security = snapshot.updates.iter().filter(|update| update.security).count() as i32;
+    let interrupted = snapshot.interrupted;
+    let packages = snapshot
+        .updates
+        .iter()
+        .map(|update| format!("{}\t{}", update.package, u8::from(update.security)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    super::ndk::run_in_jvm(
+        move |env, app| {
+            let activity = activity_object(app);
+            let class = match overlay_class(env, &activity) {
+                Ok(class) => class,
+                Err(error) => {
+                    log::error!("Compose overlay class is unavailable: {error}");
+                    clear_exception(env, "find ComposeOverlay for system update state");
+                    return;
+                }
+            };
+            let (Ok(message), Ok(packages)) = (env.new_string(message), env.new_string(packages))
+            else {
+                log::error!("Failed to allocate system update strings");
+                clear_exception(env, "allocate system update strings");
+                return;
+            };
+            if let Err(error) = env.call_static_method(
+                class,
+                "updateSystemUpdateState",
+                "(IILjava/lang/String;IIZLjava/lang/String;)V",
+                &[
+                    JValue::Int(status),
+                    JValue::Int(progress),
+                    JValue::Object(&message),
+                    JValue::Int(total),
+                    JValue::Int(security),
+                    JValue::Bool(u8::from(interrupted)),
+                    JValue::Object(&packages),
+                ],
+            ) {
+                log::error!("Compose overlay updateSystemUpdateState failed: {error}");
+                clear_exception(env, "updateSystemUpdateState");
+            }
+        },
+        android_app.clone(),
+    );
 }
 
 /// Update the small overlay state text (`Idle` / `Starting` / `Desktop ready` / `Error`).
@@ -517,6 +577,7 @@ pub fn notify_desktop_ready(android_app: &AndroidApp) {
     log::info!("compose-spike: native desktop ready latched; overlay remains fully visible");
     crate::android::diagnostics::host_event("compose-spike", "desktop-ready overlay-retained");
     publish_desktop_ready(android_app, true);
+    crate::android::proot::system_updates::schedule_background_check(android_app);
 }
 
 /// Invalidate readiness when Android destroys the native window. If the
@@ -626,6 +687,20 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRetryInstall(
     _class: JObject,
 ) -> jni::sys::jboolean {
     if crate::android::proot::setup::retry_install() {
+        1
+    } else {
+        0
+    }
+}
+
+/// JNI bridge for the Return screen's Update action. The native coordinator
+/// owns the worker; the event loop restarts Plasma when it finishes.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeBeginSystemUpdate(
+    _env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jboolean {
+    if crate::android::proot::system_updates::begin_update() {
         1
     } else {
         0

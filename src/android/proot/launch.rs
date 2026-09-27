@@ -136,6 +136,10 @@ pub fn is_running() -> bool {
 }
 
 pub fn launch() {
+    if crate::android::proot::system_updates::update_in_progress() {
+        log::info!("Skipping launch while a system update replaces guest packages");
+        return;
+    }
     if LAUNCH_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -277,7 +281,9 @@ pub fn launch() {
             started.elapsed(),
             status
         );
-        if !output.status.success() {
+        // A session ended by `stop()` was ended on purpose (Retry Plasma, a
+        // graphics repair, a system update); its signal exit is no failure.
+        if !output.status.success() && !thread_cancel.load(Ordering::Acquire) {
             report_failure(format!("Desktop session exited with status {status:?}"));
         }
         thread_cancel.store(true, Ordering::Release);

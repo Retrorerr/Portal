@@ -2492,6 +2492,8 @@ fn sync_debian_package_management(fs_root: &Path) {
         )
         .expect("Failed to seed Debian package sources");
     }
+    super::system_updates::sync_apt_policy(fs_root)
+        .expect("Failed to pin Portal's platform packages away from Debian");
 }
 
 fn retire_legacy_desktop_mutators(fs_root: &Path) -> anyhow::Result<()> {
@@ -2717,6 +2719,9 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
         sync_initial_desktop_defaults(fs_root);
     }
     sync_portal_runtime_assets(fs_root, ui_scale);
+    if let Err(error) = super::system_updates::sync_apt_policy(fs_root) {
+        log::error!("Could not pin Portal's platform packages: {error:#}");
+    }
 
     sync_guest_network_config(fs_root);
     sync_android_timezone(fs_root);
