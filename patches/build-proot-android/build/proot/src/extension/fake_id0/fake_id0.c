@@ -669,10 +669,16 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 	case PR_symlinkat:
 		return handle_symlink_enter_end(tracee, SYSARG_1, SYSARG_2, SYSARG_3, config);
 
-	/* int fstat(int fd, struct stat *buf); */
+	/* int fstat(int fd, struct stat *buf);
+	 *
+	 * fstat() runs as is: the exit stage finds the descriptor's path
+	 * through /proc/<pid>/fd itself and applies the meta file there.
+	 * Rewriting it into readlinkat() plus a chained fstatat() inside the
+	 * tracee cost extra ptrace round trips on one of the hottest
+	 * syscalls (glibc stdio, Qt, GLib and every runtime call it).  */
 	case PR_fstat:
 	case PR_fstat64:
-		return handle_stat_enter_end(tracee, SYSARG_1);
+		return 0;
 #endif
 	case PR_sendmsg:
 	case PR_socketcall:
@@ -769,6 +775,37 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		sysarg = SYSARG_2;
 		
 		address = peek_reg(tracee, ORIGINAL, sysarg);
+
+		/* A descriptor that names a guest file by path carries the
+		 * meta file recorded by chmod()/chown().  Sockets, pipes and
+		 * other pathless descriptors fall through to the plain
+		 * ownership override.  */
+		{
+			char fd_path[PATH_MAX];
+			char meta_path[PATH_MAX];
+			const char *deleted = " (deleted)";
+			size_t length;
+
+			if (readlink_proc_pid_fd(tracee->pid, (int) peek_reg(tracee, ORIGINAL, SYSARG_1), fd_path) == 0
+			    && fd_path[0] == '/'
+			    && ((length = strlen(fd_path)) < strlen(deleted)
+				|| strcmp(fd_path + length - strlen(deleted), deleted) != 0)
+			    && belongs_to_guestfs(tracee, fd_path)
+			    && get_meta_path(fd_path, meta_path) == 0
+			    && path_exists(meta_path) == 0) {
+				struct stat my_stat;
+				mode_t mode;
+
+				read_meta_file(meta_path, &mode, &uid, &gid, config);
+				if (read_data(tracee, &my_stat, address, sizeof(struct stat)) == 0) {
+					my_stat.st_mode = (mode | ((my_stat.st_mode & S_IFMT) | (my_stat.st_mode & 07000)));
+					my_stat.st_uid = uid;
+					my_stat.st_gid = gid;
+					write_data(tracee, address, &my_stat, sizeof(struct stat));
+				}
+				return 0;
+			}
+		}
 		
 		/* Sanity checks.  */
 		assert(__builtin_types_compatible_p(uid_t, uint32_t));

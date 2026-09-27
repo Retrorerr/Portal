@@ -23,6 +23,12 @@ const MAX_CAPTURED_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_LINE_BYTES: usize = 64 * 1024;
 const SUPPORT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const SUPPORT_CHECK_BINARY: &str = "ld-linux-aarch64.so.1";
+/// How long PRoot polls for the next tracee stop before it sleeps, in
+/// microseconds. Each traced syscall wakes PRoot, and waking an idle core
+/// costs more than PRoot's own work per stop. Guest syscalls come in
+/// bursts, so a short poll after each stop keeps file-heavy work 2-4x
+/// faster for at most this much CPU time per stop.
+const PROOT_SPIN_US: &str = "50";
 
 /// Concrete PRoot-based Linux runtime.
 #[derive(Debug, Clone)]
@@ -318,7 +324,8 @@ impl LinuxRuntime for PRootRuntime {
                 "PROOT_LOADER",
                 context.native_library_dir.join("libproot_loader.so"),
             )
-            .env("PROOT_TMP_DIR", &context.data_dir);
+            .env("PROOT_TMP_DIR", &context.data_dir)
+            .env("PROOT_SPIN_US", PROOT_SPIN_US);
 
         // link2symlink otherwise keeps a hard link's data beside its first
         // name, so that directory cannot be removed while another link

@@ -25,6 +25,7 @@
 #include <sys/ptrace.h> /* ptrace(1), PTRACE_*, */
 #include <sys/types.h>  /* waitpid(2), */
 #include <sys/wait.h>   /* waitpid(2), */
+#include <time.h>       /* clock_gettime(2), */
 #include <sys/utsname.h> /* uname(2), */
 #include <unistd.h>     /* fork(2), chdir(2), getpid(2), */
 #include <string.h>     /* strcmp(3), */
@@ -254,6 +255,43 @@ static void check_architecture(Tracee *tracee)
 }
 
 /**
+ * waitpid(-1, @tracee_status, __WALL), but first poll for up to
+ * PROOT_SPIN_US microseconds.  A traced syscall stops the tracee and
+ * wakes PRoot; when PRoot's CPU has gone idle in between, the wake-up
+ * alone costs tens of microseconds on phones, several times the work
+ * PRoot does per stop.  Syscalls come in bursts, so a short poll after
+ * each event keeps PRoot awake for the next one; an idle guest costs one
+ * poll window per event.
+ */
+static pid_t wait_for_tracee(int *tracee_status)
+{
+	static long spin_ns = -1;
+	struct timespec start;
+	struct timespec now;
+	pid_t pid;
+
+	if (spin_ns < 0) {
+		const char *value = getenv("PROOT_SPIN_US");
+		spin_ns = value != NULL ? strtol(value, NULL, 10) * 1000 : 0;
+		if (spin_ns < 0)
+			spin_ns = 0;
+	}
+
+	if (spin_ns > 0 && clock_gettime(CLOCK_MONOTONIC, &start) == 0) {
+		do {
+			pid = waitpid(-1, tracee_status, __WALL | WNOHANG);
+			if (pid != 0)
+				return pid;
+			if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+				break;
+		} while ((now.tv_sec - start.tv_sec) * 1000000000L
+			 + (now.tv_nsec - start.tv_nsec) < spin_ns);
+	}
+
+	return waitpid(-1, tracee_status, __WALL);
+}
+
+/**
  * Wait then handle any event from any tracee.  This function returns
  * the exit status of the last terminated program.
  */
@@ -330,7 +368,7 @@ int event_loop()
 		free_terminated_tracees();
 
 		/* Wait for the next tracee's stop. */
-		pid = waitpid(-1, &tracee_status, __WALL);
+		pid = wait_for_tracee(&tracee_status);
 		if (pid < 0) {
 			if (errno != ECHILD) {
 				note(NULL, ERROR, SYSTEM, "waitpid()");

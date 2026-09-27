@@ -33,7 +33,11 @@ set-arch() {
 	else SUBARCH=''
 	fi
 
-	API=21
+	# 26 is Portal's native floor. bionic declares process_vm_readv(2)
+	# and process_vm_writev(2) only from API 23; without them the
+	# build's feature check fails and PRoot copies guest memory one
+	# word per ptrace(2) call, which dominated every traced syscall.
+	API=26
 
 	INSTALL_ROOT="$BUILD_DIR/root-$ARCH/root"
 	STATIC_ROOT="$BUILD_DIR/static-$ARCH/root"

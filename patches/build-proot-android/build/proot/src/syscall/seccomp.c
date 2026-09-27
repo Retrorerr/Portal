@@ -38,6 +38,8 @@
 #include <stddef.h>        /* offsetof(3), */
 #include <stdint.h>        /* uint*_t, UINT*_MAX, */
 #include <assert.h>        /* assert(3), */
+#include <termios.h>       /* TCSETS, TCGETS2, */
+#include <sys/ioctl.h>     /* _IOW, */
 
 #include "syscall/seccomp.h"
 #include "tracee/tracee.h"
@@ -121,13 +123,60 @@ static int add_trace_syscall(struct sock_fprog *program, word_t syscall, int fla
 	return 0;
 }
 
+#ifdef __ANDROID__
+/* ioctl(2) requests PRoot rewrites on Android (syscall/enter.c and
+ * syscall/exit.c).  Every other request, GPU submissions and fence waits
+ * included, runs without stopping the tracee: each ptrace stop costs tens
+ * of microseconds on phones, so trapping all ioctls capped GPU clients at
+ * a few hundred frames per second whatever the GPU could do.  */
+static const uint32_t traced_ioctl_requests[] = {
+	TCSETS + 2 /* + TCSAFLUSH */,
+	TCGETS2,
+	TCSETS2,
+	TCSETSW2,
+	TCSETSF2,
+	_IOW(0x94, 9, int) /* FICLONE */,
+};
+#define NB_TRACED_IOCTLS (sizeof(traced_ioctl_requests) / sizeof(traced_ioctl_requests[0]))
+#define LENGTH_TRACE_IOCTL (NB_TRACED_IOCTLS + 4)
+
+/**
+ * Like add_trace_syscall(), but only for the ioctl(2) requests listed in
+ * traced_ioctl_requests; other requests are allowed straight away.
+ */
+static int add_trace_ioctl(struct sock_fprog *program, word_t syscall, int flag)
+{
+	/* The request is an unsigned int in the kernel: compare the low
+	 * 32 bits of the second argument (little-endian).  */
+	const size_t request_offset = offsetof(struct seccomp_data, args[1]);
+	struct sock_filter statements[LENGTH_TRACE_IOCTL];
+	size_t i;
+
+	if (syscall > UINT32_MAX || request_offset > UINT32_MAX)
+		return -ERANGE;
+
+	/* Not ioctl(2): skip this block.  */
+	statements[0] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, syscall, 0, LENGTH_TRACE_IOCTL - 1);
+	statements[1] = (struct sock_filter) BPF_STMT(BPF_LD + BPF_W + BPF_ABS, request_offset);
+	for (i = 0; i < NB_TRACED_IOCTLS; i++)
+		statements[2 + i] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K,
+					traced_ioctl_requests[i], NB_TRACED_IOCTLS - i, 0);
+	statements[2 + NB_TRACED_IOCTLS] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW);
+	statements[3 + NB_TRACED_IOCTLS] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + flag);
+
+	DEBUG_FILTER("FILTER:     trace if syscall == %ld and request is rewritten\n", syscall);
+
+	return add_statements(program, LENGTH_TRACE_IOCTL, statements);
+}
+#endif
+
 /**
  * Append to @program->filter the statements that allow anything (if
- * unfiltered).  Note that @nb_traced_syscalls is used to make a
+ * unfiltered).  Note that @section_length is used to make a
  * sanity check.  This function returns -errno if an error occurred,
  * otherwise 0.
  */
-static int end_arch_section(struct sock_fprog *program, size_t nb_traced_syscalls)
+static int end_arch_section(struct sock_fprog *program, size_t section_length)
 {
 	int status;
 
@@ -143,8 +192,7 @@ static int end_arch_section(struct sock_fprog *program, size_t nb_traced_syscall
 		return status;
 
 	/* Sanity check, see start_arch_section().  */
-	if (   talloc_array_length(program->filter) - program->len
-	    != LENGTH_END_SECTION + nb_traced_syscalls * LENGTH_TRACE_SYSCALL)
+	if (talloc_array_length(program->filter) - program->len != section_length)
 		return -ERANGE;
 
 	return 0;
@@ -152,16 +200,14 @@ static int end_arch_section(struct sock_fprog *program, size_t nb_traced_syscall
 
 /**
  * Append to @program->filter the statements that check the current
- * @architecture.  Note that @nb_traced_syscalls is used to make a
+ * @architecture.  Note that @section_length is used to make a
  * sanity check.  This function returns -errno if an error occurred,
  * otherwise 0.
  */
-static int start_arch_section(struct sock_fprog *program, uint32_t arch, size_t nb_traced_syscalls)
+static int start_arch_section(struct sock_fprog *program, uint32_t arch, size_t section_length)
 {
 	const size_t arch_offset    = offsetof(struct seccomp_data, arch);
 	const size_t syscall_offset = offsetof(struct seccomp_data, nr);
-	const size_t section_length = LENGTH_END_SECTION +
-					nb_traced_syscalls * LENGTH_TRACE_SYSCALL;
 	int status;
 
 	/* Sanity checks.  */
@@ -191,7 +237,7 @@ static int start_arch_section(struct sock_fprog *program, uint32_t arch, size_t 
 	};
 
 	DEBUG_FILTER("FILTER: if arch == %ld, up to %zdth statement\n",
-		arch, nb_traced_syscalls);
+		arch, section_length);
 
 	status = add_statements(program, LENGTH_START_SECTION, statements);
 	if (status < 0)
@@ -256,7 +302,7 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 	size_t nb_archs = sizeof(seccomp_archs) / sizeof(SeccompArch);
 
 	struct sock_fprog program = { .len = 0, .filter = NULL };
-	size_t nb_traced_syscalls;
+	size_t section_length;
 	size_t i, j, k;
 	int status;
 
@@ -268,19 +314,26 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 	for (i = 0; i < nb_archs; i++) {
 		word_t syscall;
 
-		nb_traced_syscalls = 0;
+		section_length = LENGTH_END_SECTION;
 
-		/* Pre-compute the number of traced syscalls for this architecture.  */
+		/* Pre-compute the length of the filter for this architecture.  */
 		for (j = 0; j < seccomp_archs[i].nb_abis; j++) {
 			for (k = 0; sysnums[k].value != PR_void; k++) {
 				syscall = detranslate_sysnum(seccomp_archs[i].abis[j], sysnums[k].value);
-				if (syscall != SYSCALL_AVOIDER)
-					nb_traced_syscalls++;
+				if (syscall == SYSCALL_AVOIDER)
+					continue;
+#ifdef __ANDROID__
+				if (sysnums[k].value == PR_ioctl) {
+					section_length += LENGTH_TRACE_IOCTL;
+					continue;
+				}
+#endif
+				section_length += LENGTH_TRACE_SYSCALL;
 			}
 		}
 
 		/* Filter: if handled architecture */
-		status = start_arch_section(&program, seccomp_archs[i].value, nb_traced_syscalls);
+		status = start_arch_section(&program, seccomp_archs[i].value, section_length);
 		if (status < 0)
 			goto end;
 
@@ -292,6 +345,11 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 					continue;
 
 				/* Filter: trace if handled syscall */
+#ifdef __ANDROID__
+				if (sysnums[k].value == PR_ioctl)
+					status = add_trace_ioctl(&program, syscall, sysnums[k].flags);
+				else
+#endif
 				status = add_trace_syscall(&program, syscall, sysnums[k].flags);
 				if (status < 0)
 					goto end;
@@ -299,7 +357,7 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 		}
 
 		/* Filter: allow untraced syscalls for this architecture */
-		status = end_arch_section(&program, nb_traced_syscalls);
+		status = end_arch_section(&program, section_length);
 		if (status < 0)
 			goto end;
 	}
