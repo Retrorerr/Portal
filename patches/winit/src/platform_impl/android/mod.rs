@@ -28,9 +28,7 @@ use crate::window::{
 };
 
 mod keycodes;
-mod touchpad;
 
-use touchpad::{GestureAction as TouchpadGestureAction, TouchpadGestureStateMachine};
 
 pub(crate) use crate::cursor::{
     NoCustomCursor as PlatformCustomCursor, NoCustomCursor as PlatformCustomCursorSource,
@@ -405,8 +403,7 @@ pub struct EventLoop<T: 'static> {
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
     pressed_mouse_buttons: std::collections::HashSet<MouseButton>,
-    touchpad_gestures: TouchpadGestureStateMachine,
-    touchpad_clock: Instant,
+    touchpad_scrolling: bool,
     last_touchpad_device_id: Option<event::DeviceId>,
     stylus_down: bool,
 }
@@ -433,7 +430,6 @@ impl<T: 'static> EventLoop<T> {
             "An `AndroidApp` as passed to android_main() is required to create an `EventLoop` on \
              Android",
         );
-        let density = android_app.config().density().map(|dpi| dpi as f64 / 160.0).unwrap_or(1.0);
         let redraw_flag = SharedFlag::new();
 
         // Portal touchpad scrolling: GameActivity only copies explicitly
@@ -474,8 +470,7 @@ impl<T: 'static> EventLoop<T> {
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
             pressed_mouse_buttons: std::collections::HashSet::new(),
-            touchpad_gestures: TouchpadGestureStateMachine::with_density(density),
-            touchpad_clock: Instant::now(),
+            touchpad_scrolling: false,
             last_touchpad_device_id: None,
             stylus_down: false,
         })
@@ -486,38 +481,49 @@ impl<T: 'static> EventLoop<T> {
         F: FnMut(Event<T>, &RootAEL),
     {
         let Some(device_id) = self.last_touchpad_device_id else {
-            self.touchpad_gestures.cancel();
+            self.touchpad_scrolling = false;
             self.pressed_mouse_buttons.clear();
             return;
         };
-        let window_id = window::WindowId(WindowId);
-        if self.touchpad_gestures.end_scroll() {
-            send_mouse_wheel(
-                callback,
-                self.window_target(),
-                window_id,
-                device_id,
-                0.0,
-                0.0,
-                event::TouchPhase::Cancelled,
-            );
+        self.end_touchpad_scroll(callback, device_id, event::TouchPhase::Cancelled);
+        self.release_mouse_buttons(callback, device_id);
+    }
+
+    /// Ends a two-finger scroll in progress, so KWin sends axis-stop.
+    fn end_touchpad_scroll<F>(
+        &mut self,
+        callback: &mut F,
+        device_id: event::DeviceId,
+        phase: event::TouchPhase,
+    ) -> bool
+    where
+        F: FnMut(Event<T>, &RootAEL),
+    {
+        if !std::mem::take(&mut self.touchpad_scrolling) {
+            return false;
         }
-        if self.touchpad_gestures.cancel() == Some(TouchpadGestureAction::DragEnd) {
-            send_mouse_button(
-                callback,
-                self.window_target(),
-                window_id,
-                device_id,
-                event::ElementState::Released,
-                MouseButton::Left,
-            );
-        }
+        send_mouse_wheel(
+            callback,
+            self.window_target(),
+            window::WindowId(WindowId),
+            device_id,
+            0.0,
+            0.0,
+            phase,
+        );
+        true
+    }
+
+    fn release_mouse_buttons<F>(&mut self, callback: &mut F, device_id: event::DeviceId)
+    where
+        F: FnMut(Event<T>, &RootAEL),
+    {
         let released: Vec<MouseButton> = self.pressed_mouse_buttons.drain().collect();
         for button in released {
             send_mouse_button(
                 callback,
                 self.window_target(),
-                window_id,
+                window::WindowId(WindowId),
                 device_id,
                 event::ElementState::Released,
                 button,
@@ -812,27 +818,19 @@ impl<T: 'static> EventLoop<T> {
                     let has_gesture_scroll =
                         gesture_samples.iter().any(|(x, y)| *x != 0.0 || *y != 0.0);
 
-                    let gesture_time = self.touchpad_clock.elapsed();
                     let button_state = motion_event.button_state();
 
                     // 1. Continuous Touchpad Scrolling
                     if is_touchpad && has_gesture_scroll {
-                        let was_scrolling = self.touchpad_gestures.is_scrolling();
-                        if self.touchpad_gestures.scroll() == Some(TouchpadGestureAction::DragEnd) {
-                            send_mouse_button(
-                                callback,
-                                self.window_target(),
-                                window_id,
-                                device_id,
-                                event::ElementState::Released,
-                                MouseButton::Left,
-                            );
-                        }
-                        let mut first = !was_scrolling;
                         for (gesture_dx, gesture_dy) in gesture_samples {
                             if gesture_dx == 0.0 && gesture_dy == 0.0 {
                                 continue;
                             }
+                            let phase = if std::mem::replace(&mut self.touchpad_scrolling, true) {
+                                event::TouchPhase::Moved
+                            } else {
+                                event::TouchPhase::Started
+                            };
                             send_mouse_wheel(
                                 callback,
                                 self.window_target(),
@@ -840,32 +838,19 @@ impl<T: 'static> EventLoop<T> {
                                 device_id,
                                 gesture_dx,
                                 gesture_dy,
-                                if first {
-                                    event::TouchPhase::Started
-                                } else {
-                                    event::TouchPhase::Moved
-                                },
+                                phase,
                             );
-                            first = false;
                         }
                     } else if action == MotionAction::Scroll {
                         if is_touchpad {
                             let h = pointer.axis_value(input::Axis::Hscroll) as f64 * 20.0;
                             let v = pointer.axis_value(input::Axis::Vscroll) as f64 * 20.0;
                             if h != 0.0 || v != 0.0 {
-                                let was_scrolling = self.touchpad_gestures.is_scrolling();
-                                if self.touchpad_gestures.scroll()
-                                    == Some(TouchpadGestureAction::DragEnd)
-                                {
-                                    send_mouse_button(
-                                        callback,
-                                        self.window_target(),
-                                        window_id,
-                                        device_id,
-                                        event::ElementState::Released,
-                                        MouseButton::Left,
-                                    );
-                                }
+                                let phase = if std::mem::replace(&mut self.touchpad_scrolling, true) {
+                                    event::TouchPhase::Moved
+                                } else {
+                                    event::TouchPhase::Started
+                                };
                                 send_mouse_wheel(
                                     callback,
                                     self.window_target(),
@@ -873,11 +858,7 @@ impl<T: 'static> EventLoop<T> {
                                     device_id,
                                     h,
                                     v,
-                                    if was_scrolling {
-                                        event::TouchPhase::Moved
-                                    } else {
-                                        event::TouchPhase::Started
-                                    },
+                                    phase,
                                 );
                             }
                         } else if is_mouse {
@@ -905,36 +886,11 @@ impl<T: 'static> EventLoop<T> {
                     if (action == MotionAction::HoverMove || action == MotionAction::Move)
                         && !has_gesture_scroll
                     {
-                        if is_touchpad && self.touchpad_gestures.end_scroll() {
-                            send_mouse_wheel(
-                                callback,
-                                self.window_target(),
-                                window_id,
-                                device_id,
-                                0.0,
-                                0.0,
-                                event::TouchPhase::Ended,
-                            );
+                        if is_touchpad {
+                            self.end_touchpad_scroll(callback, device_id, event::TouchPhase::Ended);
                         }
                         let location =
                             PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
-                        if is_touchpad
-                            && self.touchpad_gestures.movement(
-                                gesture_time,
-                                location.x,
-                                location.y,
-                                button_state.primary(),
-                            ) == Some(TouchpadGestureAction::DragStart)
-                        {
-                            send_mouse_button(
-                                callback,
-                                self.window_target(),
-                                window_id,
-                                device_id,
-                                event::ElementState::Pressed,
-                                MouseButton::Left,
-                            );
-                        }
                         callback(
                             Event::WindowEvent {
                                 window_id,
@@ -971,27 +927,14 @@ impl<T: 'static> EventLoop<T> {
                     };
 
                     if is_touchpad {
+                        // Android's touchpad stack recognises taps, tap-dragging
+                        // and two-finger right clicks itself and reports them as
+                        // button presses and releases around a Down/Up contact, so
+                        // they are forwarded as they are. A Down without buttons
+                        // is the fake finger of a two-finger scroll.
                         match action {
                             MotionAction::ButtonPress => {
-                                let forward_press = if mapped_button == MouseButton::Left {
-                                    self.touchpad_gestures.physical_button_press()
-                                } else {
-                                    if self.touchpad_gestures.cancel()
-                                        == Some(TouchpadGestureAction::DragEnd)
-                                    {
-                                        send_mouse_button(
-                                            callback,
-                                            self.window_target(),
-                                            window_id,
-                                            device_id,
-                                            event::ElementState::Released,
-                                            MouseButton::Left,
-                                        );
-                                    }
-                                    true
-                                };
-                                if forward_press && self.pressed_mouse_buttons.insert(mapped_button)
-                                {
+                                if self.pressed_mouse_buttons.insert(mapped_button) {
                                     send_mouse_button(
                                         callback,
                                         self.window_target(),
@@ -1003,11 +946,7 @@ impl<T: 'static> EventLoop<T> {
                                 }
                             },
                             MotionAction::ButtonRelease => {
-                                let forward_release = mapped_button != MouseButton::Left
-                                    || self.touchpad_gestures.physical_button_release();
-                                if forward_release
-                                    && self.pressed_mouse_buttons.remove(&mapped_button)
-                                {
+                                if self.pressed_mouse_buttons.remove(&mapped_button) {
                                     send_mouse_button(
                                         callback,
                                         self.window_target(),
@@ -1018,52 +957,17 @@ impl<T: 'static> EventLoop<T> {
                                     );
                                 }
                             },
-                            MotionAction::Down => {
-                                let location = PhysicalPosition {
-                                    x: pointer.x() as f64,
-                                    y: pointer.y() as f64,
+                            MotionAction::Up | MotionAction::Cancel => {
+                                let phase = if action == MotionAction::Cancel {
+                                    event::TouchPhase::Cancelled
+                                } else {
+                                    event::TouchPhase::Ended
                                 };
-                                let has_non_primary_button = self
-                                    .pressed_mouse_buttons
-                                    .iter()
-                                    .any(|button| *button != MouseButton::Left);
-                                if !has_non_primary_button {
-                                    // A new contact ends an orphaned synthetic drag first: the
-                                    // previous contact died without a terminal event, so the
-                                    // fresh contact arms normally and cannot inherit the
-                                    // orphan's tap (ownership clearing drops its tap context).
-                                    if self.touchpad_gestures.finish_touchpad_drag_if_owned()
-                                        == Some(TouchpadGestureAction::DragEnd)
-                                    {
-                                        send_mouse_button(
-                                            callback,
-                                            self.window_target(),
-                                            window_id,
-                                            device_id,
-                                            event::ElementState::Released,
-                                            MouseButton::Left,
-                                        );
-                                    }
-                                    self.touchpad_gestures.down(
-                                        gesture_time,
-                                        location.x,
-                                        location.y,
-                                    );
-                                } else if self.touchpad_gestures.cancel()
-                                    == Some(TouchpadGestureAction::DragEnd)
+                                if !self.end_touchpad_scroll(callback, device_id, phase)
+                                    && action == MotionAction::Cancel
                                 {
-                                    send_mouse_button(
-                                        callback,
-                                        self.window_target(),
-                                        window_id,
-                                        device_id,
-                                        event::ElementState::Released,
-                                        MouseButton::Left,
-                                    );
-                                }
-                            },
-                            MotionAction::Up => {
-                                if self.touchpad_gestures.end_scroll() {
+                                    // Fingers landing during a scroll's momentum come
+                                    // as a Down/Cancel pair; the scroll end stops it.
                                     send_mouse_wheel(
                                         callback,
                                         self.window_target(),
@@ -1071,139 +975,19 @@ impl<T: 'static> EventLoop<T> {
                                         device_id,
                                         0.0,
                                         0.0,
-                                        event::TouchPhase::Ended,
+                                        phase,
                                     );
                                 }
-                                let location = PhysicalPosition {
-                                    x: pointer.x() as f64,
-                                    y: pointer.y() as f64,
-                                };
-                                match self.touchpad_gestures.up(
-                                    gesture_time,
-                                    location.x,
-                                    location.y,
-                                ) {
-                                    Some(TouchpadGestureAction::Click) => {
-                                        send_mouse_button(
-                                            callback,
-                                            self.window_target(),
-                                            window_id,
-                                            device_id,
-                                            event::ElementState::Pressed,
-                                            MouseButton::Left,
-                                        );
-                                        send_mouse_button(
-                                            callback,
-                                            self.window_target(),
-                                            window_id,
-                                            device_id,
-                                            event::ElementState::Released,
-                                            MouseButton::Left,
-                                        );
-                                    },
-                                    Some(TouchpadGestureAction::DragEnd) => send_mouse_button(
-                                        callback,
-                                        self.window_target(),
-                                        window_id,
-                                        device_id,
-                                        event::ElementState::Released,
-                                        MouseButton::Left,
-                                    ),
-                                    Some(TouchpadGestureAction::DragStart) | None => {},
-                                }
-
-                                // Some Android touchpad stacks end a primary click with Up
-                                // instead of a separate ButtonRelease. Treat Up as a release
-                                // fallback so physical or adopted synthetic grabs cannot stick.
-                                let released: Vec<MouseButton> =
-                                    self.pressed_mouse_buttons.drain().collect();
-                                for button in released {
-                                    send_mouse_button(
-                                        callback,
-                                        self.window_target(),
-                                        window_id,
-                                        device_id,
-                                        event::ElementState::Released,
-                                        button,
-                                    );
-                                }
+                                // Releases come before the Up; this only covers
+                                // one that never arrived.
+                                self.release_mouse_buttons(callback, device_id);
                             },
-                            MotionAction::PointerDown
-                            | MotionAction::PointerUp
-                            | MotionAction::Cancel => {
-                                if self.touchpad_gestures.end_scroll() {
-                                    send_mouse_wheel(
-                                        callback,
-                                        self.window_target(),
-                                        window_id,
-                                        device_id,
-                                        0.0,
-                                        0.0,
-                                        if action == MotionAction::Cancel {
-                                            event::TouchPhase::Cancelled
-                                        } else {
-                                            event::TouchPhase::Ended
-                                        },
-                                    );
-                                }
-                                if self.touchpad_gestures.cancel()
-                                    == Some(TouchpadGestureAction::DragEnd)
-                                {
-                                    send_mouse_button(
-                                        callback,
-                                        self.window_target(),
-                                        window_id,
-                                        device_id,
-                                        event::ElementState::Released,
-                                        MouseButton::Left,
-                                    );
-                                }
-                            },
-                            MotionAction::HoverExit => {
-                                // Abnormal contact end (finger left the pad with no ACTION_UP):
-                                // finish an owned synthetic drag exactly once. Scroll ends
-                                // first so a concurrent scroll still terminates cleanly.
-                                if self.touchpad_gestures.end_scroll() {
-                                    send_mouse_wheel(
-                                        callback,
-                                        self.window_target(),
-                                        window_id,
-                                        device_id,
-                                        0.0,
-                                        0.0,
-                                        event::TouchPhase::Ended,
-                                    );
-                                }
-                                if self.touchpad_gestures.hover_exit()
-                                    == Some(TouchpadGestureAction::DragEnd)
-                                {
-                                    send_mouse_button(
-                                        callback,
-                                        self.window_target(),
-                                        window_id,
-                                        device_id,
-                                        event::ElementState::Released,
-                                        MouseButton::Left,
-                                    );
-                                }
-                            },
-                            MotionAction::HoverEnter => {
-                                // A fresh hover cursor while Portal still owns a synthetic
-                                // drag proves the drag contact died silently (no terminal
-                                // event arrived): reconcile the orphan exactly once. All
-                                // other states are left untouched.
-                                if self.touchpad_gestures.hover_enter()
-                                    == Some(TouchpadGestureAction::DragEnd)
-                                {
-                                    send_mouse_button(
-                                        callback,
-                                        self.window_target(),
-                                        window_id,
-                                        device_id,
-                                        event::ElementState::Released,
-                                        MouseButton::Left,
-                                    );
-                                }
+                            MotionAction::PointerDown | MotionAction::PointerUp => {
+                                self.end_touchpad_scroll(
+                                    callback,
+                                    device_id,
+                                    event::TouchPhase::Ended,
+                                );
                             },
                             _ => {},
                         }
