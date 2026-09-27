@@ -1,4 +1,4 @@
-From e054900e50f7f1fe9aaedebfffc76fd79cdeaa33 Mon Sep 17 00:00:00 2001
+From 4983ff13a9bfd199cb86ac2b742ef5057b40aa5b Mon Sep 17 00:00:00 2001
 From: Portal <masobazee@gmail.com>
 Date: Sun, 27 Sep 2026 12:29:50 +0100
 Subject: [PATCH] backends/anland: Fix touchpad cursor drift, scroll units and
@@ -17,11 +17,11 @@ Subject: [PATCH] backends/anland: Fix touchpad cursor drift, scroll units and
   scrolling themselves. Fingers landing on the pad (a scroll end without
   a scroll) stop it.
 ---
- src/backends/anland/anland_backend.cpp |  27 +++--
+ src/backends/anland/anland_backend.cpp |  27 +++-
  src/backends/anland/anland_backend.h   |   1 +
- src/backends/anland/anland_input.cpp   | 161 ++++++++++++++++++++++++-
- src/backends/anland/anland_input.h     |  23 ++++
- 4 files changed, 202 insertions(+), 10 deletions(-)
+ src/backends/anland/anland_input.cpp   | 173 ++++++++++++++++++++++++-
+ src/backends/anland/anland_input.h     |  24 ++++
+ 4 files changed, 214 insertions(+), 11 deletions(-)
 
 diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
 index 15366cd..100f025 100644
@@ -89,7 +89,7 @@ index 3a1f002..8df71bb 100644
      void enterFallback();
  
 diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
-index ac79888..86b1a1e 100644
+index ac79888..b7e06bf 100644
 --- a/src/backends/anland/anland_input.cpp
 +++ b/src/backends/anland/anland_input.cpp
 @@ -9,6 +9,7 @@
@@ -191,7 +191,7 @@ index ac79888..86b1a1e 100644
      const PointerAxisSource source =
          deltaV120 != 0 ? PointerAxisSource::Wheel : PointerAxisSource::Continuous;
      // 6.x pointerAxisChanged carries an explicit "inverted" (natural scroll) flag;
-@@ -161,11 +209,24 @@ void AnlandInputDevice::pointerAxisFinger(PointerAxis axis, qreal delta)
+@@ -161,22 +209,138 @@ void AnlandInputDevice::pointerAxisFinger(PointerAxis axis, qreal delta)
      // Exactly one layer owns each transformation: the host sends raw
      // buffer-px deltas, so the kcminputrc scroll factor and natural-scroll
      // inversion are applied here, finger-source only.
@@ -207,6 +207,7 @@ index ac79888..86b1a1e 100644
          delta = -delta;
      }
 -    Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Finger, m_naturalScroll, now(), this);
+-    Q_EMIT InputDevice::pointerFrame(this);
 +    cancelFling();
 +    // Momentum works in finger travel (logical px), the gain applies on emit.
 +    const auto time = now();
@@ -214,15 +215,25 @@ index ac79888..86b1a1e 100644
 +        m_scrollSamples.pop_front();
 +    }
 +    m_scrollSamples.push_back({time, axis, delta});
-+    Q_EMIT pointerAxisChanged(axis, delta * m_scrollGain, 0, PointerAxisSource::Finger, m_naturalScroll, time, this);
-     Q_EMIT InputDevice::pointerFrame(this);
++    // Qt makes each value an angleDelta of 12 times it, rounded without
++    // carrying the rest, which dropped the small values that start a slow
++    // scroll. Send whole twelfths and carry the rest here instead.
++    qreal &carry = axis == PointerAxis::Vertical ? m_scrollCarry.ry() : m_scrollCarry.rx();
++    const qreal wanted = delta * m_scrollGain + carry;
++    const qreal value = std::trunc(wanted * 12) / 12;
++    carry = wanted - value;
++    if (value != 0) {
++        Q_EMIT pointerAxisChanged(axis, value, 0, PointerAxisSource::Finger, m_naturalScroll, time, this);
++        Q_EMIT InputDevice::pointerFrame(this);
++    }
  }
  
-@@ -173,10 +234,103 @@ void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
+ void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
  {
      Q_EMIT pointerAxisChanged(axis, 0, 0, PointerAxisSource::Finger, false, now(), this);
      Q_EMIT InputDevice::pointerFrame(this);
 +    m_fingerScrolling = false;
++    m_scrollCarry = QPointF();
 +    const bool scrolled = std::any_of(m_scrollSamples.cbegin(), m_scrollSamples.cend(), [axis](const ScrollSample &sample) {
 +        return sample.axis == axis;
 +    });
@@ -322,7 +333,7 @@ index ac79888..86b1a1e 100644
      Q_EMIT keyChanged(keycode,
                        pressed ? KeyboardKeyState::Pressed : KeyboardKeyState::Released,
                        now(), this);
-@@ -184,6 +338,7 @@ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
+@@ -184,6 +348,7 @@ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
  
  void AnlandInputDevice::touchDown(qint32 id, const QPointF &position)
  {
@@ -331,7 +342,7 @@ index ac79888..86b1a1e 100644
  }
  
 diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
-index abbad73..a6bb474 100644
+index abbad73..2d4ff4c 100644
 --- a/src/backends/anland/anland_input.h
 +++ b/src/backends/anland/anland_input.h
 @@ -26,6 +26,9 @@
@@ -344,7 +355,7 @@ index abbad73..a6bb474 100644
  namespace KWin
  {
  
-@@ -150,10 +153,30 @@ Q_SIGNALS:
+@@ -150,10 +153,31 @@ Q_SIGNALS:
      void scrollFactorChanged();
  
  private:
@@ -365,6 +376,7 @@ index abbad73..a6bb474 100644
      qreal m_scrollFactor = 1.0;
 +    qreal m_x11ScrollFactor = 1.0;
 +    qreal m_scrollGain = 1.0;
++    QPointF m_scrollCarry;
 +    bool m_fingerScrolling = false;
 +    std::deque<ScrollSample> m_scrollSamples;
 +    QTimer m_flingTimer;
