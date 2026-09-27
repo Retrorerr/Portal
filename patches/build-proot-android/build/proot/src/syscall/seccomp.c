@@ -391,7 +391,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_accept4,		FILTER_SYSEXIT },
 	{ PR_access,		0 },
 	{ PR_acct,		0 },
-	{ PR_bind,		0 },
+	{ PR_bind,		FILTER_SYSEXIT },
 	{ PR_brk,		FILTER_SYSEXIT },
 	{ PR_chdir,		FILTER_SYSEXIT },
 	{ PR_chmod,		0 },
@@ -456,6 +456,9 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_renameat2,		FILTER_SYSEXIT },
 	{ PR_rmdir,		0 },
 	{ PR_setrlimit,		FILTER_SYSEXIT },
+#ifdef __ANDROID__
+	{ PR_socket,		FILTER_SYSEXIT },
+#endif
 	{ PR_setxattr,		0 },
 	{ PR_socketcall,	FILTER_SYSEXIT },
 	{ PR_stat,		0 },

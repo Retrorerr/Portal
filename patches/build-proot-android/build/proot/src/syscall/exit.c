@@ -25,6 +25,9 @@
 #include <linux/net.h>   /* SYS_*, */
 #include <linux/ioctl.h> /* _IOW, */
 #include <string.h>      /* strlen(3), */
+#include <stdio.h>       /* snprintf(3), sscanf(3), */
+#include <unistd.h>      /* readlink(2), */
+#include <sys/socket.h>  /* AF_NETLINK, */
 
 #include "cli/note.h"
 #include "syscall/syscall.h"
@@ -45,6 +48,34 @@
 #include "ptrace/wait.h"
 #include "extension/extension.h"
 #include "arch.h"
+
+#ifdef __ANDROID__
+/* Inodes of the route sockets PRoot handed out for uevent sockets.  A
+ * small ring is enough: udev monitors are few and long-lived.  */
+#define NB_UEVENT_INODES 64
+static unsigned long uevent_inodes[NB_UEVENT_INODES];
+static size_t uevent_next;
+
+/* The inode of @pid's socket descriptor @fd, or 0.  */
+static unsigned long socket_inode(pid_t pid, int fd)
+{
+	char link[64];
+	char target[64];
+	unsigned long inode;
+	ssize_t length;
+
+	if (fd < 0)
+		return 0;
+	snprintf(link, sizeof(link), "/proc/%d/fd/%d", pid, fd);
+	length = readlink(link, target, sizeof(target) - 1);
+	if (length <= 0)
+		return 0;
+	target[length] = '\0';
+	if (sscanf(target, "socket:[%lu]", &inode) != 1)
+		return 0;
+	return inode;
+}
+#endif
 
 /**
  * Translate the output arguments of the current @tracee's syscall in
@@ -543,6 +574,41 @@ void translate_syscall_exit(Tracee *tracee)
 	case PR_statx:
 		status = handle_statx_syscall(tracee, false);
 		break;
+
+#ifdef __ANDROID__
+	case PR_socket:
+		/* Remember the route sockets handed out for netlink uevent
+		 * sockets (see syscall/enter.c).  */
+		if ((int) peek_reg(tracee, ORIGINAL, SYSARG_1) == AF_NETLINK
+		    && (int) peek_reg(tracee, ORIGINAL, SYSARG_3) == 15 /* NETLINK_KOBJECT_UEVENT */
+		    && (int) peek_reg(tracee, CURRENT, SYSARG_RESULT) >= 0) {
+			unsigned long inode = socket_inode(tracee->pid, (int) peek_reg(tracee, CURRENT, SYSARG_RESULT));
+			if (inode != 0)
+				uevent_inodes[uevent_next++ % NB_UEVENT_INODES] = inode;
+		}
+		goto end;
+
+	case PR_bind:
+		/* Android denies apps bind(2) on netlink sockets.  For a uevent
+		 * socket PRoot replaced with a route socket, report success:
+		 * the udev monitor then starts and never sees a hotplug event,
+		 * which is the truth inside the sandbox.  Without it, callers
+		 * such as SDL2 retry their device discovery on every event pump
+		 * (dozens of traced syscalls per frame in every SDL game).
+		 * Real route sockets keep the error their callers expect.  */
+		if ((int) peek_reg(tracee, CURRENT, SYSARG_RESULT) == -EACCES) {
+			unsigned long inode = socket_inode(tracee->pid, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+			size_t i;
+
+			for (i = 0; inode != 0 && i < NB_UEVENT_INODES; i++) {
+				if (uevent_inodes[i] == inode) {
+					poke_reg(tracee, SYSARG_RESULT, 0);
+					break;
+				}
+			}
+		}
+		goto end;
+#endif
 
 	case PR_ioctl:
 		if (peek_reg(tracee, ORIGINAL, SYSARG_2) == _IOW(0x94, 9, int) /* FICLONE */ &&

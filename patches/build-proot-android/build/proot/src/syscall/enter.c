@@ -23,6 +23,7 @@
 #include <errno.h>       /* errno(3), E* */
 #include <talloc.h>      /* talloc_*, */
 #include <sys/un.h>      /* struct sockaddr_un, */
+#include <sys/socket.h>  /* AF_NETLINK, */
 #include <linux/net.h>   /* SYS_*, */
 #include <fcntl.h>       /* AT_FDCWD, */
 #include <limits.h>      /* PATH_MAX, */
@@ -627,6 +628,20 @@ int translate_syscall_enter(Tracee *tracee)
 			(peek_reg(tracee, CURRENT, SYSARG_3) & AT_SYMLINK_NOFOLLOW) ? SYMLINK : REGULAR
 		);
 		break;
+
+#ifdef __ANDROID__
+	case PR_socket:
+		/* Apps may not create netlink uevent sockets on Android, so
+		 * libudev monitors never start and callers such as SDL2 retry
+		 * their device discovery on every event pump.  Hand out a
+		 * netlink route socket instead (apps may create those); its
+		 * bind(2) is denied too and reported as a success at exit, so
+		 * the monitor starts and simply never sees a hotplug event.  */
+		if ((int) peek_reg(tracee, CURRENT, SYSARG_1) == AF_NETLINK
+		    && (int) peek_reg(tracee, CURRENT, SYSARG_3) == 15 /* NETLINK_KOBJECT_UEVENT */)
+			poke_reg(tracee, SYSARG_3, 0 /* NETLINK_ROUTE */);
+		break;
+#endif
 
 	case PR_prctl:
 		/* Prevent tracees from setting dumpable flag.
