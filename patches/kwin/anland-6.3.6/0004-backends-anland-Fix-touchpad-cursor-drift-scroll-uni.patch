@@ -1,4 +1,4 @@
-From 9e737a8dae6707d40615a97c176e7226b42fcea1 Mon Sep 17 00:00:00 2001
+From e054900e50f7f1fe9aaedebfffc76fd79cdeaa33 Mon Sep 17 00:00:00 2001
 From: Portal <masobazee@gmail.com>
 Date: Sun, 27 Sep 2026 12:29:50 +0100
 Subject: [PATCH] backends/anland: Fix touchpad cursor drift, scroll units and
@@ -7,9 +7,11 @@ Subject: [PATCH] backends/anland: Fix touchpad cursor drift, scroll units and
 - Emit the relative motion before the absolute one. KWin moves the
   cursor by a relative motion's delta, so the old order left the cursor
   one step ahead of the host's.
-- Map motion and finger-scroll deltas as vectors to logical space. Scroll
-  values are in the logical space of pointer motion, but were passed as
-  raw buffer px, which scrolled output-scale times too far.
+- Map motion and finger-scroll deltas as vectors to logical space, and
+  scale finger scrolling down to a usable speed. Qt and Xwayland read
+  scroll values as wheel steps (Qt's angleDelta is 12 times the value),
+  so raw buffer px scrolled many times too far. X11 clients get a further
+  factor, overridable as X11ScrollFactor in kcminputrc.
 - Keep scrolling X11 windows after the fingers lift, decaying from the
   fingers' speed. X11 has no axis-stop, so X11 clients cannot do kinetic
   scrolling themselves. Fingers landing on the pad (a scroll end without
@@ -17,9 +19,9 @@ Subject: [PATCH] backends/anland: Fix touchpad cursor drift, scroll units and
 ---
  src/backends/anland/anland_backend.cpp |  27 +++--
  src/backends/anland/anland_backend.h   |   1 +
- src/backends/anland/anland_input.cpp   | 142 ++++++++++++++++++++++++-
- src/backends/anland/anland_input.h     |  20 ++++
- 4 files changed, 181 insertions(+), 9 deletions(-)
+ src/backends/anland/anland_input.cpp   | 161 ++++++++++++++++++++++++-
+ src/backends/anland/anland_input.h     |  23 ++++
+ 4 files changed, 202 insertions(+), 10 deletions(-)
 
 diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
 index 15366cd..100f025 100644
@@ -87,7 +89,7 @@ index 3a1f002..8df71bb 100644
      void enterFallback();
  
 diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
-index ac79888..a911678 100644
+index ac79888..86b1a1e 100644
 --- a/src/backends/anland/anland_input.cpp
 +++ b/src/backends/anland/anland_input.cpp
 @@ -9,6 +9,7 @@
@@ -108,10 +110,19 @@ index ac79888..a911678 100644
  
  namespace KWin
  {
-@@ -27,6 +30,26 @@ static std::chrono::microseconds now()
+@@ -27,6 +30,35 @@ static std::chrono::microseconds now()
          std::chrono::steady_clock::now().time_since_epoch());
  }
  
++// Qt (angleDelta is 12 times the value) and Xwayland (a wheel click per 10)
++// read finger-scroll values as wheel steps, so a logical px of finger travel
++// scrolled far more than a px. Calibrated by feel on the OnePlus Pad, so the
++// Plasma scroll-speed slider's default of 1 is the usable speed.
++static constexpr qreal FingerScrollGain = 0.1;
++// X11 clients, Firefox among them, take larger steps than Qt on top of that.
++// Overridable as X11ScrollFactor in the Portal Touchpad kcminputrc group.
++static constexpr qreal DefaultX11ScrollFactor = 0.5;
++
 +// Momentum for X11 windows (see startFling). Speeds are logical px per second.
 +using namespace std::chrono_literals;
 +static constexpr std::chrono::microseconds FlingSampleWindow = 100ms;
@@ -135,7 +146,7 @@ index ac79888..a911678 100644
  AnlandInputDevice::AnlandInputDevice(QObject *parent)
      : InputDevice(parent)
  {
-@@ -38,6 +61,10 @@ AnlandInputDevice::AnlandInputDevice(QObject *parent)
+@@ -38,6 +70,10 @@ AnlandInputDevice::AnlandInputDevice(QObject *parent)
      m_naturalScroll = m_config.readEntry("NaturalScroll", false);
      m_scrollFactor = m_config.readEntry("ScrollFactor", 1.0);
  
@@ -146,7 +157,7 @@ index ac79888..a911678 100644
      const bool registered = QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice/") + sysName(),
                                                                           QStringLiteral("org.kde.KWin.InputDevice"),
                                                                           this,
-@@ -133,13 +160,24 @@ void AnlandInputDevice::pointerMotionAbsolute(const QPointF &position)
+@@ -133,13 +169,24 @@ void AnlandInputDevice::pointerMotionAbsolute(const QPointF &position)
  
  void AnlandInputDevice::pointerMotion(const QPointF &pos, const QPointF &delta, const QPointF &deltaUnaccel)
  {
@@ -172,7 +183,7 @@ index ac79888..a911678 100644
      Q_EMIT pointerButtonChanged(button,
                                  pressed ? PointerButtonState::Pressed : PointerButtonState::Released,
                                  now(), this);
-@@ -148,6 +186,7 @@ void AnlandInputDevice::pointerButton(quint32 button, bool pressed)
+@@ -148,6 +195,7 @@ void AnlandInputDevice::pointerButton(quint32 button, bool pressed)
  
  void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120)
  {
@@ -180,25 +191,38 @@ index ac79888..a911678 100644
      const PointerAxisSource source =
          deltaV120 != 0 ? PointerAxisSource::Wheel : PointerAxisSource::Continuous;
      // 6.x pointerAxisChanged carries an explicit "inverted" (natural scroll) flag;
-@@ -165,7 +204,13 @@ void AnlandInputDevice::pointerAxisFinger(PointerAxis axis, qreal delta)
+@@ -161,11 +209,24 @@ void AnlandInputDevice::pointerAxisFinger(PointerAxis axis, qreal delta)
+     // Exactly one layer owns each transformation: the host sends raw
+     // buffer-px deltas, so the kcminputrc scroll factor and natural-scroll
+     // inversion are applied here, finger-source only.
+-    delta *= m_scrollFactor;
++    if (!m_fingerScrolling) {
++        // Read per scroll, so the X11 factor can be tuned without a restart.
++        m_fingerScrolling = true;
++        m_config.config()->reparseConfiguration();
++        m_x11ScrollFactor = m_config.readEntry("X11ScrollFactor", DefaultX11ScrollFactor);
++    }
++    m_scrollGain = m_scrollFactor * FingerScrollGain * (pointerOverXwayland() ? m_x11ScrollFactor : 1.0);
      if (m_naturalScroll) {
          delta = -delta;
      }
 -    Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Finger, m_naturalScroll, now(), this);
 +    cancelFling();
++    // Momentum works in finger travel (logical px), the gain applies on emit.
 +    const auto time = now();
 +    while (!m_scrollSamples.empty() && time - m_scrollSamples.front().time > FlingSampleWindow * 2) {
 +        m_scrollSamples.pop_front();
 +    }
 +    m_scrollSamples.push_back({time, axis, delta});
-+    Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Finger, m_naturalScroll, time, this);
++    Q_EMIT pointerAxisChanged(axis, delta * m_scrollGain, 0, PointerAxisSource::Finger, m_naturalScroll, time, this);
      Q_EMIT InputDevice::pointerFrame(this);
  }
  
-@@ -173,10 +218,102 @@ void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
+@@ -173,10 +234,103 @@ void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
  {
      Q_EMIT pointerAxisChanged(axis, 0, 0, PointerAxisSource::Finger, false, now(), this);
      Q_EMIT InputDevice::pointerFrame(this);
++    m_fingerScrolling = false;
 +    const bool scrolled = std::any_of(m_scrollSamples.cbegin(), m_scrollSamples.cend(), [axis](const ScrollSample &sample) {
 +        return sample.axis == axis;
 +    });
@@ -272,7 +296,7 @@ index ac79888..a911678 100644
 +    const qreal elapsed = std::chrono::duration<qreal>(time - m_flingLastStep).count();
 +    m_flingLastStep = time;
 +    const qreal decay = std::exp(-elapsed / FlingTimeConstant);
-+    const QPointF distance = m_flingVelocity * FlingTimeConstant * (1 - decay);
++    const QPointF distance = m_flingVelocity * FlingTimeConstant * (1 - decay) * m_scrollGain;
 +    m_flingVelocity *= decay;
 +    if (distance.y() != 0) {
 +        Q_EMIT pointerAxisChanged(PointerAxis::Vertical, distance.y(), 0, PointerAxisSource::Continuous, m_naturalScroll, time, this);
@@ -298,7 +322,7 @@ index ac79888..a911678 100644
      Q_EMIT keyChanged(keycode,
                        pressed ? KeyboardKeyState::Pressed : KeyboardKeyState::Released,
                        now(), this);
-@@ -184,6 +321,7 @@ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
+@@ -184,6 +338,7 @@ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
  
  void AnlandInputDevice::touchDown(qint32 id, const QPointF &position)
  {
@@ -307,7 +331,7 @@ index ac79888..a911678 100644
  }
  
 diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
-index abbad73..a46bbf9 100644
+index abbad73..a6bb474 100644
 --- a/src/backends/anland/anland_input.h
 +++ b/src/backends/anland/anland_input.h
 @@ -26,6 +26,9 @@
@@ -320,7 +344,7 @@ index abbad73..a46bbf9 100644
  namespace KWin
  {
  
-@@ -150,10 +153,27 @@ Q_SIGNALS:
+@@ -150,10 +153,30 @@ Q_SIGNALS:
      void scrollFactorChanged();
  
  private:
@@ -339,6 +363,9 @@ index abbad73..a46bbf9 100644
      KConfigGroup m_config;
      bool m_naturalScroll = false;
      qreal m_scrollFactor = 1.0;
++    qreal m_x11ScrollFactor = 1.0;
++    qreal m_scrollGain = 1.0;
++    bool m_fingerScrolling = false;
 +    std::deque<ScrollSample> m_scrollSamples;
 +    QTimer m_flingTimer;
 +    QPointF m_flingVelocity;
