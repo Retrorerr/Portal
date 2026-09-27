@@ -2953,6 +2953,35 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Launch-time freshness of a payload Portal copies into the guest. Size
+/// alone misses same-size rebuilds (two libkwin builds from pinned source
+/// matched to the byte count), so each copy carries a stamp of the embedded
+/// payload's hash. Hashing the embedded bytes is cheaper than reading the
+/// guest copy back on every launch.
+fn payload_is_current(target: &Path, payload: &[u8]) -> bool {
+    fs::metadata(target).map(|m| m.len() == payload.len() as u64).unwrap_or(false)
+        && fs::read_to_string(payload_stamp_path(target))
+            .map(|stamp| stamp == payload_fingerprint(payload))
+            .unwrap_or(false)
+}
+
+/// Record that `target` now holds `payload` (see `payload_is_current`).
+fn mark_payload_current(target: &Path, payload: &[u8]) {
+    let _ = fs::write(payload_stamp_path(target), payload_fingerprint(payload));
+}
+
+fn payload_stamp_path(target: &Path) -> PathBuf {
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    target.with_file_name(format!(".{name}.portal-stamp"))
+}
+
+fn payload_fingerprint(payload: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    payload.hash(&mut hasher);
+    format!("{}:{:016x}", payload.len(), hasher.finish())
+}
+
 /// Install Portal's ABI-matched Debian KWin overlay and migrate the
 /// pre-Anland layout. Runs on every provisioning pass AND every session
 /// launch (via `sync_session_runtime_files`), so existing runtimes converge
@@ -2968,14 +2997,13 @@ fn sync_kwin_overlay(fs_root: &Path) {
     let kwin_dir = fs_root.join("usr/local/lib/portal");
     let _ = fs::create_dir_all(&kwin_dir);
     let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
-    let fresh = fs::metadata(&kwin_library)
-        .map(|m| m.len() == KWIN_LIBRARY.len() as u64)
-        .unwrap_or(false);
-    if !fresh {
+    if !payload_is_current(&kwin_library, KWIN_LIBRARY) {
         let kwin_temporary = kwin_library.with_extension("6.3.6.tmp");
         if fs::write(&kwin_temporary, KWIN_LIBRARY).is_ok() {
             let _ = fs::set_permissions(&kwin_temporary, fs::Permissions::from_mode(0o755));
-            let _ = fs::rename(&kwin_temporary, &kwin_library);
+            if fs::rename(&kwin_temporary, &kwin_library).is_ok() {
+                mark_payload_current(&kwin_library, KWIN_LIBRARY);
+            }
         }
     }
     // Repair the soname chain even when the binary itself is already the
@@ -3003,26 +3031,24 @@ fn sync_kwin_overlay(fs_root: &Path) {
     }
     // Project Anland load-time stub for QPainter sessions (see ANLAND_STUB_BINARY).
     let stub_path = kwin_dir.join("libanland-stub.so");
-    let stub_fresh = fs::metadata(&stub_path)
-        .map(|m| m.len() == ANLAND_STUB_BINARY.len() as u64)
-        .unwrap_or(false);
-    if !stub_fresh {
+    if !payload_is_current(&stub_path, ANLAND_STUB_BINARY) {
         let stub_tmp = stub_path.with_extension("so.tmp");
         if fs::write(&stub_tmp, ANLAND_STUB_BINARY).is_ok() {
             let _ = fs::set_permissions(&stub_tmp, fs::Permissions::from_mode(0o755));
-            let _ = fs::rename(&stub_tmp, &stub_path);
+            if fs::rename(&stub_tmp, &stub_path).is_ok() {
+                mark_payload_current(&stub_path, ANLAND_STUB_BINARY);
+            }
         }
     }
     // Project Anland DRM shim for Anland sessions (see DRMSHIM_BINARY).
     let shim_path = kwin_dir.join("drmshim.so");
-    let shim_fresh = fs::metadata(&shim_path)
-        .map(|m| m.len() == DRMSHIM_BINARY.len() as u64)
-        .unwrap_or(false);
-    if !shim_fresh {
+    if !payload_is_current(&shim_path, DRMSHIM_BINARY) {
         let shim_tmp = shim_path.with_extension("so.tmp");
         if fs::write(&shim_tmp, DRMSHIM_BINARY).is_ok() {
             let _ = fs::set_permissions(&shim_tmp, fs::Permissions::from_mode(0o755));
-            let _ = fs::rename(&shim_tmp, &shim_path);
+            if fs::rename(&shim_tmp, &shim_path).is_ok() {
+                mark_payload_current(&shim_path, DRMSHIM_BINARY);
+            }
         }
     }
     // Project Anland damage hint (see ANLAND_DAMAGE_BINARY). Content-compared:
@@ -3077,12 +3103,11 @@ fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow:
             .map(|bytes| bytes == KWIN_ANLAND_LIBRARY)
             .unwrap_or(false)
     } else {
-        fs::metadata(&kwin_library)
-            .map(|m| m.len() == KWIN_ANLAND_LIBRARY.len() as u64)
-            .unwrap_or(false)
+        payload_is_current(&kwin_library, KWIN_ANLAND_LIBRARY)
     };
     if !fresh {
         write_guest_binary_result(&kwin_library, KWIN_ANLAND_LIBRARY)?;
+        mark_payload_current(&kwin_library, KWIN_ANLAND_LIBRARY);
     }
     // Atomic symlink swap (temp + rename): KWin must never observe a
     // half-deployed soname chain if a launch races a previous update. This
@@ -3128,14 +3153,13 @@ fn sync_xwayland_candidate_overlay(fs_root: &Path) {
         ("xinput", XWAYLAND_XINPUT_BINARY),
     ] {
         let target = candidate_dir.join(name);
-        let fresh = fs::metadata(&target)
-            .map(|m| m.len() == payload.len() as u64)
-            .unwrap_or(false);
-        if !fresh {
+        if !payload_is_current(&target, payload) {
             let tmp = candidate_dir.join(format!("{name}.tmp"));
             if fs::write(&tmp, payload).is_ok() {
                 let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755));
-                let _ = fs::rename(&tmp, &target);
+                if fs::rename(&tmp, &target).is_ok() {
+                    mark_payload_current(&target, payload);
+                }
             }
         }
     }
