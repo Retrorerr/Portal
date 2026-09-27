@@ -193,6 +193,11 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         // without zwp_tablet_v2 as pointer motion and left clicks instead of
         // dropping it.
         ("KWIN_WAYLAND_EMULATE_TABLET".into(), "1".into()),
+        // Qt 5's X11 plugin places pens from XI2 valuators and maps them with
+        // the wrong scale under Qt high-DPI scaling, which offsets Krita's
+        // strokes from the pen. The event coordinates are right (and still
+        // sub-pixel); Qt 6 is unaffected.
+        ("QT_XCB_TABLET_LEGACY_COORDINATES".into(), "1".into()),
         // KWIN_GL_DEBUG is deliberately NOT set: it enables every GL_KHR_debug
         // message class (performance/other included), making Mesa format and
         // deliver driver chatter through KWin's callback on the compositing

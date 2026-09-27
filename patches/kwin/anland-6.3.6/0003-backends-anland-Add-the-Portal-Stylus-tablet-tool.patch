@@ -1,4 +1,4 @@
-From 34446b498697b44d7845ed22d0530f39deed105e Mon Sep 17 00:00:00 2001
+From 14cadc10ed28672c0976fb073a63814734e81fb6 Mon Sep 17 00:00:00 2001
 From: Portal <masobazee@gmail.com>
 Date: Sun, 27 Sep 2026 04:29:38 +0100
 Subject: [PATCH] backends/anland: Add the Portal Stylus tablet tool
@@ -12,12 +12,12 @@ INPUT_TYPE_TABLET_TOOL (16) commits position, pressure and state flags.
 The host sends absolute state; proximity, tip and button transitions are
 derived here, so a dropped host event cannot leave the pen stuck down.
 ---
- src/backends/anland/anland_backend.cpp |  16 +++
+ src/backends/anland/anland_backend.cpp |  16 ++
  src/backends/anland/anland_backend.h   |   6 +
- src/backends/anland/anland_input.cpp   | 188 +++++++++++++++++++++++++
- src/backends/anland/anland_input.h     |  71 ++++++++++
+ src/backends/anland/anland_input.cpp   | 208 +++++++++++++++++++++++++
+ src/backends/anland/anland_input.h     |  72 +++++++++
  src/backends/anland/protocol.h         |  23 +++
- 5 files changed, 304 insertions(+)
+ 5 files changed, 325 insertions(+)
 
 diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
 index 72ab560..15366cd 100644
@@ -99,10 +99,21 @@ index 523ab82..3a1f002 100644
      QSocketNotifier *m_inputNotifier = nullptr;
      QSocketNotifier *m_bufReadyNotifier = nullptr;
 diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
-index ba6513d..57b9c45 100644
+index ba6513d..ac79888 100644
 --- a/src/backends/anland/anland_input.cpp
 +++ b/src/backends/anland/anland_input.cpp
-@@ -262,6 +262,191 @@ void AnlandInputDevice::setScrollFactor(qreal factor)
+@@ -8,6 +8,10 @@
+ #include "anland_backend.h"
+ #include "anland_logging.h"
+ 
++#include "wayland/seat.h"
++#include "wayland/tablet_v2.h"
++#include "wayland_server.h"
++
+ #include <KSharedConfig>
+ 
+ #include <QDBusConnection>
+@@ -262,6 +266,207 @@ void AnlandInputDevice::setScrollFactor(qreal factor)
      Q_EMIT scrollFactorChanged();
  }
  
@@ -283,7 +294,23 @@ index ba6513d..57b9c45 100644
 +    }
 +    m_buttons = 0;
 +    m_near = false;
++    endClientHover(time);
 +    Q_EMIT tabletToolProximityEvent(m_position, 0, m_tiltX, m_tiltY, 0, m_distance, false, false, activeTool(), time, this);
++}
++
++void AnlandTabletDevice::endClientHover(std::chrono::microseconds time)
++{
++    // Qt and Xwayland turn pen hover into pointer hover and never end it on
++    // proximity out, so the tooltip under the pen would stay up until the
++    // next hover. Moving the tool off its surface first ends the hover the way
++    // a mouse leaving would.
++    TabletSeatV2Interface *seat = waylandServer()->tabletManagerV2()->seat(waylandServer()->seat());
++    TabletToolV2Interface *tool = seat ? seat->tool(activeTool()) : nullptr;
++    if (!tool || !tool->currentSurface() || !tool->isClientSupported()) {
++        return;
++    }
++    tool->sendMotion(QPointF(-1, -1));
++    tool->sendFrame(std::chrono::duration_cast<std::chrono::milliseconds>(time).count());
 +}
 +
 +void AnlandTabletDevice::cancel()
@@ -294,7 +321,7 @@ index ba6513d..57b9c45 100644
  AnlandInputBackend::AnlandInputBackend(AnlandBackend *backend)
      : m_backend(backend)
  {
-@@ -289,6 +474,9 @@ void AnlandInputBackend::initialize()
+@@ -289,6 +494,9 @@ void AnlandInputBackend::initialize()
              Q_EMIT deviceAdded(device->sysName());
          }
      }
@@ -305,7 +332,7 @@ index ba6513d..57b9c45 100644
  
  QStringList AnlandInputBackend::devicesSysNames() const
 diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
-index 8681f78..24f89ca 100644
+index 8681f78..abbad73 100644
 --- a/src/backends/anland/anland_input.h
 +++ b/src/backends/anland/anland_input.h
 @@ -24,6 +24,8 @@
@@ -317,7 +344,7 @@ index 8681f78..24f89ca 100644
  namespace KWin
  {
  
-@@ -154,6 +156,75 @@ private:
+@@ -154,6 +156,76 @@ private:
      qreal m_scrollFactor = 1.0;
  };
  
@@ -375,6 +402,7 @@ index 8681f78..24f89ca 100644
 +private:
 +    AnlandTabletTool *activeTool();
 +    void leaveProximity(std::chrono::microseconds time);
++    void endClientHover(std::chrono::microseconds time);
 +
 +    AnlandTabletTool m_pen;
 +    AnlandTabletTool m_eraser;
