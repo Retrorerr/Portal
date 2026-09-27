@@ -19,6 +19,7 @@ pub mod core {
     pub mod runtime;
     pub mod shm_damage;
     pub mod startup;
+    pub mod stylus;
     pub mod surface_geometry;
     pub mod tablet_mode;
     pub mod wayland_protocol;

@@ -259,6 +259,34 @@ pub enum WindowEvent {
         position: PhysicalPosition<f64>,
     },
 
+    /// One Android stylus sample. While stylus events are enabled
+    /// ([`set_stylus_events`](crate::platform::android::set_stylus_events)) the
+    /// stylus and its eraser produce only this event, never the mouse emulation.
+    /// Batched historical samples arrive oldest first, one event each.
+    #[cfg(target_os = "android")]
+    AndroidStylus {
+        device_id: DeviceId,
+        position: PhysicalPosition<f64>,
+        /// Hovering within range, or touching.
+        in_range: bool,
+        /// Touching the screen.
+        down: bool,
+        /// The eraser end (`TOOL_TYPE_ERASER`).
+        eraser: bool,
+        /// `AXIS_PRESSURE`, 0..1.
+        pressure: f32,
+        /// `AXIS_TILT`: radians away from perpendicular to the screen.
+        tilt: f32,
+        /// `AXIS_ORIENTATION`: radians, 0 = pointing up, π/2 = pointing right.
+        orientation: f32,
+        /// `AXIS_DISTANCE`: hover distance, 0 when touching.
+        distance: f32,
+        /// `BUTTON_STYLUS_PRIMARY`.
+        primary_button: bool,
+        /// `BUTTON_STYLUS_SECONDARY`.
+        secondary_button: bool,
+    },
+
     /// The cursor has entered the window.
     ///
     /// ## Platform-specific

@@ -58,6 +58,12 @@ pub const INPUT_TYPE_POINTER_AXIS_FINGER: u32 = 13;
 /// Terminates an active finger scroll stream (zero-delta event preserving
 /// the finger source, like the nested backend's axisStopped handler).
 pub const INPUT_TYPE_POINTER_AXIS_STOP: u32 = 14;
+/// Portal Stylus: latches tilt and hover distance for the next
+/// `INPUT_TYPE_TABLET_TOOL`.
+pub const INPUT_TYPE_TABLET_TOOL_AXES: u32 = 15;
+/// Portal Stylus: commits one pen sample (position, pressure, state flags from
+/// `core::stylus`).
+pub const INPUT_TYPE_TABLET_TOOL: u32 = 16;
 
 pub const INPUT_ACTION_DOWN: i32 = 0;
 pub const INPUT_ACTION_UP: i32 = 1;
@@ -238,6 +244,33 @@ impl InputEvent {
         put_u32(&mut payload, 0, axis);
         Self {
             ev_type: INPUT_TYPE_POINTER_AXIS_STOP,
+            payload,
+        }
+    }
+
+    /// Tilt in degrees (-90..90, positive towards +x/+y) and hover distance
+    /// (0..1), applied to the next `tablet_tool`.
+    pub fn tablet_axes(tilt_x: f32, tilt_y: f32, distance: f32) -> Self {
+        let mut payload = [0u8; 16];
+        put_f32(&mut payload, 0, tilt_x);
+        put_f32(&mut payload, 4, tilt_y);
+        put_f32(&mut payload, 8, distance);
+        Self {
+            ev_type: INPUT_TYPE_TABLET_TOOL_AXES,
+            payload,
+        }
+    }
+
+    /// One pen sample: buffer-px position, pressure 0..1 and
+    /// `core::stylus::TABLET_TOOL_*` flags.
+    pub fn tablet_tool(x: f32, y: f32, pressure: f32, flags: u32) -> Self {
+        let mut payload = [0u8; 16];
+        put_f32(&mut payload, 0, x);
+        put_f32(&mut payload, 4, y);
+        put_f32(&mut payload, 8, pressure);
+        put_u32(&mut payload, 12, flags);
+        Self {
+            ev_type: INPUT_TYPE_TABLET_TOOL,
             payload,
         }
     }

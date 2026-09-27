@@ -38,6 +38,15 @@ pub(crate) use crate::cursor::{
 pub(crate) use crate::icon::NoIcon as PlatformIcon;
 
 static HAS_FOCUS: AtomicBool = AtomicBool::new(true);
+static STYLUS_EVENTS: AtomicBool = AtomicBool::new(false);
+
+pub fn set_stylus_events(enabled: bool) {
+    STYLUS_EVENTS.store(enabled, Ordering::Relaxed);
+}
+
+/// Motion axes a stylus sample carries beyond X/Y.
+const STYLUS_AXES: [input::Axis; 4] =
+    [input::Axis::Pressure, input::Axis::Orientation, input::Axis::Distance, input::Axis::Tilt];
 
 fn send_mouse_button<T: 'static, F>(
     callback: &mut F,
@@ -399,6 +408,7 @@ pub struct EventLoop<T: 'static> {
     touchpad_gestures: TouchpadGestureStateMachine,
     touchpad_clock: Instant,
     last_touchpad_device_id: Option<event::DeviceId>,
+    stylus_down: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -435,6 +445,10 @@ impl<T: 'static> EventLoop<T> {
         for axis_id in TOUCHPAD_GESTURE_AXIS_IDS {
             android_app.enable_motion_axis(input::Axis::from(axis_id));
         }
+        #[cfg(not(feature = "android-native-activity"))]
+        for axis in STYLUS_AXES {
+            android_app.enable_motion_axis(axis);
+        }
 
         Ok(Self {
             android_app: android_app.clone(),
@@ -463,6 +477,7 @@ impl<T: 'static> EventLoop<T> {
             touchpad_gestures: TouchpadGestureStateMachine::with_density(density),
             touchpad_clock: Instant::now(),
             last_touchpad_device_id: None,
+            stylus_down: false,
         })
     }
 
@@ -680,6 +695,67 @@ impl<T: 'static> EventLoop<T> {
         self.pending_redraw = pending_redraw;
     }
 
+    /// Forward one stylus `MotionEvent` as `AndroidStylus` samples: batched
+    /// history oldest first, then the current sample.
+    fn dispatch_stylus<F>(
+        &mut self,
+        motion_event: &input::MotionEvent<'_>,
+        pointer: &input::Pointer<'_>,
+        action: MotionAction,
+        tool_type: ToolType,
+        callback: &mut F,
+    ) where
+        F: FnMut(Event<T>, &RootAEL),
+    {
+        let (in_range, down) = match action {
+            MotionAction::Down | MotionAction::PointerDown | MotionAction::Move => (true, true),
+            MotionAction::HoverEnter | MotionAction::HoverMove => (true, false),
+            // Barrel buttons change while hovering or touching.
+            MotionAction::ButtonPress | MotionAction::ButtonRelease => (true, self.stylus_down),
+            // Up, HoverExit and Cancel leave range. Android sends HoverExit just
+            // before Down and HoverEnter just after Up while the pen stays near;
+            // the compositor absorbs those gaps.
+            _ => (false, false),
+        };
+        self.stylus_down = down;
+
+        let buttons = motion_event.button_state();
+        let device_id = event::DeviceId(DeviceId(motion_event.device_id()));
+        let window_id = window::WindowId(WindowId);
+        let eraser = tool_type == ToolType::Eraser;
+
+        let mut samples = Vec::new();
+        if matches!(action, MotionAction::Move | MotionAction::HoverMove) {
+            for historical in pointer.history() {
+                let axes = STYLUS_AXES.map(|axis| historical.axis_value(axis));
+                samples.push((historical.x(), historical.y(), axes));
+            }
+        }
+        samples.push((pointer.x(), pointer.y(), STYLUS_AXES.map(|axis| pointer.axis_value(axis))));
+
+        for (x, y, [pressure, orientation, distance, tilt]) in samples {
+            callback(
+                Event::WindowEvent {
+                    window_id,
+                    event: WindowEvent::AndroidStylus {
+                        device_id,
+                        position: PhysicalPosition { x: x as f64, y: y as f64 },
+                        in_range,
+                        down,
+                        eraser,
+                        pressure,
+                        tilt,
+                        orientation,
+                        distance,
+                        primary_button: buttons.stylus_primary(),
+                        secondary_button: buttons.stylus_secondary(),
+                    },
+                },
+                self.window_target(),
+            );
+        }
+    }
+
     fn handle_input_event<F>(
         &mut self,
         android_app: &AndroidApp,
@@ -704,6 +780,12 @@ impl<T: 'static> EventLoop<T> {
                 };
 
                 let tool_type = pointer.tool_type();
+                if matches!(tool_type, ToolType::Stylus | ToolType::Eraser)
+                    && STYLUS_EVENTS.load(Ordering::Relaxed)
+                {
+                    self.dispatch_stylus(motion_event, &pointer, action, tool_type, callback);
+                    return input_status;
+                }
                 // On Samsung Dex, `tool_type()` still reports `Finger` when using built-in trackpad
                 // So we also check for `source()`, as it correctly reports `Mouse` (although other devices such as Desktop AVDs report `Unknown``)
 

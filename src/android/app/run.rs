@@ -372,6 +372,9 @@ fn resume_anland(
                     refresh_mhz
                 );
                 backend.anland = Some(session);
+                // KWin's Portal Stylus takes the pen as a tablet tool; the
+                // QPainter path keeps winit's mouse emulation.
+                winit::platform::android::set_stylus_events(true);
             }
             Err(error) => {
                 log::error!("anland.session=start failed (stable QPainter path untouched): {error}");
@@ -485,6 +488,38 @@ fn forward_anland_input(
             );
             note_motion_logged(position.x, position.y, "android-pointer");
             session.send_pointer_motion(position.x as f32, position.y as f32);
+        }
+        WindowEvent::AndroidStylus {
+            position,
+            in_range,
+            down,
+            eraser,
+            pressure,
+            tilt,
+            orientation,
+            distance,
+            primary_button,
+            secondary_button,
+            ..
+        } => {
+            use crate::core::stylus;
+            let (tilt_x, tilt_y) = stylus::tilt_degrees(*tilt, *orientation);
+            let flags =
+                stylus::tool_flags(*in_range, *down, *eraser, *primary_button, *secondary_button);
+            note_motion_logged(
+                position.x,
+                position.y,
+                &format!(
+                    "stylus flags={flags:#x} pressure={pressure:.2} tilt=({tilt_x:.0},{tilt_y:.0}) distance={distance:.2}"
+                ),
+            );
+            session.send_input(&AnlandInput::tablet_axes(tilt_x, tilt_y, stylus::unit(*distance)));
+            session.send_input(&AnlandInput::tablet_tool(
+                position.x as f32,
+                position.y as f32,
+                stylus::unit(*pressure),
+                flags,
+            ));
         }
         WindowEvent::MouseInput { state, button, .. } => {
             let code = match button {
@@ -661,6 +696,7 @@ impl PolarBearApp {
             if let Some(session) = backend.anland.take() {
                 session.stop();
             }
+            winit::platform::android::set_stylus_events(false);
         }
         accessibility::set_runtime_active(false);
         ime::reset();

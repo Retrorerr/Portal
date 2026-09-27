@@ -75,6 +75,17 @@ use crate::window::{Window, WindowAttributes};
 
 use self::activity::{AndroidApp, ConfigurationRef, Rect};
 
+/// Deliver the stylus as [`WindowEvent::AndroidStylus`] instead of emulating
+/// a mouse with it. Off by default; takes effect from the next input event.
+///
+/// [`WindowEvent::AndroidStylus`]: crate::event::WindowEvent::AndroidStylus
+pub fn set_stylus_events(enabled: bool) {
+    #[cfg(android_platform)]
+    crate::platform_impl::set_stylus_events(enabled);
+    #[cfg(not(android_platform))]
+    let _ = enabled;
+}
+
 /// Additional methods on [`EventLoop`] that are specific to Android.
 pub trait EventLoopExtAndroid {
     /// Get the [`AndroidApp`] which was used to create this event loop.

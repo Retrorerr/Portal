@@ -1,0 +1,436 @@
+From 34446b498697b44d7845ed22d0530f39deed105e Mon Sep 17 00:00:00 2001
+From: Portal <masobazee@gmail.com>
+Date: Sun, 27 Sep 2026 04:29:38 +0100
+Subject: [PATCH] backends/anland: Add the Portal Stylus tablet tool
+
+Android's stylus reaches KWin as a zwp_tablet_v2 tablet tool with
+pressure, tilt, hover distance, the eraser end and both barrel buttons.
+
+A pen sample is two input events that fit the 16-byte payload:
+INPUT_TYPE_TABLET_TOOL_AXES (15) latches tilt and distance, and
+INPUT_TYPE_TABLET_TOOL (16) commits position, pressure and state flags.
+The host sends absolute state; proximity, tip and button transitions are
+derived here, so a dropped host event cannot leave the pen stuck down.
+---
+ src/backends/anland/anland_backend.cpp |  16 +++
+ src/backends/anland/anland_backend.h   |   6 +
+ src/backends/anland/anland_input.cpp   | 188 +++++++++++++++++++++++++
+ src/backends/anland/anland_input.h     |  71 ++++++++++
+ src/backends/anland/protocol.h         |  23 +++
+ 5 files changed, 304 insertions(+)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index 72ab560..15366cd 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -105,6 +105,7 @@ AnlandBackend::~AnlandBackend()
+     }
+     // m_outputs are QObject children of this backend; ~QObject deletes them.
+     m_outputs.clear();
++    m_tabletDevice.reset();
+     m_inputDevice.reset();
+     if (m_display) {
+         ::disconnect(m_display); // C producer API, not QObject::disconnect
+@@ -147,6 +148,7 @@ bool AnlandBackend::initialize()
+     }
+ 
+     m_inputDevice = std::make_unique<AnlandInputDevice>();
++    m_tabletDevice = std::make_unique<AnlandTabletDevice>();
+ 
+     auto *output = new AnlandOutput(this, QStringLiteral("anland-1"));
+     output->init(QSize(w, h), static_cast<int>(refresh), 1.0);
+@@ -359,6 +361,17 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
+         }
+         break;
+     }
++    case INPUT_TYPE_TABLET_TOOL_AXES:
++        if (m_tabletDevice) {
++            m_tabletDevice->setAxes(ev.tablet_axes.tilt_x, ev.tablet_axes.tilt_y, ev.tablet_axes.distance);
++        }
++        break;
++    case INPUT_TYPE_TABLET_TOOL:
++        if (m_tabletDevice) {
++            const QPointF pos = mapInputToLogical(QPointF(ev.tablet_tool.x, ev.tablet_tool.y));
++            m_tabletDevice->toolState(pos, ev.tablet_tool.pressure, ev.tablet_tool.flags);
++        }
++        break;
+     case INPUT_TYPE_TOUCH_FRAME:
+         m_inputDevice->touchFrame();
+         break;
+@@ -461,6 +474,9 @@ void AnlandBackend::enterFallback()
+     if (m_inputDevice) {
+         m_inputDevice->touchCancel();
+     }
++    if (m_tabletDevice) {
++        m_tabletDevice->cancel();
++    }
+ 
+     // A frame may be in flight awaiting a buffer-ready that will never come now;
+     // fail it so the RenderLoop's frame accounting does not stall.
+diff --git a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
+index 523ab82..3a1f002 100644
+--- a/src/backends/anland/anland_backend.h
++++ b/src/backends/anland/anland_backend.h
+@@ -31,6 +31,7 @@ namespace KWin
+ 
+ class AnlandOutput;
+ class AnlandInputDevice;
++class AnlandTabletDevice;
+ class DrmDevice;
+ class OpenGLBackend;
+ class EglDisplay;
+@@ -70,6 +71,10 @@ public:
+     {
+         return m_inputDevice.get();
+     }
++    AnlandTabletDevice *tabletDevice() const
++    {
++        return m_tabletDevice.get();
++    }
+ 
+     bool notifyFramePresented();
+ 
+@@ -112,6 +117,7 @@ private:
+     std::unique_ptr<EglDisplay> m_eglDisplay;
+     QVector<AnlandOutput *> m_outputs;
+     std::unique_ptr<AnlandInputDevice> m_inputDevice;
++    std::unique_ptr<AnlandTabletDevice> m_tabletDevice;
+ 
+     QSocketNotifier *m_inputNotifier = nullptr;
+     QSocketNotifier *m_bufReadyNotifier = nullptr;
+diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
+index ba6513d..57b9c45 100644
+--- a/src/backends/anland/anland_input.cpp
++++ b/src/backends/anland/anland_input.cpp
+@@ -262,6 +262,191 @@ void AnlandInputDevice::setScrollFactor(qreal factor)
+     Q_EMIT scrollFactorChanged();
+ }
+ 
++// evdev codes for the stylus barrel buttons, as libinput reports them.
++static constexpr quint32 BtnStylus = 0x14b;
++static constexpr quint32 BtnStylus2 = 0x14c;
++
++AnlandTabletTool::AnlandTabletTool(Type type, quint64 serial, QObject *parent)
++    : InputDeviceTabletTool(parent)
++    , m_type(type)
++    , m_serial(serial)
++{
++}
++
++quint64 AnlandTabletTool::serialId() const
++{
++    return m_serial;
++}
++
++quint64 AnlandTabletTool::uniqueId() const
++{
++    return m_serial;
++}
++
++InputDeviceTabletTool::Type AnlandTabletTool::type() const
++{
++    return m_type;
++}
++
++QList<InputDeviceTabletTool::Capability> AnlandTabletTool::capabilities() const
++{
++    return {Pressure, Tilt, Distance};
++}
++
++AnlandTabletDevice::AnlandTabletDevice(QObject *parent)
++    : InputDevice(parent)
++    , m_pen(InputDeviceTabletTool::Pen, 1)
++    , m_eraser(InputDeviceTabletTool::Eraser, 2)
++{
++    m_leaveTimer.setSingleShot(true);
++    m_leaveTimer.setInterval(50);
++    connect(&m_leaveTimer, &QTimer::timeout, this, [this]() {
++        leaveProximity(now());
++    });
++}
++
++QString AnlandTabletDevice::name() const
++{
++    return QStringLiteral("Portal Stylus");
++}
++
++bool AnlandTabletDevice::isEnabled() const
++{
++    return m_enabled;
++}
++
++void AnlandTabletDevice::setEnabled(bool enabled)
++{
++    m_enabled = enabled;
++}
++
++bool AnlandTabletDevice::isKeyboard() const
++{
++    return false;
++}
++
++bool AnlandTabletDevice::isPointer() const
++{
++    return false;
++}
++
++bool AnlandTabletDevice::isTouchpad() const
++{
++    return false;
++}
++
++bool AnlandTabletDevice::isTouch() const
++{
++    return false;
++}
++
++bool AnlandTabletDevice::isTabletTool() const
++{
++    return true;
++}
++
++bool AnlandTabletDevice::isTabletPad() const
++{
++    return false;
++}
++
++bool AnlandTabletDevice::isTabletModeSwitch() const
++{
++    return false;
++}
++
++bool AnlandTabletDevice::isLidSwitch() const
++{
++    return false;
++}
++
++void AnlandTabletDevice::setAxes(qreal tiltX, qreal tiltY, qreal distance)
++{
++    m_tiltX = tiltX;
++    m_tiltY = tiltY;
++    m_distance = distance;
++}
++
++AnlandTabletTool *AnlandTabletDevice::activeTool()
++{
++    return m_eraserActive ? &m_eraser : &m_pen;
++}
++
++void AnlandTabletDevice::toolState(const QPointF &position, qreal pressure, quint32 flags)
++{
++    const auto time = now();
++    const bool down = flags & TABLET_TOOL_TIP_DOWN;
++    const bool near = down || (flags & TABLET_TOOL_IN_PROXIMITY);
++    const bool eraser = flags & TABLET_TOOL_ERASER;
++    const quint32 buttons = flags & (TABLET_TOOL_BUTTON1 | TABLET_TOOL_BUTTON2);
++
++    if (!near) {
++        if (m_near) {
++            // Lift the tip and release buttons now; leave proximity later
++            // unless the pen comes straight back.
++            toolState(m_position, 0, TABLET_TOOL_IN_PROXIMITY | (m_eraserActive ? TABLET_TOOL_ERASER : 0));
++            m_leaveTimer.start();
++        }
++        return;
++    }
++    m_leaveTimer.stop();
++    // Flipping the pen is a different tool: the old one leaves first.
++    if (m_near && eraser != m_eraserActive) {
++        leaveProximity(time);
++    }
++
++    m_position = position;
++    if (!down) {
++        pressure = 0;
++    }
++    if (!m_near) {
++        m_near = true;
++        m_eraserActive = eraser;
++        Q_EMIT tabletToolProximityEvent(position, pressure, m_tiltX, m_tiltY, 0, m_distance, false, true, activeTool(), time, this);
++    }
++    if (down != m_down) {
++        m_down = down;
++        Q_EMIT tabletToolTipEvent(position, pressure, m_tiltX, m_tiltY, 0, m_distance, down, true, activeTool(), time, this);
++    } else {
++        Q_EMIT tabletToolAxisEvent(position, pressure, m_tiltX, m_tiltY, 0, m_distance, down, true, activeTool(), time, this);
++    }
++
++    const quint32 changed = buttons ^ m_buttons;
++    m_buttons = buttons;
++    if (changed & TABLET_TOOL_BUTTON1) {
++        Q_EMIT tabletToolButtonEvent(BtnStylus, buttons & TABLET_TOOL_BUTTON1, activeTool(), time, this);
++    }
++    if (changed & TABLET_TOOL_BUTTON2) {
++        Q_EMIT tabletToolButtonEvent(BtnStylus2, buttons & TABLET_TOOL_BUTTON2, activeTool(), time, this);
++    }
++}
++
++void AnlandTabletDevice::leaveProximity(std::chrono::microseconds time)
++{
++    m_leaveTimer.stop();
++    if (!m_near) {
++        return;
++    }
++    if (m_down) {
++        m_down = false;
++        Q_EMIT tabletToolTipEvent(m_position, 0, m_tiltX, m_tiltY, 0, m_distance, false, true, activeTool(), time, this);
++    }
++    if (m_buttons & TABLET_TOOL_BUTTON1) {
++        Q_EMIT tabletToolButtonEvent(BtnStylus, false, activeTool(), time, this);
++    }
++    if (m_buttons & TABLET_TOOL_BUTTON2) {
++        Q_EMIT tabletToolButtonEvent(BtnStylus2, false, activeTool(), time, this);
++    }
++    m_buttons = 0;
++    m_near = false;
++    Q_EMIT tabletToolProximityEvent(m_position, 0, m_tiltX, m_tiltY, 0, m_distance, false, false, activeTool(), time, this);
++}
++
++void AnlandTabletDevice::cancel()
++{
++    leaveProximity(now());
++}
++
+ AnlandInputBackend::AnlandInputBackend(AnlandBackend *backend)
+     : m_backend(backend)
+ {
+@@ -289,6 +474,9 @@ void AnlandInputBackend::initialize()
+             Q_EMIT deviceAdded(device->sysName());
+         }
+     }
++    if (AnlandTabletDevice *tablet = m_backend->tabletDevice()) {
++        Q_EMIT deviceAdded(tablet);
++    }
+ }
+ 
+ QStringList AnlandInputBackend::devicesSysNames() const
+diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
+index 8681f78..24f89ca 100644
+--- a/src/backends/anland/anland_input.h
++++ b/src/backends/anland/anland_input.h
+@@ -24,6 +24,8 @@
+ 
+ #include <KConfigGroup>
+ 
++#include <QTimer>
++
+ namespace KWin
+ {
+ 
+@@ -154,6 +156,75 @@ private:
+     qreal m_scrollFactor = 1.0;
+ };
+ 
++class AnlandTabletTool : public InputDeviceTabletTool
++{
++    Q_OBJECT
++
++public:
++    AnlandTabletTool(Type type, quint64 serial, QObject *parent = nullptr);
++
++    quint64 serialId() const override;
++    quint64 uniqueId() const override;
++    Type type() const override;
++    QList<Capability> capabilities() const override;
++
++private:
++    Type m_type;
++    quint64 m_serial;
++};
++
++// The Portal Stylus: Android's stylus as a tablet tool, so clients that bind
++// zwp_tablet_v2 get pressure, tilt, hover distance and the eraser. The host
++// sends absolute pen state; the transitions KWin expects (proximity in/out,
++// tip down/up, button press/release) are derived here, so a lost host event
++// can never leave the pen stuck down. Leaving proximity is held back briefly:
++// Android reports the pen out of hover range just before it touches down and
++// after it lifts, and those gaps must not flicker the tool in and out.
++class AnlandTabletDevice : public InputDevice
++{
++    Q_OBJECT
++
++public:
++    explicit AnlandTabletDevice(QObject *parent = nullptr);
++
++    QString name() const override;
++    bool isEnabled() const override;
++    void setEnabled(bool enabled) override;
++
++    bool isKeyboard() const override;
++    bool isPointer() const override;
++    bool isTouchpad() const override;
++    bool isTouch() const override;
++    bool isTabletTool() const override;
++    bool isTabletPad() const override;
++    bool isTabletModeSwitch() const override;
++    bool isLidSwitch() const override;
++
++    // Latch tilt (degrees) and hover distance (0..1) for the next toolState().
++    void setAxes(qreal tiltX, qreal tiltY, qreal distance);
++    // Commit one pen sample (TABLET_TOOL_* flags).
++    void toolState(const QPointF &position, qreal pressure, quint32 flags);
++    // Lift the pen and leave proximity, e.g. when the consumer goes away.
++    void cancel();
++
++private:
++    AnlandTabletTool *activeTool();
++    void leaveProximity(std::chrono::microseconds time);
++
++    AnlandTabletTool m_pen;
++    AnlandTabletTool m_eraser;
++    QTimer m_leaveTimer;
++    bool m_enabled = true;
++    bool m_near = false;
++    bool m_down = false;
++    bool m_eraserActive = false;
++    quint32 m_buttons = 0;
++    QPointF m_position;
++    qreal m_tiltX = 0;
++    qreal m_tiltY = 0;
++    qreal m_distance = 0;
++};
++
+ class AnlandInputBackend : public InputBackend
+ {
+     Q_OBJECT
+diff --git a/src/backends/anland/protocol.h b/src/backends/anland/protocol.h
+index 726503a..e980595 100644
+--- a/src/backends/anland/protocol.h
++++ b/src/backends/anland/protocol.h
+@@ -73,6 +73,17 @@ struct buf_info {
+ #define INPUT_TYPE_POINTER_AXIS_FINGER 13
+ /* Portal: terminates an active finger scroll stream, { axis }. */
+ #define INPUT_TYPE_POINTER_AXIS_STOP 14
++/* Portal Stylus. One pen sample is two events: TABLET_TOOL_AXES latches tilt
++ * and hover distance, then TABLET_TOOL commits position, pressure and the
++ * TABLET_TOOL_* state flags. */
++#define INPUT_TYPE_TABLET_TOOL_AXES 15
++#define INPUT_TYPE_TABLET_TOOL      16
++
++#define TABLET_TOOL_IN_PROXIMITY (1u << 0)
++#define TABLET_TOOL_TIP_DOWN     (1u << 1)
++#define TABLET_TOOL_ERASER       (1u << 2)
++#define TABLET_TOOL_BUTTON1      (1u << 3) /* BTN_STYLUS */
++#define TABLET_TOOL_BUTTON2      (1u << 4) /* BTN_STYLUS2 */
+ 
+ /* Service identifiers used by OUTPUT_TYPE_RESOURCES_REQUEST / INPUT_TYPE_RESOURCE. */
+ #define SERVICE_TYPE_CAMERA 1
+@@ -109,6 +120,18 @@ struct InputEvent {
+             float    value;
+             int32_t  discrete;
+         } pointer_axis;
++        struct {
++            float    tilt_x;   /* degrees, -90..90, positive towards +x */
++            float    tilt_y;   /* degrees, -90..90, positive towards +y */
++            float    distance; /* 0 (touching) .. 1 (edge of hover range) */
++            uint32_t reserved;
++        } tablet_axes;
++        struct {
++            float    x;
++            float    y;
++            float    pressure; /* 0..1 */
++            uint32_t flags;    /* TABLET_TOOL_* */
++        } tablet_tool;
+         struct {
+             uint32_t refresh_mhz; // current display refresh rate, milli-Hz
+         } display;
