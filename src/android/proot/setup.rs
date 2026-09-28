@@ -1488,6 +1488,7 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     sync_kwin_overlay(fs_root);
     sync_guest_host_path_alias(fs_root);
     sync_chromium_entries(fs_root);
+    sync_libreoffice_launchers(fs_root);
     sync_default_applications(fs_root);
     sync_default_menu(fs_root);
     sync_firefox_config(fs_root);
@@ -1610,6 +1611,39 @@ fn sync_chromium_entries(fs_root: &Path) {
                 log::warn!("{} could not be updated: {error}", path.display());
             }
         }
+    }
+}
+
+/// Keep LibreOffice's Qt windows on the integer Wayland scale.
+///
+/// LibreOffice's Qt VCL plugin derives its DPI and frame geometry from
+/// `QScreen::devicePixelRatio()`, the integer `wl_output` scale (3 at KWin's
+/// 2.5), while Qt renders each window at the fractional scale from
+/// `wp_fractional_scale_v1`. The mismatch drew every dialog 1.2x too large for
+/// its window, cutting off the right and bottom edges with their buttons.
+/// Without that protocol Qt renders at the integer scale throughout and KWin
+/// downscales, which is the model LibreOffice's code assumes; the app stays a
+/// native Wayland client. `/usr/local/bin` precedes `/usr/bin` in PATH, so
+/// this covers the desktop entries (`Exec=libreoffice ...`) and terminal use.
+fn sync_libreoffice_launchers(fs_root: &Path) {
+    for name in ["libreoffice", "soffice"] {
+        let launcher = fs_root.join("usr/local/bin").join(name);
+        // Stale after an uninstall; resynced on the launch after an install.
+        if fs_root.join("usr/bin").join(name).symlink_metadata().is_err() {
+            if fs::read_to_string(&launcher).is_ok_and(|text| text.contains("Managed by Portal")) {
+                let _ = fs::remove_file(launcher);
+            }
+            continue;
+        }
+        write_executable(
+            &launcher,
+            &format!(
+                "#!/bin/sh\n\
+                 # Managed by Portal: LibreOffice's Qt VCL clips at fractional Wayland scales.\n\
+                 export QT_WAYLAND_DISABLED_INTERFACES=\"${{QT_WAYLAND_DISABLED_INTERFACES:+$QT_WAYLAND_DISABLED_INTERFACES,}}wp_fractional_scale_manager_v1\"\n\
+                 exec /usr/bin/{name} \"$@\"\n"
+            ),
+        );
     }
 }
 
