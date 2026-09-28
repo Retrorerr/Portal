@@ -69,7 +69,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.SideEffect
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.platform.LocalContext
 import app.polarbear.setup.components.LocalPortalVeil
+import app.polarbear.setup.components.SetupChecklist
+import app.polarbear.setup.components.setupChecklistPending
 import app.polarbear.setup.components.PortalEmphasized
 import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
@@ -359,6 +363,10 @@ internal fun PortalReturnScreen(
         repairPhase == ReturnRepairPhase.Failed ||
         repairPhase == ReturnRepairPhase.RecoveryRequested
     var updateBlocked by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    // Decided once per screen: ticking a step off keeps the card (showing it
+    // done) instead of yanking it away mid-read.
+    val checklistPending = remember { setupChecklistPending(context) }
     LaunchedEffect(repairBlocked, updateBlocked) {
         currentRepairBlocked(repairBlocked || updateBlocked)
     }
@@ -451,6 +459,17 @@ internal fun PortalReturnScreen(
                     suppressed = repairPhase != ReturnRepairPhase.Hidden,
                     onBlockedChanged = { updateBlocked = it },
                 )
+                // Installs from before the checklist existed, or that skipped
+                // a step, see it here until every step is done.
+                if (checklistPending) {
+                    SetupChecklist(
+                        palette = palette,
+                        title = "Finish setting up Android",
+                        modifier = Modifier
+                            .padding(top = 28.dp)
+                            .widthIn(max = PortalDimens.PickerMaxWidth),
+                    )
+                }
             }
         }
     }

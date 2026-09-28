@@ -76,6 +76,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.setup.components.AddAppsPicker
 import app.polarbear.setup.components.PortalAmbientFragments
+import app.polarbear.setup.components.SetupChecklist
+import app.polarbear.setup.components.setupChecklistApplies
 import app.polarbear.setup.components.StorageCapacityBar
 import app.polarbear.setup.components.rememberStorageCapacity
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -249,6 +251,7 @@ fun PortalSetupScreen(
     val veil = LocalPortalVeil.current
     SideEffect { veil.ink = palette.textPrimary }
     val capacity = rememberStorageCapacity()
+    val checklistApplies = remember { setupChecklistApplies() }
     val density = LocalDensity.current
     val icons by rememberAppIcons(APP_ICON_IDS)
     val reveal = rememberThemeReveal()
@@ -523,6 +526,23 @@ fun PortalSetupScreen(
                         }
                     }
                 }
+            }
+            // The install takes minutes: offer the Android settings Portal
+            // cannot change itself while the user waits.
+            AnimatedVisibility(
+                visible = checklistApplies &&
+                    (phase == SetupPhase.Installing || phase == SetupPhase.Failed),
+                enter = fadeIn(tween(420, delayMillis = 360, easing = PortalEmphasizedDecelerate)) +
+                    slideInVertically(tween(560, delayMillis = 300, easing = PortalEmphasized)) { it / 6 },
+                exit = fadeOut(tween(200, easing = PortalEmphasizedAccelerate)),
+            ) {
+                SetupChecklist(
+                    palette = palette,
+                    modifier = Modifier
+                        .padding(top = 16.dp)
+                        .widthIn(max = PortalDimens.SurfaceMaxWidth)
+                        .fillMaxWidth(0.94f),
+                )
             }
         }
 
