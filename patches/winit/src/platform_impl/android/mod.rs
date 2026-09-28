@@ -392,6 +392,9 @@ impl RedrawRequester {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct KeyEventExtra {
     pub meta_state: u32,
+    /// Hardware scan code (the evdev code for real keyboards, 0 for virtual
+    /// and injected keys such as the back gesture).
+    pub scan_code: u32,
 }
 
 pub struct EventLoop<T: 'static> {
@@ -1237,6 +1240,7 @@ impl<T: 'static> EventLoop<T> {
                                     text: None,
                                     platform_specific: KeyEventExtra {
                                         meta_state: key.meta_state().0,
+                                        scan_code: key.scan_code().max(0) as u32,
                                     },
                                 },
                                 is_synthetic: false,

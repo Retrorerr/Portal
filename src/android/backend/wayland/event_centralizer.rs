@@ -4,7 +4,7 @@ use crate::android::backend::wayland::{
         WinitMouseMovedEvent, WinitMouseWheelEvent, WinitTouchCancelledEvent, WinitTouchEndedEvent,
         WinitTouchMovedEvent, WinitTouchStartedEvent,
     },
-    keymap::physicalkey_to_scancode,
+    keymap::key_event_to_scancode,
     TouchMode, WaylandBackend,
 };
 use crate::android::utils::ndk;
@@ -198,7 +198,7 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             // unmapped OEM key, the stale Alt must still be released now
             // rather than lingering until the next mapped key.
             reconcile_modifiers(event.android_meta_state(), time as u32, backend);
-            let Some(scancode) = physicalkey_to_scancode(event.physical_key) else {
+            let Some(scancode) = key_event_to_scancode(&event) else {
                 // Never forward the sentinel evdev code 0. It is interpreted as an unknown
                 // key by libinput/KWin and can leave modifiers or key counters inconsistent.
                 log::debug!("Dropping keyboard event without a physical evdev mapping: {event:?}");

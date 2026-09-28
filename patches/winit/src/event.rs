@@ -703,6 +703,11 @@ impl KeyEvent {
     pub fn android_meta_state(&self) -> u32 {
         self.platform_specific.meta_state
     }
+
+    #[cfg(target_os = "android")]
+    pub fn android_scan_code(&self) -> u32 {
+        self.platform_specific.scan_code
+    }
 }
 
 /// Describes keyboard modifiers event.

@@ -1,6 +1,31 @@
+use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, NativeKeyCode, PhysicalKey};
 
-pub fn physicalkey_to_scancode(key: PhysicalKey) -> Option<u32> {
+const ANDROID_KEYCODE_BACK: u32 = 4;
+const EVDEV_KEY_ESC: u32 = 1;
+
+/// The evdev code to send the guest for an Android key event.
+///
+/// Android keyboards put a Back key where Esc belongs: the OnePlus Pad 3
+/// Keyboard's Esc sends evdev KEY_BACK (158), which Android reports as
+/// KEYCODE_BACK. A hardware Back key (non-zero scan code) therefore becomes
+/// Esc; the back gesture has no scan code and is still dropped. Any other key
+/// winit can't name passes its hardware evdev code through unchanged.
+pub fn key_event_to_scancode(event: &KeyEvent) -> Option<u32> {
+    let hardware_code = event.android_scan_code();
+    if let PhysicalKey::Unidentified(NativeKeyCode::Android(keycode)) = event.physical_key {
+        if hardware_code == 0 {
+            return None;
+        }
+        if keycode == ANDROID_KEYCODE_BACK {
+            return Some(EVDEV_KEY_ESC);
+        }
+        return Some(hardware_code);
+    }
+    physicalkey_to_scancode(event.physical_key)
+}
+
+fn physicalkey_to_scancode(key: PhysicalKey) -> Option<u32> {
     let code = match key {
         PhysicalKey::Code(code) => code,
         PhysicalKey::Unidentified(code) => {

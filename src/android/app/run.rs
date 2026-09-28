@@ -594,9 +594,9 @@ fn forward_anland_input(
                 // The Smithay path drops them the same way.
                 return;
             }
-            let Some(scancode) = crate::android::backend::wayland::keymap::physicalkey_to_scancode(
-                event.physical_key,
-            ) else {
+            let Some(scancode) =
+                crate::android::backend::wayland::keymap::key_event_to_scancode(&event)
+            else {
                 return;
             };
             let action = match event.state {
