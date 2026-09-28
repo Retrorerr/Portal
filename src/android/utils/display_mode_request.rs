@@ -12,9 +12,10 @@
 //! deduplicated here and the JNI call runs on a dedicated worker thread.
 
 use std::sync::{
-    atomic::{AtomicU32, AtomicU8, Ordering},
+    atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering},
     mpsc, Mutex, OnceLock,
 };
+use std::time::Instant;
 
 use jni::objects::{JObject, JValue};
 use jni::sys::_jobject;
@@ -26,6 +27,22 @@ const HIGH: u8 = 2;
 
 /// Last state handed to the worker (dedupe for per-frame callers).
 static REQUESTED: AtomicU8 = AtomicU8::new(UNKNOWN);
+
+/// When the held high-refresh request was last resolved (ms since `epoch()`).
+static RESOLVED_MS: AtomicU64 = AtomicU64::new(0);
+
+/// A held high-refresh request is resolved again this often. OnePlus Games
+/// applies its per-app refresh override just after Portal returns to the
+/// foreground, so a resume can read the system-wide peak (120 Hz) while the
+/// panel then runs at the app's 144 Hz. Resolving only on a fresh request left
+/// a continuously busy session requesting the 120 Hz mode and advertising
+/// 120 Hz to KWin on a 144 Hz panel.
+const RESOLVE_INTERVAL_MS: u64 = 2_000;
+
+fn epoch() -> &'static Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now)
+}
 
 /// Refresh (millihertz) of the mode the latest high-refresh request asked
 /// for, re-resolved against the live peak-refresh setting. 0 = unknown.
@@ -77,12 +94,18 @@ pub fn attach(android_app: &AndroidApp) {
 }
 
 /// Request (or release) the high-refresh display mode. Cheap and
-/// non-blocking; repeated identical requests are dropped.
+/// non-blocking; repeated identical requests are dropped, except that a held
+/// high-refresh request is re-resolved every `RESOLVE_INTERVAL_MS`.
 pub fn request(enable: bool) {
     let state = if enable { HIGH } else { LOW };
-    if REQUESTED.swap(state, Ordering::AcqRel) == state {
+    let now_ms = epoch().elapsed().as_millis() as u64;
+    if REQUESTED.swap(state, Ordering::AcqRel) == state
+        && (!enable
+            || now_ms.saturating_sub(RESOLVED_MS.load(Ordering::Acquire)) < RESOLVE_INTERVAL_MS)
+    {
         return;
     }
+    RESOLVED_MS.store(now_ms, Ordering::Release);
     let sent = worker()
         .and_then(|tx| tx.lock().ok())
         .is_some_and(|tx| tx.send(enable).is_ok());
@@ -98,13 +121,15 @@ fn apply(enable: bool) {
     super::ndk::run_in_jvm(
         |env, app| {
             let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            let mut changed = !enable;
             if enable {
                 match env
                     .call_method(&activity, "highRefreshTargetMillihz", "()I", &[])
                     .and_then(|value| value.i())
                 {
                     Ok(millihz) if millihz > 0 => {
-                        TARGET_MILLIHZ.store(millihz as u32, Ordering::Release);
+                        changed = TARGET_MILLIHZ.swap(millihz as u32, Ordering::AcqRel)
+                            != millihz as u32;
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -122,7 +147,7 @@ fn apply(enable: bool) {
                 log::warn!("display-mode request (enable={enable}) failed: {error}");
                 let _ = env.exception_clear();
                 REQUESTED.store(UNKNOWN, Ordering::Release);
-            } else {
+            } else if changed {
                 log::info!("anland.refresh window high-refresh request enable={enable}");
             }
         },
