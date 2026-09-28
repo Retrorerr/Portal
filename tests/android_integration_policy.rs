@@ -348,11 +348,10 @@ fn nested_kwin_text_input_uses_protocol_commits_and_authoritative_hotplug() {
 
 #[test]
 fn nested_android_owned_settings_are_truthful() {
-    // Mozilla apps run through XWayland, where tabs drawn into their own
-    // title bar left black strips along growing edges during resizes; KWin
-    // decorates them instead, as a default users can still change.
-    assert!(ANDROID_SETUP_SOURCE.contains("defaultPref(\"browser.tabs.inTitlebar\", 0)"));
-    assert!(ANDROID_SETUP_SOURCE.contains("mail.tabs.drawInTitlebar"));
+    // Mozilla apps run natively on Wayland and keep their own tabs-in-title-bar
+    // layout; Portal no longer forces KWin's title bar on them.
+    assert!(!ANDROID_SETUP_SOURCE.contains("browser.tabs.inTitlebar"));
+    assert!(!ANDROID_SETUP_SOURCE.contains("mail.tabs.drawInTitlebar"));
     assert!(ANDROID_SETUP_SOURCE.contains("sync_firefox_config"));
     // Sandbox/audio/runtime compatibility prefs must remain.
     assert!(ANDROID_SETUP_SOURCE.contains("media.cubeb.sandbox"));

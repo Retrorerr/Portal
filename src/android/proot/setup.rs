@@ -1197,12 +1197,6 @@ defaultPref("layers.acceleration.force-enabled", true);
 // Render at KWin's fractional scale (2.5 on the Pad 3) rather than the next
 // integer (3) that KWin then scales down: fewer pixels, and sharp.
 defaultPref("widget.wayland.fractional-scale.enabled", true);
-// Server-side (KWin) title bar by default. With tabs drawn in the title bar
-// the X11 window grows before Firefox repaints, leaving black strips along
-// the new edges for the whole interactive resize; with KWin decorating the
-// window, resizes stay in sync (device-verified). Users can still re-enable
-// "Title Bar" off in Customize Toolbar.
-defaultPref("browser.tabs.inTitlebar", 0);
 
 "#;
 
@@ -1690,17 +1684,12 @@ application/vnd.openxmlformats-officedocument.presentationml.presentation=libreo
     }
 }
 
-/// Thunderbird default preferences. With tabs drawn in its own title bar,
-/// Thunderbird under XWayland left black strips along the growing edges
-/// during interactive resizes; with KWin decorating the window, resizes stay
-/// in sync. Users can still switch the title bar off again in Thunderbird's
-/// settings. Like Firefox (see `sync_firefox_config`), it renders at KWin's
-/// fractional scale on Wayland and forces GPU WebRender past the gfxInfo
-/// blocklist, without which it composited in software (`WebRender
-/// (Software)`, device-verified).
+/// Thunderbird default preferences. Like Firefox (see `sync_firefox_config`),
+/// it renders at KWin's fractional scale on Wayland and forces GPU WebRender
+/// past the gfxInfo blocklist, without which it composited in software
+/// (`WebRender (Software)`, device-verified).
 fn sync_thunderbird_defaults(fs_root: &Path) {
     const PREFS: &str = "// Managed by Portal: Thunderbird defaults (user settings still win).\n\
-pref(\"mail.tabs.drawInTitlebar\", false);\n\
 pref(\"widget.wayland.fractional-scale.enabled\", true);\n\
 pref(\"gfx.webrender.all\", true);\n\
 pref(\"layers.acceleration.force-enabled\", true);\n";
