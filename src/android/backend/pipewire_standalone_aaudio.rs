@@ -802,19 +802,28 @@ fn spawn_pipewire_pulse(
     spawn_logged(command, "pipewire-pulse")
 }
 
+/// Portal's tone chain (bass, loudness and a limiter in the sink) is on
+/// unless `<files>/audio-tone` says `off`.
+fn audio_tone_enabled() -> bool {
+    let flag = Path::new(crate::core::config::APP_FILES_ROOT).join("audio-tone");
+    fs::read_to_string(flag).map_or(true, |value| value.trim() != "off")
+}
+
 fn spawn_aaudio_sink(binary: &Path, env: &PipewireAaudioEnv) -> Result<Child, String> {
     pw_info!("spawn", "exec {}", binary.display());
     let mut command = Command::new(binary);
     apply_pipewire_env(&mut command, env);
     command
         .arg("--node-name")
-        .arg("localdesktop-aaudio-sink")
+        .arg("portal-audio-output")
         .arg("--rate")
         .arg("48000")
         .arg("--channels")
         .arg("2")
         .arg("--buffer-ms")
         .arg("120")
+        .arg("--tone")
+        .arg(if audio_tone_enabled() { "on" } else { "off" })
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

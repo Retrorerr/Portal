@@ -17,7 +17,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-const DEFAULT_NODE_NAME: &str = "localdesktop-aaudio-sink";
+const DEFAULT_NODE_NAME: &str = "portal-audio-output";
 const DEFAULT_RATE: u32 = 48000;
 const DEFAULT_CHANNELS: u32 = 2;
 const DEFAULT_BUFFER_MS: u32 = 120;
@@ -139,6 +139,154 @@ impl Sink {
 }
 
 // ----------------------------------------------------------------------------
+// Tone: Portal's own speaker voicing
+// ----------------------------------------------------------------------------
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+/// RBJ-cookbook biquad in transposed direct form II, one state per channel.
+/// f64 keeps the low-frequency filters' poles (near z = 1) numerically clean.
+struct Biquad {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    state: Vec<[f64; 2]>,
+}
+
+impl Biquad {
+    fn new(channels: usize, b: [f64; 3], a: [f64; 3]) -> Biquad {
+        Biquad {
+            b0: b[0] / a[0],
+            b1: b[1] / a[0],
+            b2: b[2] / a[0],
+            a1: a[1] / a[0],
+            a2: a[2] / a[0],
+            state: vec![[0.0; 2]; channels],
+        }
+    }
+
+    fn high_pass(channels: usize, rate: f64, hz: f64, q: f64) -> Biquad {
+        let w = std::f64::consts::TAU * hz / rate;
+        let (sin, cos) = w.sin_cos();
+        let alpha = sin / (2.0 * q);
+        Biquad::new(
+            channels,
+            [(1.0 + cos) / 2.0, -(1.0 + cos), (1.0 + cos) / 2.0],
+            [1.0 + alpha, -2.0 * cos, 1.0 - alpha],
+        )
+    }
+
+    /// Low (`low = true`) or high shelf with slope 1.
+    fn shelf(channels: usize, rate: f64, hz: f64, gain_db: f64, low: bool) -> Biquad {
+        let a = 10f64.powf(gain_db / 40.0);
+        let w = std::f64::consts::TAU * hz / rate;
+        let (sin, cos) = w.sin_cos();
+        let alpha = sin / 2.0 * std::f64::consts::SQRT_2;
+        let beta = 2.0 * a.sqrt() * alpha;
+        let s = if low { 1.0 } else { -1.0 };
+        Biquad::new(
+            channels,
+            [
+                a * ((a + 1.0) - s * (a - 1.0) * cos + beta),
+                s * 2.0 * a * ((a - 1.0) - s * (a + 1.0) * cos),
+                a * ((a + 1.0) - s * (a - 1.0) * cos - beta),
+            ],
+            [
+                (a + 1.0) + s * (a - 1.0) * cos + beta,
+                -s * 2.0 * ((a - 1.0) + s * (a + 1.0) * cos),
+                (a + 1.0) + s * (a - 1.0) * cos - beta,
+            ],
+        )
+    }
+
+    fn run(&mut self, channel: usize, x: f64) -> f64 {
+        let [s1, s2] = self.state[channel];
+        let y = self.b0 * x + s1;
+        self.state[channel] = [self.b1 * x - self.a1 * y + s2, self.b2 * x - self.a2 * y];
+        y
+    }
+}
+
+/// Fuller, louder output without clipping: a subsonic high-pass (tablet
+/// speakers can't play below ~40 Hz, and boosting there only eats headroom),
+/// a low shelf for bass, a small high shelf so the bass doesn't turn muddy,
+/// make-up gain, then a stereo-linked peak limiter that holds every sample
+/// under the ceiling. Runs on the AAudio callback, so it adds no latency.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct Tone {
+    channels: usize,
+    filters: [Biquad; 3],
+    gain: f64,
+    ceiling: f64,
+    release: f64,
+    limiter_gain: f64,
+}
+
+impl Tone {
+    const HIGH_PASS_HZ: f64 = 35.0;
+    const BASS_HZ: f64 = 110.0;
+    const BASS_DB: f64 = 4.5;
+    const AIR_HZ: f64 = 8000.0;
+    const AIR_DB: f64 = 1.5;
+    const GAIN_DB: f64 = 2.5;
+    /// -0.6 dBFS: headroom for Android's own resampling and mixing.
+    const CEILING: f64 = 0.933;
+    const RELEASE_MS: f64 = 80.0;
+
+    fn new(rate: u32, channels: usize) -> Tone {
+        let rate = rate as f64;
+        Tone {
+            channels,
+            filters: [
+                Biquad::high_pass(channels, rate, Self::HIGH_PASS_HZ, std::f64::consts::FRAC_1_SQRT_2),
+                Biquad::shelf(channels, rate, Self::BASS_HZ, Self::BASS_DB, true),
+                Biquad::shelf(channels, rate, Self::AIR_HZ, Self::AIR_DB, false),
+            ],
+            gain: 10f64.powf(Self::GAIN_DB / 20.0),
+            ceiling: Self::CEILING,
+            release: (-1000.0 / (Self::RELEASE_MS * rate)).exp(),
+            limiter_gain: 1.0,
+        }
+    }
+
+    /// Process interleaved frames in place.
+    fn process(&mut self, samples: &mut [f32]) {
+        let ch = self.channels;
+        let mut frame = [0.0f64; 8];
+        for chunk in samples.chunks_exact_mut(ch) {
+            let mut peak = 0.0f64;
+            for (c, sample) in chunk.iter().enumerate().take(frame.len()) {
+                let mut y = *sample as f64;
+                for filter in &mut self.filters {
+                    y = filter.run(c, y);
+                }
+                y *= self.gain;
+                frame[c] = y;
+                peak = peak.max(y.abs());
+            }
+
+            // Instant attack, smooth release: gain drops at once to keep this
+            // frame under the ceiling, then recovers toward unity.
+            let target = if peak > self.ceiling {
+                self.ceiling / peak
+            } else {
+                1.0
+            };
+            self.limiter_gain = if target < self.limiter_gain {
+                target
+            } else {
+                target + (self.limiter_gain - target) * self.release
+            };
+
+            for (c, sample) in chunk.iter_mut().enumerate().take(frame.len()) {
+                *sample = (frame[c] * self.limiter_gain) as f32;
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Arguments
 // ----------------------------------------------------------------------------
 
@@ -147,6 +295,7 @@ struct Args {
     rate: u32,
     channels: u32,
     buffer_ms: u32,
+    tone: bool,
 }
 
 enum Parsed {
@@ -156,7 +305,7 @@ enum Parsed {
 
 fn usage() {
     eprintln!(
-        "Usage: localdesktop-pipewire-aaudio-sink [--node-name NAME] [--rate HZ] [--channels N] [--buffer-ms MS]"
+        "Usage: localdesktop-pipewire-aaudio-sink [--node-name NAME] [--rate HZ] [--channels N] [--buffer-ms MS] [--tone on|off]"
     );
 }
 
@@ -166,6 +315,7 @@ fn parse_args(argv: &[String]) -> Result<Parsed, String> {
         rate: DEFAULT_RATE,
         channels: DEFAULT_CHANNELS,
         buffer_ms: DEFAULT_BUFFER_MS,
+        tone: true,
     };
 
     let mut i = 0;
@@ -188,6 +338,13 @@ fn parse_args(argv: &[String]) -> Result<Parsed, String> {
             "--rate" => args.rate = number()?,
             "--channels" => args.channels = number()?,
             "--buffer-ms" => args.buffer_ms = number()?,
+            "--tone" => {
+                args.tone = match raw.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(format!("invalid value for --tone: {raw}")),
+                }
+            }
             other => return Err(format!("unknown argument {other}")),
         }
         i += 2;
@@ -218,6 +375,14 @@ mod android {
     /// Channel count of the opened AAudio stream, published before the stream
     /// starts so the data callback can emit silence until `SINK` exists.
     static AAUDIO_CHANNELS: AtomicUsize = AtomicUsize::new(0);
+    /// The open AAudio stream, read by the latency timer on the PipeWire loop.
+    static AAUDIO_STREAM: AtomicPtr<aaudio::Stream> = AtomicPtr::new(std::ptr::null_mut());
+    /// Portal's tone chain (`--tone on`), set before `SINK`. Only the AAudio
+    /// callback thread touches it after that.
+    static TONE: OnceLock<ToneCell> = OnceLock::new();
+
+    struct ToneCell(UnsafeCell<Tone>);
+    unsafe impl Sync for ToneCell {}
 
     impl Sink {
         /// Ask the graph for another quantum once the ring runs low. Called
@@ -260,6 +425,9 @@ mod android {
         pub const FORMAT_PCM_FLOAT: i32 = 2;
         pub const PERFORMANCE_MODE_LOW_LATENCY: i32 = 12;
         pub const SHARING_MODE_SHARED: i32 = 1;
+        pub const USAGE_MEDIA: i32 = 1;
+        pub const CONTENT_TYPE_MUSIC: i32 = 2;
+        pub const CLOCK_MONOTONIC: i32 = 1;
         pub const CALLBACK_RESULT_CONTINUE: i32 = 0;
 
         pub type DataCallback =
@@ -277,12 +445,16 @@ mod android {
             pub set_sharing_mode: unsafe extern "C" fn(*mut Builder, i32),
             pub set_sample_rate: unsafe extern "C" fn(*mut Builder, i32),
             pub set_channel_count: unsafe extern "C" fn(*mut Builder, i32),
+            pub set_usage: unsafe extern "C" fn(*mut Builder, i32),
+            pub set_content_type: unsafe extern "C" fn(*mut Builder, i32),
             pub set_data_callback: unsafe extern "C" fn(*mut Builder, DataCallback, *mut c_void),
             pub set_error_callback: unsafe extern "C" fn(*mut Builder, ErrorCallback, *mut c_void),
             pub open_stream: unsafe extern "C" fn(*mut Builder, *mut *mut Stream) -> Res,
             pub sample_rate: unsafe extern "C" fn(*mut Stream) -> i32,
             pub channel_count: unsafe extern "C" fn(*mut Stream) -> i32,
             pub buffer_size_in_frames: unsafe extern "C" fn(*mut Stream) -> i32,
+            pub frames_written: unsafe extern "C" fn(*mut Stream) -> i64,
+            pub timestamp: unsafe extern "C" fn(*mut Stream, i32, *mut i64, *mut i64) -> Res,
             pub request_start: unsafe extern "C" fn(*mut Stream) -> Res,
             pub request_stop: unsafe extern "C" fn(*mut Stream) -> Res,
             pub close: unsafe extern "C" fn(*mut Stream) -> Res,
@@ -315,12 +487,16 @@ mod android {
                         set_sharing_mode: sym(&lib, b"AAudioStreamBuilder_setSharingMode\0")?,
                         set_sample_rate: sym(&lib, b"AAudioStreamBuilder_setSampleRate\0")?,
                         set_channel_count: sym(&lib, b"AAudioStreamBuilder_setChannelCount\0")?,
+                        set_usage: sym(&lib, b"AAudioStreamBuilder_setUsage\0")?,
+                        set_content_type: sym(&lib, b"AAudioStreamBuilder_setContentType\0")?,
                         set_data_callback: sym(&lib, b"AAudioStreamBuilder_setDataCallback\0")?,
                         set_error_callback: sym(&lib, b"AAudioStreamBuilder_setErrorCallback\0")?,
                         open_stream: sym(&lib, b"AAudioStreamBuilder_openStream\0")?,
                         sample_rate: sym(&lib, b"AAudioStream_getSampleRate\0")?,
                         channel_count: sym(&lib, b"AAudioStream_getChannelCount\0")?,
                         buffer_size_in_frames: sym(&lib, b"AAudioStream_getBufferSizeInFrames\0")?,
+                        frames_written: sym(&lib, b"AAudioStream_getFramesWritten\0")?,
+                        timestamp: sym(&lib, b"AAudioStream_getTimestamp\0")?,
                         request_start: sym(&lib, b"AAudioStream_requestStart\0")?,
                         request_stop: sym(&lib, b"AAudioStream_requestStop\0")?,
                         close: sym(&lib, b"AAudioStream_close\0")?,
@@ -347,6 +523,9 @@ mod android {
             Some(sink) => {
                 sink.read(dst);
                 sink.maybe_trigger_process();
+                if let Some(tone) = TONE.get() {
+                    (*tone.0.get()).process(dst);
+                }
             }
         }
 
@@ -386,7 +565,13 @@ mod android {
 
             (api.set_direction)(builder, aaudio::DIRECTION_OUTPUT);
             (api.set_format)(builder, aaudio::FORMAT_PCM_FLOAT);
+            // Low latency on purpose. The deep-buffer output (POWER_SAVING)
+            // carries OnePlus's OplusAudioX tuning, but on the Pad 3 it added
+            // ~250 ms of latency, stuttered with this refill scheme and gave
+            // no audible gain, so the FAST path stays (2026-09-28).
             (api.set_performance_mode)(builder, aaudio::PERFORMANCE_MODE_LOW_LATENCY);
+            (api.set_usage)(builder, aaudio::USAGE_MEDIA);
+            (api.set_content_type)(builder, aaudio::CONTENT_TYPE_MUSIC);
             (api.set_sharing_mode)(builder, aaudio::SHARING_MODE_SHARED);
             (api.set_sample_rate)(builder, rate as i32);
             (api.set_channel_count)(builder, channels as i32);
@@ -414,17 +599,49 @@ mod android {
                 return Err("AAudioStream_requestStart failed".into());
             }
 
+            AAUDIO_STREAM.store(stream, Ordering::Release);
             Ok((stream, rate, channels))
         }
     }
 
     fn close_aaudio(stream: *mut aaudio::Stream) {
+        AAUDIO_STREAM.store(std::ptr::null_mut(), Ordering::Release);
         if let (Some(api), false) = (AAUDIO.get(), stream.is_null()) {
             unsafe {
                 (api.request_stop)(stream);
                 (api.close)(stream);
             }
         }
+    }
+
+    /// Time from a sample entering the ring to it leaving the speaker: the
+    /// frames AAudio holds but has not presented yet, plus what waits in the
+    /// ring. None until AAudio reports its first timestamp.
+    fn output_latency_ns(sink: &Sink) -> Option<i64> {
+        let api = AAUDIO.get()?;
+        let stream = AAUDIO_STREAM.load(Ordering::Acquire);
+        if stream.is_null() {
+            return None;
+        }
+        let (mut position, mut presented_ns) = (0i64, 0i64);
+        let written = unsafe {
+            if (api.timestamp)(stream, aaudio::CLOCK_MONOTONIC, &mut position, &mut presented_ns)
+                != aaudio::OK
+            {
+                return None;
+            }
+            (api.frames_written)(stream)
+        };
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+        let now_ns = now.tv_sec * 1_000_000_000 + now.tv_nsec;
+        let rate = sink.rate as i64;
+        let presented_now = position + (now_ns - presented_ns).max(0) * rate / 1_000_000_000;
+        let pending = (written - presented_now).max(0) + sink.buffered_frames() as i64;
+        Some(pending * 1_000_000_000 / rate)
     }
 
     // -- SPA pods ------------------------------------------------------------
@@ -494,6 +711,17 @@ mod android {
                     ))),
                 ),
             ],
+        }))
+    }
+
+    fn process_latency_pod(ns: i64) -> Vec<u8> {
+        pod_bytes(&spa::pod::Value::Object(spa::pod::Object {
+            type_: spa::utils::SpaTypes::ObjectParamProcessLatency.as_raw(),
+            id: spa::param::ParamType::ProcessLatency.as_raw(),
+            properties: vec![prop(
+                spa::sys::SPA_PARAM_PROCESS_LATENCY_ns,
+                spa::pod::Value::Long(ns),
+            )],
         }))
     }
 
@@ -640,7 +868,7 @@ mod android {
         let props = pw::properties::properties! {
             *pw::keys::MEDIA_CLASS => "Audio/Sink",
             *pw::keys::NODE_NAME => node_name,
-            *pw::keys::NODE_DESCRIPTION => "Portal AAudio Output",
+            *pw::keys::NODE_DESCRIPTION => "Portal Audio Output",
             *pw::keys::NODE_DRIVER => "true",
             *pw::keys::NODE_SUSPEND_ON_IDLE => "false",
             *pw::keys::AUDIO_RATE => sink.rate.to_string(),
@@ -675,6 +903,44 @@ mod android {
         sink.stream
             .store(stream.as_raw_ptr().cast(), Ordering::Release);
 
+        // Report the Android output latency so clients keep audio and video
+        // in sync (Firefox reads it through pipewire-pulse). It moves with the
+        // route, so it is sampled every half second. A single sample swings
+        // by about one data callback (AAudio's written count advances in
+        // callback steps), so the average of the last 8 samples is reported,
+        // and only when it moves by 10 ms or more.
+        let latency_stream = stream.clone();
+        let samples = std::cell::RefCell::new(std::collections::VecDeque::with_capacity(8));
+        let reported_ns = std::cell::Cell::new(0i64);
+        let latency_timer = mainloop.loop_().add_timer(move |_| {
+            let Some(sample) = output_latency_ns(sink) else { return };
+            let ns = {
+                let mut samples = samples.borrow_mut();
+                if samples.len() == 8 {
+                    samples.pop_front();
+                }
+                samples.push_back(sample);
+                if samples.len() < 8 {
+                    return;
+                }
+                samples.iter().sum::<i64>() / samples.len() as i64
+            };
+            if (ns - reported_ns.get()).abs() < 10_000_000 {
+                return;
+            }
+            let bytes = process_latency_pod(ns);
+            let Some(pod) = spa::pod::Pod::from_bytes(&bytes) else { return };
+            match latency_stream.update_params(&mut [pod]) {
+                Ok(()) => {
+                    note!("output latency {} ms", ns / 1_000_000);
+                    reported_ns.set(ns);
+                }
+                Err(e) => note!("failed to report latency: {e}"),
+            }
+        });
+        let half_second = std::time::Duration::from_millis(500);
+        latency_timer.update_timer(Some(half_second), Some(half_second));
+
         note!(
             "running node={node_name} rate={} channels={} ring_frames={}",
             sink.rate,
@@ -690,6 +956,10 @@ mod android {
 
         let result = (|| {
             let (aaudio_stream, rate, channels) = open_aaudio(args.rate, args.channels)?;
+            if args.tone {
+                let _ = TONE.set(ToneCell(UnsafeCell::new(Tone::new(rate, channels as usize))));
+            }
+            note!("tone {}", if args.tone { "on" } else { "off" });
             let sink = match SINK.get() {
                 Some(sink) => sink,
                 None => {
@@ -765,9 +1035,11 @@ mod tests {
     fn defaults_and_overrides_parse() {
         let d = args(&[]);
         assert_eq!(
-            (d.node_name.as_str(), d.rate, d.channels, d.buffer_ms),
-            (DEFAULT_NODE_NAME, 48000, 2, 120)
+            (d.node_name.as_str(), d.rate, d.channels, d.buffer_ms, d.tone),
+            (DEFAULT_NODE_NAME, 48000, 2, 120, true)
         );
+        assert!(!args(&["--tone", "off"]).tone);
+        assert!(parse_args(&["--tone".into(), "loud".into()]).is_err());
 
         let a = args(&["--node-name", "x", "--rate", "44100", "--channels", "1"]);
         assert_eq!((a.node_name.as_str(), a.rate, a.channels), ("x", 44100, 1));
@@ -831,6 +1103,54 @@ mod tests {
         // The first 44 frames were dropped, so frame 44 leads.
         assert_eq!(&dst[..2], &[88.0, 89.0]);
         assert_eq!(&dst[dst.len() - 2..], &[598.0, 599.0]);
+    }
+
+    /// Steady-state peak of a stereo sine at `hz` through a fresh Tone.
+    fn tone_peak(hz: f64, amplitude: f64) -> f64 {
+        let mut tone = Tone::new(48000, 2);
+        let mut samples: Vec<f32> = (0..48000)
+            .flat_map(|n| {
+                let x = (amplitude * (std::f64::consts::TAU * hz * n as f64 / 48000.0).sin()) as f32;
+                [x, x]
+            })
+            .collect();
+        tone.process(&mut samples);
+        samples[samples.len() / 2..]
+            .iter()
+            .fold(0.0f64, |peak, s| peak.max(s.abs() as f64))
+    }
+
+    fn db(ratio: f64) -> f64 {
+        20.0 * ratio.log10()
+    }
+
+    #[test]
+    fn tone_keeps_silence_silent() {
+        let mut tone = Tone::new(48000, 2);
+        let mut samples = vec![0.0f32; 4096];
+        tone.process(&mut samples);
+        assert!(samples.iter().all(|s| *s == 0.0));
+    }
+
+    #[test]
+    fn tone_lifts_bass_and_level_below_the_limiter() {
+        // Quiet enough that the limiter never engages.
+        let mid = db(tone_peak(1000.0, 0.1) / 0.1);
+        let bass = db(tone_peak(70.0, 0.1) / 0.1);
+        let rumble = db(tone_peak(15.0, 0.1) / 0.1);
+        assert!((mid - Tone::GAIN_DB).abs() < 0.5, "mid {mid} dB");
+        assert!(bass > mid + 3.0, "bass {bass} dB vs mid {mid} dB");
+        assert!(rumble < mid, "rumble {rumble} dB vs mid {mid} dB");
+    }
+
+    #[test]
+    fn tone_never_exceeds_the_ceiling() {
+        for hz in [50.0, 100.0, 1000.0, 10000.0] {
+            let peak = tone_peak(hz, 1.0);
+            assert!(peak <= Tone::CEILING + 1e-6, "{hz} Hz peaked at {peak}");
+            // Loud input still comes out loud, not squashed.
+            assert!(peak > 0.8, "{hz} Hz only reached {peak}");
+        }
     }
 
     #[test]
