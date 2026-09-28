@@ -1489,8 +1489,27 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     sync_guest_host_path_alias(fs_root);
     sync_chromium_entries(fs_root);
     sync_default_applications(fs_root);
+    sync_default_menu(fs_root);
     sync_firefox_config(fs_root);
     sync_thunderbird_defaults(fs_root);
+}
+
+/// Give unprefixed menu lookups Plasma's menu.
+///
+/// KService indexes applications through `${XDG_MENU_PREFIX}applications.menu`.
+/// The session exports `XDG_MENU_PREFIX=plasma-`, but Debian ships no plain
+/// `applications.menu`, so any process without that variable that triggers
+/// kbuildsycoca6 rewrote the shared database with zero applications: every
+/// panel launcher then showed a "?" icon until the next rebuild.
+fn sync_default_menu(fs_root: &Path) {
+    let menus = fs_root.join("etc/xdg/menus");
+    let link = menus.join("applications.menu");
+    if link.symlink_metadata().is_ok() || !menus.join("plasma-applications.menu").is_file() {
+        return;
+    }
+    if let Err(error) = std::os::unix::fs::symlink("plasma-applications.menu", &link) {
+        log::warn!("default application menu could not be installed: {error}");
+    }
 }
 
 /// Make the rootfs's own Android host path resolve inside the guest.
@@ -1642,11 +1661,15 @@ application/vnd.openxmlformats-officedocument.presentationml.presentation=libreo
 /// during interactive resizes; with KWin decorating the window, resizes stay
 /// in sync. Users can still switch the title bar off again in Thunderbird's
 /// settings. Like Firefox (see `sync_firefox_config`), it renders at KWin's
-/// fractional scale on Wayland.
+/// fractional scale on Wayland and forces GPU WebRender past the gfxInfo
+/// blocklist, without which it composited in software (`WebRender
+/// (Software)`, device-verified).
 fn sync_thunderbird_defaults(fs_root: &Path) {
     const PREFS: &str = "// Managed by Portal: Thunderbird defaults (user settings still win).\n\
 pref(\"mail.tabs.drawInTitlebar\", false);\n\
-pref(\"widget.wayland.fractional-scale.enabled\", true);\n";
+pref(\"widget.wayland.fractional-scale.enabled\", true);\n\
+pref(\"gfx.webrender.all\", true);\n\
+pref(\"layers.acceleration.force-enabled\", true);\n";
     let dir = fs_root.join("usr/lib/thunderbird/defaults/pref");
     if !dir.is_dir() {
         return;

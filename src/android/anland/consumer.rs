@@ -61,8 +61,12 @@ const HEARTBEAT_NS: u64 = 1_000_000_000;
 /// Presentation demand granted per KWin damage hint. Continuous animations
 /// re-hint every frame (each presented frame releases the client's next
 /// frame callback), so this only needs to bridge one frame at the slowest
-/// panel rate, plus KWin's catch-up repaints of the other window buffers.
-const DAMAGE_BURST_NS: u64 = 40_000_000;
+/// panel rate (50 Hz). A hint after the burst lapsed wakes the loop at once
+/// (see `damage_listener`), so a late frame costs no heartbeat. KWin's
+/// catch-up repaints of the other window buffers need no extra selects: they
+/// render with the next one. 40 ms bursts presented ~6 identical frames at
+/// 144 Hz for every isolated hint (clock, tray widgets).
+const DAMAGE_BURST_NS: u64 = 20_000_000;
 /// Hints closer together than this belong to one continuous animation.
 const DAMAGE_STREAK_GAP_NS: u64 = 50_000_000;
 /// Continuous damage this long counts as an animation and also requests the
@@ -1545,13 +1549,19 @@ fn spawn_damage_listener(
 /// KWin damage hints (guest preload `anland-damage.so`): KWin asked for a
 /// repaint of real scene content. Grant a short presentation burst so the
 /// next vsync tick selects; continuous animations keep re-hinting each frame.
-/// No eventfd wake: damage presents on the vsync grid, only input bypasses it.
+/// Hints inside a burst present on the vsync grid. The first hint after the
+/// loop went idle also wakes it: while idle it sleeps with display ticks
+/// disarmed, so an unwoken burst expired unseen and a client that paces to
+/// frame callbacks (it only commits after the previous frame was presented)
+/// fell back to the 1 Hz heartbeat.
 fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) {
     log::info!("anland.damage listener started");
     let mut buf = [0u8; 64];
     let mut streak_start_ns: u64 = 0;
     let mut last_hint_ns: u64 = 0;
     let mut hints: u64 = 0;
+    let mut wakes: u64 = 0;
+    let mut log_ns: u64 = 0;
     while inner.running.load(Ordering::Acquire) {
         match socket.recv(&mut buf) {
             Ok(_) => {}
@@ -1574,7 +1584,14 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
         }
         hints += 1;
         let until = now.wrapping_add(DAMAGE_BURST_NS);
-        inner.demand_until_ns.fetch_max(until, Ordering::AcqRel);
+        if inner.demand_until_ns.fetch_max(until, Ordering::AcqRel) <= now {
+            wakes += 1;
+            let _ = sys::eventfd_write(&inner.wake, 1);
+        }
+        if now.wrapping_sub(log_ns) >= 10_000_000_000 {
+            log::info!("anland.damage hints={hints} idle_wakes={wakes}");
+            log_ns = now;
+        }
         if now.wrapping_sub(last_hint_ns) > DAMAGE_STREAK_GAP_NS {
             streak_start_ns = now;
         }
