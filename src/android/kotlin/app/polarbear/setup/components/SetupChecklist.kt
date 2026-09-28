@@ -3,7 +3,7 @@ package app.polarbear.setup.components
 // Android settings Portal cannot change itself, offered while the install
 // runs (the user is waiting anyway). Each step opens the right Settings
 // screen; the child-process step ticks itself off once Android reports the
-// restriction disabled, the Games step (OxygenOS/ColorOS) on the user's word.
+// restriction disabled, the Games step (OPPO-family brands) on the user's word.
 
 import android.content.ActivityNotFoundException
 import android.content.Context
@@ -57,7 +57,7 @@ private const val TAG = "PortalSetupChecklist"
 private const val PREFS = "portal_setup_checklist"
 private const val PREF_GAMES_DONE = "games_added"
 
-/** The Games app that owns OxygenOS/ColorOS game handling. */
+/** The Games app behind game handling on OxygenOS, ColorOS and realme UI. */
 private const val OPLUS_GAMES_PACKAGE = "com.oplus.games"
 
 /**
@@ -89,8 +89,17 @@ fun setupChecklistPending(context: Context): Boolean =
 private fun childProcessStepApplies(): Boolean =
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
 
-private fun gamesStepApplies(): Boolean =
-    Build.MANUFACTURER.lowercase() in setOf("oneplus", "oppo", "realme")
+/**
+ * OPPO-family brands share one game stack (com.oplus.games) across OxygenOS,
+ * ColorOS and realme UI. Nothing tells the ROMs apart reliably (they report
+ * the same ro.build.version.oplusrom, and OnePlus ships ColorOS in China), so
+ * the step names the brand, never the ROM.
+ */
+private val OPLUS_BRANDS = mapOf("oneplus" to "OnePlus", "oppo" to "OPPO", "realme" to "realme")
+
+private fun oplusBrand(): String? = OPLUS_BRANDS[Build.MANUFACTURER.lowercase()]
+
+private fun gamesStepApplies(): Boolean = oplusBrand() != null
 
 /**
  * `true` once the restriction is off, `false` while it applies, `null` when
@@ -216,7 +225,7 @@ fun SetupChecklist(
             ChecklistStep(
                 number = ++number,
                 title = "Add Portal to Games",
-                body = "OxygenOS lowers the refresh rate for apps it doesn’t treat as games. " +
+                body = "${oplusBrand()} devices lower the refresh rate for apps they don’t treat as games. " +
                     "In the Games app, add Portal to your games.",
                 state = if (gamesDone) StepState.Done else StepState.Todo,
                 actionLabel = "Open Games",
