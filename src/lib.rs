@@ -6,6 +6,7 @@ pub mod core {
     pub mod clipboard_sync;
     pub mod config;
     pub mod coordinate_transform;
+    pub mod drm_nodes;
     pub mod guest_locale;
     #[cfg(unix)]
     pub mod guest_timezone;

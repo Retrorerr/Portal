@@ -68,7 +68,19 @@
  * __errno_location (resolved from the already-loaded libc at process start).
  *
  * Preloaded ONLY when ANLAND_SOCKET is set (see
- * assets/localdesktop-kwin-wrapper-v2.sh); never in QPainter mode.
+ * assets/localdesktop-startplasma.sh, which preloads it for the whole Plasma
+ * session so every client sees a working render node, and
+ * assets/localdesktop-kwin-wrapper-v2.sh); never in QPainter mode. Session-
+ * wide preload is quiet: the audit lines below are written only when
+ * DRMSHIM_VERBOSE is set in the process environment (the KWin wrapper sets it
+ * so kwin.log keeps the audit trail).
+ *
+ * Clients enumerate the node through libdrm (drmGetDevices2/
+ * drmGetDeviceFromDevId, statically bundled in Chromium/Electron), which
+ * needs a listable /dev/dri and /sys/dev/char/<maj>:<min>/device/{drm,uevent}.
+ * Those are PRoot binds of a host-built fake tree (see
+ * src/android/anland/mod.rs `fake_drm_binds`), whose renderD128 is a symlink
+ * to /dev/kgsl-3d0 so stat() reports the real kgsl char device number.
  *
  * Build (Windows host, NDK clang 18):
  *   clang --target=aarch64-linux-gnu -shared -fPIC -nostdlib -O2 \
@@ -267,6 +279,42 @@ static void shim_log_int(int v) {
     shim_write_all(buf + i, (size_t)(11 - i));
 }
 
+/* Audit logging is opt-in (DRMSHIM_VERBOSE in the environment): the shim is
+ * preloaded into the whole session, where per-open lines would flood client
+ * stderr. environ is the only extra libc symbol besides __errno_location. */
+extern char **environ;
+static int verbose_state = -1;
+static int verbose(void) {
+    if (verbose_state < 0) {
+        int on = 0;
+        for (char **e = environ; e && *e; e++) {
+            const char *k = "DRMSHIM_VERBOSE=";
+            const char *v = *e;
+            while (*k && *v == *k) {
+                k++;
+                v++;
+            }
+            if (!*k) {
+                on = 1;
+                break;
+            }
+        }
+        verbose_state = on;
+    }
+    return verbose_state;
+}
+
+/* Clients open the node from several threads at once (Chromium's GPU
+ * process); table writes take a tiny spinlock so entries are never lost. */
+static volatile int table_lock;
+static void lock_table(void) {
+    while (__atomic_exchange_n(&table_lock, 1, __ATOMIC_ACQUIRE))
+        ;
+}
+static void unlock_table(void) {
+    __atomic_store_n(&table_lock, 0, __ATOMIC_RELEASE);
+}
+
 #define MAX_FAKE_FDS 32
 struct fake_entry {
     int fd;
@@ -291,10 +339,11 @@ static int is_fake_fast(int fd) {
 }
 
 static void forget_fd(int fd) {
+    lock_table();
     int idx = find_fake(fd);
-    if (idx < 0)
-        return;
-    fake_tab[idx] = fake_tab[--fake_count];
+    if (idx >= 0)
+        fake_tab[idx] = fake_tab[--fake_count];
+    unlock_table();
 }
 
 /* Validated lookup: re-checks the live descriptor's dev+ino so a recycled
@@ -328,7 +377,7 @@ static int is_fake_validated(int fd) {
     return 0;
 }
 
-static void remember_fd(int fd) {
+static void remember_fd_locked(int fd) {
     int idx = find_fake(fd);
     struct kstat st;
     long rc = raw_syscall6(SYS_fstat, (long)fd, (long)&st, 0, 0, 0, 0);
@@ -371,6 +420,12 @@ static void remember_fd(int fd) {
     }
 }
 
+static void remember_fd(int fd) {
+    lock_table();
+    remember_fd_locked(fd);
+    unlock_table();
+}
+
 static int is_dri_node(const char *path) {
     return shim_streq(path, "/dev/dri/renderD128") || shim_streq(path, "/dev/dri/card0");
 }
@@ -396,15 +451,17 @@ static int fake_open_node(const char *label, const char *path) {
     if (fd < 0 || fd > 0x7FFFFFFF)
         return -1;
     remember_fd((int)fd);
-    shim_log("drmshim: faked ");
-    shim_log(label);
-    shim_log("(");
-    shim_log(path);
-    shim_log(") -> fd ");
-    shim_log_int((int)fd);
-    shim_log(" backing=");
-    shim_log(backing);
-    shim_log("\n");
+    if (verbose()) {
+        shim_log("drmshim: faked ");
+        shim_log(label);
+        shim_log("(");
+        shim_log(path);
+        shim_log(") -> fd ");
+        shim_log_int((int)fd);
+        shim_log(" backing=");
+        shim_log(backing);
+        shim_log("\n");
+    }
     return (int)fd;
 }
 
@@ -723,11 +780,13 @@ int ioctl(int fd, unsigned long request, ...) {
     if (DRM_IOCTL_NR(request) == DRM_IOCTL_VERSION_NR) {
         return handle_version_ioctl((struct drm_version *)arg);
     }
-    shim_log("drmshim: UNHANDLED ioctl ");
-    shim_log_ulong_hex(request);
-    shim_log(" on fake fd ");
-    shim_log_int(fd);
-    shim_log(" (failing ENOTTY)\n");
+    if (verbose()) {
+        shim_log("drmshim: UNHANDLED ioctl ");
+        shim_log_ulong_hex(request);
+        shim_log(" on fake fd ");
+        shim_log_int(fd);
+        shim_log(" (failing ENOTTY)\n");
+    }
     *__errno_location() = ENOTTY;
     return -1;
 }

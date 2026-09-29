@@ -166,6 +166,13 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         // timer and skips the Xwayland hop: an animated page cost ~6 s of
         // CPU per 10 s instead of ~11 s (Pad 3, 2026-09-27).
         ("MOZ_ENABLE_WAYLAND".into(), "1".into()),
+        // Firefox finds its DRM render device through EGL_EXT_device_drm_render
+        // _node, which Mesa's kgsl winsys does not report, so its DMABUF
+        // feature stays off ("missing DRM render device") even though the
+        // fake render node (see `fake_drm_binds`) opens through drmshim.
+        // Naming the node turns DMABUF on: fullscreen WebGL used ~35% less CPU
+        // (Pad 3, 2026-09-29). Gecko-only, so Thunderbird gets it too.
+        ("MOZ_DRM_DEVICE".into(), "/dev/dri/renderD128".into()),
         // SDL2 prefers X11 even under Wayland. Through Xwayland a
         // SuperTuxKart race cost ~17% of a core in Xwayland alone; natively
         // it runs at the same full-panel resolution and frame rate without
@@ -391,7 +398,48 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
             binds.push(BindMount::new(host, guest));
         }
     }
+    binds.extend(fake_drm_binds(files));
     binds
+}
+
+/// Fake DRM render node for libdrm clients (see `core::drm_nodes`).
+///
+/// The app sandbox denies `/dev/dri`, so anything enumerating DRM nodes
+/// through libdrm finds nothing: Chromium/Electron (which bundle libdrm)
+/// then drop to software compositing and WebGL readback. The tree is built
+/// from the kgsl node's real device number, because KWin advertises that
+/// number as its dmabuf main device and clients resolve it through
+/// `/sys/dev/char/<major>:<minor>/device/drm`. Skipped when the device is
+/// absent so a phone without KGSL is left exactly as before.
+fn fake_drm_binds(files: &std::path::Path) -> Vec<crate::core::runtime::BindMount> {
+    use crate::core::drm_nodes;
+    use crate::core::runtime::BindMount;
+    use std::os::unix::fs::MetadataExt;
+
+    let rdev = match std::fs::metadata(drm_nodes::KGSL_DEVICE) {
+        Ok(meta) => meta.rdev(),
+        Err(error) => {
+            log::info!("anland.drm-nodes skipped: {} unavailable ({error})", drm_nodes::KGSL_DEVICE);
+            return Vec::new();
+        }
+    };
+    match drm_nodes::build_fake_drm_tree(&files.join("fake-drm"), rdev) {
+        Ok(tree) => {
+            log::info!(
+                "anland.drm-nodes fake render node for kgsl {}:{}",
+                tree.major,
+                tree.minor
+            );
+            tree.pairs()
+                .into_iter()
+                .map(|(host, guest)| BindMount::new(host, guest))
+                .collect()
+        }
+        Err(error) => {
+            log::warn!("anland.drm-nodes could not build the fake DRM tree: {error}");
+            Vec::new()
+        }
+    }
 }
 
 /// Create the winit window for Anland mode and return it with the raw

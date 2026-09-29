@@ -48,6 +48,18 @@ if [ -n "${ANLAND_SOCKET:-}" ]; then
     # so a bare "wayland" made them abort unless they forced xcb themselves.
     export QT_QPA_PLATFORM="wayland;xcb"
     export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
+    # DRM render-node shim for the whole session, not just KWin. The app
+    # sandbox denies /dev/dri, so libdrm clients (Chromium/Electron bundle
+    # their own) otherwise find no render node and fall back to software
+    # compositing. Portal binds a fake /dev/dri and sysfs entry into the guest
+    # (see src/core/drm_nodes.rs); the shim answers the open and the DRM
+    # version query on top of it. Quiet unless DRMSHIM_VERBOSE is set.
+    if [ -r /usr/local/lib/portal/drmshim.so ]; then
+        case ":${LD_PRELOAD:-}:" in
+            *:/usr/local/lib/portal/drmshim.so:*) ;;
+            *) export LD_PRELOAD="/usr/local/lib/portal/drmshim.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+        esac
+    fi
 fi
 
 state_dir=/var/lib/localdesktop/session

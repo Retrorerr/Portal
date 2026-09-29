@@ -15,8 +15,14 @@ other than VERSION fail ENOTTY (logged); every non-DRM ioctl passes through
 to the real device, and every faked/unhandled ioctl number is logged to
 stderr (captured in /var/lib/localdesktop/kwin.log) for audit.
 
-Preloaded ONLY when ANLAND_SOCKET is set (see
-assets/localdesktop-kwin-wrapper-v2.sh); never in QPainter mode.
+Preloaded ONLY when ANLAND_SOCKET is set; never in QPainter mode. The whole
+Plasma session preloads it (assets/localdesktop-startplasma.sh), not just
+KWin, so libdrm clients see a render node too: Chromium/Electron bundle libdrm
+and otherwise fall back to software compositing. Those clients enumerate the
+node through a PRoot-bound fake /dev/dri and /sys/dev/char/<maj>:<min>/device/
+{drm,uevent} tree that Portal builds from /dev/kgsl-3d0's real device number
+(src/core/drm_nodes.rs). The shim is quiet unless DRMSHIM_VERBOSE is set; the
+KWin wrapper sets it so kwin.log keeps its audit trail.
 
 Source of truth: `assets/guest-arm64/drmshim.c` (freestanding, no libc
 dependency; raw AArch64 SVC for openat/write/ioctl so the shim never

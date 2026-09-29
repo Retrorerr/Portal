@@ -195,8 +195,14 @@ else
     # Project Anland DRM shim (Anland only): the app sandbox cannot open
     # /dev/dri/renderD128, which KWin's Anland backend requires at init.
     # Never set in QPainter mode.
+    # The session already preloads it for every client (startplasma), so only
+    # add it when KWin is started without that; KWin keeps the audit log.
     if [ -r /usr/local/lib/portal/drmshim.so ]; then
-        export LD_PRELOAD="/usr/local/lib/portal/drmshim.so${LD_PRELOAD:+:$LD_PRELOAD}"
+        case ":${LD_PRELOAD:-}:" in
+            *:/usr/local/lib/portal/drmshim.so:*) ;;
+            *) export LD_PRELOAD="/usr/local/lib/portal/drmshim.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+        esac
+        export DRMSHIM_VERBOSE=1
     fi
     # Project Anland damage hint (Anland only): forwards KWin's repaint
     # requests to the host so animations without input present at full rate.
