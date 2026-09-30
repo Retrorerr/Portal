@@ -43,6 +43,24 @@ typedef struct {
 
 #define FILTER_SYSEXIT  0x1
 
+#ifdef __ANDROID__
+/* Trace only when the first argument, a file descriptor, is
+ * PROOT_TRACED_FD_BASE or higher.  */
+#define FILTER_HIGH_FD  0x2
+/* Trace clone(2) only when it asks for new namespaces.  */
+#define FILTER_CLONE_NS 0x4
+#else
+#define FILTER_HIGH_FD  0
+#define FILTER_CLONE_NS 0
+#endif
+#define FILTER_ARGS (FILTER_HIGH_FD | FILTER_CLONE_NS)
+
+/* PRoot moves the descriptors it has to see every send, receive and
+ * close of up here (see syscall/exit.c).  Guests rarely hold this many
+ * files, and the default soft RLIMIT_NOFILE (1024) still allows it.  */
+#define PROOT_TRACED_FD_BASE 900
+
 extern int enable_syscall_filtering(const Tracee *tracee);
+extern int filtered_sysnum_flags(const Tracee *tracee, Sysnum sysnum);
 
 #endif /* SECCOMP_H */

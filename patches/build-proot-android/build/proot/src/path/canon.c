@@ -203,6 +203,7 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 	Finality finality;
 	const char *cursor;
 	int status;
+	unsigned int symlinks_followed = 0;
 
 	/* Avoid infinite loop on circular links.  */
 	if (recursion_level > MAXSYMLINKS)
@@ -281,45 +282,75 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		/* It's a link, so we have to dereference *and*
 		 * canonicalize to ensure we are not going outside the
 		 * new root.  */
-		comparison = compare_paths("/proc", guest_path);
-		switch (comparison) {
-		case PATHS_ARE_EQUAL:
-		case PATH1_IS_PREFIX:
-			/* Some links in "/proc" are generated
-			 * dynamically by the kernel.  PRoot has to
-			 * emulate some of them.  */
-			status = readlink_proc(tracee, scratch_path,
-					       guest_path, component, comparison);
-			switch (status) {
-			case CANONICALIZE:
-				/* The symlink is already dereferenced,
-				 * now canonicalize it.  */
-				goto canon;
+		{
+			const char *proc_base = guest_path;
+			char alias_base[PATH_MAX];
 
-			case DONT_CANONICALIZE:
-				/* If and only very final, this symlink
-				 * shouldn't be dereferenced nor canonicalized.  */
-				if (finality == FINAL_NORMAL) {
-					strcpy(guest_path, scratch_path);
-					return 0;
+			comparison = compare_paths("/proc", guest_path);
+
+			/* If guest_path is not under /proc directly,
+			 * check whether it aliases /proc via a binding
+			 * (e.g. /oldroot/proc when /oldroot is bound to
+			 * /).  Otherwise links like /oldroot/proc/self
+			 * would be resolved by the real kernel readlink
+			 * and return PRoot's own pid.  */
+			if (comparison != PATHS_ARE_EQUAL && comparison != PATH1_IS_PREFIX) {
+				strncpy(alias_base, guest_path, PATH_MAX - 1);
+				alias_base[PATH_MAX - 1] = '\0';
+				(void) substitute_binding(tracee, GUEST, alias_base);
+				if (strcmp(alias_base, guest_path) != 0) {
+					comparison = compare_paths("/proc", alias_base);
+					proc_base = alias_base;
 				}
-				break;
-
-			default:
-				if (status < 0)
-					return status;
 			}
 
-		default:
-			break;
+			switch (comparison) {
+			case PATHS_ARE_EQUAL:
+			case PATH1_IS_PREFIX:
+				/* Some links in "/proc" are generated
+				 * dynamically by the kernel.  PRoot has to
+				 * emulate some of them.  */
+				status = readlink_proc(tracee, scratch_path,
+						       proc_base, component, comparison);
+				switch (status) {
+				case CANONICALIZE:
+					/* The symlink is already dereferenced,
+					 * now canonicalize it.  */
+					goto canon;
+
+				case DONT_CANONICALIZE:
+					/* If and only very final, this symlink
+					 * shouldn't be dereferenced nor canonicalized.  */
+					if (finality == FINAL_NORMAL) {
+						strcpy(guest_path, scratch_path);
+						return 0;
+					}
+					break;
+
+				default:
+					if (status < 0)
+						return status;
+				}
+
+			default:
+				break;
+			}
 		}
 
 		status = readlink(host_path, scratch_path, sizeof(scratch_path));
 		if (status < 0)
-			return status;
+			return -errno;
 		else if (status == sizeof(scratch_path))
 			return -ENAMETOOLONG;
 		scratch_path[status] = '\0';
+
+		/* Don't notify extensions during the initialization of a binding.  */
+		if (tracee->glue_type == 0) {
+			status = notify_extensions(tracee, SYMLINK_DEREFERENCED,
+						(intptr_t) host_path, (intptr_t) scratch_path);
+			if (status < 0)
+				return status;
+		}
 
 		/* Remove the leading "root" part if needed, it's
 		 * useful for "/proc/self/cwd/" for instance.  */
@@ -332,7 +363,7 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		 * is/contains a link, moreover if it is not an
 		 * absolute link then it is relative to
 		 * 'guest_path'. */
-		status = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + 1);
+		status = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + (++symlinks_followed));
 		if (status < 0)
 			return status;
 

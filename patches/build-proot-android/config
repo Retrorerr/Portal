@@ -1,7 +1,7 @@
 TALLOC_V='2.4.3'
 PROOT_REPO='https://github.com/termux/proot.git'
 PROOT_VERSION='master'
-PROOT_COMMIT='ab2e3464d04483b98a0614b470f3f8950d5a6468'
+PROOT_COMMIT='d4d2a19081c3c07f75250e4ce2980b9fa2f5720f'
 
 # `pre5' is for Android API < 21 where we can't _FILE_OFFSET_BITS=64 at least
 

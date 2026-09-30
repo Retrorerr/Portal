@@ -40,6 +40,8 @@
 #include <assert.h>        /* assert(3), */
 #include <termios.h>       /* TCSETS, TCGETS2, */
 #include <sys/ioctl.h>     /* _IOW, */
+#include <linux/sockios.h>  /* SIOCGIFINDEX, */
+#include <sched.h>         /* CLONE_NEW*, */
 
 #include "syscall/seccomp.h"
 #include "tracee/tracee.h"
@@ -136,6 +138,7 @@ static const uint32_t traced_ioctl_requests[] = {
 	TCSETSW2,
 	TCSETSF2,
 	_IOW(0x94, 9, int) /* FICLONE */,
+	SIOCGIFINDEX,
 };
 #define NB_TRACED_IOCTLS (sizeof(traced_ioctl_requests) / sizeof(traced_ioctl_requests[0]))
 #define LENGTH_TRACE_IOCTL (NB_TRACED_IOCTLS + 4)
@@ -167,6 +170,46 @@ static int add_trace_ioctl(struct sock_fprog *program, word_t syscall, int flag)
 	DEBUG_FILTER("FILTER:     trace if syscall == %ld and request is rewritten\n", syscall);
 
 	return add_statements(program, LENGTH_TRACE_IOCTL, statements);
+}
+
+/* The namespace flags syscall/enter.c strips from clone(2).  */
+#define CLONE_NS_FLAGS (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | \
+			CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | \
+			0x02000000 /* CLONE_NEWCGROUP */ | \
+			0x00000080 /* CLONE_NEWTIME */)
+
+#define LENGTH_TRACE_ARG 5
+
+/**
+ * Like add_trace_syscall(), but only when the first argument of
+ * @syscall matches @flag: FILTER_HIGH_FD, a descriptor PRoot moved to
+ * PROOT_TRACED_FD_BASE or higher (negative ones match too), or
+ * FILTER_CLONE_NS, clone(2) flags asking for a namespace.  close(2),
+ * send(2) and recv(2) calls otherwise stop every Wayland, X11, D-Bus
+ * and PipeWire message, and clone(2) every thread.
+ */
+static int add_trace_arg(struct sock_fprog *program, word_t syscall, int flag)
+{
+	/* Compare the low 32 bits of the first argument (little-endian).  */
+	const size_t arg_offset = offsetof(struct seccomp_data, args[0]);
+	struct sock_filter statements[LENGTH_TRACE_ARG];
+
+	if (syscall > UINT32_MAX || arg_offset > UINT32_MAX)
+		return -ERANGE;
+
+	/* Not @syscall: skip this block.  */
+	statements[0] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, syscall, 0, LENGTH_TRACE_ARG - 1);
+	statements[1] = (struct sock_filter) BPF_STMT(BPF_LD + BPF_W + BPF_ABS, arg_offset);
+	if ((flag & FILTER_HIGH_FD) != 0)
+		statements[2] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JGE + BPF_K, PROOT_TRACED_FD_BASE, 1, 0);
+	else
+		statements[2] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JSET + BPF_K, CLONE_NS_FLAGS, 1, 0);
+	statements[3] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW);
+	statements[4] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + (flag & FILTER_SYSEXIT));
+
+	DEBUG_FILTER("FILTER:     trace if syscall == %ld and its first argument matches\n", syscall);
+
+	return add_statements(program, LENGTH_TRACE_ARG, statements);
 }
 #endif
 
@@ -327,6 +370,10 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 					section_length += LENGTH_TRACE_IOCTL;
 					continue;
 				}
+				if ((sysnums[k].flags & FILTER_ARGS) != 0) {
+					section_length += LENGTH_TRACE_ARG;
+					continue;
+				}
 #endif
 				section_length += LENGTH_TRACE_SYSCALL;
 			}
@@ -348,6 +395,8 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 #ifdef __ANDROID__
 				if (sysnums[k].value == PR_ioctl)
 					status = add_trace_ioctl(&program, syscall, sysnums[k].flags);
+				else if ((sysnums[k].flags & FILTER_ARGS) != 0)
+					status = add_trace_arg(&program, syscall, sysnums[k].flags);
 				else
 #endif
 				status = add_trace_syscall(&program, syscall, sysnums[k].flags);
@@ -398,8 +447,16 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_chown,		0 },
 	{ PR_chown32,		0 },
 	{ PR_chroot,		0 },
+	{ PR_clone,		FILTER_CLONE_NS },
+	{ PR_clone3,		0 },
+	{ PR_close,		FILTER_HIGH_FD },
 	{ PR_connect,		0 },
 	{ PR_creat,		0 },
+	{ PR_recvfrom,		FILTER_HIGH_FD },
+	{ PR_recvmsg,		FILTER_HIGH_FD },
+	{ PR_sendmsg,		FILTER_HIGH_FD },
+	{ PR_sendto,		FILTER_HIGH_FD },
+	{ PR_socket,		FILTER_SYSEXIT },
 	{ PR_execve,		FILTER_SYSEXIT },
 	{ PR_execveat,		FILTER_SYSEXIT },
 	{ PR_faccessat,		0 },
@@ -436,15 +493,15 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_mkdirat,		0 },
 	{ PR_mknod,		0 },
 	{ PR_mknodat,		0 },
-	{ PR_mount,		0 },
+	{ PR_mount,		FILTER_SYSEXIT },
 	{ PR_name_to_handle_at,	0 },
 	{ PR_newfstatat,	0 },
 	{ PR_oldlstat,		0 },
 	{ PR_oldstat,		0 },
 	{ PR_open,		0 },
 	{ PR_openat,		0 },
-	{ PR_openat2,		FILTER_SYSEXIT },
-	{ PR_pivot_root,	0 },
+	{ PR_openat2,		0 },
+	{ PR_pivot_root,	FILTER_SYSEXIT },
 	{ PR_prctl, 		0 },
 	{ PR_prlimit64,		FILTER_SYSEXIT },
 	{ PR_ptrace,		FILTER_SYSEXIT },
@@ -456,9 +513,6 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_renameat2,		FILTER_SYSEXIT },
 	{ PR_rmdir,		0 },
 	{ PR_setrlimit,		FILTER_SYSEXIT },
-#ifdef __ANDROID__
-	{ PR_socket,		FILTER_SYSEXIT },
-#endif
 	{ PR_setxattr,		0 },
 	{ PR_socketcall,	FILTER_SYSEXIT },
 	{ PR_stat,		0 },
@@ -472,9 +526,11 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_symlinkat,		0 },
 	{ PR_truncate,		0 },
 	{ PR_truncate64,	0 },
-	{ PR_umount,		0 },
-	{ PR_umount2,		0 },
+	{ PR_umount,		FILTER_SYSEXIT },
+	{ PR_umount2,		FILTER_SYSEXIT },
 	{ PR_uname,		FILTER_SYSEXIT },
+	{ PR_unshare,		FILTER_SYSEXIT },
+	{ PR_setns,		FILTER_SYSEXIT },
 	{ PR_unlink,		0 },
 	{ PR_unlinkat,		0 },
 	{ PR_uselib,		0 },
@@ -526,8 +582,11 @@ static int merge_filtered_sysnums(TALLOC_CTX *context, FilteredSysnum **sysnums,
 		}
 		else
 			/* The sysnum is already filtered, merge the
-			 * flags.  */
-			(*sysnums)[j].flags |= new_sysnums[i].flags;
+			 * flags.  An argument restriction stays only if
+			 * every list asks for it.  */
+			(*sysnums)[j].flags =
+				(((*sysnums)[j].flags | new_sysnums[i].flags) & ~FILTER_ARGS)
+				| ((*sysnums)[j].flags & new_sysnums[i].flags & FILTER_ARGS);
 	}
 
 	return 0;
@@ -574,12 +633,50 @@ int enable_syscall_filtering(const Tracee *tracee)
 	return 0;
 }
 
+/**
+ * Return the flags the filter of enable_syscall_filtering() associates
+ * with @sysnum for @tracee, ie. the data PTRACE_EVENT_SECCOMP stops of
+ * that syscall report: the filter was built from the very same lists.
+ */
+int filtered_sysnum_flags(const Tracee *tracee, Sysnum sysnum)
+{
+	Extension *extension;
+	int flags = 0;
+	size_t i;
+
+	for (i = 0; proot_sysnums[i].value != PR_void; i++) {
+		if (proot_sysnums[i].value == sysnum)
+			flags |= proot_sysnums[i].flags;
+	}
+
+	if (tracee->extensions == NULL)
+		return flags;
+
+	LIST_FOREACH(extension, tracee->extensions, link) {
+		if (extension->filtered_sysnums == NULL)
+			continue;
+
+		for (i = 0; extension->filtered_sysnums[i].value != PR_void; i++) {
+			if (extension->filtered_sysnums[i].value == sysnum)
+				flags |= extension->filtered_sysnums[i].flags;
+		}
+	}
+
+	return flags;
+}
+
 #else
 
+#include "syscall/seccomp.h"
 #include "tracee/tracee.h"
 #include "attribute.h"
 
 int enable_syscall_filtering(const Tracee *tracee UNUSED)
+{
+	return 0;
+}
+
+int filtered_sysnum_flags(const Tracee *tracee UNUSED, Sysnum sysnum UNUSED)
 {
 	return 0;
 }
