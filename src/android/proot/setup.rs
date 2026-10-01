@@ -225,6 +225,13 @@ const DRMSHIM_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/drmshi
 /// Optional (a missing hint only restores heartbeat pacing); preloaded ONLY
 /// in Anland sessions. Source: `assets/guest-arm64/anland-damage.c`.
 const ANLAND_DAMAGE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/anland-damage.so");
+/// Qt Wayland input coalescing for LibreOffice, which repaints inside every
+/// scroll/drag event and starved its own presents (3.7 -> 21 frames/s on a
+/// scrollbar drag). Preloaded only by the LibreOffice launchers.
+/// Source: `assets/guest-arm64/qt-input-coalesce.cpp`.
+const QT_INPUT_COALESCE_BINARY: &[u8] =
+    include_bytes!("../../../assets/guest-arm64/qt-input-coalesce.so");
+const QT_INPUT_COALESCE_PATH: &str = "usr/local/lib/portal/qt-input-coalesce.so";
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -1600,7 +1607,23 @@ fn sync_chromium_entries(fs_root: &Path) {
 /// downscales, which is the model LibreOffice's code assumes; the app stays a
 /// native Wayland client. `/usr/local/bin` precedes `/usr/bin` in PATH, so
 /// this covers the desktop entries (`Exec=libreoffice ...`) and terminal use.
+///
+/// The launchers also preload `qt-input-coalesce.so` (see
+/// `QT_INPUT_COALESCE_BINARY`) so scrolling presents at a usable rate.
 fn sync_libreoffice_launchers(fs_root: &Path) {
+    let coalesce = fs_root.join(QT_INPUT_COALESCE_PATH);
+    if !payload_is_current(&coalesce, QT_INPUT_COALESCE_BINARY) {
+        if let Some(parent) = coalesce.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let temporary = coalesce.with_extension("so.tmp");
+        if fs::write(&temporary, QT_INPUT_COALESCE_BINARY).is_ok() {
+            let _ = fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755));
+            if fs::rename(&temporary, &coalesce).is_ok() {
+                mark_payload_current(&coalesce, QT_INPUT_COALESCE_BINARY);
+            }
+        }
+    }
     for name in ["libreoffice", "soffice"] {
         let launcher = fs_root.join("usr/local/bin").join(name);
         // Stale after an uninstall; resynced on the launch after an install.
@@ -1616,6 +1639,8 @@ fn sync_libreoffice_launchers(fs_root: &Path) {
                 "#!/bin/sh\n\
                  # Managed by Portal: LibreOffice's Qt VCL clips at fractional Wayland scales.\n\
                  export QT_WAYLAND_DISABLED_INTERFACES=\"${{QT_WAYLAND_DISABLED_INTERFACES:+$QT_WAYLAND_DISABLED_INTERFACES,}}wp_fractional_scale_manager_v1\"\n\
+                 # Merge bursts of scroll/drag input so each repaint is presented.\n\
+                 [ -r /{QT_INPUT_COALESCE_PATH} ] && export LD_PRELOAD=\"/{QT_INPUT_COALESCE_PATH}${{LD_PRELOAD:+:$LD_PRELOAD}}\"\n\
                  exec /usr/bin/{name} \"$@\"\n"
             ),
         );
