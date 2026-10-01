@@ -54,8 +54,11 @@ import androidx.lifecycle.LifecycleEventObserver
 import app.polarbear.setup.PortalPalette
 
 private const val TAG = "PortalSetupChecklist"
-private const val PREFS = "portal_setup_checklist"
+internal const val PREFS = "portal_setup_checklist"
 private const val PREF_GAMES_DONE = "games_added"
+
+/** The user said the setting is on, on a device that never reports it. */
+private const val PREF_PREPARE_CONFIRMED = "prepare_confirmed"
 
 /** The Games app behind game handling on OxygenOS, ColorOS and realme UI. */
 private const val OPLUS_GAMES_PACKAGE = "com.oplus.games"
@@ -74,19 +77,42 @@ private const val PHANTOM_MONITOR_PREFERENCE_KEY = "disable_phantom_process_moni
 
 private enum class StepState { Todo, Done }
 
-/** Whether the checklist has anything to offer on this device. */
-fun setupChecklistApplies(): Boolean = childProcessStepApplies() || gamesStepApplies()
-
 /**
- * Whether a step is still open, for surfaces shown on every launch. A child
- * process flag Android does not expose never counts as open there.
+ * Whether the checklist has anything to offer on this device. The child
+ * process step is the onboarding gate's job: it only reappears here for a
+ * user who chose to skip the gate.
  */
+fun setupChecklistApplies(context: Context): Boolean =
+    (childProcessStepApplies() && !prepareSatisfied(context)) || gamesStepApplies()
+
+/** Whether a step is still open, for surfaces shown on every launch. */
 fun setupChecklistPending(context: Context): Boolean =
-    (childProcessStepApplies() && childRestrictionsDisabled() == false) ||
+    (childProcessStepApplies() && !prepareSatisfied(context)) ||
         (gamesStepApplies() &&
             !context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(PREF_GAMES_DONE, false))
 
-private fun childProcessStepApplies(): Boolean =
+/**
+ * Whether the Android setting the desktop depends on is known to be on. Android
+ * reports it on most devices; where it does not (the flag stays unset), the
+ * user's own confirmation from the onboarding stands in. A device reporting
+ * the restriction as active is never satisfied, whatever was confirmed before.
+ */
+fun prepareSatisfied(context: Context): Boolean {
+    if (!childProcessStepApplies()) return true
+    return when (childRestrictionsDisabled()) {
+        true -> true
+        false -> false
+        null -> context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(PREF_PREPARE_CONFIRMED, false)
+    }
+}
+
+internal fun rememberPrepareConfirmed(context: Context) {
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .edit().putBoolean(PREF_PREPARE_CONFIRMED, true).apply()
+}
+
+internal fun childProcessStepApplies(): Boolean =
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
 
 /**
@@ -106,7 +132,7 @@ private fun gamesStepApplies(): Boolean = oplusBrand() != null
  * Android does not expose the flag to apps (the step then stays a plain
  * instruction).
  */
-private fun childRestrictionsDisabled(): Boolean? {
+internal fun childRestrictionsDisabled(): Boolean? {
     val value = runCatching {
         Class.forName("android.os.SystemProperties")
             .getMethod("get", String::class.java)
@@ -119,7 +145,7 @@ private fun childRestrictionsDisabled(): Boolean? {
     }
 }
 
-private fun developerOptionsEnabled(context: Context): Boolean =
+internal fun developerOptionsEnabled(context: Context): Boolean =
     Settings.Global.getInt(
         context.contentResolver,
         Settings.Global.DEVELOPMENT_SETTINGS_ENABLED,
@@ -137,12 +163,18 @@ private fun launch(context: Context, intent: Intent): Boolean = try {
     false
 }
 
-private fun openChildProcessSetting(context: Context) {
+internal fun openChildProcessSetting(context: Context) {
     if (developerOptionsEnabled(context)) {
         val developer = Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
             .putExtra(":settings:fragment_args_key", PHANTOM_MONITOR_PREFERENCE_KEY)
         if (launch(context, developer)) return
     }
+    if (!launch(context, Intent(Settings.ACTION_DEVICE_INFO_SETTINGS))) {
+        launch(context, Intent(Settings.ACTION_SETTINGS))
+    }
+}
+
+internal fun openAboutDevice(context: Context) {
     if (!launch(context, Intent(Settings.ACTION_DEVICE_INFO_SETTINGS))) {
         launch(context, Intent(Settings.ACTION_SETTINGS))
     }
@@ -178,6 +210,8 @@ fun SetupChecklist(
     val restrictionsOff = remember(resumes) { childRestrictionsDisabled() }
     val developerOn = remember(resumes) { developerOptionsEnabled(context) }
     var gamesDone by remember { mutableStateOf(prefs.getBoolean(PREF_GAMES_DONE, false)) }
+    // Decided once: a step ticked off while the card is up stays, showing done.
+    val childStep = remember { childProcessStepApplies() && !prepareSatisfied(context) }
 
     val shape = RoundedCornerShape(24.dp)
     Column(
@@ -201,7 +235,7 @@ fun SetupChecklist(
             color = palette.textMuted,
         )
         var number = 0
-        if (childProcessStepApplies()) {
+        if (childStep) {
             Spacer(Modifier.height(16.dp))
             ChecklistStep(
                 number = ++number,
@@ -317,7 +351,7 @@ private fun ChecklistStep(
 }
 
 @Composable
-private fun ChecklistButton(
+internal fun ChecklistButton(
     label: String,
     emphasized: Boolean,
     onClick: () -> Unit,

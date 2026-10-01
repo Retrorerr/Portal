@@ -8,7 +8,14 @@ import android.os.Build
 import android.util.Log
 import android.view.ViewTreeObserver
 import androidx.annotation.RequiresApi
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import app.polarbear.setup.components.PortalEmphasizedAccelerate
+import app.polarbear.setup.components.PortalEmphasizedDecelerate
+import app.polarbear.setup.components.setupPrepareNeeded
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
@@ -79,7 +86,15 @@ fun PortalLaunchTransition(
     isReturn: Boolean = false,
 ) {
     val view = LocalView.current
-    val lifecycle = (LocalContext.current as LifecycleOwner).lifecycle
+    val context = LocalContext.current
+    val lifecycle = (context as LifecycleOwner).lifecycle
+    // An installed desktop is gated too: until the Android setting it depends
+    // on is on, the onboarding is the first (and only) thing shown, and the
+    // veil cannot lift because the Return screen, which signals ready, has not
+    // been shown yet. Decided once per launch, so ticking the setting off in
+    // Settings never yanks the screen away mid-read.
+    val gateNeeded = remember { isReturn && setupPrepareNeeded(context) }
+    var gateCleared by rememberSaveable { mutableStateOf(false) }
     var resolved by rememberSaveable { mutableStateOf(!playIntro || Build.VERSION.SDK_INT < 33) }
     var ready by remember { mutableStateOf(false) }
     var rootBounds by remember { mutableStateOf(Rect.Zero) }
@@ -193,7 +208,29 @@ fun PortalLaunchTransition(
         // Keep this call at the same composition slot before/during/after intro:
         // no second screen, second fade, duplicated state or persistent capture.
         Box(Modifier.fillMaxSize().then(treatment)) {
-            if (isReturn) {
+            if (isReturn && gateNeeded) {
+                AnimatedContent(
+                    targetState = !gateCleared,
+                    transitionSpec = {
+                        fadeIn(tween(720, delayMillis = 320, easing = PortalEmphasizedDecelerate))
+                            .togetherWith(fadeOut(tween(420, easing = PortalEmphasizedAccelerate)))
+                    },
+                    label = "launch gate",
+                ) { gated ->
+                    if (gated) {
+                        PortalPrepareGate(
+                            launchMarkModifier = launchMarkModifier,
+                            onCleared = { gateCleared = true },
+                        )
+                    } else {
+                        PortalReturnScreen(
+                            launchMarkModifier = launchMarkModifier,
+                            onReturnReady = { setupReady = true },
+                            onRepairBlockedChanged = { returnRepairBlocked = it },
+                        )
+                    }
+                }
+            } else if (isReturn) {
                 PortalReturnScreen(
                     launchMarkModifier = launchMarkModifier,
                     onReturnReady = { setupReady = true },

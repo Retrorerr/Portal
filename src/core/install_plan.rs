@@ -26,6 +26,12 @@ static INITIAL_PLAN_COMMIT_LOCK: Mutex<()> = Mutex::new(());
 /// choice whose fixed `Large` multiplier would exceed that limit; silently
 /// clamping would make the persisted user choice differ from what was applied.
 pub const MAX_INSTALL_DENSITY_DPI: u32 = 695;
+/// The shorter display side must keep at least this many logical pixels at the
+/// Balanced scale. Android's own density suits Android apps, but a 560 dpi
+/// phone would leave Plasma 363 logical pixels across, narrower than the
+/// minimum width of System Settings or Firefox, so their windows spill off the
+/// screen.
+const MIN_LOGICAL_SHORT_SIDE_PX: u32 = 640;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -264,7 +270,18 @@ impl InstallPlan {
     /// The device-derived baseline required by Portal's presentation path.
     /// Size-choice multipliers belong to the Plasma/KScreen applicator.
     pub fn device_baseline_scale(&self) -> f64 {
-        f64::from(self.density_dpi) / 160.0
+        f64::from(self.effective_density_dpi()) / 160.0
+    }
+
+    /// Android's density, held back so the shorter display side keeps
+    /// [`MIN_LOGICAL_SHORT_SIDE_PX`] logical pixels. The cap never goes below
+    /// a scale of 1.0, and tablets and desktops sit well under it, so only
+    /// dense phones are affected. It stays an integer dpi so every scale keeps
+    /// an exact five-decimal form.
+    fn effective_density_dpi(&self) -> u32 {
+        let short_side = self.logical_width_px.min(self.logical_height_px);
+        let cap = (short_side * 160 / MIN_LOGICAL_SHORT_SIDE_PX).max(160);
+        self.density_dpi.min(cap)
     }
 
     /// One initial KScreen output scale, derived from Android's actual display
@@ -278,17 +295,20 @@ impl InstallPlan {
             InterfaceSize::Balanced => 1.00,
             InterfaceSize::Large => 1.15,
         };
-        self.device_baseline_scale() * multiplier
+        // KWin keeps output scales in 1/120 steps. Snap here, before the value
+        // is sent, so a request that falls exactly between two steps (a 318
+        // dpi phone asks for 238.5) cannot be rounded one way by KWin and the
+        // other way by the checks that read its answer back.
+        (self.device_baseline_scale() * multiplier * 120.0).round() / 120.0
     }
 
     /// Decimal form accepted by `kscreen-doctor output.<id>.scale.<qreal>`.
     /// It is generated in native code, never parsed or recalculated by a
     /// shell helper.
     pub fn initial_output_scale_string(&self) -> String {
-        // All three fixed multipliers over integer dpi are exactly representable
-        // within five decimal places (the common denominator is 3200), so this
-        // preserves the selected fractional scale rather than rounding it to
-        // an integer or collapsing adjacent choices.
+        // Five decimals keep adjacent size choices distinct. The value is
+        // already on KWin's 1/120 grid, so this text is always within 0.5e-5
+        // of a grid step, far from any rounding boundary.
         let mut value = format!("{:.5}", self.initial_output_scale());
         while value.contains('.') && value.ends_with('0') {
             value.pop();
@@ -796,8 +816,8 @@ mod tests {
         "committedAppearance":"dark",
         "interfaceSize":"balanced",
         "densityDpi":320,
-        "logicalWidthPx":1280,
-        "logicalHeightPx":800,
+        "logicalWidthPx":2560,
+        "logicalHeightPx":1600,
         "selectedAppIds":["gimp","libreoffice","vlc"]
     }"#;
 
@@ -1029,8 +1049,71 @@ mod tests {
             .unwrap();
             assert!(compact.initial_output_scale() < balanced.initial_output_scale());
             assert!(balanced.initial_output_scale() < large.initial_output_scale());
-            assert_eq!(balanced.initial_output_scale(), f64::from(density_dpi) / 160.0);
+            // 1600 px on the short side allows up to 400 dpi before the cap.
+            assert_eq!(
+                balanced.initial_output_scale(),
+                f64::from(density_dpi.min(400)) / 160.0
+            );
         }
+    }
+
+    #[test]
+    fn scales_never_sit_on_a_kwin_rounding_boundary() {
+        // Every density and size must land on a 1/120 step, so the guest
+        // helper, KWin and the proof check all round it the same way.
+        for density_dpi in 72..=MAX_INSTALL_DENSITY_DPI {
+            for size in ["compact", "balanced", "large"] {
+                let plan = InstallPlan::from_json(
+                    &VALID_PLAN
+                        .replace("\"densityDpi\":320", &format!("\"densityDpi\":{density_dpi}"))
+                        .replace("\"logicalWidthPx\":2560", "\"logicalWidthPx\":8192")
+                        .replace("\"logicalHeightPx\":1600", "\"logicalHeightPx\":8192")
+                        .replace("\"interfaceSize\":\"balanced\"", &format!("\"interfaceSize\":\"{size}\"")),
+                )
+                .unwrap();
+                let steps = plan.initial_output_scale() * 120.0;
+                assert!((steps - steps.round()).abs() < 1e-9, "{density_dpi} {size}");
+                let sent: f64 = plan.initial_output_scale_string().parse().unwrap();
+                assert!(
+                    ((sent * 120.0) - steps.round()).abs() < 0.01,
+                    "{density_dpi} {size}: {sent} is not safely on a KWin step"
+                );
+                assert!(plan.initial_output_scale() <= 5.0);
+            }
+        }
+    }
+
+    #[test]
+    fn dense_phones_keep_a_usable_logical_width() {
+        // 1272x2772 at 560 dpi (a 6.8" phone): Android's own 3.5 would leave
+        // 363 logical pixels; the cap leaves 640.
+        let phone = InstallPlan::from_json(
+            &VALID_PLAN
+                .replace("\"densityDpi\":320", "\"densityDpi\":560")
+                .replace("\"logicalWidthPx\":2560", "\"logicalWidthPx\":1272")
+                .replace("\"logicalHeightPx\":1600", "\"logicalHeightPx\":2772"),
+        )
+        .unwrap();
+        assert_eq!(phone.initial_output_scale_string(), "1.99167");
+        assert!(1272.0 / phone.initial_output_scale() >= 638.0);
+        // The same phone held sideways gets the same scale.
+        let sideways = InstallPlan::from_json(
+            &VALID_PLAN
+                .replace("\"densityDpi\":320", "\"densityDpi\":560")
+                .replace("\"logicalWidthPx\":2560", "\"logicalWidthPx\":2772")
+                .replace("\"logicalHeightPx\":1600", "\"logicalHeightPx\":1272"),
+        )
+        .unwrap();
+        assert_eq!(sideways.initial_output_scale_string(), "1.99167");
+        // A tablet is untouched: 2400 px at 420 dpi keeps Android's 2.625.
+        let tablet = InstallPlan::from_json(
+            &VALID_PLAN
+                .replace("\"densityDpi\":320", "\"densityDpi\":420")
+                .replace("\"logicalWidthPx\":2560", "\"logicalWidthPx\":2400")
+                .replace("\"logicalHeightPx\":1600", "\"logicalHeightPx\":3392"),
+        )
+        .unwrap();
+        assert_eq!(tablet.initial_output_scale_string(), "2.625");
     }
 
     #[test]

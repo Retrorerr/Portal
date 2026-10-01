@@ -143,4 +143,19 @@ object PortalDimens {
     val PickerMaxWidth: Dp = 560.dp
     val BeginMaxWidth: Dp = 310.dp
     val BeginHeight: Dp = 52.dp
+
+    // The onboarding stage keeps a phone's proportions on every screen: on a
+    // tablet the card is this wide, then opens up when the install options
+    // take over.
+    val PrepareCardWidth: Dp = 480.dp
+
+    // Phones in portrait: below this width the card fills the screen with a
+    // small gutter and a tighter inset, and the header shrinks so the title
+    // keeps to one line.
+    val CompactBreakpoint: Dp = 480.dp
+    val CompactScreenGutter: Dp = 12.dp
+    val CompactSurfacePaddingH: Dp = 20.dp
+    val CompactSurfacePaddingV: Dp = 24.dp
+    val CompactLogoSize: Dp = 56.dp
+    val CompactTitleSize = 22.sp
 }

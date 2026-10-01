@@ -37,6 +37,8 @@ package app.polarbear
 //     SurfaceView, so normal Android hit-testing delivers input; no custom
 //     event routing, no PopupWindow, no second window.
 
+import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Bundle
@@ -106,6 +108,21 @@ open class PortalActivity : GameActivity() {
         }
         super.onCreate(savedInstanceState)
         applyImmersive("onCreate")
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Debug builds only: open the first-run stages on demand.
+        //   adb shell am start -n app.polarbear/.PortalActivity --activity-single-top --ez portal_preview_setup true
+        if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
+            intent.getBooleanExtra(PortalPreview.EXTRA, false)
+        ) {
+            PortalPreview.show(
+                this,
+                intent.getFloatExtra(PortalPreview.EXTRA_SLOW, 1f),
+                intent.getBooleanExtra(PortalPreview.EXTRA_GATE, false),
+            )
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

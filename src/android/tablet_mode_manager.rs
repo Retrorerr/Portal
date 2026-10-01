@@ -24,8 +24,14 @@ pub fn apply_kwin_tablet_mode(has_desktop_input: bool) {
 
     // No session: KWin reads the file when it starts.
     let runtime = crate::android::runtime::proot::PRootRuntime::active();
-    let kwinrc_path = runtime
-        .rootfs_path()
+    let rootfs = runtime.rootfs_path();
+    // Before setup accepts a plan the runtime must stay absent: a stray home/
+    // directory makes the next launch treat a clean first run as a partial
+    // install and refuse to start setup. Setup writes the initial kwinrc itself.
+    if !rootfs.exists() {
+        return;
+    }
+    let kwinrc_path = rootfs
         .join("home")
         .join(DESKTOP_USER)
         .join(".config/kwinrc");

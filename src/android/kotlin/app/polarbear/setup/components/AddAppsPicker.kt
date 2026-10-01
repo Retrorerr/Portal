@@ -51,6 +51,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -124,7 +125,7 @@ fun AddAppsPicker(
                     chosen.size == 1 -> chosen.first().name
                     else -> "${chosen.first().name} +${chosen.size - 1}"
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.padding(end = 10.dp),
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
                 color = palette.textPrimary,
@@ -135,7 +136,7 @@ fun AddAppsPicker(
                 selectedIds = selectedIds,
                 icons = icons,
                 palette = palette,
-                modifier = Modifier.graphicsLayer {
+                modifier = Modifier.weight(1f).graphicsLayer {
                     // The cluster hands over to the full rows as they unfold.
                     val hide = (open.value * 1.8f).coerceIn(0f, 1f)
                     alpha = 1f - hide
@@ -211,35 +212,65 @@ private fun IconCluster(
     palette: PortalPalette,
     modifier: Modifier = Modifier,
 ) {
-    if (icons.isEmpty()) return
-    Row(modifier.semantics { contentDescription = "Optional apps" }) {
-        OPTIONAL_APPS.forEachIndexed { index, app ->
-            val icon = icons[app.id] ?: return@forEachIndexed
-            val lit by animateFloatAsState(
-                if (selectedIds.isEmpty() || app.id in selectedIds) 1f else 0f,
-                tween(320, easing = PortalEmphasized),
-                label = "cluster icon",
-            )
-            Image(
-                bitmap = icon,
-                contentDescription = null,
-                // Unchosen apps rest nearly monochrome and colour up when picked.
-                colorFilter = if (lit >= 0.999f) {
-                    null
-                } else {
-                    ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0.15f + 0.85f * lit) })
-                },
-                modifier = Modifier
-                    .padding(start = if (index == 0) 0.dp else 5.dp)
-                    .size(18.dp)
-                    .graphicsLayer {
-                        alpha = if (palette.isDark) 0.38f + 0.62f * lit else 0.45f + 0.55f * lit
-                        val s = 0.9f + 0.1f * lit
-                        scaleX = s
-                        scaleY = s
-                    },
-            )
+    if (icons.isEmpty()) {
+        Spacer(modifier)
+        return
+    }
+    // Right-aligned against the chevron. On a narrow row the label keeps its
+    // room and the icons that no longer fit are left out.
+    Layout(
+        modifier = modifier.semantics { contentDescription = "Optional apps" },
+        content = { ClusterIcons(selectedIds, icons, palette) },
+    ) { measurables, constraints ->
+        val placeables = measurables.map { it.measure(Constraints()) }
+        val gap = 5.dp.roundToPx()
+        var used = 0
+        val shown = placeables.takeWhile { placeable ->
+            val next = used + (if (used == 0) 0 else gap) + placeable.width
+            (next <= constraints.maxWidth).also { fits -> if (fits) used = next }
         }
+        val height = placeables.maxOfOrNull { it.height } ?: 0
+        layout(constraints.maxWidth, height) {
+            var x = constraints.maxWidth - used
+            shown.forEach { placeable ->
+                placeable.place(x, 0)
+                x += placeable.width + gap
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClusterIcons(
+    selectedIds: Set<String>,
+    icons: Map<String, ImageBitmap>,
+    palette: PortalPalette,
+) {
+    OPTIONAL_APPS.forEach { app ->
+        val icon = icons[app.id] ?: return@forEach
+        val lit by animateFloatAsState(
+            if (selectedIds.isEmpty() || app.id in selectedIds) 1f else 0f,
+            tween(320, easing = PortalEmphasized),
+            label = "cluster icon",
+        )
+        Image(
+            bitmap = icon,
+            contentDescription = null,
+            // Unchosen apps rest nearly monochrome and colour up when picked.
+            colorFilter = if (lit >= 0.999f) {
+                null
+            } else {
+                ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0.15f + 0.85f * lit) })
+            },
+            modifier = Modifier
+                .size(18.dp)
+                .graphicsLayer {
+                    alpha = if (palette.isDark) 0.38f + 0.62f * lit else 0.45f + 0.55f * lit
+                    val s = 0.9f + 0.1f * lit
+                    scaleX = s
+                    scaleY = s
+                },
+        )
     }
 }
 
