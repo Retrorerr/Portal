@@ -168,6 +168,20 @@ SEED_PACKAGES = [
     "zstd",
     "python3",  # Portal IME bridge
     "kdialog",
+    # Recommends of the desktop packages above that a stock install would
+    # have: RAR in Ark, PDF/PostScript thumbnails, GTK theming for X11 apps,
+    # Breeze for Qt5 apps, event sounds, shell completion, standalone KCMs.
+    "unar",
+    "ghostscript",
+    "xsettingsd",
+    "kde-style-breeze-qt5",
+    "libcanberra-pulse",
+    "bash-completion",
+    "bsdextrautils",
+    "gnupg-utils",
+    "dolphin-plugins",
+    "libkf6kcmutils-bin",
+    "kinfocenter",
 ]
 
 # Packages to skip if pulled in as optional/heavy non-critical dependencies
@@ -331,6 +345,36 @@ def download_file(url: str, dest: Path) -> bool:
             temp.unlink()
         print(f"Failed to download {url}: {e}")
         return False
+
+def snapshot_url(name: str, pkg: dict) -> str | None:
+    """snapshot.debian.org URL for a locked .deb that the mirror has dropped.
+
+    Point releases delete superseded versions from deb.debian.org, so an
+    older lock stops being downloadable there. The caller still verifies the
+    locked SHA-256, so this only changes where the identical bytes come from.
+    """
+    filename = os.path.basename(pkg["Filename"])
+    api = (f"https://snapshot.debian.org/mr/binary/{urllib.parse.quote(name)}/"
+           f"{urllib.parse.quote(pkg['Version'])}/binfiles?fileinfo=1")
+    req = urllib.request.Request(api, headers={"User-Agent": "Portal-Provisioner/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            info = json.load(resp)["fileinfo"]
+    except Exception as e:
+        print(f"snapshot.debian.org lookup failed for {filename}: {e}")
+        return None
+    for entries in info.values():
+        for entry in entries:
+            if entry["name"] == filename and entry["archive_name"] == "debian":
+                return (f"https://snapshot.debian.org/archive/debian/{entry['first_seen']}"
+                        f"{entry['path']}/{filename}")
+    return None
+
+def download_package(name: str, pkg: dict, dest: Path) -> bool:
+    if download_file(f"{DEBIAN_MIRROR}/{pkg['Filename']}", dest):
+        return True
+    url = snapshot_url(name, pkg)
+    return bool(url) and download_file(url, dest)
 
 def decompress_tar_data(name: str, data: bytes) -> bytes:
     if name.endswith(".xz"):
@@ -527,10 +571,8 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked
     with ThreadPoolExecutor(max_workers=16) as executor:
         for pkg_name in pkg_list:
             pkg = packages[pkg_name]
-            rel_path = pkg["Filename"]
-            url = f"{DEBIAN_MIRROR}/{rel_path}"
-            dest = deb_cache_dir / os.path.basename(rel_path)
-            download_tasks.append(executor.submit(download_file, url, dest))
+            dest = deb_cache_dir / os.path.basename(pkg["Filename"])
+            download_tasks.append(executor.submit(download_package, pkg_name, pkg, dest))
 
         completed = 0
         for future in as_completed(download_tasks):

@@ -6916,5 +6916,77 @@
     "Filename": "pool/main/w/wget/wget_1.25.0-2_arm64.deb",
     "SHA256": "b5232cda342e4b6d6f5ebf309d4b1639e722837dd9fa0574997029302288c43b",
     "Size": "970348"
+  },
+  "bash-completion": {
+    "Version": "1:2.16.0-7",
+    "Filename": "pool/main/b/bash-completion/bash-completion_2.16.0-7_all.deb",
+    "SHA256": "e94b49cbfeccbf620effb20f4e9968bbbe6a5acbe0a5d7140ba394249060464a",
+    "Size": "319436"
+  },
+  "bsdextrautils": {
+    "Version": "2.41-5",
+    "Filename": "pool/main/u/util-linux/bsdextrautils_2.41-5_arm64.deb",
+    "SHA256": "2a689acb8d0583266888d9dccd7f2125e86fc75522888b3890ff17dcdf1ee471",
+    "Size": "93820"
+  },
+  "dolphin-plugins": {
+    "Version": "4:25.04.0-1",
+    "Filename": "pool/main/d/dolphin-plugins/dolphin-plugins_25.04.0-1_arm64.deb",
+    "SHA256": "a77138217ff47b2c071aeceadd815971dbc9a5010c01f25082e29c58fca70c8d",
+    "Size": "463448"
+  },
+  "ghostscript": {
+    "Version": "10.05.1~dfsg-1+deb13u1",
+    "Filename": "pool/main/g/ghostscript/ghostscript_10.05.1~dfsg-1+deb13u1_arm64.deb",
+    "SHA256": "4983312b40fa1d6756dbc5f7029421b9c8d081290315b4dc6a75a42a119669ed",
+    "Size": "50452"
+  },
+  "gnupg-utils": {
+    "Version": "2.4.7-21+deb13u1+b4",
+    "Filename": "pool/main/g/gnupg2/gnupg-utils_2.4.7-21+deb13u1+b4_arm64.deb",
+    "SHA256": "50a5c74c99077627819949353d94996b1b999e48b4e7140822a65fbc1a1231b9",
+    "Size": "181484"
+  },
+  "kde-style-breeze-qt5": {
+    "Version": "4:6.3.5-1",
+    "Filename": "pool/main/b/breeze/kde-style-breeze-qt5_6.3.5-1_arm64.deb",
+    "SHA256": "4e01f1793021455258b3e54bbadf84abdf75e3803a623330120c331681ea9684",
+    "Size": "177184"
+  },
+  "kinfocenter": {
+    "Version": "4:6.3.6-1",
+    "Filename": "pool/main/k/kinfocenter/kinfocenter_6.3.6-1_arm64.deb",
+    "SHA256": "1c2ae156246a7bf09628e906533b566eb6c68f484ffa4eca5111abf1878e49f6",
+    "Size": "890836"
+  },
+  "libcanberra-pulse": {
+    "Version": "0.30-18",
+    "Filename": "pool/main/libc/libcanberra/libcanberra-pulse_0.30-18_arm64.deb",
+    "SHA256": "552ea19cfffa8d5e85fd7447e6629daefd5289df60b5d777022a523eb9c1b326",
+    "Size": "12772"
+  },
+  "libkf5style5": {
+    "Version": "5.116.0-1",
+    "Filename": "pool/main/f/frameworkintegration/libkf5style5_5.116.0-1_arm64.deb",
+    "SHA256": "111b77ee9a88a5b8f2a31d288e873fa91de2e3429b2236f55984c4d52305273c",
+    "Size": "15372"
+  },
+  "libkf6kcmutils-bin": {
+    "Version": "6.13.0-2",
+    "Filename": "pool/main/k/kf6-kcmutils/libkf6kcmutils-bin_6.13.0-2_arm64.deb",
+    "SHA256": "2954facc0b80dc048c96861d5fc839fa634d5e9e348b5bc676465553cb62820b",
+    "Size": "26012"
+  },
+  "usb.ids": {
+    "Version": "2025.07.26-1",
+    "Filename": "pool/main/u/usb.ids/usb.ids_2025.07.26-1_all.deb",
+    "SHA256": "4b440f0f5d73d3412dad08b0d810b941e75fd4ca9a46f2a3fbd4b5ec852d5041",
+    "Size": "209204"
+  },
+  "xsettingsd": {
+    "Version": "1.0.2-1+b1",
+    "Filename": "pool/main/x/xsettingsd/xsettingsd_1.0.2-1+b1_arm64.deb",
+    "SHA256": "2a80a140c74a003d3ccbe5b45a902b30af61e0f60157521a7fde689317d183a2",
+    "Size": "27420"
   }
 }
