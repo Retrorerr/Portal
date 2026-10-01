@@ -307,12 +307,15 @@ static void check_architecture(Tracee *tracee)
  * wakes PRoot; when PRoot's CPU has gone idle in between, the wake-up
  * alone costs tens of microseconds on phones, several times the work
  * PRoot does per stop.  Syscalls come in bursts, so a short poll after
- * each event keeps PRoot awake for the next one; an idle guest costs one
- * poll window per event.
+ * each event keeps PRoot awake for the next one.  An idle desktop sends
+ * isolated syscalls (Wayland messages, timers) that each burned a whole
+ * window, so after a window times out PRoot blocks until an event comes
+ * back quickly enough to show a burst again.
  */
 static pid_t wait_for_tracee(int *tracee_status)
 {
 	static long spin_ns = -1;
+	static bool quiet = false;
 	struct timespec start;
 	struct timespec now;
 	pid_t pid;
@@ -324,7 +327,10 @@ static pid_t wait_for_tracee(int *tracee_status)
 			spin_ns = 0;
 	}
 
-	if (spin_ns > 0 && clock_gettime(CLOCK_MONOTONIC, &start) == 0) {
+	if (spin_ns <= 0 || clock_gettime(CLOCK_MONOTONIC, &start) != 0)
+		return waitpid(-1, tracee_status, __WALL);
+
+	if (!quiet) {
 		do {
 			pid = waitpid(-1, tracee_status, __WALL | WNOHANG);
 			if (pid != 0)
@@ -333,9 +339,17 @@ static pid_t wait_for_tracee(int *tracee_status)
 				break;
 		} while ((now.tv_sec - start.tv_sec) * 1000000000L
 			 + (now.tv_nsec - start.tv_nsec) < spin_ns);
+		quiet = true;
+		return waitpid(-1, tracee_status, __WALL);
 	}
 
-	return waitpid(-1, tracee_status, __WALL);
+	pid = waitpid(-1, tracee_status, __WALL);
+	/* Twice the window leaves room for the wake-up itself.  */
+	if (clock_gettime(CLOCK_MONOTONIC, &now) == 0
+	    && (now.tv_sec - start.tv_sec) * 1000000000L
+	       + (now.tv_nsec - start.tv_nsec) < 2 * spin_ns)
+		quiet = false;
+	return pid;
 }
 
 /**

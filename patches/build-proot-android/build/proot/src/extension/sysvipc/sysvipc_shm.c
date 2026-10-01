@@ -773,6 +773,18 @@ int sysvipc_shm_namespace_destructor(struct SysVIpcNamespace *ipc_namespace) {
 
 static int sysvipc_shm_do_allocate(size_t size, int shmid) {
 #ifdef __ANDROID__
+	/* Apps targeting API 29+ may not open /dev/ashmem (SELinux), which made
+	 * every shmget fail with ENOSPC. memfd gives the same shared,
+	 * fd-passable memory; ashmem stays as the fallback for old kernels.  */
+	char memfd_name[32];
+	snprintf(memfd_name, sizeof(memfd_name), "sysvshm_0x%X", shmid);
+	int memfd = syscall(__NR_memfd_create, memfd_name, 0);
+	if (memfd >= 0) {
+		if (ftruncate(memfd, size) == 0)
+			return memfd;
+		close(memfd);
+	}
+
 	int fd = open("/dev/ashmem", O_RDWR, 0);
 	if (fd < 0) return -ENOSPC;
 
