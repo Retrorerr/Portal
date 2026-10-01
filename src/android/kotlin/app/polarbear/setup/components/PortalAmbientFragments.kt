@@ -40,6 +40,8 @@ import kotlin.math.sin
 private const val SCENE_SCALE = 0.25f
 private const val TAU = (PI * 2).toFloat()
 private const val SCATTER_DURATION_MS = 720
+// Drift clock step: every frame at 60 Hz, every 2nd at 120 Hz, every 3rd at 144 Hz.
+private const val AMBIENT_FRAME_MS = 15L
 private const val TAG = "PortalAmbient"
 
 private data class Drift(
@@ -201,7 +203,24 @@ private fun AmbientScene(
     }
     val centers = remember(paths) { paths.map { it.getBounds().center } }
     val stroke = remember { Stroke(54f) }
-    val motion = rememberInfiniteTransition(label = "Portal environment")
+    // Drift clock, advanced at most every AMBIENT_FRAME_MS. Each tick
+    // re-records the scene and re-runs both full-screen blurs; the drift is
+    // ~100 px/s of heavily blurred shapes, so 45-60 even updates per second
+    // look the same as 144 and cost a third. The scatter runs at full rate.
+    var clockMs by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) {
+        if (!ValueAnimator.areAnimatorsEnabled()) return@LaunchedEffect
+        val start = withFrameMillis { it }
+        var shown = start
+        while (true) {
+            withFrameMillis { now ->
+                if (now - shown >= AMBIENT_FRAME_MS) {
+                    shown = now
+                    clockMs = now - start
+                }
+            }
+        }
+    }
     // Loops are built in real scene pixels (keyed on size, so rotation
     // rebuilds them) for exact arc-length uniformity. One clock per fragment;
     // the loop duration sets its mean speed, preserving the previous
@@ -212,13 +231,14 @@ private fun AmbientScene(
     val loops = remember(scenePx) {
         DRIFTS.map { LoopPath.forSeed(it.seed, sceneW, sceneH) }
     }
-    val phases = loops.mapIndexed { index, loop ->
-        val meanSpeedPx = BASE_SPEED * REF_PACE_SEC / DRIFTS[index].paceSec * minDim
-        val loopMs = ((loop.total / meanSpeedPx) * 1000f).toInt().coerceAtLeast(1000)
-        motion.animateFloat(0f, TAU,
-            infiniteRepeatable(tween(loopMs, easing = LinearEasing), RepeatMode.Restart),
-            label = "Portal drift $index")
+    val loopMs = remember(loops) {
+        loops.mapIndexed { index, loop ->
+            val meanSpeedPx = BASE_SPEED * REF_PACE_SEC / DRIFTS[index].paceSec * minDim
+            ((loop.total / meanSpeedPx) * 1000f).toLong().coerceAtLeast(1000L)
+        }
     }
+    // Linear loop phase in [0, TAU); read in draw so only the Canvas redraws.
+    fun driftPhase(index: Int): Float = (clockMs % loopMs[index]).toFloat() / loopMs[index] * TAU
     val scatterProgress = remember { Animatable(0f) }
     var scatterOrigins by remember(scenePx) { mutableStateOf<List<ScatterOrigin>?>(null) }
     LaunchedEffect(scatter, loops) {
@@ -235,7 +255,7 @@ private fun AmbientScene(
         val centreY = sceneH * 0.5f
         val diagonal = hypot(sceneW, sceneH).coerceAtLeast(1f)
         scatterOrigins = loops.mapIndexed { index, loop ->
-            val phase = phases[index].value
+            val phase = driftPhase(index)
             val at = loop.position(phase / TAU * loop.total)
             var directionX = at.x - centreX
             var directionY = at.y - centreY
@@ -308,7 +328,7 @@ private fun AmbientScene(
                 // the piece can neither stop nor reverse — heading only ever
                 // changes through the spline's own smooth curvature.
                 val captured = capturedScatter?.get(index)
-                val phase = captured?.phase ?: phases[index].value
+                val phase = captured?.phase ?: driftPhase(index)
                 val at = if (captured == null) {
                     loops[index].position(phase / TAU * loops[index].total)
                 } else {

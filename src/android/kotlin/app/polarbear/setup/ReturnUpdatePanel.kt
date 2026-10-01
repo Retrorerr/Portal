@@ -275,18 +275,23 @@ private fun UpdateCapsule(
 /** Portal-orange update arrow; drifts upward when something is urgent. */
 @Composable
 private fun UpdateArrow(palette: PortalPalette, lifting: Boolean) {
-    val drift = rememberInfiniteTransition(label = "update arrow")
-    val lift by drift.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1400, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "update arrow lift",
-    )
+    // A still arrow runs no transition: an idle infinite one still requests
+    // a frame of the whole window every vsync.
+    val lift = if (lifting) {
+        rememberInfiniteTransition(label = "update arrow").animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1400, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "update arrow lift",
+        )
+    } else {
+        null
+    }
     Canvas(Modifier.size(14.dp)) {
-        val offset = if (lifting) -1.5.dp.toPx() * lift else 0f
+        val offset = -1.5.dp.toPx() * (lift?.value ?: 0f)
         val stroke = Stroke(
             width = 1.8.dp.toPx(),
             cap = StrokeCap.Round,

@@ -377,6 +377,14 @@ mod android {
     static AAUDIO_CHANNELS: AtomicUsize = AtomicUsize::new(0);
     /// The open AAudio stream, read by the latency timer on the PipeWire loop.
     static AAUDIO_STREAM: AtomicPtr<aaudio::Stream> = AtomicPtr::new(std::ptr::null_mut());
+    /// Whether the AAudio stream is started. It is stopped while the PipeWire
+    /// node is idle so the callback thread and the audio DSP can sleep.
+    static AAUDIO_STARTED: AtomicBool = AtomicBool::new(false);
+    /// Latency-timer ticks (500 ms) since the node stopped streaming.
+    static IDLE_TICKS: AtomicU32 = AtomicU32::new(0);
+    /// Ticks of idle before AAudio is stopped (3 s), so pauses between short
+    /// sounds don't restart the output each time.
+    const IDLE_STOP_TICKS: u32 = 6;
     /// Portal's tone chain (`--tone on`), set before `SINK`. Only the AAudio
     /// callback thread touches it after that.
     static TONE: OnceLock<ToneCell> = OnceLock::new();
@@ -600,12 +608,36 @@ mod android {
             }
 
             AAUDIO_STREAM.store(stream, Ordering::Release);
+            AAUDIO_STARTED.store(true, Ordering::Release);
             Ok((stream, rate, channels))
+        }
+    }
+
+    /// Start or stop the open AAudio stream (no-op if already in that state).
+    fn set_aaudio_started(started: bool) {
+        let stream = AAUDIO_STREAM.load(Ordering::Acquire);
+        let Some(api) = AAUDIO.get() else { return };
+        if stream.is_null() || AAUDIO_STARTED.load(Ordering::Acquire) == started {
+            return;
+        }
+        let res = unsafe {
+            if started {
+                (api.request_start)(stream)
+            } else {
+                (api.request_stop)(stream)
+            }
+        };
+        if res == aaudio::OK {
+            AAUDIO_STARTED.store(started, Ordering::Release);
+            note!("AAudio {}", if started { "started" } else { "stopped (idle)" });
+        } else {
+            note!("AAudio {} failed: {res}", if started { "start" } else { "stop" });
         }
     }
 
     fn close_aaudio(stream: *mut aaudio::Stream) {
         AAUDIO_STREAM.store(std::ptr::null_mut(), Ordering::Release);
+        AAUDIO_STARTED.store(false, Ordering::Release);
         if let (Some(api), false) = (AAUDIO.get(), stream.is_null()) {
             unsafe {
                 (api.request_stop)(stream);
@@ -751,6 +783,8 @@ mod android {
         new: pw::stream::StreamState,
     ) {
         if new == pw::stream::StreamState::Streaming {
+            IDLE_TICKS.store(0, Ordering::Release);
+            set_aaudio_started(true);
             sink.clear();
             sink.process_pending.store(false, Ordering::Release);
             sink.drive_enabled.store(true, Ordering::Release);
@@ -913,6 +947,14 @@ mod android {
         let samples = std::cell::RefCell::new(std::collections::VecDeque::with_capacity(8));
         let reported_ns = std::cell::Cell::new(0i64);
         let latency_timer = mainloop.loop_().add_timer(move |_| {
+            if !sink.drive_enabled.load(Ordering::Acquire) {
+                // Node idle: stop AAudio once the hold has passed. The
+                // Streaming transition restarts it before the graph runs.
+                if IDLE_TICKS.fetch_add(1, Ordering::AcqRel) + 1 >= IDLE_STOP_TICKS {
+                    set_aaudio_started(false);
+                }
+                return;
+            }
             let Some(sample) = output_latency_ns(sink) else { return };
             let ns = {
                 let mut samples = samples.borrow_mut();

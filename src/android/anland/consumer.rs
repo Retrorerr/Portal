@@ -2289,9 +2289,8 @@ fn event_loop(inner: Arc<Inner>) {
 ///
 /// Runs on the event thread's 500ms poll cadence. Sums user+sys jiffies over
 /// watched guest client processes; any window above threshold kicks
-/// full-rate presentation. Watched: Wayland/X11 clients (video raster and
-/// software decode burn client CPU here — our Firefox is SWGL, so playback
-/// always shows up). Deliberately NOT watched: KWin (our selects drive its
+/// full-rate presentation. Watched: Wayland/X11 clients (software video
+/// decode and raster burn client CPU here). Deliberately NOT watched: KWin (our selects drive its
 /// CPU — feedback loop) and our own process. Fail-quiet (no kick on error),
 /// never fail-busy.
 
@@ -2341,9 +2340,12 @@ fn sample_client_activity(inner: &Arc<Inner>) {
         "kded6",
         "krunner",
     ];
-    // ~2% of one core within the 500ms window (USER_HZ=100). Idle plasmashell
-    // sits ~1.4% (below); any video raster/decode is far above.
-    const BUSY_JIFFIES_PER_WINDOW: u64 = 1;
+    // ~20% of one core within the 500ms window (USER_HZ=100). An idle Firefox
+    // with Xwayland and kded6 already sums 1-4 jiffies per window, which at
+    // the old 1-jiffy bar held full-rate presentation forever (KWin ~23% of a
+    // core compositing identical frames). Animations are carried by KWin
+    // damage hints; this only backs up heavy decode/raster (video ~50).
+    const BUSY_JIFFIES_PER_WINDOW: u64 = 10;
     // Full /proc re-scan cadence for PID discovery (cached PIDs are cheap).
     const FULL_SCAN_NS: u64 = 5_000_000_000;
     let self_pid = std::process::id();
