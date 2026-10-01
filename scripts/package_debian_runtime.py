@@ -28,7 +28,7 @@ LOCK = REPO / "assets/debian-runtime-packages.json"
 # New canonical runtime: Debian base plus the pinned lfdevs Anland KWin/XWayland
 # stack. Older versions (e.g. debian13-arm64-2026.09.05.3) are never rebuilt or
 # replaced; pass --version explicitly to target a different image.
-VERSION = "debian13-arm64-2026.09.10.1"
+VERSION = "debian13-arm64-2026.10.01.1"
 
 
 def add_bytes(archive, name, data, mode=0o644):
