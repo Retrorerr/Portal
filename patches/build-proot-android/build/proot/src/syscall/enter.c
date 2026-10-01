@@ -68,6 +68,8 @@
 #include "ptrace/ptrace.h"
 #include "ptrace/wait.h"
 #include "syscall/heap.h"
+#include "syscall/fakens.h"
+#include "tracee/seccomp.h"
 #include "extension/extension.h"
 #include "execve/execve.h"
 #include "tracee/tracee.h"
@@ -643,12 +645,12 @@ static struct fake_netlink_socket *fake_netlink_socket(Tracee *tracee, int fd)
 {
 	int i;
 
-	if (fd < 0)
+	if (fd < 0 || tracee->fake_netlink == NULL)
 		return NULL;
 
-	for (i = 0; i < tracee->fake_netlink_fds_count; i++)
-		if (tracee->fake_netlink_fds[i].fd == fd)
-			return &tracee->fake_netlink_fds[i];
+	for (i = 0; i < tracee->fake_netlink->count; i++)
+		if (tracee->fake_netlink->fds[i].fd == fd)
+			return &tracee->fake_netlink->fds[i];
 
 	return NULL;
 }
@@ -668,7 +670,7 @@ static void unmark_fake_netlink_fd(Tracee *tracee, int fd)
 	/* A reply the tracee never got round to reading dies with its
 	 * socket, just like the datagrams left in a receive queue.  */
 	talloc_free(sock->reply);
-	*sock = tracee->fake_netlink_fds[--tracee->fake_netlink_fds_count];
+	*sock = tracee->fake_netlink->fds[--tracee->fake_netlink->count];
 }
 
 /**
@@ -1399,7 +1401,7 @@ static void build_fake_netlink_reply(Tracee *tracee, struct fake_netlink_socket 
 	 * and talloc hands back memory aligned well past what struct
 	 * nlmsghdr and the rtnetlink payloads we lay out in it need.  */
 	if (sock->reply == NULL) {
-		sock->reply = talloc_size(tracee, max);
+		sock->reply = talloc_size(tracee->fake_netlink, max);
 		if (sock->reply == NULL)
 			return;
 	}
@@ -1415,7 +1417,9 @@ static void build_fake_netlink_reply(Tracee *tracee, struct fake_netlink_socket 
 	type  = hdr.nlmsg_type;
 	flags = hdr.nlmsg_flags;
 	seq   = hdr.nlmsg_seq;
-	dump  = (flags & NLM_F_DUMP) == NLM_F_DUMP;
+	/* rtnetlink dumps on either half of NLM_F_DUMP: nICEr (Firefox's
+	 * WebRTC) asks with NLM_F_ROOT alone and reads until NLMSG_DONE.  */
+	dump  = (flags & NLM_F_DUMP) != 0;
 
 	switch (type) {
 	case RTM_GETLINK: {
@@ -1869,6 +1873,15 @@ int translate_syscall_enter(Tracee *tracee)
 
 	/* Translate input arguments. */
 	syscall_number = get_sysnum(tracee, ORIGINAL);
+
+	if (tracee->pidns != NULL || tracee->userns) {
+		bool handled;
+
+		status = fakens_enter(tracee, syscall_number, &handled);
+		if (status < 0 || handled)
+			goto end;
+	}
+
 	switch (syscall_number) {
 	default:
 		/* Nothing to do. */
@@ -2408,6 +2421,11 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_chmod:
 	case PR_chown:
 	case PR_chown32:
+	case PR_rt_sigaction:
+		sigsys_action_enter(tracee);
+		status = 0;
+		break;
+
 	case PR_chroot:
 	case PR_getxattr:
 	case PR_listxattr:
@@ -2439,6 +2457,15 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_unshare:
 		if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNET) != 0)
 			tracee->fake_netns = true;
+		/* An unshared PID namespace may need its seccomp filter
+		 * installed instead (see syscall/fakens.c); the exit
+		 * stage reports success either way.  */
+		status = fakens_enter_unshare(tracee, peek_reg(tracee, CURRENT, SYSARG_1));
+		if (status != 0) {
+			if (status > 0)
+				status = 0;
+			break;
+		}
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		status = 0;
@@ -2478,7 +2505,7 @@ int translate_syscall_enter(Tracee *tracee)
 			poke_reg(tracee, SYSARG_1, flags & ~(word_t) CLONE_NS_MASK);
 		}
 		force_fork_sysexit(tracee);
-		status = 0;
+		status = fakens_enter_clone(tracee, flags);
 		break;
 	}
 
@@ -2499,7 +2526,7 @@ int translate_syscall_enter(Tracee *tracee)
 			}
 		}
 		force_fork_sysexit(tracee);
-		status = 0;
+		status = (args_addr != 0 && errno == 0) ? fakens_enter_clone(tracee, flags) : 0;
 		break;
 	}
 

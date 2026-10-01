@@ -17,16 +17,24 @@ When setup completes, Portal starts KDE Plasma 6 on its native Wayland composito
 
 ## Installing software
 
-Portal uses Debian's standard package manager:
+Portal uses Debian's standard package manager. You are the `desktop` user and `sudo` works without a password (the account has none), so ordinary Debian instructions apply as written:
 
 ```bash
 sudo apt update
-sudo apt install firefox-esr
+sudo apt install wget
 ```
 
-Search available packages with `apt search <name>`. Graphical applications appear in Plasma's launcher after installation.
+Search available packages with `apt search <name>`. Graphical applications appear in Plasma's launcher after installation. `wget`, `curl`, the `ffmpeg` command line and CJK fonts (`fonts-noto-cjk`) are part of a fresh install; existing installs can add them with `apt`.
 
-Android cannot provide Linux user namespaces to the guest. Chromium and Electron applications may therefore need `--no-sandbox`; Portal installs compatibility launchers for common packages.
+Third-party repositories and `.deb` files work too, for example `sudo apt install ./package-arm64.deb` or a vendor's APT repository. Only arm64 packages run.
+
+Portal keeps its own KWin and Xwayland builds pinned so a package upgrade cannot replace them with stock Debian ones; everything else upgrades normally.
+
+### Firefox
+
+Firefox ESR from Debian is installed. To use Mozilla's own build instead (`firefox`, or the `firefox-beta`, `firefox-devedition` and `firefox-nightly` channels), add Mozilla's APT repository as their instructions describe and `sudo apt install firefox`. Portal applies the settings it needs for Android (GPU compositing on) to every Firefox under `/usr/lib`, at each launch and again after every `apt`/`dpkg` run, so a new install or upgrade needs nothing extra. The default browser is Mozilla's `firefox` when installed, otherwise Firefox ESR; **System Settings → Default Applications** overrides it.
+
+Android's kernel has no user or PID namespaces, so PRoot emulates the parts browser sandboxes rely on. Chrome, Chromium, Electron apps and Firefox run with their own sandboxes on, as on a desktop Linux install, without `--no-sandbox`.
 
 ## Display and input
 

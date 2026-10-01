@@ -46,6 +46,8 @@ struct bindings;
 struct load_info;
 struct extensions;
 struct chained_syscalls;
+struct fake_pidns;
+struct fake_pidns;
 
 /* Information related to a file-system name-space.  */
 typedef struct {
@@ -62,6 +64,10 @@ typedef struct {
 
 	/* Current working directory, à la /proc/self/pwd.  */
 	char *cwd;
+
+	/* Set once chroot(2) replaced the root: descriptors opened
+	 * before still reach outside of it (see translate_path).  */
+	bool chrooted;
 } FileSystemNameSpace;
 
 /* Virtual heap, emulated with a regular memory mapping.  */
@@ -119,10 +125,50 @@ typedef struct tracee {
 	 * share that namespace.  */
 	bool fake_netns;
 
+	/* Emulated user and PID namespaces, see syscall/fakens.c.
+	 * The clone_stripped_* flags are consumed like the ones above.
+	 * "pidns" is NULL in the host's PID namespace, and
+	 * "pidns_for_children" is set by unshare(CLONE_NEWPID).  In an
+	 * emulated user namespace ("userns"), capget(2)/capset(2) see
+	 * the cap_* sets.  */
+	bool clone_stripped_newuser;
+	bool clone_stripped_newpid;
+	struct fake_pidns *pidns;
+	struct fake_pidns *pidns_for_children;
+	bool pidns_filter;
+	pid_t tgid;
+	bool userns;
+	uint64_t cap_effective;
+	uint64_t cap_permitted;
+	uint64_t cap_inheritable;
+
+	/* The fork-like syscall to restart once the seccomp filter of
+	 * an emulated PID namespace is installed in its place.  */
+	struct {
+		bool pending;
+		int sysnum;
+		word_t args[6];
+	} fakens_restart;
+
+	/* The SIGSYS action of the guest, shared by the tracees
+	 * sharing their signal handlers, the one rt_sigaction(2) is
+	 * setting, and the result of the syscall trapped by Android's
+	 * filter to report once that action is reinstalled, see
+	 * tracee/seccomp.c.  */
+	struct sigsys_action *sigsys_action;
+	struct {
+		bool pending;
+		uint8_t act[32];
+	} sigsys_action_new;
+	struct {
+		bool pending;
+		word_t result;
+	} sigsys_reinstall;
+
 	/* Emulation of AF_NETLINK / NETLINK_ROUTE sockets for
 	 * sandbox helpers like bubblewrap that try to bring up the
 	 * loopback interface inside their would-be net namespace.
-	 * fake_netlink_fds holds one entry per socket we silently
+	 * fake_netlink holds one entry per socket we silently
 	 * redirected from AF_NETLINK to AF_UNIX/SOCK_DGRAM; see
 	 * enter.c / exit.c for the intercepts.
 	 *
@@ -133,16 +179,22 @@ typedef struct tracee {
 	 * one of them while a second answers the interface lookups it makes
 	 * along the way.  The buffer is allocated on demand and handed back
 	 * one datagram at a time ("reply_off" is how far the tracee has
-	 * read), since that is how the kernel delivers a dump.  */
+	 * read), since that is how the kernel delivers a dump.
+	 *
+	 * The table belongs to the fd table, so threads (CLONE_FILES)
+	 * share it: Firefox opens its socket on one thread and reads it
+	 * on another, which otherwise blocks forever on the substitute.  */
 #define MAX_FAKE_NETLINK_FDS 8
 #define MAX_FAKE_NETLINK_REPLY 8192
-	struct fake_netlink_socket {
-		int fd;
-		uint8_t *reply;
-		size_t reply_len;
-		size_t reply_off;
-	} fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
-	int fake_netlink_fds_count;
+	struct fake_netlink_table {
+		struct fake_netlink_socket {
+			int fd;
+			uint8_t *reply;
+			size_t reply_len;
+			size_t reply_off;
+		} fds[MAX_FAKE_NETLINK_FDS];
+		int count;
+	} *fake_netlink;
 	bool pending_fake_netlink_socket;
 
 	/* Fds of the *real* NETLINK_ROUTE sockets a tracee got when the

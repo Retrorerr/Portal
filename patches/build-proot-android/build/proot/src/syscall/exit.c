@@ -39,6 +39,7 @@
 #include "syscall/sysnum.h"
 #include "syscall/socket.h"
 #include "syscall/chain.h"
+#include "syscall/fakens.h"
 #include "syscall/heap.h"
 #include "syscall/rlimit.h"
 #include "execve/execve.h"
@@ -153,6 +154,10 @@ void translate_syscall_exit(Tracee *tracee)
 	}
 	if (status > 0)
 		return;
+
+	/* A fork-like syscall waiting for its PID namespace filter.  */
+	if (fakens_exit_start(tracee))
+		goto end;
 
 	/* Set the tracee's errno if an error occured previously during
 	 * the translation. */
@@ -603,6 +608,16 @@ void translate_syscall_exit(Tracee *tracee)
 	case PR_execve:
 	case PR_execveat:
 		translate_execve_exit(tracee);
+		fakens_exit(tracee, syscall_number);
+		sigsys_action_execve(tracee);
+		goto end;
+
+	case PR_rt_sigaction:
+		sigsys_action_exit(tracee);
+		goto end;
+
+	case PR_getppid:
+		fakens_exit(tracee, syscall_number);
 		goto end;
 
 	case PR_openat2:
@@ -887,20 +902,23 @@ void translate_syscall_exit(Tracee *tracee)
 		/* Record the fd we substituted for an AF_NETLINK request.  */
 		if (tracee->pending_fake_netlink_socket) {
 			int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
-			if (fd >= 0) {
+			if (fd >= 0 && tracee->fake_netlink == NULL)
+				tracee->fake_netlink = talloc_zero(tracee, struct fake_netlink_table);
+			if (fd >= 0 && tracee->fake_netlink != NULL) {
+				struct fake_netlink_table *table = tracee->fake_netlink;
 				int i;
-				if (tracee->fake_netlink_fds_count < MAX_FAKE_NETLINK_FDS) {
+				if (table->count < MAX_FAKE_NETLINK_FDS) {
 					/* Avoid duplicates.  */
 					bool present = false;
-					for (i = 0; i < tracee->fake_netlink_fds_count; i++) {
-						if (tracee->fake_netlink_fds[i].fd == fd) {
+					for (i = 0; i < table->count; i++) {
+						if (table->fds[i].fd == fd) {
 							present = true;
 							break;
 						}
 					}
 					if (!present) {
 						struct fake_netlink_socket *sock =
-							&tracee->fake_netlink_fds[tracee->fake_netlink_fds_count++];
+							&table->fds[table->count++];
 						memset(sock, 0, sizeof(*sock));
 						sock->fd = fd;
 					}

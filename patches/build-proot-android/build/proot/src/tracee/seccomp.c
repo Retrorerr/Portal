@@ -7,6 +7,11 @@
 #include <linux/net.h> /* SYS_SENDMMSG */
 #include <assert.h>    /* assert(3), */
 #include <time.h>      /* time(2), */
+#include <inttypes.h>  /* PRIu64, */
+#include <sched.h>     /* CLONE_SIGHAND, */
+#include <talloc.h>    /* talloc_*, */
+#include <stdint.h>    /* uint64_t, */
+#include <sys/ptrace.h> /* ptrace(2), */
 
 #include "extension/extension.h"
 #include "cli/note.h"
@@ -14,10 +19,177 @@
 #include "syscall/syscall.h"
 #include "tracee/seccomp.h"
 #include "tracee/mem.h"
+#include "tracee/abi.h"
 #include "tracee/statx.h"
 #include "path/path.h"
 
 static int handle_seccomp_event_common(Tracee *tracee);
+
+/* A signal the kernel forces on a thread which blocks it gets its
+ * handler reset to SIG_DFL.  Android's filter traps set_robust_list(2)
+ * right at the start of each thread, where glibc still blocks every
+ * signal, so the SIGSYS handler of a sandboxed process (Chromium's,
+ * Firefox's) is lost to the first thread it creates, and the next trap
+ * of its own filter kills it.  PRoot thus keeps a copy of the guest's
+ * SIGSYS action, the kernel's struct sigaction of the 64-bit ABIs
+ * (handler, flags, restorer, mask), and reinstalls it after each trap
+ * of Android's filter it absorbs.  */
+struct sigsys_action {
+	bool valid;
+	uint8_t act[32];
+};
+
+/**
+ * Make @child, just created by @parent with @clone_flags, share or
+ * copy the SIGSYS action of @parent.
+ */
+void sigsys_action_new_child(Tracee *parent, Tracee *child, word_t clone_flags)
+{
+	if ((clone_flags & CLONE_SIGHAND) != 0) {
+		if (parent->sigsys_action == NULL)
+			parent->sigsys_action = talloc_zero(parent, struct sigsys_action);
+		if (parent->sigsys_action != NULL)
+			child->sigsys_action = talloc_reference(child, parent->sigsys_action);
+	}
+	else if (parent->sigsys_action != NULL && parent->sigsys_action->valid)
+		child->sigsys_action = talloc_memdup(child, parent->sigsys_action,
+						     sizeof(struct sigsys_action));
+}
+
+/**
+ * Remember the SIGSYS action @tracee's rt_sigaction(2) sets, if any.
+ */
+void sigsys_action_enter(Tracee *tracee)
+{
+	word_t act = peek_reg(tracee, CURRENT, SYSARG_2);
+
+	tracee->sigsys_action_new.pending = false;
+	if (sizeof_word(tracee) != 8
+	    || (int) peek_reg(tracee, CURRENT, SYSARG_1) != SIGSYS
+	    || act == 0 || peek_reg(tracee, CURRENT, SYSARG_4) != 8)
+		return;
+
+	if (read_data(tracee, tracee->sigsys_action_new.act, act, sizeof(tracee->sigsys_action_new.act)) < 0)
+		return;
+	tracee->sigsys_action_new.pending = true;
+}
+
+/**
+ * Commit the SIGSYS action remembered at the enter stage of @tracee's
+ * rt_sigaction(2) if it succeeded, and report the result of the
+ * trapped syscall if this rt_sigaction(2) was a reinstallation.
+ */
+void sigsys_action_exit(Tracee *tracee)
+{
+	const bool pending = tracee->sigsys_action_new.pending;
+
+	tracee->sigsys_action_new.pending = false;
+	if (pending && (long) peek_reg(tracee, CURRENT, SYSARG_RESULT) == 0) {
+		if (tracee->sigsys_action == NULL)
+			tracee->sigsys_action = talloc_zero(tracee, struct sigsys_action);
+		if (tracee->sigsys_action != NULL) {
+			memcpy(tracee->sigsys_action->act, tracee->sigsys_action_new.act,
+			       sizeof(tracee->sigsys_action->act));
+			tracee->sigsys_action->valid = true;
+		}
+	}
+
+	if (tracee->sigsys_reinstall.pending) {
+		tracee->sigsys_reinstall.pending = false;
+		poke_reg(tracee, SYSARG_RESULT, tracee->sigsys_reinstall.result);
+	}
+}
+
+/**
+ * execve(2) resets the handlers of @tracee, and unshares them.
+ */
+void sigsys_action_execve(Tracee *tracee)
+{
+	struct sigsys_action *action = tracee->sigsys_action;
+	word_t handler;
+
+	if (action == NULL || (long) peek_reg(tracee, CURRENT, SYSARG_RESULT) < 0)
+		return;
+
+	memcpy(&handler, action->act, sizeof(handler));
+	tracee->sigsys_action = NULL;
+	if (action->valid && handler == (word_t) SIG_IGN)
+		tracee->sigsys_action = talloc_memdup(tracee, action, sizeof(*action));
+	talloc_unlink(tracee, action);
+}
+
+#ifndef PTRACE_GETSIGMASK
+#define PTRACE_GETSIGMASK 0x420a
+#define PTRACE_SETSIGMASK 0x420b
+#endif
+
+/**
+ * Unblock SIGSYS in @tracee, a new thread or process which hasn't run
+ * any code yet, if it has a handler for it.  glibc starts threads
+ * with every signal blocked and calls set_robust_list(2) first, which
+ * Android's filter traps: SIGSYS then gets through without resetting
+ * the handler (see above), which the other threads of the process may
+ * need before PRoot could reinstall it.  glibc sets the mask of the
+ * thread right after.
+ */
+void sigsys_unblock_new_tracee(Tracee *tracee)
+{
+	const struct sigsys_action *action = tracee->sigsys_action;
+	const uint64_t sigsys_bit = UINT64_C(1) << (SIGSYS - 1);
+	uint64_t mask;
+	word_t handler;
+
+	if (action == NULL || !action->valid)
+		return;
+
+	memcpy(&handler, action->act, sizeof(handler));
+	if (handler == (word_t) SIG_DFL)
+		return;
+
+	if (ptrace(PTRACE_GETSIGMASK, tracee->pid, sizeof(mask), &mask) < 0
+	    || (mask & sigsys_bit) == 0)
+		return;
+
+	mask &= ~sigsys_bit;
+	(void) ptrace(PTRACE_SETSIGMASK, tracee->pid, sizeof(mask), &mask);
+}
+
+/**
+ * Reinstall the SIGSYS action of @tracee, which Android's filter just
+ * trapped a syscall of: replace the latter, whose result is already
+ * set, with rt_sigaction(2), and report that result at its exit.
+ */
+static void reinstall_sigsys_action(Tracee *tracee)
+{
+	const struct sigsys_action *action = tracee->sigsys_action;
+	word_t handler;
+	word_t address;
+
+	if (action == NULL || !action->valid || sizeof_word(tracee) != 8
+	    || tracee->restore_original_regs_after_seccomp_event)
+		return;
+
+	memcpy(&handler, action->act, sizeof(handler));
+	if (handler == (word_t) SIG_DFL)
+		return;
+
+	address = alloc_mem(tracee, sizeof(action->act) + RED_ZONE_SIZE);
+	if (address == 0 || write_data(tracee, address, action->act, sizeof(action->act)) < 0) {
+		poke_reg(tracee, STACK_POINTER, peek_reg(tracee, ORIGINAL_SECCOMP_REWRITE, STACK_POINTER));
+		return;
+	}
+
+	VERBOSE(tracee, 3, "vpid %" PRIu64 ": reinstalling the SIGSYS handler", tracee->vpid);
+
+	tracee->sigsys_reinstall.pending = true;
+	tracee->sigsys_reinstall.result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	set_sysnum(tracee, PR_rt_sigaction);
+	poke_reg(tracee, SYSARG_1, SIGSYS);
+	poke_reg(tracee, SYSARG_2, address);
+	poke_reg(tracee, SYSARG_3, 0);
+	poke_reg(tracee, SYSARG_4, 8);
+	restart_syscall_after_seccomp(tracee);
+}
 
 /**
  * Restart syscall that caused seccomp event
@@ -114,7 +286,30 @@ int handle_seccomp_event(Tracee* tracee)
 
 	print_current_regs(tracee, 3, "seccomp SIGSYS");
 
-	return handle_seccomp_event_common(tracee);
+	ret = handle_seccomp_event_common(tracee);
+	if (ret == 0)
+		reinstall_sigsys_action(tracee);
+	return ret;
+}
+
+/**
+ * Reinstall the SIGSYS action of @tracee after Android's filter
+ * trapped the syscall PRoot voided at the enter stage, whose result
+ * is already faked.
+ */
+void reinstall_sigsys_action_after_void(Tracee *tracee)
+{
+	const struct sigsys_action *action = tracee->sigsys_action;
+
+	if (action == NULL || !action->valid)
+		return;
+
+	tracee->status = 0;
+	tracee->restore_original_regs = false;
+	if (fetch_regs(tracee) != 0)
+		return;
+	save_current_regs(tracee, ORIGINAL_SECCOMP_REWRITE);
+	reinstall_sigsys_action(tracee);
 }
 
 void fix_and_restart_enosys_syscall(Tracee* tracee)

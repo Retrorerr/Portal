@@ -175,6 +175,20 @@ Action readlink_proc(const Tracee *tracee, char result[PATH_MAX],
 		break;
 	}
 
+	/* Links in "/proc/<PID>/ns/" point to "<type>:[<inode>]"
+	 * objects, not paths: don't dereference them either.  */
+	status = snprintf(proc_path, sizeof(proc_path), "/proc/%d/ns", pid);
+	if (status < 0 || (size_t) status >= sizeof(proc_path))
+		return -EPERM;
+
+	if (compare_paths(proc_path, base) == PATHS_ARE_EQUAL) {
+		status = snprintf(result, PATH_MAX, "%s/%s", base, component);
+		if (status < 0 || status >= PATH_MAX)
+			return -EPERM;
+
+		return DONT_CANONICALIZE;
+	}
+
 	return DEFAULT;
 }
 

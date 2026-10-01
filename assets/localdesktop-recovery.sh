@@ -20,7 +20,8 @@ export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_DESKTOP=plasma
 export XDG_CURRENT_DESKTOP=KDE
 export KDE_FULL_SESSION=true
-export ELECTRON_DISABLE_SANDBOX=1
+# PRoot emulates the namespaces of the Electron sandbox where it can.
+[ -L /proc/self/ns/user ] || export ELECTRON_DISABLE_SANDBOX=1
 export QT_SCALE_FACTOR="$output_scale"
 export PLASMA_USE_QT_SCALING=1
 export QT_USE_PHYSICAL_DPI=1

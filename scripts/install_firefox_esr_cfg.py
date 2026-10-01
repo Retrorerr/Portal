@@ -6,16 +6,6 @@ pref("general.config.sandbox_enabled", false);
 """
 
 localdesktop_cfg = """// Auto updated by Portal on each startup, do not edit manually
-defaultPref("media.cubeb.sandbox", false);
-defaultPref("security.sandbox.content.level", 0);
-defaultPref("media.allow-audio-non-utility", true);
-defaultPref("media.rdd-process.enabled", false);
-
-try {
-  var { SandboxUtils } = ChromeUtils.importESModule("resource://gre/modules/SandboxUtils.sys.mjs");
-  SandboxUtils.maybeWarnAboutDisabledContentSandbox = () => {};
-  SandboxUtils.observeContentSandboxPref = () => {};
-} catch (_) {}
 """
 
 with open("target/autoconfig.js", "w", newline="\n") as f:

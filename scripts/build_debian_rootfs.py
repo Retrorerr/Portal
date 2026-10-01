@@ -64,6 +64,9 @@ SEED_PACKAGES = [
     # Fonts
     "fonts-dejavu-core",
     "fonts-noto-core",
+    # fonts-noto-core has no CJK; without this Chinese, Japanese and Korean
+    # text renders as empty boxes in every app.
+    "fonts-noto-cjk",
     "fontconfig",
     # Locale, timezone, and desktop metadata tools
     "locales",
@@ -104,6 +107,14 @@ SEED_PACKAGES = [
     "debian-archive-keyring",
     "gnupg",
     "gpgv",
+    # A stock Debian desktop's everyday terminal tools; third-party install
+    # instructions ("wget ... | sudo tee", "curl ... | sh", "ffmpeg -i")
+    # assume them. sudo is a dependency of the desktop already; naming it here
+    # keeps that from silently changing (it is what `sudo apt install` needs).
+    "sudo",
+    "wget",
+    "curl",
+    "ffmpeg",
     # Curated desktop application suite
     "ark",
     "gwenview",
@@ -176,6 +187,67 @@ EXCLUDE_PACKAGES = {
     "bluez",
     "fwupd",
 }
+
+# Passwordless sudo for `desktop`. The account has no password and the guest is
+# not a security boundary. Keep byte-identical to SUDOERS_DROPIN in
+# src/core/guest_sudo.rs, which restores it on existing installs at every
+# launch (tests/guest_access.rs checks the two agree).
+SUDOERS_DROPIN = (
+    "# Managed by Portal: the desktop account has no password, so sudo asks for none.\n"
+    "%sudo ALL=(ALL:ALL) NOPASSWD: ALL\n"
+)
+SUDOERS_DROPIN_PATH = "etc/sudoers.d/portal-desktop"
+SUDOERS_DROPIN_MODE = 0o440
+# Debian's base-passwd fixes gid 27 for `sudo`.
+GUEST_GROUP = (
+    "root:x:0:\n"
+    "desktop:x:1000:\n"
+    "audio:x:29:desktop\n"
+    "video:x:44:desktop\n"
+    "sudo:x:27:desktop\n"
+)
+
+
+def validate_sudoers(text: str) -> None:
+    """Refuse a drop-in sudo would reject; a bad one locks sudo out of the whole image.
+
+    `visudo -cf` where the build host has it (Linux), otherwise a strict shape
+    check: Windows builders have no visudo.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    visudo = shutil.which("visudo")
+    if visudo:
+        with tempfile.NamedTemporaryFile("w", suffix=".sudoers", delete=False, newline="\n") as handle:
+            handle.write(text)
+        try:
+            result = subprocess.run([visudo, "-cf", handle.name], capture_output=True, text=True)
+        finally:
+            os.unlink(handle.name)
+        if result.returncode != 0:
+            raise ValueError(f"visudo rejected the sudoers drop-in: {result.stdout}{result.stderr}")
+        return
+    for line in text.splitlines():
+        if not (line.startswith("#") or re.fullmatch(r"%sudo ALL=\(ALL:ALL\) NOPASSWD: ALL", line)):
+            raise ValueError(f"Unexpected line in the sudoers drop-in: {line!r}")
+    if not text.endswith("\n") or "NOPASSWD" not in text:
+        raise ValueError("The sudoers drop-in is incomplete")
+
+
+def write_guest_access(output_dir: Path) -> None:
+    """Group database and sudoers drop-in: `desktop` may `sudo` without a password."""
+    group = output_dir / "etc" / "group"
+    group.write_text(GUEST_GROUP, newline="\n")
+    group.chmod(0o644)
+
+    validate_sudoers(SUDOERS_DROPIN)
+    dropin = output_dir / SUDOERS_DROPIN_PATH
+    dropin.parent.mkdir(parents=True, exist_ok=True)
+    dropin.write_text(SUDOERS_DROPIN, newline="\n")
+    dropin.chmod(SUDOERS_DROPIN_MODE)
+
 
 def fetch_package_index(cache_file: Path) -> dict:
     if cache_file.exists() and cache_file.stat().st_size > 10 * 1024 * 1024:
@@ -634,15 +706,7 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked
         f.write(passwd_content)
     passwd.chmod(0o644)
 
-    group = output_dir / "etc" / "group"
-    group_content = (
-        "root:x:0:\n"
-        "desktop:x:1000:\n"
-        "audio:x:29:desktop\n"
-        "video:x:44:desktop\n"
-    )
-    group.write_text(group_content)
-    group.chmod(0o644)
+    write_guest_access(output_dir)
 
     # Ensure /etc/default/locale exists
     default_locale = output_dir / "etc" / "default" / "locale"

@@ -158,7 +158,7 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         ("TURNIP_KMD".into(), "kgsl".into()),
         ("XWAYLAND_FORCE_KGSL_SURFACELESS".into(), "1".into()),
         // Firefox backend selection: native Wayland. With the forced
-        // WebRender prefs (see setup.rs sync_firefox_config), Firefox 140 on
+        // WebRender prefs (see core::guest_browser), Firefox 140 on
         // Wayland composites on the GPU (about:support `Compositing:
         // WebRender`, WebGL on freedreno); only its DMABUF feature fails
         // (no DRM device), which gates VA-API but not compositing. Against

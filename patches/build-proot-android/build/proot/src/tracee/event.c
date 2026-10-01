@@ -852,6 +852,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			 * is only used to notify the tracer.  */
 			if (tracee->sigstop == SIGSTOP_IGNORED) {
 				tracee->sigstop = SIGSTOP_ALLOWED;
+				sigsys_unblock_new_tracee(tracee);
 				signal = 0;
 			}
 			break;
@@ -904,6 +905,28 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 					tracee->skip_next_seccomp_signal = false;
 					tracee->restore_sysarg1_after_sigsys = false;
 					signal = 0;
+					if (siginfo.si_errno == 0)
+						reinstall_sigsys_action_after_void(tracee);
+				}
+				/* SECCOMP_RET_DATA ends up in si_errno: Android's
+				 * policy traps with 0, whereas the sandbox of
+				 * Chromium, Firefox, ... traps with its own
+				 * non-zero IDs for its in-process SIGSYS
+				 * handler.  Deliver the latter untouched, with
+				 * the syscall's first argument restored if a
+				 * synthesized sysexit clobbered it above.  */
+				else if (siginfo.si_errno != 0) {
+					VERBOSE(tracee, 4, "vpid %" PRIu64 ": SIGSYS from the tracee's own filter: syscall %d, data %d",
+						tracee->vpid, siginfo.si_syscall, siginfo.si_errno);
+#if defined(ARCH_ARM_EABI) || defined(ARCH_ARM64)
+					if (tracee->restore_sysarg1_after_sigsys
+					    && fetch_regs(tracee) == 0
+					    && get_sysnum(tracee, ORIGINAL) == get_sysnum(tracee, CURRENT)) {
+						poke_reg(tracee, SYSARG_1, peek_reg(tracee, ORIGINAL, SYSARG_1));
+						push_specific_regs(tracee, false);
+					}
+#endif
+					tracee->restore_sysarg1_after_sigsys = false;
 				} else {
 					signal = handle_seccomp_event(tracee);
 				}

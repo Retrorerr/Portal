@@ -34,6 +34,7 @@
 #include <inttypes.h>  /* PRI*, */
 
 #include "path/path.h"
+#include "syscall/fakens.h"
 #include "path/binding.h"
 #include "path/canon.h"
 #include "path/proc.h"
@@ -368,6 +369,19 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 		if (result[0] != '/')
 			return -ENOTDIR;
 
+		/* A directory opened before chroot(2) still leads
+		 * outside the new root, as with the kernel: resolve
+		 * from it on the host.  */
+		if (tracee->fs->chrooted
+		    && !belongs_to_guestfs(tracee, result)
+		    && get_path_binding(tracee, HOST, result) == NULL) {
+			status = join_paths(2, guest_path, result, user_path);
+			if (status < 0)
+				return status;
+			strcpy(result, guest_path);
+			goto skip;
+		}
+
 		/* Remove the leading "root" part of the base
 		 * (required!). */
 		status = detranslate_path(tracee, result, NULL);
@@ -409,6 +423,8 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 	status = substitute_binding(tracee, GUEST, result);
 	if (status < 0)
 		return status;
+
+	fakens_fix_ns_path(tracee, result);
 
 skip:
 	VERBOSE(tracee, 2, "vpid %" PRIu64 ":          -> \"%s\"",

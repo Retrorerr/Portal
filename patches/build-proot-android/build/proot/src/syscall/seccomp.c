@@ -42,6 +42,7 @@
 #include <sys/ioctl.h>     /* _IOW, */
 #include <linux/sockios.h>  /* SIOCGIFINDEX, */
 #include <sched.h>         /* CLONE_NEW*, */
+#include <signal.h>        /* SIGSYS, */
 
 #include "syscall/seccomp.h"
 #include "tracee/tracee.h"
@@ -184,7 +185,8 @@ static int add_trace_ioctl(struct sock_fprog *program, word_t syscall, int flag)
  * Like add_trace_syscall(), but only when the first argument of
  * @syscall matches @flag: FILTER_HIGH_FD, a descriptor PRoot moved to
  * PROOT_TRACED_FD_BASE or higher (negative ones match too), or
- * FILTER_CLONE_NS, clone(2) flags asking for a namespace.  close(2),
+ * FILTER_CLONE_NS, clone(2) flags asking for a namespace, or
+ * FILTER_SIGSYS, the signal number SIGSYS.  close(2),
  * send(2) and recv(2) calls otherwise stop every Wayland, X11, D-Bus
  * and PipeWire message, and clone(2) every thread.
  */
@@ -202,6 +204,8 @@ static int add_trace_arg(struct sock_fprog *program, word_t syscall, int flag)
 	statements[1] = (struct sock_filter) BPF_STMT(BPF_LD + BPF_W + BPF_ABS, arg_offset);
 	if ((flag & FILTER_HIGH_FD) != 0)
 		statements[2] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JGE + BPF_K, PROOT_TRACED_FD_BASE, 1, 0);
+	else if ((flag & FILTER_SIGSYS) != 0)
+		statements[2] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, SIGSYS, 1, 0);
 	else
 		statements[2] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JSET + BPF_K, CLONE_NS_FLAGS, 1, 0);
 	statements[3] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW);
@@ -446,6 +450,8 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_chmod,		0 },
 	{ PR_chown,		0 },
 	{ PR_chown32,		0 },
+	{ PR_capget,		0 },
+	{ PR_capset,		0 },
 	{ PR_chroot,		0 },
 	{ PR_clone,		FILTER_CLONE_NS },
 	{ PR_clone3,		0 },
@@ -453,6 +459,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_connect,		0 },
 	{ PR_creat,		0 },
 	{ PR_recvfrom,		FILTER_HIGH_FD },
+	{ PR_rt_sigaction,	FILTER_SIGSYS | FILTER_SYSEXIT },
 	{ PR_recvmsg,		FILTER_HIGH_FD },
 	{ PR_sendmsg,		FILTER_HIGH_FD },
 	{ PR_sendto,		FILTER_HIGH_FD },

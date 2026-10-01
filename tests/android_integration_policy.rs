@@ -21,6 +21,7 @@ const ANDROID_TEXT_INPUT_V2_SOURCE: &str =
 const ANDROID_KEYBOARD_BRIDGE_SOURCE: &str =
     include_str!("../src/android/java/app/polarbear/SoftKeyboardBridge.java");
 const ANDROID_SETUP_SOURCE: &str = include_str!("../src/android/proot/setup.rs");
+const GUEST_BROWSER_SOURCE: &str = include_str!("../src/core/guest_browser.rs");
 const INITIAL_SETUP_HELPER_SOURCE: &str =
     include_str!("../assets/localdesktop-apply-initial-appearance.py");
 const ANDROID_IME_SOURCE: &str = include_str!("../src/android/ime.rs");
@@ -353,9 +354,10 @@ fn nested_android_owned_settings_are_truthful() {
     assert!(!ANDROID_SETUP_SOURCE.contains("browser.tabs.inTitlebar"));
     assert!(!ANDROID_SETUP_SOURCE.contains("mail.tabs.drawInTitlebar"));
     assert!(ANDROID_SETUP_SOURCE.contains("sync_firefox_config"));
-    // Sandbox/audio/runtime compatibility prefs must remain.
-    assert!(ANDROID_SETUP_SOURCE.contains("media.cubeb.sandbox"));
-    assert!(ANDROID_SETUP_SOURCE.contains("security.sandbox.content.level"));
+    // Firefox keeps its own sandbox and audio process defaults.
+    assert!(!GUEST_BROWSER_SOURCE.contains("defaultPref(\"media.cubeb.sandbox\""));
+    assert!(!GUEST_BROWSER_SOURCE.contains("defaultPref(\"security.sandbox.content.level\""));
+    assert!(!GUEST_BROWSER_SOURCE.contains("browser.tabs.inTitlebar"));
     assert!(ANDROID_SETUP_SOURCE.contains("get_timezone_id()"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_touchscreen.so"));
     assert!(ANDROID_SETUP_SOURCE.contains("systemsettings/kcm_tablet.so"));

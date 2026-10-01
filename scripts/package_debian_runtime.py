@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 
 from build_debian_rootfs import (
+    SUDOERS_DROPIN_MODE,
+    SUDOERS_DROPIN_PATH,
     build_rootfs,
     fetch_package_index,
     prepare_locked_packages_with_anland,
@@ -34,6 +36,38 @@ def add_bytes(archive, name, data, mode=0o644):
     info.mode = mode
     info.size = len(data)
     archive.addfile(info, io.BytesIO(data))
+
+
+def extend_lock(seeds):
+    """Lock the dependency closure of `seeds`, adding only what is not locked yet.
+
+    Every entry already locked keeps its exact version, so a new package never
+    drags the whole image onto newer Debian builds (that is --refresh-lock).
+    Naming the seeds keeps unrelated drift between SEED_PACKAGES and the lock
+    (packages Portal installs at first launch instead) out of the image. The
+    index must be the one the lock was made from: an existing entry whose
+    version differs from it means the cached index is stale, and nothing is
+    written.
+    """
+    packages = fetch_package_index(REPO / "target/deb_cache/Packages.txt")
+    locked = json.loads(LOCK.read_text())
+    stale = sorted(n for n, entry in locked.items()
+                   if n in packages and packages[n]["Version"] != entry["Version"])
+    if stale:
+        raise ValueError(f"Package index is not the one the lock was made from; differs for {stale[:5]}")
+    unknown = sorted(set(seeds) - set(SEED_PACKAGES))
+    if unknown:
+        raise ValueError(f"Not in SEED_PACKAGES (add them there first): {unknown}")
+    wanted = resolve_dependencies(packages, seeds)
+    missing = set(seeds) - set(wanted)
+    if missing:
+        raise ValueError(f"Missing seed packages: {missing}")
+    added = [name for name in wanted if name not in locked]
+    for name in added:
+        locked[name] = {key: packages[name][key] for key in ("Version", "Filename", "SHA256", "Size")}
+    if added:
+        LOCK.write_text(json.dumps(locked, indent=2) + "\n")
+    print(f"Locked {len(added)} new packages: {', '.join(added) or 'none'}")
 
 
 def build(output, refresh_lock=False, version=VERSION, with_anland=True):
@@ -71,7 +105,8 @@ def build(output, refresh_lock=False, version=VERSION, with_anland=True):
                     continue  # canonical relative links below
                 if path.is_file():
                     executable = name == "usr/sbin/policy-rc.d" or name.endswith((".postinst", ".preinst", ".prerm", ".postrm", ".config"))
-                    add_bytes(archive, name, path.read_bytes(), 0o755 if executable else 0o644)
+                    mode = SUDOERS_DROPIN_MODE if name == SUDOERS_DROPIN_PATH else 0o755 if executable else 0o644
+                    add_bytes(archive, name, path.read_bytes(), mode)
                 elif path.is_dir():
                     member = tarfile.TarInfo(name)
                     member.type = tarfile.DIRTYPE
@@ -108,10 +143,15 @@ def build(output, refresh_lock=False, version=VERSION, with_anland=True):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--refresh-lock", action="store_true", help="Explicitly select new package versions")
+    parser.add_argument("--extend-lock", nargs="+", metavar="PACKAGE",
+                        help="Lock these SEED_PACKAGES and their new dependencies (existing versions unchanged) and exit")
     parser.add_argument("--version", default=VERSION, help="Runtime version marker (never reuse a published version)")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--no-anland", action="store_true", help="Build the pure Debian base without the lfdevs overlay")
     args = parser.parse_args()
+    if args.extend_lock:
+        extend_lock(args.extend_lock)
+        raise SystemExit(0)
     output = args.output or (REPO / f"target/portal-{args.version}.tar.xz")
     manifest = build(output, args.refresh_lock, args.version, not args.no_anland)
     # NOTE: assets/debian-runtime.json is only rewritten by

@@ -45,6 +45,8 @@
 #include "ptrace/wait.h"
 #include "extension/extension.h"
 #include "cli/note.h"
+#include "syscall/fakens.h"
+#include "tracee/seccomp.h"
 
 #include "compat.h"
 
@@ -569,6 +571,8 @@ void resolve_pending_child(Tracee *parent)
 			parent->vpid);
 		parent->clone_stripped_newns = false;
 		parent->clone_stripped_newnet = false;
+		parent->clone_stripped_newuser = false;
+		parent->clone_stripped_newpid = false;
 		return;
 	}
 
@@ -762,6 +766,7 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 		if (child->fs->cwd == NULL)
 			return -ENOMEM;
 		talloc_set_name_const(child->fs->cwd, "$cwd");
+		child->fs->chrooted = parent->fs->chrooted;
 
 		if (parent->clone_stripped_newns
 		    && parent->fs->bindings.guest != NULL) {
@@ -811,17 +816,28 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 	child->fake_netns = parent->fake_netns || parent->clone_stripped_newnet;
 	parent->clone_stripped_newnet = false;
 
-	/* Open fds survive fork(2)/clone(2), so the child has to keep
-	 * recognising the netlink sockets its parent opened.  The reply
-	 * pending on either of them doesn't carry over: it belongs to
-	 * whoever sent the request.  */
-	for (int i = 0; i < parent->fake_netlink_fds_count; i++) {
-		child->fake_netlink_fds[i].fd = parent->fake_netlink_fds[i].fd;
-		child->fake_netlink_fds[i].reply = NULL;
-		child->fake_netlink_fds[i].reply_len = 0;
-		child->fake_netlink_fds[i].reply_off = 0;
+	/* Same for the user and PID namespaces.  */
+	fakens_new_child(parent, child, clone_flags);
+	sigsys_action_new_child(parent, child, clone_flags);
+
+	/* Threads share their fd table, hence the netlink sockets opened
+	 * and the replies pending on them.  A forked child keeps
+	 * recognising its parent's sockets, but the reply pending on
+	 * either of them belongs to whoever sent the request.  */
+	if ((clone_flags & CLONE_FILES) != 0) {
+		if (parent->fake_netlink == NULL)
+			parent->fake_netlink = talloc_zero(parent, struct fake_netlink_table);
+		if (parent->fake_netlink != NULL)
+			child->fake_netlink = talloc_reference(child, parent->fake_netlink);
 	}
-	child->fake_netlink_fds_count = parent->fake_netlink_fds_count;
+	else if (parent->fake_netlink != NULL && parent->fake_netlink->count > 0) {
+		child->fake_netlink = talloc_zero(child, struct fake_netlink_table);
+		if (child->fake_netlink != NULL) {
+			for (int i = 0; i < parent->fake_netlink->count; i++)
+				child->fake_netlink->fds[i].fd = parent->fake_netlink->fds[i].fd;
+			child->fake_netlink->count = parent->fake_netlink->count;
+		}
+	}
 	memcpy(child->netlink_route_fds, parent->netlink_route_fds,
 	       sizeof(child->netlink_route_fds));
 	child->netlink_route_fds_count = parent->netlink_route_fds_count;
@@ -846,6 +862,7 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 		bool keep_stopped = false;
 
 		child->sigstop = SIGSTOP_ALLOWED;
+		sigsys_unblock_new_tracee(child);
 
 		/* Notify its ptracer if it is ready to be traced.  */
 		if (child->as_ptracee.ptracer != NULL) {

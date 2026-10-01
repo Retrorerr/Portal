@@ -7,7 +7,9 @@ pub mod core {
     pub mod config;
     pub mod coordinate_transform;
     pub mod drm_nodes;
+    pub mod guest_browser;
     pub mod guest_locale;
+    pub mod guest_sudo;
     #[cfg(unix)]
     pub mod guest_timezone;
     pub mod ime_policy;

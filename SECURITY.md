@@ -7,12 +7,13 @@ with Portal's Android UID and share its files, sockets and process permissions.
 Guest root is simulated; it does not grant Android root. Android's app sandbox
 still separates Portal from other apps, subject to permissions the user grants.
 
-Firefox's content sandbox and separate RDD isolation are disabled for this
-environment. Chromium/Electron use `--no-sandbox`; the `bwrap` compatibility
-wrapper executes its target without namespace isolation. Do not treat guest
-apps, browser content processes or purported Flatpak containers as isolated
-from one another. These compromises keep Linux applications runnable under
-stock Android; they do not provide standard desktop Linux browser security.
+Browser sandboxes run with their seccomp-bpf filters and file brokers as on
+desktop Linux: PRoot passes their seccomp traps through and emulates the user
+and PID namespaces they create. The namespaces are emulated, not enforced by
+the kernel, so a compromised renderer that escapes its seccomp filter is not
+contained by them the way it would be on desktop Linux. The `bwrap`
+compatibility wrapper executes its target without namespace isolation. Do not
+treat guest apps or purported Flatpak containers as isolated from one another.
 
 Shared storage is bound at `/android` and `/root/Android` only when the user
 grants all-files access. That grant exposes shared storage to every guest app.

@@ -36,7 +36,8 @@ export QT_NO_XDG_DESKTOP_PORTAL=1
 export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
 export QT_SCALE_FACTOR=1
 export PLASMA_USE_QT_SCALING=1
-export ELECTRON_DISABLE_SANDBOX=1
+# PRoot emulates the namespaces of the Electron sandbox where it can.
+[ -L /proc/self/ns/user ] || export ELECTRON_DISABLE_SANDBOX=1
 export LOCALDESKTOP_DIAGNOSTICS=1
 export WAYLAND_DEBUG=${WAYLAND_DEBUG:-1}
 export XDG_DATA_DIRS=/usr/local/share:/usr/share

@@ -49,11 +49,14 @@ typedef struct {
 #define FILTER_HIGH_FD  0x2
 /* Trace clone(2) only when it asks for new namespaces.  */
 #define FILTER_CLONE_NS 0x4
+/* Trace rt_sigaction(2) only when it is about SIGSYS.  */
+#define FILTER_SIGSYS   0x8
 #else
 #define FILTER_HIGH_FD  0
 #define FILTER_CLONE_NS 0
+#define FILTER_SIGSYS   0
 #endif
-#define FILTER_ARGS (FILTER_HIGH_FD | FILTER_CLONE_NS)
+#define FILTER_ARGS (FILTER_HIGH_FD | FILTER_CLONE_NS | FILTER_SIGSYS)
 
 /* PRoot moves the descriptors it has to see every send, receive and
  * close of up here (see syscall/exit.c).  Guests rarely hold this many

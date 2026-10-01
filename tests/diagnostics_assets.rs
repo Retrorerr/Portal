@@ -149,7 +149,9 @@ fn preinstall_support_probe_keeps_diagnostics_out_of_runtime_b() {
 #[test]
 fn electron_helper_remains_available_without_automatic_desktop_rewrites() {
     assert!(SETUP.contains("resources/app.asar"));
-    assert!(SETUP.contains("--no-sandbox"));
+    // Chromium's sandbox stays on wherever PRoot emulates its namespaces.
+    assert!(SETUP.contains("[ -L /proc/self/ns/user ] || no_sandbox=1"));
+    assert!(SETUP.contains(".replace(\" --no-sandbox\", \"\")"));
     assert!(SETUP.contains("--no-stdio-init"));
     assert!(SETUP.contains("--ozone-platform=wayland"));
     assert!(SETUP.contains("retire_legacy_desktop_mutators"));

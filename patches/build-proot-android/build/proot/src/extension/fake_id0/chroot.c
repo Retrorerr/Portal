@@ -1,11 +1,14 @@
 #include <errno.h>       /* E*, */
 #include <sys/stat.h>    /* stat, */
+#include <linux/capability.h> /* CAP_SYS_CHROOT, */
 
 #include "tracee/reg.h"
 #include "tracee/mem.h"
 #include "path/path.h"
 #include "path/binding.h"
 #include "extension/fake_id0/chroot.h"
+
+#include "syscall/fakens.h"
 
 int handle_chroot_exit_end(Tracee *tracee, Config *config, bool from_sigsys) {
 	char path[PATH_MAX];
@@ -17,7 +20,8 @@ int handle_chroot_exit_end(Tracee *tracee, Config *config, bool from_sigsys) {
 	struct stat statbuf;
 	bool seen_bind_under_new_root = false;
 
-	if (config->euid != 0) /* TODO: && !HAS_CAP(SYS_CHROOT) */
+	/* Root, or CAP_SYS_CHROOT in an emulated user namespace.  */
+	if (config->euid != 0 && !fakens_has_cap(tracee, CAP_SYS_CHROOT))
 		return from_sigsys ? -EPERM : 0;
 
 	if (from_sigsys) {
@@ -73,7 +77,7 @@ int handle_chroot_exit_end(Tracee *tracee, Config *config, bool from_sigsys) {
 	/* Fetch guest path if we didn't already.  */
 	if (!from_sigsys) {
 		input = peek_reg(tracee, ORIGINAL, SYSARG_1);
-		status = read_path(tracee, path, input);
+		status = read_path(tracee, path_guest, input);
 		if (status < 0)
 			return -errno;
 	}
@@ -100,11 +104,23 @@ int handle_chroot_exit_end(Tracee *tracee, Config *config, bool from_sigsys) {
 		if (status < 0)
 			return status;
 
-		/* Replace tracee bindings */
-		talloc_unlink(tracee, tracee->fs);
+		/* Replace tracee bindings, for every process sharing
+		 * them through CLONE_FS too.  */
+		FileSystemNameSpace *old_fs = tracee->fs;
+		Tracee *sharer;
+
 		tracee->fs = talloc_zero(tracee, FileSystemNameSpace);
 		binding = new_binding(tracee, path_host_absolute, "/", true);
 		initialize_bindings(tracee);
+		tracee->fs->chrooted = true;
+
+		LIST_FOREACH(sharer, get_tracees_list_head(), link) {
+			if (sharer == tracee || sharer->fs != old_fs)
+				continue;
+			sharer->fs = talloc_reference(sharer, tracee->fs);
+			talloc_unlink(sharer, old_fs);
+		}
+		talloc_unlink(tracee, old_fs);
 
 		/* Restore current dir.  */
 		status = detranslate_path(tracee, path, NULL);

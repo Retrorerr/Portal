@@ -15,6 +15,8 @@ use crate::{
     },
     core::{
         config::{APP_FILES_ROOT, DESKTOP_USER, DOCS_HOME_URL, PRODUCTION_FS_ROOT},
+        guest_browser as browser,
+        guest_sudo,
         install_plan::{
             validate_initial_setup_proof, AppliedAppearance, AppearanceChoice, InstallPlan,
             InstallPlanState, OptionalApp, PersistedInstallPlan, INSTALL_PLAN_FILE,
@@ -73,11 +75,15 @@ pub struct SetupOptions {
 pub type SetupCompletionCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 const KWIN_WRAPPER: &str = include_str!("../../../assets/localdesktop-kwin-wrapper-v2.sh");
-/// Opt-in helper deriving `--no-sandbox` user desktop entries for
-/// Chromium/Electron apps (see `setup_chromium_no_sandbox`).
+/// Opt-in helper deriving user desktop entries for Chromium/Electron apps
+/// (see `setup_chromium_no_sandbox`). PRoot emulates the user and PID
+/// namespaces their sandbox needs; `--no-sandbox` is only added where that
+/// emulation is unavailable, which `/proc/self/ns/user` tells.
 const CHROMIUM_ENTRIES_HELPER: &str = r#"#!/bin/sh
 target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$target_dir" || exit 1
+no_sandbox=0
+[ -L /proc/self/ns/user ] || no_sandbox=1
 
 for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop; do
     [ -f "$src" ] || continue
@@ -111,10 +117,10 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
     fi
 
     tmp="$dst.portal-tmp.$$"
-    if ! awk -v electron="$electron" '
+    if ! awk -v electron="$electron" -v no_sandbox="$no_sandbox" '
         /^\[Desktop Entry\]/ && !seen { print; print "X-LocalDesktop-NoSandbox=true"; seen = 1; next }
         /^Exec=/ {
-            if (index($0, "--no-sandbox") == 0)
+            if (no_sandbox == 1 && index($0, "--no-sandbox") == 0)
                 sub(/^Exec=[^ ]+/, "& --no-sandbox")
             if (electron == 1 && index($0, "--no-stdio-init") == 0)
                 sub(/^Exec=[^ ]+/, "& --no-stdio-init")
@@ -907,7 +913,8 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
         })
         .collect::<Vec<_>>();
     // Official Electron apps ship their own launchers, which need Portal's
-    // no-sandbox copy in the user's applications directory.
+    // copy (Wayland, stdio and shortcut flags) in the user's applications
+    // directory.
     let electron_apps = selected_apps
         .iter()
         .copied()
@@ -1019,7 +1026,7 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
             // entry name is fixed enum metadata, never UI input.
             let user = get_application_context().local_config.user.username;
             let desktop_command = format!(
-                "/usr/local/bin/localdesktop-no-sandbox-entries && grep -q '^X-LocalDesktop-NoSandbox=true$' \"$HOME/.local/share/applications/{desktop_file}\" && grep -q '^Exec=.* --no-sandbox' \"$HOME/.local/share/applications/{desktop_file}\""
+                "/usr/local/bin/localdesktop-no-sandbox-entries && grep -q '^X-LocalDesktop-NoSandbox=true$' \"$HOME/.local/share/applications/{desktop_file}\""
             );
             let output = PRootRuntime::active().execute(
                 ProcessSpec::new(desktop_command).with_user(user),
@@ -1170,62 +1177,14 @@ fn generate_machine_id() -> String {
     format!("{:016x}{:016x}", nanos as u64, process::id() as u64)
 }
 
-pub fn sync_firefox_config(fs_root: &Path) {
-    let candidates = [
-        fs_root.join("usr/lib/firefox"),
-        fs_root.join("usr/lib/firefox-esr"),
-    ];
-
-    let autoconfig_js = r#"pref("general.config.filename", "localdesktop.cfg");
-pref("general.config.obscure_value", 0);
-pref("general.config.sandbox_enabled", false);
-"#;
-
-    let firefox_cfg = r#"// Auto updated by Portal on each startup, do not edit manually
-defaultPref("media.cubeb.sandbox", false);
-defaultPref("security.sandbox.content.level", 0);
-defaultPref("media.allow-audio-non-utility", true);
-defaultPref("media.rdd-process.enabled", false);
-// Project Anland GPU compositing (see src/android/anland/mod.rs): there is
-// no DRM render node in PRoot, so Firefox's gfxInfo concludes SOFTWARE_GL
-// and blocklists hardware compositing — even though real Adreno contexts
-// work (proven: WebGL freedreno, glxtest EGL freedreno). These prefs force
-// the GPU path back on; on native Wayland it composites through EGL window
-// surfaces and needs no GBM allocation.
-defaultPref("gfx.webrender.all", true);
-defaultPref("layers.acceleration.force-enabled", true);
-// Render at KWin's fractional scale (2.5 on the Pad 3) rather than the next
-// integer (3) that KWin then scales down: fewer pixels, and sharp.
-defaultPref("widget.wayland.fractional-scale.enabled", true);
-
-"#;
-
-    for dir in candidates {
-        if dir.exists() || dir.parent().map_or(false, |p| p.exists()) {
-            let pref_dir = dir.join("defaults/pref");
-            let _ = fs::create_dir_all(&pref_dir);
-            for (path, contents) in [
-                (pref_dir.join("autoconfig.js"), autoconfig_js),
-                (dir.join("localdesktop.cfg"), firefox_cfg),
-            ] {
-                if fs::read_to_string(&path).ok().as_deref() != Some(contents) {
-                    let _ = fs::write(path, contents);
-                }
-            }
-        }
-    }
-}
-
 fn validate_firefox_anland_config(fs_root: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(
-        ["usr/bin/firefox", "usr/bin/firefox-esr"]
-            .iter()
-            .any(|relative| fs_root.join(relative).is_file()),
+        browser::firefox_installed(fs_root),
         "Firefox is not installed in the Portal runtime"
     );
 
     let mut checked = 0usize;
-    for dir in [fs_root.join("usr/lib/firefox"), fs_root.join("usr/lib/firefox-esr")] {
+    for dir in browser::firefox_install_dirs(fs_root) {
         if !dir.is_dir() {
             continue;
         }
@@ -1362,7 +1321,9 @@ fn supervise_plasmashell_autostart(original: &str) -> anyhow::Result<String> {
 
 /// Refresh only Portal-owned files needed by the running session. This is
 /// shared by normal launch repair and the explicit Anland migration. It never
-/// touches Debian packages or user home/configuration state.
+/// installs or removes Debian packages and never touches user home
+/// configuration; the only system files it edits are the sudo-access ones
+/// described in `core::guest_sudo`.
 fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     // The guest scripts are versioned assets so the classic startup contract,
     // KWin crash capture and graphical recovery UI cannot drift apart. The
@@ -1483,10 +1444,26 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     sync_guest_host_path_alias(fs_root);
     sync_chromium_entries(fs_root);
     sync_libreoffice_launchers(fs_root);
-    sync_default_applications(fs_root);
+    browser::sync_default_applications(fs_root);
     sync_default_menu(fs_root);
-    sync_firefox_config(fs_root);
+    browser::sync_firefox_config(fs_root);
+    browser::sync_firefox_prefs_hook(fs_root);
     sync_thunderbird_defaults(fs_root);
+    sync_sudo_access(fs_root);
+}
+
+/// Passwordless `sudo` for the desktop account (see `core::guest_sudo` for
+/// what that takes). Runs on every launch so existing installs converge; it
+/// changes nothing that is already right and never overwrites a sudoers file
+/// the user edited.
+fn sync_sudo_access(fs_root: &Path) {
+    let report = guest_sudo::sync_sudo_access(fs_root);
+    if !report.changed.is_empty() {
+        log::info!("sudo access synced: {}", report.changed.join(", "));
+    }
+    for (step, error) in &report.failed {
+        log::warn!("sudo access ({step}) could not be synced: {error}");
+    }
 }
 
 /// Give unprefixed menu lookups Plasma's menu.
@@ -1554,6 +1531,8 @@ fn sync_guest_host_path_alias(fs_root: &Path) {
 /// Earlier helpers forced `--password-store=basic`. Electron's safeStorage is
 /// unavailable with that store, so apps such as Claude could not keep their
 /// sign-in; derived entries drop it and use the desktop's secret service.
+/// They also forced `--no-sandbox`, which PRoot's namespace emulation made
+/// unnecessary: derived entries drop it and keep Chromium's sandbox.
 fn sync_chromium_entries(fs_root: &Path) {
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-no-sandbox-entries"),
@@ -1581,7 +1560,9 @@ fn sync_chromium_entries(fs_root: &Path) {
                 let Some(exec) = body.strip_prefix("Exec=") else {
                     return line.to_owned();
                 };
-                let exec = exec.replace(" --password-store=basic", "");
+                let exec = exec
+                    .replace(" --password-store=basic", "")
+                    .replace(" --no-sandbox", "");
                 let exec = exec.as_str();
                 let (program, rest) = match exec.split_once(' ') {
                     Some((program, rest)) => (program, format!(" {rest}")),
@@ -1641,50 +1622,7 @@ fn sync_libreoffice_launchers(fs_root: &Path) {
     }
 }
 
-/// System-wide default applications (`/etc/xdg/mimeapps.list`; users'
-/// `~/.config/mimeapps.list` still wins).
-///
-/// Without explicit defaults, the first desktop entry in `mimeinfo.cache`
-/// wins. The optional ChatGPT app claims http/https and Office/CSV types and
-/// sorts before Firefox and LibreOffice, so it became the default browser:
-/// Plasma's `preferred://browser` panel launcher then showed a second ChatGPT
-/// icon instead of Firefox. Entries naming an app that is not installed are
-/// ignored by the spec, so the same defaults hold for every selection.
-fn sync_default_applications(fs_root: &Path) {
-    const DEFAULTS: &str = "# Managed by Portal: system-wide default applications.\n\
-# Override per user in ~/.config/mimeapps.list (System Settings > Default Applications).\n\
-[Default Applications]\n\
-x-scheme-handler/http=firefox-esr.desktop;\n\
-x-scheme-handler/https=firefox-esr.desktop;\n\
-text/html=firefox-esr.desktop;\n\
-application/xhtml+xml=firefox-esr.desktop;\n\
-x-scheme-handler/mailto=thunderbird.desktop;\n\
-text/csv=libreoffice-calc.desktop;\n\
-text/tab-separated-values=libreoffice-calc.desktop;\n\
-application/vnd.ms-excel=libreoffice-calc.desktop;\n\
-application/vnd.ms-excel.sheet.macroEnabled.12=libreoffice-calc.desktop;\n\
-application/vnd.openxmlformats-officedocument.spreadsheetml.sheet=libreoffice-calc.desktop;\n\
-application/vnd.openxmlformats-officedocument.wordprocessingml.document=libreoffice-writer.desktop;\n\
-application/vnd.openxmlformats-officedocument.presentationml.presentation=libreoffice-impress.desktop;\n";
-    let path = fs_root.join("etc/xdg/mimeapps.list");
-    let current = fs::read_to_string(&path).ok();
-    if current.as_deref() == Some(DEFAULTS) {
-        return;
-    }
-    if current.is_some_and(|text| !text.starts_with("# Managed by Portal")) {
-        log::warn!("{} is not Portal-managed; leaving it untouched", path.display());
-        return;
-    }
-    if let Err(error) = path
-        .parent()
-        .map_or(Ok(()), fs::create_dir_all)
-        .and_then(|()| fs::write(&path, DEFAULTS))
-    {
-        log::warn!("default applications could not be installed: {error}");
-    }
-}
-
-/// Thunderbird default preferences. Like Firefox (see `sync_firefox_config`),
+/// Thunderbird default preferences. Like Firefox (see `browser::sync_firefox_config`),
 /// it renders at KWin's fractional scale on Wayland and forces GPU WebRender
 /// past the gfxInfo blocklist, without which it composited in software
 /// (`WebRender (Software)`, device-verified).
@@ -1741,7 +1679,7 @@ fn sync_anland_required_session_files(
     ui_scale: i32,
 ) -> anyhow::Result<()> {
     sync_guest_session_directories(fs_root)?;
-    sync_firefox_config(fs_root);
+    browser::sync_firefox_config(fs_root);
     sync_portal_runtime_assets(fs_root, ui_scale);
     // Normal launch keeps size-gated overlay checks cheap. An explicit repair
     // is the point where same-size corruption must also be replaced.
@@ -1760,7 +1698,7 @@ fn sync_anland_required_session_files(
 fn setup_firefox_config(_: &SetupOptions) -> StageOutput {
     use crate::core::runtime::LinuxRuntime;
     let active_runtime = crate::android::runtime::proot::PRootRuntime::active();
-    sync_firefox_config(&active_runtime.rootfs_path());
+    browser::sync_firefox_config(&active_runtime.rootfs_path());
     None
 }
 
@@ -1907,9 +1845,11 @@ exec "$@"
 fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
 
-    // Chromium's sandbox needs CLONE_NEWUSER, which Android SELinux blocks.  Electron also
-    // initializes Node against inherited descriptors that PRoot cannot faithfully expose,
-    // and Xwayland authentication is not a reliable boundary for guest-launched clients.
+    // Chromium's sandbox needs user and PID namespaces, which the kernel lacks;
+    // PRoot emulates them (syscall/fakens.c), so it only runs without one where
+    // /proc/self/ns/user is missing.  Electron also initializes Node against
+    // inherited descriptors that PRoot cannot faithfully expose, and Xwayland
+    // authentication is not a reliable boundary for guest-launched clients.
     // Keep an opt-in helper for Chromium/Electron desktop entries. Never run it
     // from session startup or apt: those hooks recreated user-removed entries.
     write_executable(
@@ -1917,12 +1857,13 @@ fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
         CHROMIUM_ENTRIES_HELPER,
     );
 
-    // Same flag for terminal launches, following the /usr/local/bin PATH-priority pattern.
+    // Same check for terminal launches, following the /usr/local/bin PATH-priority pattern.
     write_executable(
         &fs_root.join("usr/local/bin/chromium"),
         r#"#!/bin/sh
 [ -x /usr/bin/chromium ] || { echo "chromium is not installed" >&2; exit 127; }
-exec /usr/bin/chromium --no-sandbox "$@"
+[ -L /proc/self/ns/user ] || set -- --no-sandbox "$@"
+exec /usr/bin/chromium "$@"
 "#,
     );
 
@@ -2600,7 +2541,7 @@ fn sync_initial_desktop_defaults(fs_root: &Path) {
     )))
     .unpack(fs_root)
     .expect("Failed to install desktop cache tools");
-    sync_firefox_config(fs_root);
+    browser::sync_firefox_config(fs_root);
     seed_plasma_locale(fs_root);
     // Repair Portal's own launcher to use Debian's installed browser/icon name.
     let docs_entry = home_dir.join("Desktop/localdesktop-online-docs.desktop");
