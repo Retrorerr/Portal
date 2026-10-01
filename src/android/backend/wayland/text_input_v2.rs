@@ -174,8 +174,8 @@ impl State {
         else {
             return false;
         };
-        if text == "\u{8}" {
-            input.delete_surrounding_text(1, 0);
+        if !text.is_empty() && text.chars().all(|c| c == '\u{8}') {
+            input.delete_surrounding_text(text.len() as u32, 0);
             input.commit_string(String::new());
         } else {
             input.commit_string(text.to_string());

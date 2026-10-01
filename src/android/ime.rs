@@ -12,7 +12,7 @@ use jni::{
     JNIEnv,
 };
 use std::sync::{
-    atomic::{AtomicBool, AtomicI8, Ordering},
+    atomic::{AtomicBool, AtomicI8, AtomicU8, Ordering},
     Mutex, OnceLock,
 };
 use winit::{
@@ -61,11 +61,35 @@ pub fn start_hardware_keyboard_monitor(android_app: &AndroidApp) -> Result<(), S
     call_bridge(android_app, "startHardwareKeyboardMonitor")
 }
 
-pub fn set_wayland_text_input_active(active: bool) {
+// Text-entry focus is reported by independent sources: Portal's own text-input-v2 global, the
+// guest KWin input-method bridge (Wayland clients) and the guest IBus engine (X11/GTK clients).
+// The two guest bridges are separate processes, so a focus hop between a Wayland and an X11
+// field can deliver the new source's ACTIVATE before the old source's DEACTIVATE. One shared
+// flag would then end inactive and hide the keyboard over a focused field.
+const SOURCE_TEXT_INPUT_V2: u8 = 1 << 0;
+const SOURCE_IM_BRIDGE: u8 = 1 << 1;
+const SOURCE_IBUS: u8 = 1 << 2;
+const GUEST_IM_SOURCES: u8 = SOURCE_IM_BRIDGE | SOURCE_IBUS;
+static ACTIVE_SOURCES: AtomicU8 = AtomicU8::new(0);
+
+fn set_source_active(source: u8, active: bool) {
+    let sources = if active {
+        ACTIVE_SOURCES.fetch_or(source, Ordering::AcqRel) | source
+    } else {
+        ACTIVE_SOURCES.fetch_and(!source, Ordering::AcqRel) & !source
+    };
     let hw = HARDWARE_KEYBOARD_PRESENT.load(Ordering::Acquire);
-    log::info!("Portal ime: set_wayland_text_input_active({active}), hw_present={hw}");
-    WAYLAND_TEXT_INPUT_ACTIVE.store(active, Ordering::Release);
-    request_visibility(active && !hw);
+    log::info!(
+        "Portal ime: source {source:#x} active={active}, sources={sources:#x}, hw_present={hw}"
+    );
+    IME_CONTEXT_ACTIVE.store(sources & GUEST_IM_SOURCES != 0, Ordering::Release);
+    WAYLAND_TEXT_INPUT_ACTIVE.store(sources != 0, Ordering::Release);
+    request_visibility(sources != 0 && !hw);
+}
+
+/// Portal's text-input-v2 global (Smithay compositor path) enabled or disabled text entry.
+pub fn set_wayland_text_input_active(active: bool) {
+    set_source_active(SOURCE_TEXT_INPUT_V2, active);
 }
 
 pub fn request_visibility(show: bool) {
@@ -160,15 +184,21 @@ pub fn send_engine_enter() -> bool {
     send_engine_command("ENTER\n")
 }
 
+/// Events FIFO protocol: `ACTIVATE`/`DEACTIVATE` with an optional `:<source>` suffix
+/// (`:ibus` from the IBus engine). Untagged lines and the legacy `1`/`0` come from the KWin
+/// input-method bridge.
 pub fn handle_fifo_line(line: &str) {
     let trimmed = line.trim();
     log::info!("Portal IME FIFO line received: '{trimmed}'");
-    if trimmed == "1" || trimmed == "ACTIVATE" {
-        IME_CONTEXT_ACTIVE.store(true, Ordering::Release);
-        set_wayland_text_input_active(true);
-    } else if trimmed == "0" || trimmed == "DEACTIVATE" {
-        IME_CONTEXT_ACTIVE.store(false, Ordering::Release);
-        set_wayland_text_input_active(false);
+    let (command, source) = match trimmed.split_once(':') {
+        Some((command, "ibus")) => (command, SOURCE_IBUS),
+        Some((command, _)) => (command, SOURCE_IM_BRIDGE),
+        None => (trimmed, SOURCE_IM_BRIDGE),
+    };
+    match command {
+        "1" | "ACTIVATE" => set_source_active(source, true),
+        "0" | "DEACTIVATE" => set_source_active(source, false),
+        _ => {}
     }
 }
 
@@ -442,6 +472,18 @@ pub fn hide(android_app: &AndroidApp) -> Result<(), String> {
     call_bridge(android_app, "hide")
 }
 
+/// The user tapped or clicked the desktop, which can move the guest caret behind the IME's
+/// back. Drop the Android editor's mirrored text so autocorrect and deletes cannot edit text
+/// that is no longer before the caret. No-op while no text field is focused.
+pub fn reset_text_context(android_app: &AndroidApp) {
+    if !is_wayland_text_input_active() || is_hardware_keyboard_present() {
+        return;
+    }
+    if let Err(error) = call_bridge(android_app, "resetContext") {
+        log::debug!("Software keyboard context could not be reset: {error}");
+    }
+}
+
 /// Clear any queued commits after a surface loss or focus transition.
 pub fn reset() {
     if let Ok(mut queue) = commits().lock() {
@@ -480,6 +522,60 @@ pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnTextCommit(
         }
     };
     dispatch_committed_text(text);
+}
+
+/// Show `text` as the guest preedit (empty clears it). Preedit only exists on the input-method
+/// channels, so without an active context there is nothing to show it in.
+fn send_preedit(text: &str) {
+    if !is_ime_context_active() {
+        return;
+    }
+    let Ok(b64) = crate::core::clipboard_broker::encode_base64(text.as_bytes()) else {
+        return;
+    };
+    let line = format!("PREEDIT:{b64}\n");
+    // Dual send as for commits: each bridge self-gates on real focus.
+    let mut framed = send_ime_command(&line);
+    framed |= send_engine_command(&line);
+    if !framed {
+        log::warn!("Preedit update dropped: no input-method channel");
+    }
+}
+
+/// JNI callback used by `SoftKeyboardBridge` for the word the IME is composing.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnPreedit(
+    mut env: JNIEnv,
+    _bridge: JObject,
+    text: JString,
+) {
+    match env.get_string(&text) {
+        Ok(text) => send_preedit(&text.to_string_lossy()),
+        Err(error) => log::warn!("Failed to decode software-keyboard preedit: {error}"),
+    }
+}
+
+/// JNI callback: commit the guest preedit as text (the Android editor was reset while the
+/// guest field kept focus, e.g. the keyboard was hidden).
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnPreeditFlush(
+    _env: JNIEnv,
+    _bridge: JObject,
+) {
+    if is_ime_context_active() {
+        send_ime_command("FLUSH\n");
+        send_engine_command("FLUSH\n");
+    }
+}
+
+/// JNI query: can the focused guest client show a preedit? Without an input-method context
+/// commits fall back to synthesized keys, so the composing word must be typed live instead.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeIsPreeditSupported(
+    _env: JNIEnv,
+    _bridge: JObject,
+) -> jni::sys::jboolean {
+    is_ime_context_active() as jni::sys::jboolean
 }
 
 /// JNI callback from Android's InputDeviceListener. Device classification is

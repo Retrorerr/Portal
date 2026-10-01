@@ -5,7 +5,13 @@ Connects to KWin's private WAYLAND_SOCKET as an input method (zwp_input_method_v
 Relays text field activate/deactivate events to /tmp/portal-ime-events.fifo.
 Reads text commit and delete commands from /tmp/portal-ime-commands.fifo and
 forwards them directly through zwp_input_method_context_v1 (commit_string,
-delete_surrounding_text) into the focused guest Wayland client.
+preedit_string, keysym) into the focused guest Wayland client.
+
+Deletes are BackSpace keysyms only. KWin turns delete_surrounding_text into a
+text-input-v3 delete that Qt clients (LibreOffice, verified) ignore while GTK
+and Chromium apply it, so sending both double-deleted there. Qt in turn
+applies a forwarded key after text-input events that arrive behind it in the
+same burst, so text following a keysym waits KEY_SETTLE_S before going out.
 """
 import base64
 import os
@@ -20,6 +26,9 @@ EVENTS_FIFO = "/tmp/portal-ime-events.fifo"
 COMMANDS_FIFO = "/tmp/portal-ime-commands.fifo"
 LEGACY_FIFO = "/tmp/portal-ime.fifo"
 LOG_PATH = "/tmp/portal_ime.log"
+# Verified on LibreOffice: a BackSpace keysym and the commit right behind it
+# reorder; spaced by human typing intervals they do not.
+KEY_SETTLE_S = 0.06
 
 try:
     log_file = open(LOG_PATH, "w")
@@ -116,14 +125,47 @@ def main():
     im_obj_id = 4
     active_context_id = None
     latest_serial = 0
+    current_preedit = ""
+    last_key_time = 0.0
     wayland_buf = b""
     cmd_buf = b""
 
+    def settle():
+        wait = last_key_time + KEY_SETTLE_S - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+
+    def wl_string(value: str) -> bytes:
+        utf8_bytes = value.encode("utf-8")
+        str_len = len(utf8_bytes) + 1  # include null terminator
+        pad_len = ((str_len + 3) // 4) * 4
+        return struct.pack("<I", str_len) + utf8_bytes + b"\0" * (pad_len - len(utf8_bytes))
+
+    def send_preedit(text: str):
+        # The word Android is still composing. commit=text makes KWin commit it
+        # if focus moves or the user taps into the window before Android does.
+        nonlocal current_preedit
+        if active_context_id is None:
+            return
+        settle()
+        try:
+            # Opcode 4: preedit_cursor(index) applies to the next preedit_string.
+            body = struct.pack("<i", len(text.encode("utf-8")))
+            s.sendall(struct.pack("<II", active_context_id, ((8 + len(body)) << 16) | 4) + body)
+            # Opcode 2: preedit_string(serial, text, commit)
+            body = struct.pack("<I", latest_serial) + wl_string(text) + wl_string(text)
+            s.sendall(struct.pack("<II", active_context_id, ((8 + len(body)) << 16) | 2) + body)
+            current_preedit = text
+            log(f"Sent preedit_string(text={text!r})")
+        except Exception as e:
+            log(f"Failed to send preedit_string: {e}")
+
     def send_commit_string(text: str):
-        nonlocal active_context_id, latest_serial, s
+        nonlocal active_context_id, latest_serial, s, current_preedit
         if active_context_id is None:
             log(f"Warning: commit_string requested with no active context (text={text!r})")
             return
+        settle()
         try:
             utf8_bytes = text.encode("utf-8")
             str_len = len(utf8_bytes) + 1  # include null terminator
@@ -134,12 +176,14 @@ def main():
             # Opcode 1 on active_context_id: commit_string(serial, text)
             msg = struct.pack("<II", active_context_id, (req_size << 16) | 1) + body
             s.sendall(msg)
+            # KWin replaces the preedit with the commit in one text-input frame.
+            current_preedit = ""
             log(f"Sent commit_string(serial={latest_serial}, text={text!r}, bytes={len(utf8_bytes)})")
         except Exception as e:
             log(f"Failed to send commit_string: {e}")
 
     def send_keysym(sym: int):
-        nonlocal active_context_id, latest_serial, s
+        nonlocal active_context_id, latest_serial, s, last_key_time
         if active_context_id is None:
             log(f"Warning: keysym requested with no active context (sym={hex(sym)})")
             return
@@ -153,6 +197,7 @@ def main():
             k_body_rel = struct.pack("<IIIII", latest_serial, (now_ms + 10) & 0xFFFFFFFF, sym, 0, 0)
             k_msg_rel = struct.pack("<II", active_context_id, (28 << 16) | 8) + k_body_rel
             s.sendall(k_msg_rel)
+            last_key_time = time.monotonic()
             log(f"Sent keysym({hex(sym)}) Pressed+Released via input_method_context")
         except Exception as e:
             log(f"Failed to send keysym {hex(sym)}: {e}")
@@ -161,34 +206,14 @@ def main():
         # XKB_KEY_Return is 0xff0d
         send_keysym(0xff0d)
 
-    def send_delete_surrounding_text(count: int):
-        nonlocal active_context_id, latest_serial, s
+    def send_delete(count: int):
         if active_context_id is None:
             log(f"Warning: delete requested with no active context (count={count})")
             return
-        try:
-            # 1. Opcode 5: delete_surrounding_text(index: int32, length: uint32)
-            body = struct.pack("<ii", -count, count)
-            req_size = 8 + len(body)
-            msg = struct.pack("<II", active_context_id, (req_size << 16) | 5) + body
-            s.sendall(msg)
-            log(f"Sent delete_surrounding_text(index={-count}, length={count})")
-
-            # 2. Opcode 8: keysym(serial, time, sym, state, modifiers) for XKB_KEY_BackSpace (0xff08)
-            # This ensures clients where the text widget handles backspace via keysym (like Kate/Qt) delete reliably.
-            for _ in range(count):
-                now_ms = int(time.time() * 1000) & 0xFFFFFFFF
-                # state = 1 (pressed)
-                k_body = struct.pack("<IIIII", latest_serial, now_ms, 0xff08, 1, 0)
-                k_msg = struct.pack("<II", active_context_id, (28 << 16) | 8) + k_body
-                s.sendall(k_msg)
-                # state = 0 (released)
-                k_body_rel = struct.pack("<IIIII", latest_serial, (now_ms + 10) & 0xFFFFFFFF, 0xff08, 0, 0)
-                k_msg_rel = struct.pack("<II", active_context_id, (28 << 16) | 8) + k_body_rel
-                s.sendall(k_msg_rel)
-                log("Sent keysym(BackSpace, 0xff08) Pressed+Released via input_method_context")
-        except Exception as e:
-            log(f"Failed to send delete_surrounding_text: {e}")
+        if current_preedit:
+            send_preedit("")
+        for _ in range(count):
+            send_keysym(0xff08)  # XKB_KEY_BackSpace
 
     def process_command(line: str):
         line = line.strip()
@@ -213,7 +238,16 @@ def main():
                 count = int(line[7:])
             except Exception:
                 count = 1
-            send_delete_surrounding_text(count)
+            send_delete(count)
+        elif line.startswith("PREEDIT:"):
+            try:
+                send_preedit(base64.b64decode(line[8:]).decode("utf-8", errors="ignore"))
+            except Exception as e:
+                log(f"Failed to decode PREEDIT payload: {e}")
+        elif line == "FLUSH":
+            # Android dropped its composing state while the field kept focus.
+            if current_preedit:
+                send_commit_string(current_preedit)
         elif line.startswith("TABLET_MODE:"):
             set_tablet_mode(line[12:])
         else:
@@ -302,6 +336,8 @@ def main():
                         context_id = struct.unpack("<I", msg_body[:4])[0]
                         log(f">>> KWIN EVENT: DEACTIVATE context_id={context_id} <<<")
                         active_context_id = None
+                        # KWin commits a pending preedit itself on focus changes.
+                        current_preedit = ""
                         notify_portal(False)
                 elif active_context_id is not None and obj_id == active_context_id:
                     # zwp_input_method_context_v1 events:
@@ -311,7 +347,9 @@ def main():
                     # 3: invoke_action(button, index)
                     # 4: commit_state(serial)
                     # 5: preferred_language(language)
-                    if opcode == 4:  # commit_state
+                    if opcode == 1:  # reset: KWin committed or dropped the preedit
+                        current_preedit = ""
+                    elif opcode == 4:  # commit_state
                         latest_serial = struct.unpack("<I", msg_body[:4])[0]
                         log(f"Updated latest_serial={latest_serial}")
 

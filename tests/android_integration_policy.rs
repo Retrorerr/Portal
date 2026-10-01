@@ -28,6 +28,7 @@ const ANDROID_IME_SOURCE: &str = include_str!("../src/android/ime.rs");
 const KWIN_WRAPPER_SOURCE: &str = include_str!("../assets/localdesktop-kwin-wrapper-v2.sh");
 const STARTPLASMA_SOURCE: &str = include_str!("../assets/localdesktop-startplasma.sh");
 const PORTAL_IME_BRIDGE_SOURCE: &str = include_str!("../assets/portal-ime-bridge.py");
+const PORTAL_IBUS_ENGINE_SOURCE: &str = include_str!("../assets/portal-ibus-engine.py");
 const PORTAL_IBUS_LAZY_SOURCE: &str = include_str!("../assets/portal-ibus-lazy.sh");
 const ANLAND_ENV_SOURCE: &str = include_str!("../src/android/anland/mod.rs");
 const RENDERER_POLICY_SOURCE: &str = include_str!("../src/core/renderer_policy.rs");
@@ -680,7 +681,11 @@ fn input_method_bridge_and_fallback_policy() {
     // 4. Portal IME Bridge speaks zwp_input_method_v1 with commit_string (1) and delete_surrounding_text (5)
     assert!(PORTAL_IME_BRIDGE_SOURCE.contains("zwp_input_method_v1"));
     assert!(PORTAL_IME_BRIDGE_SOURCE.contains("active_context_id, (req_size << 16) | 1"));
-    assert!(PORTAL_IME_BRIDGE_SOURCE.contains("active_context_id, (req_size << 16) | 5"));
+    // Deletes are BackSpace keysyms only (the v3 delete is ignored by Qt and doubles in GTK),
+    // and the composing word travels as preedit_string (opcode 2).
+    assert!(!PORTAL_IME_BRIDGE_SOURCE.contains("(req_size << 16) | 5"));
+    assert!(PORTAL_IME_BRIDGE_SOURCE.contains("send_keysym(0xff08)"));
+    assert!(PORTAL_IME_BRIDGE_SOURCE.contains("((8 + len(body)) << 16) | 2)"));
     assert!(PORTAL_IME_BRIDGE_SOURCE.contains("/tmp/portal-ime-events.fifo"));
     assert!(PORTAL_IME_BRIDGE_SOURCE.contains("/tmp/portal-ime-commands.fifo"));
 
@@ -703,6 +708,14 @@ fn input_method_bridge_and_fallback_policy() {
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("nativeOnTextCommit"));
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("commitText"));
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("deleteSurroundingText"));
+    // 7. The editor mirrors guest text and forwards diffs, so autocorrect replaces the word
+    // instead of appending the correction after it.
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("InputConnectionWrapper"));
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("sendBackspaces(removed)"));
+    assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("public static void resetContext"));
+    // 8. The Wayland bridge and IBus engine report focus as separate sources.
+    assert!(PORTAL_IBUS_ENGINE_SOURCE.contains("b\"ACTIVATE:ibus\\n\""));
+    assert!(ANDROID_IME_SOURCE.contains("Some((command, \"ibus\")) => (command, SOURCE_IBUS)"));
 }
 
 #[test]

@@ -1350,9 +1350,17 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
 
             match &event {
                 // Focus changes are common during rotation, popup dismissal and app switching.
-                // Do not summon the soft keyboard for every Focused(true): Android should show it
-                // only after winit enables text input (or an explicit text-entry request).
-                WindowEvent::Focused(true) => {}
+                // Only re-show the keyboard when a guest text field is still focused: losing
+                // window focus hid it, and the guest sends no new ACTIVATE for a field that
+                // never lost focus, so nothing else would bring it back.
+                WindowEvent::Focused(true) => ime::refresh_visibility(),
+                WindowEvent::Touch(touch) if touch.phase == TouchPhase::Started => {
+                    ime::reset_text_context(&backend.android_app);
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    ..
+                } => ime::reset_text_context(&backend.android_app),
                 WindowEvent::Focused(false) => {
                     if let Err(error) = ime::hide(&backend.android_app) {
                         log::debug!("Software keyboard bridge could not be hidden: {error}");

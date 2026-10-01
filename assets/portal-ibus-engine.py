@@ -12,11 +12,14 @@ Host protocol on the command FIFO (same vocabulary as portal-ime-bridge):
   COMMIT:<base64 utf-8>   commit text (UTF-8, any language)
   DELETE:<n>              delete n chars before cursor
   ENTER                   Return key press+release
-  PREEDIT:<base64 utf-8>  update preedit (empty hides); currently unused by
-                          the host (Android exposes commits only)
+  PREEDIT:<base64 utf-8>  update preedit (empty hides): the word Android is
+                          composing; committed by IBus on focus-out/reset
+  FLUSH                   commit the current preedit
 
 Focus is reported to the host on /tmp/portal-ime-events.fifo
-(ACTIVATE/DEACTIVATE), reusing the existing Portal IME show/hide path.
+(ACTIVATE:ibus/DEACTIVATE:ibus), reusing the existing Portal IME show/hide
+path. The :ibus tag keeps this focus separate from the Wayland bridge's, so
+a focus hop between an X11 and a Wayland field cannot race the keyboard off.
 
 Physical keys always pass through (ProcessKeyEvent returns False), so an
 attached hardware keyboard keeps working and IBus never swallows typing.
@@ -48,7 +51,7 @@ def log(msg):
 
 
 def notify_portal(active):
-    val = b"ACTIVATE\n" if active else b"DEACTIVATE\n"
+    val = b"ACTIVATE:ibus\n" if active else b"DEACTIVATE:ibus\n"
     try:
         fd = os.open(EVENTS_FIFO, os.O_RDWR | os.O_NONBLOCK)
         try:
@@ -78,6 +81,7 @@ def main():
                              object_path=PortalEngine._next_path,
                              has_focus_id=True)
             self.focused = False
+            self.preedit = ""
 
         def do_focus_in(self):
             self.do_focus_in_id('', '')
@@ -97,6 +101,8 @@ def main():
         def do_focus_out(self):
             log("FocusOut")
             self.focused = False
+            # PreeditFocusMode.COMMIT: the daemon commits the preedit itself.
+            self.preedit = ""
             try:
                 self.hide_preedit_text()
             except Exception:
@@ -112,6 +118,7 @@ def main():
 
         def do_reset(self):
             log("Reset")
+            self.preedit = ""
             try:
                 self.hide_preedit_text()
             except Exception:
@@ -132,6 +139,23 @@ def main():
             log(f"SetCapabilities({caps})")
 
         # --- host-driven actions (called on the main loop) ---
+        def clear_preedit(self):
+            if not self.preedit:
+                return
+            self.preedit = ""
+            try:
+                self.update_preedit_text_with_mode(
+                    IBus.Text.new_from_string(""), 0, False,
+                    IBus.PreeditFocusMode.CLEAR)
+            except Exception as e:
+                log(f"Preedit clear failed: {e}")
+
+        def host_flush(self):
+            if self.focused and self.preedit:
+                text = self.preedit
+                self.clear_preedit()
+                self.host_commit_keys(text)
+
         def host_commit_keys(self, text):
             # Delivery via a single ForwardKeyEvent per keysym (Unicode-safe:
             # keysyms, not keycodes, so no layout guessing; UCS keysyms
@@ -144,6 +168,7 @@ def main():
                 log("commit-keys ignored, no focus")
                 return
             log(f"CommitKeys ({len(text)} chars)")
+            self.clear_preedit()
             try:
                 for ch in text:
                     o = ord(ch)
@@ -166,6 +191,7 @@ def main():
                 log("delete ignored, no focus")
                 return
             log(f"DeleteKeys({count})")
+            self.clear_preedit()
             try:
                 for _ in range(min(count, 64)):
                     self.forward_key_event(0xFF08, 0, 0)
@@ -177,6 +203,7 @@ def main():
                 log("enter ignored, no focus")
                 return
             log("ForwardKeyEvent(Return)")
+            self.clear_preedit()
             try:
                 # keysym 0xff0d Return; keycode 0 lets the client map it.
                 # Single call (press+release pairs double input).
@@ -187,14 +214,17 @@ def main():
         def host_preedit(self, text):
             if not self.focused:
                 return
+            if not text:
+                self.clear_preedit()
+                return
             try:
-                if text:
-                    self.update_preedit_text(
-                        IBus.Text.new_from_string(text), len(text), True)
-                    log(f"UpdatePreeditText ({len(text)} chars)")
-                else:
-                    self.hide_preedit_text()
-                    log("HidePreeditText")
+                # COMMIT mode: a focus-out or toolkit reset (click elsewhere)
+                # commits the word instead of dropping it, like KWin does.
+                self.update_preedit_text_with_mode(
+                    IBus.Text.new_from_string(text), len(text), True,
+                    IBus.PreeditFocusMode.COMMIT)
+                self.preedit = text
+                log(f"UpdatePreeditText ({len(text)} chars)")
             except Exception as e:
                 log(f"Preedit failed: {e}")
 
@@ -280,7 +310,8 @@ def main():
         if not active:
             log("no engine instance yet; dropping")
             return
-        eng = active[-1]
+        # Each GTK editable gets its own engine; target the focused one.
+        eng = next((e for e in reversed(active) if e.focused), active[-1])
         if line.startswith("COMMIT:"):
             try:
                 text = base64.b64decode(line[7:]).decode("utf-8", errors="ignore")
@@ -311,6 +342,8 @@ def main():
             except Exception:
                 text = ""
             GLib.idle_add(eng.host_preedit, text)
+        elif line == "FLUSH":
+            GLib.idle_add(eng.host_flush)
         else:
             log(f"unknown command: {line[:30]}")
 
