@@ -615,16 +615,17 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
 }
 
 #[test]
-fn production_runtime_artifact_matches_manifest_and_archive_verification() {    let artifact = RuntimeArtifact::production();
-    assert_eq!(artifact.version, "debian13-arm64-2026.09.10.1");
+fn production_runtime_artifact_matches_manifest_and_archive_verification() {
+    let artifact = RuntimeArtifact::production();
+    assert_eq!(artifact.version, "debian13-arm64-2026.10.01.1");
     assert_eq!(
         artifact.sha256,
-        "1e3fb4b38c5824ee98b840ffa1461726242efebaf1993200883e1c558208919f"
+        "b398740319af13a0823da776fd7edf1ccdfb3ab010812ea63a4258027dd7eeb0"
     );
-    assert_eq!(artifact.compressed_bytes, 896140656);
-    assert!(artifact.url.starts_with("https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.09.10.1/"));
+    assert_eq!(artifact.compressed_bytes, 965676616);
+    assert!(artifact.url.starts_with("https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.10.01.1/"));
     let archive_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target/portal-debian13-arm64-2026.09.10.1.tar.xz");
+        .join("target/portal-debian13-arm64-2026.10.01.1.tar.xz");
     if archive_path.exists() {
         artifact
             .verify(&archive_path)
