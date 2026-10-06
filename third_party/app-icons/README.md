@@ -38,6 +38,7 @@ Dolphin icon: https://invent.kde.org/system/dolphin, Debian package `dolphin`
 | `portal_app_inkscape.png` | Inkscape |
 | `portal_app_chatgpt.png` | ChatGPT desktop app |
 | `portal_app_claude.png` | Claude desktop app (`claude-desktop`) |
+| `portal_app_steam.png` | Steam (`hicolor/256x256/apps/steam.png` from Valve's `steam.deb` installer, also staged as `assets/steam/steam-256.png` for the guest launcher) |
 
 These are each project's own upstream icon as shipped in its Debian package
 (or, for ChatGPT and Claude, the icon in the vendor's official .deb). Names and logos are trademarks of

@@ -459,6 +459,12 @@ internal fun PortalReturnScreen(
                     suppressed = repairPhase != ReturnRepairPhase.Hidden,
                     onBlockedChanged = { updateBlocked = it },
                 )
+                // Optional apps can be added or removed after setup. Hidden
+                // while a repair or Debian upgrade owns the runtime.
+                ReturnAppsPanel(
+                    palette = palette,
+                    suppressed = repairPhase != ReturnRepairPhase.Hidden || updateBlocked,
+                )
                 // Installs from before the checklist existed, or that skipped
                 // a step, see it here until every step is done.
                 if (checklistPending) {

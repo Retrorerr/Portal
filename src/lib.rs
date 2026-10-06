@@ -12,9 +12,11 @@ pub mod core {
     pub mod guest_sudo;
     #[cfg(unix)]
     pub mod guest_timezone;
+    pub mod gamepad;
     pub mod ime_policy;
     pub mod install_plan;
     pub mod mesa_layer;
+    pub mod optional_apps;
     pub mod pointer_buttons;
     pub mod presentation;
     pub mod provisioning;
@@ -36,6 +38,7 @@ pub mod android {
     pub mod clipboard;
     pub mod clipboard_broker;
     pub mod diagnostics;
+    pub mod gamepad;
     pub mod ime;
     pub mod tablet_mode_manager;
 
@@ -52,6 +55,7 @@ pub mod android {
     pub mod proot {
         pub mod launch;
         pub mod mesa_layer;
+        pub mod optional_apps;
         pub mod process;
         pub mod setup;
         pub mod system_updates;

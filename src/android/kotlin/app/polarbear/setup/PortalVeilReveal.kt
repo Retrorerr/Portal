@@ -43,6 +43,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.graphicsLayer
@@ -249,7 +251,7 @@ internal fun PortalRevealVeil(
                 requireUnconsumed = false,
                 pass = PointerEventPass.Initial,
             )
-            if (commitInFlight[0]) {
+            if (commitInFlight[0] || motion.excludes(down.position)) {
                 return@awaitEachGesture
             }
 
@@ -361,6 +363,7 @@ internal fun PortalRevealVeil(
             Modifier
                 .fillMaxSize()
                 .onSizeChanged { motion.height = it.height.toFloat() }
+                .onGloballyPositioned { motion.shellOrigin = it.positionInRoot() }
                 .semantics {
                     if (eligible) {
                         onClick(label = "Enter Portal") {

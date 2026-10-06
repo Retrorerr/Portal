@@ -877,7 +877,8 @@ private fun InterfaceSizeSection(
     )
 }
 
-private val APP_ICON_IDS = INCLUDED_APPS.map { it.id } + OPTIONAL_APPS.map { it.id }
+// A getter: the optional part comes from the native catalog.
+private val APP_ICON_IDS: List<String> get() = INCLUDED_APPS.map { it.id } + OPTIONAL_APPS.map { it.id }
 
 /**
  * What every install already has, as the icons you will meet in Plasma.

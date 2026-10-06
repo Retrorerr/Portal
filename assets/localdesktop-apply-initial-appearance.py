@@ -48,7 +48,8 @@ MAX_WAIT_SECONDS = 60
 MAX_PANEL_WAIT_SECONDS = 20
 
 # Native OptionalApp IDs map to the desktop-entry IDs shipped by Debian
-# Trixie. The Compose labels, package names, and desktop-file IDs never become
+# Trixie (Steam's is Portal's own). tests/test_initial_setup_helper.py keeps
+# this in step with tests/fixtures/optional-app-catalog.tsv. The Compose labels, package names, and desktop-file IDs never become
 # shell fragments; all three mappings are fixed allowlists.
 APP_DESKTOP_FILES = {
     "chatgpt": "chatgpt.desktop",
@@ -57,6 +58,8 @@ APP_DESKTOP_FILES = {
     "inkscape": "org.inkscape.Inkscape.desktop",
     "krita": "org.kde.krita.desktop",
     "libreoffice": "libreoffice-startcenter.desktop",
+    # Written by Portal itself; starts Valve's native ARM64 client.
+    "steam": "portal-steam.desktop",
     "thunderbird": "thunderbird.desktop",
     "vlc": "vlc.desktop",
 }

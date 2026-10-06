@@ -45,6 +45,8 @@ import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -108,7 +110,16 @@ open class PortalActivity : GameActivity() {
         }
         super.onCreate(savedInstanceState)
         applyImmersive("onCreate")
+        GamepadBridge.attach(this)
     }
+
+    // GameActivity forwards only touch input to native code; controller
+    // keys and sticks go to the guest's evdev pads before the view tree.
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean =
+        GamepadBridge.dispatchKey(event) || super.dispatchKeyEvent(event)
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean =
+        GamepadBridge.dispatchMotion(event) || super.dispatchGenericMotionEvent(event)
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -123,6 +134,16 @@ open class PortalActivity : GameActivity() {
                 intent.getBooleanExtra(PortalPreview.EXTRA_GATE, false),
             )
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        TouchControls.attach(this)
+    }
+
+    override fun onPause() {
+        TouchControls.detach()
+        super.onPause()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

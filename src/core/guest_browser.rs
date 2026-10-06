@@ -43,6 +43,11 @@ defaultPref("layers.acceleration.force-enabled", true);
 // Render at KWin's fractional scale (2.5 on the Pad 3) rather than the next
 // integer (3) that KWin then scales down: fewer pixels, and sharp.
 defaultPref("widget.wayland.fractional-scale.enabled", true);
+// Portal already makes Firefox the default browser (/etc/xdg/mimeapps.list).
+// Its own "make default" writes a userapp-*.desktop that the panel cannot
+// match to the Firefox window (see repair_user_default_browser), so don't ask.
+defaultPref("browser.shell.checkDefaultBrowser", false);
+defaultPref("browser.shell.skipDefaultBrowserCheckOnFirstRun", true);
 
 "#;
 
@@ -269,4 +274,97 @@ pub fn sync_default_applications(fs_root: &Path) {
     {
         log::warn!("default applications could not be installed: {error}");
     }
+}
+
+/// The packaged desktop entry for a Firefox that set itself as the default
+/// browser, from the `userapp-*.desktop` entry GIO wrote for it: `Exec=` names
+/// the binary under `/usr/lib/firefox*/`, and that directory's name is the
+/// package's desktop id (`firefox`, `firefox-esr`, `firefox-beta`, ...).
+fn packaged_entry_for_userapp(fs_root: &Path, userapp: &str) -> Option<String> {
+    let exec = userapp.lines().find_map(|line| line.strip_prefix("Exec="))?;
+    let program = exec.split_whitespace().next()?;
+    let dir = program.strip_prefix("/usr/lib/")?.split('/').next()?;
+    if !dir.starts_with("firefox") {
+        return None;
+    }
+    let id = format!("{dir}.desktop");
+    fs_root
+        .join("usr/share/applications")
+        .join(&id)
+        .is_file()
+        .then_some(id)
+}
+
+/// Point the desktop user's default browser back at Firefox's packaged entry.
+///
+/// Firefox's "Make default" (its first-run prompt, the welcome page and
+/// Settings) does not use `firefox.desktop`: it has GIO create a
+/// `userapp-Firefox-XXXXXX.desktop` with no icon and no `StartupWMClass` and
+/// maps the browser types to it in `~/.config/mimeapps.list`. Plasma's
+/// `preferred://browser` panel launcher then shows a blank icon, and the
+/// Firefox window (app id `firefox`) does not match that launcher, so it gets
+/// a second task button as if it were another app. Runs on every launch;
+/// other user choices in the file are left alone.
+pub fn repair_user_default_browser(fs_root: &Path) {
+    let applications = fs_root.join("home/desktop/.local/share/applications");
+    let Ok(entries) = fs::read_dir(&applications) else {
+        return;
+    };
+    let replacements: Vec<(String, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if !name.starts_with("userapp-") || !name.ends_with(".desktop") {
+                return None;
+            }
+            let text = fs::read_to_string(entry.path()).ok()?;
+            Some((name, packaged_entry_for_userapp(fs_root, &text)?))
+        })
+        .collect();
+    if replacements.is_empty() {
+        return;
+    }
+    let path = fs_root.join("home/desktop/.config/mimeapps.list");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return;
+    };
+    let updated = replace_default_entries(&text, &replacements);
+    if updated != text {
+        if let Err(error) = fs::write(&path, updated) {
+            log::warn!("{} could not be updated: {error}", path.display());
+        }
+    }
+}
+
+/// Swap desktop ids in a `mimeapps.list`, dropping duplicates a swap creates
+/// within one value list.
+pub fn replace_default_entries(text: &str, replacements: &[(String, String)]) -> String {
+    text.split_inclusive('\n')
+        .map(|line| {
+            let body = line.trim_end_matches(['\r', '\n']);
+            let eol = &line[body.len()..];
+            let Some((key, value)) = body.split_once('=') else {
+                return line.to_owned();
+            };
+            if key.trim_start().starts_with('#') {
+                return line.to_owned();
+            }
+            let mut ids: Vec<&str> = Vec::new();
+            let mut changed = false;
+            for id in value.split(';').filter(|id| !id.is_empty()) {
+                let swapped = replacements
+                    .iter()
+                    .find(|(from, _)| from == id)
+                    .map_or(id, |(_, to)| to.as_str());
+                changed |= swapped != id || ids.contains(&swapped);
+                if !ids.contains(&swapped) {
+                    ids.push(swapped);
+                }
+            }
+            if !changed {
+                return line.to_owned();
+            }
+            format!("{key}={};{eol}", ids.join(";"))
+        })
+        .collect()
 }

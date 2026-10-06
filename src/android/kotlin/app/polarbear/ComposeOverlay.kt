@@ -67,6 +67,23 @@ object ComposeOverlay {
     @JvmStatic external fun nativeRequestAnlandRepairRecovery(): Boolean
     /** Install the Debian updates offered on the Return screen. */
     @JvmStatic external fun nativeBeginSystemUpdate(): Boolean
+    /** The optional-app catalog: one tab-separated line per app. */
+    @JvmStatic external fun nativeOptionalAppCatalog(): String?
+    /** Queue an install (true) or removal (false) of one allowlisted app. */
+    @JvmStatic external fun nativeRequestOptionalApp(appId: String, install: Boolean): Boolean
+
+    init {
+        // The pickers read the catalog through SetupModels, which stays free
+        // of Android types so its host tests can feed it a fixture instead.
+        app.polarbear.setup.OptionalAppCatalog.loader = {
+            try {
+                nativeOptionalAppCatalog()
+            } catch (_: UnsatisfiedLinkError) {
+                Log.e(TAG, "nativeOptionalAppCatalog unavailable")
+                null
+            }
+        }
+    }
 
     // Native readiness is independent of installation progress. A KWin frame
     // can latch this before the Compose hierarchy has finished presenting.
@@ -157,6 +174,22 @@ object ComposeOverlay {
     )
     @Volatile private var systemUpdateStateSnapshot = defaultSystemUpdateState
     private val systemUpdateStateValue = mutableStateOf(defaultSystemUpdateState)
+
+    const val APP_ABSENT = 0
+    const val APP_INSTALLED = 1
+    const val APP_QUEUED = 2
+    const val APP_INSTALLING = 3
+    const val APP_REMOVING = 4
+    const val APP_FAILED = 5
+
+    data class OptionalAppUiState(val state: Int, val progress: Int, val message: String) {
+        val installed: Boolean get() = state == APP_INSTALLED
+        val busy: Boolean get() = state == APP_QUEUED || state == APP_INSTALLING || state == APP_REMOVING
+        val failed: Boolean get() = state == APP_FAILED
+    }
+
+    @Volatile private var optionalAppsSnapshot: Map<String, OptionalAppUiState> = emptyMap()
+    private val optionalAppsValue = mutableStateOf<Map<String, OptionalAppUiState>>(emptyMap())
     // First app-owned frame handshake for the system splash: set on the
     // Compose content pre-draw (CONFIGURE and launch destination measured), or when
     // showing fails so the fallback screen can draw instead. PortalActivity
@@ -203,6 +236,9 @@ object ComposeOverlay {
 
     /** System-splash gate: true once an app-owned frame (or the fallback path) exists. */
     @JvmStatic fun isFirstFrameReady(): Boolean = firstFrameReady.get()
+
+    /** UI thread: whether a Portal screen covers the desktop. */
+    @JvmStatic fun isShowing(): Boolean = composeView != null
 
     /** Called by PortalActivity when the system splash view is actually removed. */
     fun markSystemSplashRemoved() {
@@ -313,6 +349,39 @@ object ComposeOverlay {
         )
         systemUpdateStateSnapshot = next
         composeView?.post { systemUpdateStateValue.value = systemUpdateStateSnapshot }
+    }
+
+    /** Subscribe to the app manager's per-app state (keyed by app ID). */
+    @Composable
+    fun optionalAppsState(): State<Map<String, OptionalAppUiState>> = optionalAppsValue
+
+    /** Native app manager bridge: `id	state	progress	message` per line. */
+    @JvmStatic fun updateOptionalAppsState(text: String) {
+        val next = text.lineSequence()
+            .filter { it.isNotBlank() }
+            .mapNotNull { line ->
+                val fields = line.split('	', limit = 4)
+                if (fields.size < 3) return@mapNotNull null
+                fields[0] to OptionalAppUiState(
+                    state = fields[1].toIntOrNull()?.coerceIn(APP_ABSENT, APP_FAILED) ?: APP_ABSENT,
+                    progress = fields[2].toIntOrNull()?.coerceIn(0, 100) ?: 0,
+                    message = fields.getOrElse(3) { "" },
+                )
+            }
+            .toMap()
+        optionalAppsSnapshot = next
+        composeView?.post { optionalAppsValue.value = optionalAppsSnapshot }
+    }
+
+    /** Ask the native app manager to install or remove one app. */
+    @JvmStatic fun requestOptionalApp(appId: String, install: Boolean): Boolean = try {
+        nativeRequestOptionalApp(appId, install)
+    } catch (_: UnsatisfiedLinkError) {
+        Log.e(TAG, "nativeRequestOptionalApp unavailable")
+        false
+    } catch (e: Exception) {
+        Log.e(TAG, "nativeRequestOptionalApp failed", e)
+        false
     }
 
     /** Ask the native coordinator to stop Plasma and install updates. */
@@ -501,6 +570,7 @@ object ComposeOverlay {
             installStateValue.value = installStateSnapshot
             anlandRepairStateValue.value = anlandRepairStateSnapshot
             systemUpdateStateValue.value = systemUpdateStateSnapshot
+            optionalAppsValue.value = optionalAppsSnapshot
             frame.alpha = 1f
             Log.i(
                 TAG,

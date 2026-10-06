@@ -43,6 +43,7 @@
 #include <linux/sockios.h>  /* SIOCGIFINDEX, */
 #include <sched.h>         /* CLONE_NEW*, */
 #include <signal.h>        /* SIGSYS, */
+#include "syscall/evdev.h"  /* FAKE_EVDEV_IOCTL_TYPE, */
 
 #include "syscall/seccomp.h"
 #include "tracee/tracee.h"
@@ -142,11 +143,13 @@ static const uint32_t traced_ioctl_requests[] = {
 	SIOCGIFINDEX,
 };
 #define NB_TRACED_IOCTLS (sizeof(traced_ioctl_requests) / sizeof(traced_ioctl_requests[0]))
-#define LENGTH_TRACE_IOCTL (NB_TRACED_IOCTLS + 4)
+#define LENGTH_TRACE_IOCTL (NB_TRACED_IOCTLS + 6)
 
 /**
  * Like add_trace_syscall(), but only for the ioctl(2) requests listed in
- * traced_ioctl_requests; other requests are allowed straight away.
+ * traced_ioctl_requests and the evdev requests (type 'E', answered for
+ * emulated game pads by syscall/evdev.c); other requests are allowed
+ * straight away.
  */
 static int add_trace_ioctl(struct sock_fprog *program, word_t syscall, int flag)
 {
@@ -164,9 +167,13 @@ static int add_trace_ioctl(struct sock_fprog *program, word_t syscall, int flag)
 	statements[1] = (struct sock_filter) BPF_STMT(BPF_LD + BPF_W + BPF_ABS, request_offset);
 	for (i = 0; i < NB_TRACED_IOCTLS; i++)
 		statements[2 + i] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K,
-					traced_ioctl_requests[i], NB_TRACED_IOCTLS - i, 0);
-	statements[2 + NB_TRACED_IOCTLS] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW);
-	statements[3 + NB_TRACED_IOCTLS] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + flag);
+					traced_ioctl_requests[i], NB_TRACED_IOCTLS + 2 - i, 0);
+	/* The request's type byte is bits 8-15.  */
+	statements[2 + NB_TRACED_IOCTLS] = (struct sock_filter) BPF_STMT(BPF_ALU + BPF_AND + BPF_K, 0xff00);
+	statements[3 + NB_TRACED_IOCTLS] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K,
+					FAKE_EVDEV_IOCTL_TYPE << 8, 1, 0);
+	statements[4 + NB_TRACED_IOCTLS] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW);
+	statements[5 + NB_TRACED_IOCTLS] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + flag);
 
 	DEBUG_FILTER("FILTER:     trace if syscall == %ld and request is rewritten\n", syscall);
 
@@ -481,6 +488,8 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_inotify_add_watch,	0 },
 #ifdef __ANDROID__
 	{ PR_ioctl,		FILTER_SYSEXIT },
+	/* Answered from PRoot's copy, see emulate_robust_list().  */
+	{ PR_get_robust_list,	0 },
 #endif
 	{ PR_lchown,		0 },
 	{ PR_lchown32,		0 },

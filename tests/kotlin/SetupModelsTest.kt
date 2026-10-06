@@ -1,7 +1,10 @@
 package app.polarbear.setup
 
-// Host-only invariants. Run with Kotlin/JVM; no device or UI automation.
+// Host-only invariants. Run with Kotlin/JVM from the repository root; no
+// device or UI automation. The catalog comes from the same fixture the Rust
+// allowlist is checked against, standing in for the JNI catalog.
 fun main() {
+    OptionalAppCatalog.loader = { java.io.File("tests/fixtures/optional-app-catalog.tsv").readText() }
     val capacities = listOf(
         StorageCapacity(128_000_000_000L, 91_000_000_000L),
         StorageCapacity(512_000_000_000L, 400_000_000_000L),
@@ -21,7 +24,13 @@ fun main() {
             check(projectedInstallBytes(ids + app.id) - requested == app.installedMb * 1_000_000L)
         }
     }
-    check(OPTIONAL_APP_IDS == setOf("claude", "chatgpt", "libreoffice", "vlc", "gimp", "krita", "inkscape", "thunderbird"))
+    check(OPTIONAL_APP_IDS == setOf("claude", "chatgpt", "libreoffice", "vlc", "gimp", "krita", "inkscape", "thunderbird", "steam"))
+    check(OPTIONAL_APPS.all { it.available && it.categoryLabel.isNotEmpty() })
+    check(groupedOptionalApps().map { it.first } == listOf("AI", "Productivity", "Internet", "Creative", "Media", "Gaming"))
+    check(projectedInstallBytes(setOf("steam")) - projectedInstallBytes(emptySet()) == 4_200_000_000L)
+    val unavailable = parseOptionalAppCatalog("steam	Steam	Games	gaming	Gaming	4200	Needs GPU graphics mode
+broken line")
+    check(unavailable.size == 1 && unavailable[0].unavailableReason == "Needs GPU graphics mode" && !unavailable[0].available)
     check(projectedInstallBytes(setOf("chatgpt")) - projectedInstallBytes(emptySet()) == 1_940_000_000L)
     check(projectedInstallBytes(setOf("claude")) - projectedInstallBytes(emptySet()) == 600_000_000L)
     check("okular" !in OPTIONAL_APP_IDS && "kate" !in OPTIONAL_APP_IDS)

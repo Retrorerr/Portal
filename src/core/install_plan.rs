@@ -60,7 +60,7 @@ pub enum InterfaceSize {
 ///
 /// This enum deliberately doubles as the native allowlist.  Package names
 /// are never received from Kotlin or interpolated from an untrusted string.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OptionalApp {
     Chatgpt,
@@ -69,11 +69,139 @@ pub enum OptionalApp {
     Inkscape,
     Krita,
     Libreoffice,
+    Steam,
     Thunderbird,
     Vlc,
 }
 
+/// Groups shown by the app pickers, in display order.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum AppCategory {
+    Ai,
+    Productivity,
+    Creative,
+    Media,
+    Internet,
+    Gaming,
+}
+
+impl AppCategory {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Ai => "ai",
+            Self::Productivity => "productivity",
+            Self::Creative => "creative",
+            Self::Media => "media",
+            Self::Internet => "internet",
+            Self::Gaming => "gaming",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ai => "AI",
+            Self::Productivity => "Productivity",
+            Self::Creative => "Creative",
+            Self::Media => "Media",
+            Self::Internet => "Internet",
+            Self::Gaming => "Gaming",
+        }
+    }
+}
+
+/// What the device must offer before an app can be installed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppRequirement {
+    None,
+    /// Hardware Vulkan (Anland + Turnip on KGSL) and 4 KiB pages for FEX.
+    GpuGaming,
+}
+
 impl OptionalApp {
+    /// Every app, in picker order.
+    pub const ALL: [Self; 9] = [
+        Self::Claude,
+        Self::Chatgpt,
+        Self::Libreoffice,
+        Self::Thunderbird,
+        Self::Gimp,
+        Self::Krita,
+        Self::Inkscape,
+        Self::Vlc,
+        Self::Steam,
+    ];
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|app| app.id() == id)
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Chatgpt => "ChatGPT",
+            Self::Claude => "Claude",
+            Self::Gimp => "GIMP",
+            Self::Inkscape => "Inkscape",
+            Self::Krita => "Krita",
+            Self::Libreoffice => "LibreOffice",
+            Self::Steam => "Steam",
+            Self::Thunderbird => "Thunderbird",
+            Self::Vlc => "VLC",
+        }
+    }
+
+    pub const fn blurb(self) -> &'static str {
+        match self {
+            Self::Chatgpt => "Official OpenAI desktop app",
+            Self::Claude => "Official Anthropic desktop app",
+            Self::Gimp => "Image editor",
+            Self::Inkscape => "Vector graphics",
+            Self::Krita => "Digital painting",
+            Self::Libreoffice => "Office suite",
+            Self::Steam => "PC games via Proton and FEX",
+            Self::Thunderbird => "Email client",
+            Self::Vlc => "Media player",
+        }
+    }
+
+    pub const fn category(self) -> AppCategory {
+        match self {
+            Self::Chatgpt | Self::Claude => AppCategory::Ai,
+            Self::Libreoffice => AppCategory::Productivity,
+            Self::Gimp | Self::Inkscape | Self::Krita => AppCategory::Creative,
+            Self::Vlc => AppCategory::Media,
+            Self::Thunderbird => AppCategory::Internet,
+            Self::Steam => AppCategory::Gaming,
+        }
+    }
+
+    /// Estimated installed footprint in decimal MB (not download size). For
+    /// Steam this is the client plus Proton, before any game.
+    pub const fn installed_mb(self) -> u32 {
+        match self {
+            Self::Chatgpt => 1940,
+            Self::Claude => 600,
+            Self::Gimp => 325,
+            Self::Inkscape => 300,
+            Self::Krita => 615,
+            Self::Libreoffice => 790,
+            Self::Steam => 4200,
+            Self::Thunderbird => 355,
+            Self::Vlc => 215,
+        }
+    }
+
+    pub const fn requirement(self) -> AppRequirement {
+        match self {
+            Self::Steam => AppRequirement::GpuGaming,
+            _ => AppRequirement::None,
+        }
+    }
+
+    /// Electron apps whose launchers Portal copies with its own flags.
+    pub const fn is_electron(self) -> bool {
+        matches!(self, Self::Chatgpt | Self::Claude)
+    }
+
     pub const fn id(self) -> &'static str {
         match self {
             Self::Chatgpt => "chatgpt",
@@ -82,21 +210,25 @@ impl OptionalApp {
             Self::Inkscape => "inkscape",
             Self::Krita => "krita",
             Self::Libreoffice => "libreoffice",
+            Self::Steam => "steam",
             Self::Thunderbird => "thunderbird",
             Self::Vlc => "vlc",
         }
     }
 
-    pub const fn package_name(self) -> &'static str {
+    /// The Debian package that is the app itself. Steam is not a Debian
+    /// package: Valve's ARM64 client installs and updates itself.
+    pub const fn package_name(self) -> Option<&'static str> {
         match self {
-            Self::Chatgpt => "chatgpt",
-            Self::Claude => "claude-desktop",
-            Self::Gimp => "gimp",
-            Self::Inkscape => "inkscape",
-            Self::Krita => "krita",
-            Self::Libreoffice => "libreoffice",
-            Self::Thunderbird => "thunderbird",
-            Self::Vlc => "vlc",
+            Self::Chatgpt => Some("chatgpt"),
+            Self::Claude => Some("claude-desktop"),
+            Self::Gimp => Some("gimp"),
+            Self::Inkscape => Some("inkscape"),
+            Self::Krita => Some("krita"),
+            Self::Libreoffice => Some("libreoffice"),
+            Self::Steam => None,
+            Self::Thunderbird => Some("thunderbird"),
+            Self::Vlc => Some("vlc"),
         }
     }
 
@@ -130,6 +262,29 @@ impl OptionalApp {
                 "fonts-crosextra-caladea",
                 "fonts-liberation",
             ],
+            // Libraries Valve's ARM64 client links that Portal's image
+            // lacks (libnm, GTK 2), the tools it shells out to (lsof,
+            // lsb_release, lspci, zenity), the CEF/Vulkan runtime it expects,
+            // SDL2 for Wine's controller backend, Box64 for x86 Linux games
+            // (Portal's portal-box64 compat tool), and PipeWire's ALSA
+            // plugin since those games open ALSA's default device.
+            Self::Steam => &[
+                "libnm0",
+                "libgtk2.0-0t64",
+                "lsof",
+                "lsb-release",
+                "pciutils",
+                "zenity",
+                "libnss3",
+                "libgbm1",
+                "libvulkan1",
+                "libxss1",
+                "libva2",
+                "xdg-utils",
+                "libsdl2-2.0-0",
+                "box64",
+                "pipewire-alsa",
+            ],
             Self::Thunderbird => &["thunderbird"],
             Self::Vlc => &["vlc"],
         }
@@ -145,6 +300,8 @@ impl OptionalApp {
             Self::Inkscape => "org.inkscape.Inkscape.desktop",
             Self::Krita => "org.kde.krita.desktop",
             Self::Libreoffice => "libreoffice-startcenter.desktop",
+            // Written by Portal; launches the native ARM64 client.
+            Self::Steam => "portal-steam.desktop",
             Self::Thunderbird => "thunderbird.desktop",
             Self::Vlc => "vlc.desktop",
         }
@@ -154,6 +311,32 @@ impl OptionalApp {
     pub fn plasma_launcher_url(self) -> String {
         format!("applications:{}", self.desktop_file_id())
     }
+}
+
+/// One catalog line per app, tab separated, in picker order:
+/// `id name blurb category-id category-label installed-mb unavailable-reason`.
+/// `unavailable` maps an app to why this device cannot run it, if anything.
+/// Kotlin parses this format; the fields are fixed native text with no tabs.
+pub fn optional_app_catalog(unavailable: impl Fn(OptionalApp) -> Option<String>) -> String {
+    OptionalApp::ALL
+        .iter()
+        .map(|&app| {
+            let reason = unavailable(app)
+                .unwrap_or_default()
+                .replace(['\t', '\n'], " ");
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                app.id(),
+                app.name(),
+                app.blurb(),
+                app.category().id(),
+                app.category().label(),
+                app.installed_mb(),
+                reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A validated snapshot of every first-run choice that affects the guest.
@@ -327,7 +510,7 @@ impl InstallPlan {
         self.selected_app_ids
             .iter()
             .copied()
-            .map(OptionalApp::package_name)
+            .filter_map(OptionalApp::package_name)
     }
 }
 
@@ -879,6 +1062,7 @@ mod tests {
                 "libreoffice",
                 "libreoffice-startcenter.desktop",
             ),
+            (OptionalApp::Steam, "steam", "portal-steam.desktop"),
             (OptionalApp::Thunderbird, "thunderbird", "thunderbird.desktop"),
             (OptionalApp::Vlc, "vlc", "vlc.desktop"),
         ];
@@ -904,8 +1088,49 @@ mod tests {
             OptionalApp::Thunderbird,
             OptionalApp::Vlc,
         ] {
-            assert_eq!(app.required_packages()[0], app.package_name());
+            assert_eq!(Some(app.required_packages()[0]), app.package_name());
         }
+        assert_eq!(OptionalApp::Steam.package_name(), None);
+        assert_eq!(OptionalApp::Steam.requirement(), AppRequirement::GpuGaming);
+    }
+
+    #[test]
+    fn catalog_lists_every_app_once_and_matches_the_shared_fixture() {
+        let mut ids = OptionalApp::ALL.iter().map(|app| app.id()).collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), OptionalApp::ALL.len());
+        for app in OptionalApp::ALL {
+            assert_eq!(OptionalApp::from_id(app.id()), Some(app));
+            assert_eq!(
+                serde_json::to_string(&app).unwrap(),
+                format!("\"{}\"", app.id())
+            );
+        }
+        assert_eq!(OptionalApp::from_id("kate"), None);
+        // Kotlin's and the guest helper's tests read this file, so the three
+        // copies of the app list cannot drift apart.
+        let fixture = include_str!("../../tests/fixtures/optional-app-catalog.tsv");
+        assert_eq!(
+            optional_app_catalog(|_| None),
+            fixture.strip_suffix('\n').unwrap_or(fixture)
+        );
+        let catalog = optional_app_catalog(|app| {
+            (app == OptionalApp::Steam).then(|| "Needs\tGPU".to_owned())
+        });
+        assert!(catalog.lines().last().unwrap().ends_with("\tNeeds GPU"));
+        assert!(catalog.lines().all(|line| line.split('\t').count() == 7));
+    }
+
+    #[test]
+    fn steam_is_an_allowlisted_choice_without_a_debian_package() {
+        let plan = InstallPlan::from_json(&VALID_PLAN.replace(
+            "[\"gimp\",\"libreoffice\",\"vlc\"]",
+            "[\"gimp\",\"steam\"]",
+        ))
+        .unwrap();
+        assert_eq!(plan.selected_apps(), &[OptionalApp::Gimp, OptionalApp::Steam]);
+        assert_eq!(plan.selected_packages().collect::<Vec<_>>(), vec!["gimp"]);
     }
 
     #[test]

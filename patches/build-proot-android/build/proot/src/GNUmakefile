@@ -51,6 +51,7 @@ OBJECTS += \
 	syscall/rlimit.o	\
 	syscall/pipe_shadow.o	\
 	syscall/fakens.o	\
+	syscall/evdev.o		\
 	tracee/tracee.o		\
 	tracee/mem.o		\
 	tracee/reg.o		\

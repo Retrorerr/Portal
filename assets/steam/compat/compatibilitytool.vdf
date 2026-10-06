@@ -1,0 +1,13 @@
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "portal-proton-arm64"
+    {
+      "install_path" "."
+      "display_name" "Portal Proton (ARM64 + FEX)"
+      "from_oslist" "windows"
+      "to_oslist" "linux"
+    }
+  }
+}

@@ -69,6 +69,7 @@
 #include "ptrace/wait.h"
 #include "syscall/heap.h"
 #include "syscall/fakens.h"
+#include "syscall/evdev.h"
 #include "tracee/seccomp.h"
 #include "extension/extension.h"
 #include "execve/execve.h"
@@ -2568,8 +2569,10 @@ int translate_syscall_enter(Tracee *tracee)
 			status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
 		else
 			status = translate_sysarg(tracee, SYSARG_1, REGULAR);
-		if (status >= 0)
+		if (status >= 0) {
 			maybe_redirect_userns_file(tracee, SYSARG_1);
+			fake_evdev_open(tracee, SYSARG_1, SYSARG_2);
+		}
 		break;
 
 	case PR_fchownat:
@@ -2720,8 +2723,10 @@ int translate_syscall_enter(Tracee *tracee)
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
 		else
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
-		if (status >= 0)
+		if (status >= 0) {
 			maybe_redirect_userns_file(tracee, SYSARG_2);
+			fake_evdev_open(tracee, SYSARG_2, SYSARG_3);
+		}
 		break;
 
 	case PR_readlinkat:
@@ -2877,6 +2882,19 @@ int translate_syscall_enter(Tracee *tracee)
 		}
 		break;
 
+	case PR_get_robust_list: {
+		/* Android's filter traps set_robust_list(2): answer from
+		 * PRoot's copy (tracee/seccomp.c).  */
+		int result = emulate_robust_list(tracee, PR_get_robust_list);
+		if (result < 0) {
+			status = result;
+			break;
+		}
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
+		break;
+	}
+
 	case PR_ioctl: {
 		word_t cmd = peek_reg(tracee, CURRENT, SYSARG_2);
 		word_t arg = peek_reg(tracee, CURRENT, SYSARG_3);
@@ -2889,6 +2907,21 @@ int translate_syscall_enter(Tracee *tracee)
 			poke_reg(tracee, SYSARG_RESULT, 0);
 			set_sysnum(tracee, PR_void);
 			break;
+		}
+
+		/* Emulated game pads (syscall/evdev.c).  */
+		if (_IOC_TYPE((unsigned int) cmd) == FAKE_EVDEV_IOCTL_TYPE) {
+			int result;
+			word_t fd = peek_reg(tracee, CURRENT, SYSARG_1);
+			if (fake_evdev_ioctl(tracee, fd, cmd, arg, &result)) {
+				if (result < 0) {
+					status = result;
+					break;
+				}
+				poke_reg(tracee, SYSARG_RESULT, (word_t) result);
+				set_sysnum(tracee, PR_void);
+				break;
+			}
 		}
 
 #ifdef __ANDROID__

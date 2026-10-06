@@ -155,7 +155,6 @@ const INITIAL_APPEARANCE_PLAN: &str = "var/lib/localdesktop/initial-setup-plan-v
 const INITIAL_APPEARANCE_PROOF: &str = ".local/state/localdesktop/initial-setup-proof-v2";
 const INITIAL_APPEARANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(240);
 const INITIAL_APPEARANCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const OPTIONAL_APPS_LOG: &str = "/tmp/portal-optional-apps-v1.log";
 const KONSOLE_CONFIG: &str = include_str!("../../../assets/konsole/konsolerc");
 const KONSOLE_PROFILE: &str = include_str!("../../../assets/konsole/LocalDesktop.profile");
 const CRASH_HANDLER_BINARY: &[u8] =
@@ -850,7 +849,7 @@ fn installed_dpkg_packages(fs_root: &Path) -> anyhow::Result<HashSet<String>> {
     Ok(installed)
 }
 
-fn validate_optional_app_apt_setup(fs_root: &Path) -> anyhow::Result<()> {
+pub(crate) fn validate_optional_app_apt_setup(fs_root: &Path) -> anyhow::Result<()> {
     let apt_sandbox = fs::read_to_string(fs_root.join("etc/apt/apt.conf.d/01no-sandbox"))
         .context("Portal's PRoot-safe apt sandbox policy is missing")?;
     anyhow::ensure!(
@@ -917,6 +916,10 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
             !app.required_packages()
                 .iter()
                 .all(|package| installed.contains(*package))
+                || (*app == OptionalApp::Steam
+                    && !fs_root
+                        .join(crate::core::optional_apps::STEAM_MARKER_REL)
+                        .is_file())
         })
         .collect::<Vec<_>>();
     // Official Electron apps ship their own launchers, which need Portal's
@@ -925,128 +928,20 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
     let electron_apps = selected_apps
         .iter()
         .copied()
-        .filter(|app| matches!(app, OptionalApp::Chatgpt | OptionalApp::Claude))
+        .filter(|app| app.is_electron())
         .collect::<Vec<_>>();
     if missing.is_empty() && electron_apps.is_empty() {
         provision_ibus_packages(fs_root);
         return None;
     }
     Some(thread::spawn(move || -> anyhow::Result<()> {
-        // ProcessSpec launches guest shell source rather than an argv vector,
-        // so keep every package token inside fixed enum arms. The UI only
-        // chooses which literal command fragments are included.
-        let package_commands = missing
-            .iter()
-            .map(|app| match app {
-                OptionalApp::Chatgpt => r#"(apt-get install -y --no-install-recommends curl &&
-                    curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-                        --output /tmp/portal-chatgpt_arm64.deb.part \
-                        https://persistent.oaistatic.com/codex-app-prod/linux/deb/latest/chatgpt_arm64.deb &&
-                    test "$(dpkg-deb --field /tmp/portal-chatgpt_arm64.deb.part Package)" = chatgpt &&
-                    test "$(dpkg-deb --field /tmp/portal-chatgpt_arm64.deb.part Architecture)" = arm64 &&
-                    mv -f /tmp/portal-chatgpt_arm64.deb.part /tmp/portal-chatgpt_arm64.deb &&
-                    apt-get install -y --no-install-recommends /tmp/portal-chatgpt_arm64.deb git ripgrep python3-venv &&
-                    rm -f /tmp/portal-chatgpt_arm64.deb)"#,
-                // Anthropic's signed apt repository, as its Linux install
-                // guide describes, so apt resolves the newest release now and
-                // delivers later ones with ordinary package updates. The whole
-                // key file becomes apt's keyring for this source, so it is
-                // accepted only if it holds exactly one key and that key has
-                // Anthropic's published fingerprint.
-                OptionalApp::Claude => r#"(apt-get install -y --no-install-recommends curl gnupg ca-certificates &&
-                    curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-                        --output /tmp/portal-claude-desktop-key.asc.part \
-                        https://downloads.claude.ai/claude-desktop/key.asc &&
-                    test "$(gpg --batch --with-colons --show-keys /tmp/portal-claude-desktop-key.asc.part |
-                        awk -F: '$1 == "pub" { keys++ } $1 == "fpr" && primary == "" { primary = $10 }
-                            END { if (keys == 1) print primary }')" = 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE &&
-                    install -m 0644 /tmp/portal-claude-desktop-key.asc.part \
-                        /usr/share/keyrings/claude-desktop-archive-keyring.asc &&
-                    rm -f /tmp/portal-claude-desktop-key.asc.part &&
-                    printf '%s\n' 'deb [arch=arm64 signed-by=/usr/share/keyrings/claude-desktop-archive-keyring.asc] https://downloads.claude.ai/claude-desktop/apt/stable stable main' \
-                        >/etc/apt/sources.list.d/claude-desktop.list &&
-                    apt-get update &&
-                    apt-get install -y --no-install-recommends claude-desktop git ripgrep python3-venv)"#,
-                OptionalApp::Gimp => "apt-get install -y --no-install-recommends gimp ghostscript",
-                OptionalApp::Inkscape => {
-                    "apt-get install -y --no-install-recommends inkscape python3-lxml                         python3-numpy python3-scour python3-cssselect"
-                },
-                OptionalApp::Krita => "apt-get install -y --no-install-recommends krita python3-pyqt5",
-                OptionalApp::Libreoffice => {
-                    "apt-get install -y --no-install-recommends libreoffice libreoffice-kf6                         libreoffice-style-breeze fonts-crosextra-carlito fonts-crosextra-caladea                         fonts-liberation"
-                }
-                OptionalApp::Thunderbird => {
-                    "apt-get install -y --no-install-recommends thunderbird"
-                }
-                OptionalApp::Vlc => "apt-get install -y --no-install-recommends vlc",
-            })
-            .collect::<Vec<_>>()
-            .join(&format!(" >>{OPTIONAL_APPS_LOG} 2>&1 && "));
-        if !missing.is_empty() {
-            // The extracted image has gawk but not its postinst-created awk
-            // alternative. Restore it before configuring a retry's packages.
-            let command = format!(
-                "(test -x /usr/bin/awk || \
-             update-alternatives --quiet --install /usr/bin/awk awk /usr/bin/gawk 10) \
-             >>{OPTIONAL_APPS_LOG} 2>&1 && \
-             dpkg --configure -a >>{OPTIONAL_APPS_LOG} 2>&1 && \
-             apt-get update >>{OPTIONAL_APPS_LOG} 2>&1 && \
-             apt-get install -y --no-remove --no-install-recommends --fix-broken >>{OPTIONAL_APPS_LOG} 2>&1 && \
-             {package_commands} >>{OPTIONAL_APPS_LOG} 2>&1"
-            );
-            let spec = ProcessSpec::new(command).with_env("DEBIAN_FRONTEND", "noninteractive");
-            let output = PRootRuntime::active().execute(spec, None, None);
-            anyhow::ensure!(
-                output.status.success(),
-                "Optional Debian app installation failed (status {:?}); see {OPTIONAL_APPS_LOG}: {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
-                    .chars()
-                    .rev()
-                    .take(2048)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-            );
-        }
-        let installed = installed_dpkg_packages(Path::new(PRODUCTION_FS_ROOT))?;
-        anyhow::ensure!(
-            missing
-                .iter()
-                .all(|app| app.required_packages().iter().all(|package| installed.contains(*package))),
-            "A requested optional Debian app is not fully installed after apt completed"
-        );
-        for app in electron_apps {
-            let desktop_file = app.desktop_file_id();
-            anyhow::ensure!(
-                installed.contains(app.package_name())
-                    && Path::new(PRODUCTION_FS_ROOT)
-                        .join("usr/share/applications")
-                        .join(desktop_file)
-                        .is_file(),
-                "The requested official {} desktop app is not fully installed",
-                app.id()
-            );
-            // This is a one-time first-run application to the selected user's
-            // desktop entry. A later cold start must not regenerate it. The
-            // entry name is fixed enum metadata, never UI input.
-            let user = get_application_context().local_config.user.username;
-            let desktop_command = format!(
-                "/usr/local/bin/localdesktop-no-sandbox-entries && grep -q '^X-LocalDesktop-NoSandbox=true$' \"$HOME/.local/share/applications/{desktop_file}\""
-            );
-            let output = PRootRuntime::active().execute(
-                ProcessSpec::new(desktop_command).with_user(user),
-                None,
-                None,
-            );
-            anyhow::ensure!(
-                output.status.success(),
-                "The official {} launcher could not be prepared for Portal's PRoot session: {}",
-                app.id(),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        // Every package token comes from fixed allowlist commands in
+        // core::optional_apps; the UI only chooses which apps are included.
+        super::optional_apps::install_for_setup(&missing)
+            .context("Optional app installation failed")?;
+        // This is a one-time first-run application to the selected user's
+        // desktop entry. A later cold start must not regenerate it.
+        super::optional_apps::prepare_electron_launchers_for_setup(&electron_apps)?;
         provision_ibus_packages(Path::new(PRODUCTION_FS_ROOT));
         Ok(())
     }))
@@ -1451,7 +1346,9 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     sync_guest_host_path_alias(fs_root);
     sync_chromium_entries(fs_root);
     sync_libreoffice_launchers(fs_root);
+    super::optional_apps::sync_steam_integration(fs_root);
     browser::sync_default_applications(fs_root);
+    browser::repair_user_default_browser(fs_root);
     sync_default_menu(fs_root);
     browser::sync_firefox_config(fs_root);
     browser::sync_firefox_prefs_hook(fs_root);
@@ -2569,12 +2466,12 @@ fn sync_initial_desktop_defaults(fs_root: &Path) {
     browser::sync_firefox_config(fs_root);
     seed_plasma_locale(fs_root);
     // Repair Portal's own launcher to use Debian's installed browser/icon name.
+    // `firefox` itself stays: it is Mozilla's Firefox once setup installs it,
+    // and Debian's firefox-esr wrapper until then.
     let docs_entry = home_dir.join("Desktop/localdesktop-online-docs.desktop");
     if fs_root.join("usr/bin/firefox-esr").exists() {
         if let Ok(text) = fs::read_to_string(&docs_entry) {
-            let text = text
-                .replace("Exec=firefox ", "Exec=firefox-esr ")
-                .replace("Icon=firefox\n", "Icon=firefox-esr\n");
+            let text = text.replace("Icon=firefox\n", "Icon=firefox-esr\n");
             let _ = fs::write(&docs_entry, text);
             let _ = fs::set_permissions(&docs_entry, fs::Permissions::from_mode(0o755));
         }
@@ -2770,6 +2667,7 @@ pub fn try_sync_session_runtime_files(fs_root: &Path, ui_scale: i32) -> anyhow::
 /// private runtime/session directories; Plasma itself is never run as root.
 pub fn prepare_desktop_login(migrate_legacy: bool) -> anyhow::Result<()> {
     ensure_desktop_services(Path::new(PRODUCTION_FS_ROOT))?;
+    ensure_mozilla_firefox(Path::new(PRODUCTION_FS_ROOT));
     let caches = PRootRuntime::active().execute(
         ProcessSpec::new("/usr/local/bin/localdesktop-system-caches"),
         None,
@@ -2862,6 +2760,93 @@ fn ensure_desktop_services(root: &Path) -> anyhow::Result<()> {
     fs::File::open(marker.parent().context("Missing desktop service marker parent")?)?
         .sync_all()?;
     Ok(())
+}
+
+/// `/usr/bin/firefox` laid out the way Debian's `firefox-esr` expects. ESR
+/// ships a `/usr/bin/firefox` wrapper that runs `/usr/bin/firefox.real` when
+/// it exists and ESR otherwise, and its preinst diverts every other package's
+/// `/usr/bin/firefox` there, so Mozilla's `firefox` lands on `firefox.real`
+/// and `firefox` starts it. The image unpacks ESR without running its preinst,
+/// so the diversion is added here (`--no-rename`: the file in place is ESR's
+/// own wrapper). Earlier Portal builds diverted on behalf of `firefox` to
+/// `/usr/bin/firefox.debian-esr` instead, which made ESR's preinst fail on
+/// every ESR upgrade; that layout is moved over.
+const FIREFOX_ESR_DIVERSION: &str = r#"if dpkg-divert --list /usr/bin/firefox | grep -q ' by firefox$'; then
+        mv -f /usr/bin/firefox /usr/bin/firefox.real &&
+        dpkg-divert --package firefox --no-rename --remove /usr/bin/firefox &&
+        mv -f /usr/bin/firefox.debian-esr /usr/bin/firefox
+    fi &&
+    if dpkg -s firefox-esr >/dev/null 2>&1 && ! dpkg-divert --list /usr/bin/firefox | grep -q .; then
+        dpkg-divert --package firefox-esr --no-rename --divert /usr/bin/firefox.real --add /usr/bin/firefox
+    fi"#;
+
+/// Mozilla's Firefox from packages.mozilla.org, the browser Portal defaults
+/// to (see `guest_browser::BROWSER_DESKTOP_IDS`); the image's Debian
+/// `firefox-esr` stays as the fallback (see `FIREFOX_ESR_DIVERSION` for how
+/// the two share `/usr/bin/firefox`). The signing key must be exactly
+/// Mozilla's published one. Not fatal: the desktop starts with ESR and a later
+/// launch retries; once installed, the marker keeps a user's removal from
+/// being undone.
+const MOZILLA_FIREFOX_INSTALL: &str = r#"curl --fail --location --retry 2 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --output /tmp/portal-mozilla-key.asc.part \
+        https://packages.mozilla.org/apt/repo-signing-key.gpg &&
+    test "$(gpg --batch --with-colons --show-keys /tmp/portal-mozilla-key.asc.part |
+        awk -F: '$1 == "pub" { keys++ } $1 == "fpr" && primary == "" { primary = $10 }
+            END { if (keys == 1) print primary }')" = 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 &&
+    install -d -m 0755 /etc/apt/keyrings &&
+    install -m 0644 /tmp/portal-mozilla-key.asc.part /etc/apt/keyrings/packages.mozilla.org.asc &&
+    rm -f /tmp/portal-mozilla-key.asc.part &&
+    printf '%s\n' 'deb [arch=arm64 signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' \
+        >/etc/apt/sources.list.d/mozilla.list &&
+    apt-get update &&
+    apt-get install -y --no-remove --no-install-recommends firefox"#;
+
+fn ensure_mozilla_firefox(root: &Path) {
+    // Every launch, so the old `.debian-esr` layout is moved over and an ESR
+    // reinstalled since gets its diversion; a dpkg state file read skips the
+    // PRoot call when nothing is to do.
+    let diversions = fs::read_to_string(root.join("var/lib/dpkg/diversions")).unwrap_or_default();
+    let esr_diverted = diversions.lines().any(|line| line == "/usr/bin/firefox.real");
+    let esr_installed = installed_dpkg_packages(root).is_ok_and(|installed| installed.contains("firefox-esr"));
+    if (esr_installed && !esr_diverted) || diversions.contains("/usr/bin/firefox.debian-esr") {
+        let output = PRootRuntime::active().execute(ProcessSpec::new(FIREFOX_ESR_DIVERSION), None, None);
+        if !output.status.success() {
+            log::warn!(
+                "/usr/bin/firefox diversion could not be set up: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+    }
+    let marker = root.join("var/lib/localdesktop/mozilla-firefox-v1");
+    if marker.is_file() {
+        return;
+    }
+    let installed = match installed_dpkg_packages(root) {
+        Ok(installed) => installed.contains("firefox"),
+        Err(error) => {
+            log::warn!("Mozilla Firefox: package state unreadable: {error:#}");
+            return;
+        }
+    };
+    if !installed {
+        let output = PRootRuntime::active().execute(
+            ProcessSpec::new(MOZILLA_FIREFOX_INSTALL).with_env("DEBIAN_FRONTEND", "noninteractive"),
+            None,
+            None,
+        );
+        if !output.status.success() {
+            log::warn!(
+                "Mozilla Firefox install failed; Firefox ESR stays the browser until a later launch: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        browser::sync_firefox_config(root);
+    }
+    if let Err(error) = fs::write(&marker, b"installed\n") {
+        log::warn!("Mozilla Firefox marker could not be written: {error}");
+    }
 }
 
 fn setup_desktop_login(_: &SetupOptions) -> StageOutput {

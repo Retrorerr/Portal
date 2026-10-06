@@ -340,6 +340,15 @@ impl LinuxRuntime for PRootRuntime {
             Err(error) => log::warn!("PRoot link2symlink directory unavailable: {error}"),
         }
 
+        // Game pads: `/dev/input` is Portal's pty-backed pads, and PRoot
+        // answers their evdev ioctls (see `android::gamepad`).
+        let pad_input = crate::android::gamepad::input_dir();
+        let pad_registry = crate::android::gamepad::registry_dir();
+        let pads_ready = fs::create_dir_all(&pad_input).is_ok() && fs::create_dir_all(&pad_registry).is_ok();
+        if pads_ready {
+            process.env("PROOT_FAKE_EVDEV_DIR", &pad_registry);
+        }
+
         let rootfs_str = self.rootfs.to_string_lossy().to_string();
 
         process
@@ -366,6 +375,10 @@ impl LinuxRuntime for PRootRuntime {
             .arg("--bind=/sys")
             .arg(format!("--bind={}/tmp:/dev/shm", rootfs_str))
             .arg("--bind=/dev/tty:/dev/tty");
+
+        if pads_ready {
+            process.arg(format!("--bind={}:/dev/input", pad_input.display()));
+        }
 
         if context.permission_all_files_access {
             process

@@ -427,6 +427,7 @@ fn show_compose_overlay_with(android_app: &AndroidApp, method: &str) {
     publish_current_anland_repair_state(android_app);
     if method == "showReturn" {
         crate::android::proot::system_updates::publish_current(android_app);
+        crate::android::proot::optional_apps::publish_current(android_app);
     }
 }
 
@@ -481,6 +482,40 @@ pub fn publish_system_update_state(
             ) {
                 log::error!("Compose overlay updateSystemUpdateState failed: {error}");
                 clear_exception(env, "updateSystemUpdateState");
+            }
+        },
+        android_app.clone(),
+    );
+}
+
+/// Publish the app manager's per-app state: one `id	state	progress	message`
+/// line per app (state codes in `optional_apps::AppState`).
+pub fn publish_optional_apps_state(android_app: &AndroidApp, text: &str) {
+    let text = text.to_owned();
+    super::ndk::run_in_jvm(
+        move |env, app| {
+            let activity = activity_object(app);
+            let class = match overlay_class(env, &activity) {
+                Ok(class) => class,
+                Err(error) => {
+                    log::error!("Compose overlay class is unavailable: {error}");
+                    clear_exception(env, "find ComposeOverlay for optional app state");
+                    return;
+                }
+            };
+            let Ok(value) = env.new_string(text) else {
+                log::error!("Failed to allocate optional app state string");
+                clear_exception(env, "allocate optional app state");
+                return;
+            };
+            if let Err(error) = env.call_static_method(
+                class,
+                "updateOptionalAppsState",
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&value)],
+            ) {
+                log::error!("Compose overlay updateOptionalAppsState failed: {error}");
+                clear_exception(env, "updateOptionalAppsState");
             }
         },
         android_app.clone(),
@@ -705,6 +740,45 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeBeginSystemUpdate
     } else {
         0
     }
+}
+
+/// JNI source of the optional-app catalog both pickers show: one
+/// tab-separated line per app (see `install_plan::optional_app_catalog`),
+/// with this device's availability.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOptionalAppCatalog(
+    mut env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jstring {
+    let catalog = crate::android::proot::optional_apps::catalog();
+    match env.new_string(catalog) {
+        Ok(value) => value.into_raw(),
+        Err(error) => {
+            log::error!("Could not allocate the optional app catalog: {error}");
+            clear_exception(&mut env, "allocate optional app catalog");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// JNI bridge for the Return screen's app manager. Only an allowlisted app
+/// ID crosses; the native worker owns all guest work.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRequestOptionalApp(
+    mut env: JNIEnv,
+    _class: JObject,
+    app_id: JString,
+    install: jni::sys::jboolean,
+) -> jni::sys::jboolean {
+    let app_id = match env.get_string(&app_id) {
+        Ok(value) => value.to_string_lossy().into_owned(),
+        Err(error) => {
+            log::error!("Could not read the requested optional app: {error}");
+            clear_exception(&mut env, "read optional app id");
+            return 0;
+        }
+    };
+    u8::from(crate::android::proot::optional_apps::request(&app_id, install != 0))
 }
 
 /// JNI bridge for the explicit existing-install Anland graphics repair. The

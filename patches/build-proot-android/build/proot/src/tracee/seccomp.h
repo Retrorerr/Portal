@@ -1,4 +1,5 @@
 #include "tracee/tracee.h"
+#include "syscall/sysnum.h"
 #include "sys/vfs.h"
 
 struct compat_statfs {
@@ -18,6 +19,7 @@ struct compat_statfs {
 
 void restart_syscall_after_seccomp(Tracee* tracee);
 void set_result_after_seccomp(Tracee *tracee, word_t result);
+int emulate_robust_list(Tracee *tracee, Sysnum sysnum);
 int handle_seccomp_event(Tracee* tracee);
 void fix_and_restart_enosys_syscall(Tracee* tracee);
 void sigsys_action_new_child(Tracee *parent, Tracee *child, word_t clone_flags);

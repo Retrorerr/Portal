@@ -657,3 +657,43 @@ fn the_hook_script_never_fails_even_with_nothing_to_do() {
         .unwrap()
         .success());
 }
+
+#[test]
+fn firefoxs_userapp_default_is_pointed_back_at_its_packaged_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "usr/share/applications/firefox.desktop", "[Desktop Entry]\n");
+    write(
+        dir.path(),
+        "home/desktop/.local/share/applications/userapp-Firefox-FVUIW3.desktop",
+        "[Desktop Entry]\nType=Application\nNoDisplay=true\nExec=/usr/lib/firefox/firefox-bin %u\nName=Firefox\n",
+    );
+    write(
+        dir.path(),
+        "home/desktop/.local/share/applications/userapp-Other-AAAAAA.desktop",
+        "[Desktop Entry]\nExec=/opt/other/bin %u\n",
+    );
+    write(
+        dir.path(),
+        "home/desktop/.config/mimeapps.list",
+        "[Added Associations]\nx-scheme-handler/http=userapp-Firefox-FVUIW3.desktop;firefox.desktop;\n\n[Default Applications]\nx-scheme-handler/http=userapp-Firefox-FVUIW3.desktop\ntext/plain=userapp-Other-AAAAAA.desktop\n",
+    );
+    guest_browser::repair_user_default_browser(dir.path());
+    assert_eq!(
+        read(dir.path(), "home/desktop/.config/mimeapps.list"),
+        "[Added Associations]\nx-scheme-handler/http=firefox.desktop;\n\n[Default Applications]\nx-scheme-handler/http=firefox.desktop;\ntext/plain=userapp-Other-AAAAAA.desktop\n"
+    );
+}
+
+#[test]
+fn a_userapp_for_a_firefox_without_a_packaged_entry_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "home/desktop/.local/share/applications/userapp-Firefox-X.desktop",
+        "[Desktop Entry]\nExec=/usr/lib/firefox-nightly/firefox-bin %u\n",
+    );
+    let own = "[Default Applications]\nx-scheme-handler/http=userapp-Firefox-X.desktop\n";
+    write(dir.path(), "home/desktop/.config/mimeapps.list", own);
+    guest_browser::repair_user_default_browser(dir.path());
+    assert_eq!(read(dir.path(), "home/desktop/.config/mimeapps.list"), own);
+}

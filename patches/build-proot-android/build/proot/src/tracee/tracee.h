@@ -373,6 +373,12 @@ typedef struct tracee {
 	/* Ensure the sysexit stage is always hit under seccomp.  */
 	bool sysexit_pending;
 
+	/* Robust futex list this thread registered, kept by PRoot because
+	 * Android's app filter traps set_robust_list(2) (see
+	 * emulate_robust_list() in tracee/seccomp.c).  */
+	word_t robust_list_head;
+	word_t robust_list_len;
+
 	/* True when the kernel reported a fork event of this tracee
 	 * without the new child's PID; the child, created with
 	 * pending_clone_flags and starting with the stack pointer

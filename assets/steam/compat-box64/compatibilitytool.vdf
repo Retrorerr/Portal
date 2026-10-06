@@ -1,0 +1,13 @@
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "portal-box64"
+    {
+      "install_path" "."
+      "display_name" "Portal Box64 (x86 Linux games)"
+      "from_oslist" "linux"
+      "to_oslist" "linux"
+    }
+  }
+}

@@ -54,6 +54,12 @@ class LauncherPlanTests(unittest.TestCase):
         with self.assertRaises(helper.ApplyError):
             helper.launcher_urls(["plasma-shell"])
 
+    def test_desktop_map_covers_exactly_the_native_catalog(self):
+        fixture = Path(__file__).with_name("fixtures") / "optional-app-catalog.tsv"
+        catalog_ids = {line.split("	")[0] for line in fixture.read_text().splitlines() if line}
+        self.assertEqual(set(helper.APP_DESKTOP_FILES), catalog_ids)
+        self.assertEqual(helper.launcher_urls(["steam"]), ["applications:portal-steam.desktop"])
+
     def test_merge_preserves_unrelated_order_and_is_idempotent(self):
         old = [
             "preferred://browser",

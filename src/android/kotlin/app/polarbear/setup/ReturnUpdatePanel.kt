@@ -441,7 +441,7 @@ private fun PackageRow(pending: ComposeOverlay.PendingPackage, palette: PortalPa
 }
 
 @Composable
-private fun PanelButton(
+internal fun PanelButton(
     text: String,
     primary: Boolean,
     palette: PortalPalette,

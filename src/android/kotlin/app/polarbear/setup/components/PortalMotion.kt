@@ -19,6 +19,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.GraphicsLayerScope
@@ -90,6 +92,20 @@ class PortalVeilMotion {
 
     /** Ink for the veil's own affordance, set by the screen beneath it. */
     var ink by mutableStateOf(Color(0xFFF1EBDD))
+
+    /** Root offset of the veil's input shell, so exclusions compare in root space. */
+    var shellOrigin = Offset.Zero
+
+    /**
+     * Root-space regions that own their vertical drags, such as a scrolling
+     * card. A swipe that starts inside one never lifts the veil.
+     */
+    val gestureExclusions = HashMap<Any, Rect>()
+
+    fun excludes(local: Offset): Boolean {
+        val point = local + shellOrigin
+        return gestureExclusions.values.any { it.contains(point) }
+    }
 
     /** Total visual lift in px. */
     val lift: Float get() = (gesture + hint).coerceAtLeast(0f)

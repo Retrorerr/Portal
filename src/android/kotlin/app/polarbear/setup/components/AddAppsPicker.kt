@@ -69,6 +69,7 @@ import app.polarbear.setup.EssentialApp
 import app.polarbear.setup.OPTIONAL_APPS
 import app.polarbear.setup.PortalColors
 import app.polarbear.setup.PortalPalette
+import app.polarbear.setup.groupedOptionalApps
 import app.polarbear.setup.selectedApps
 import kotlin.math.roundToInt
 
@@ -180,28 +181,51 @@ fun AddAppsPicker(
                 }
                 .padding(start = 6.dp, end = 6.dp, bottom = 6.dp),
         ) {
-            OPTIONAL_APPS.forEachIndexed { index, app ->
-                AppSelectionRow(
-                    app = app,
-                    icon = icons[app.id],
-                    checked = app.id in selectedIds,
-                    onToggle = { onToggle(app.id) },
-                    palette = palette,
-                    enabled = enabled && expanded,
-                    modifier = Modifier.graphicsLayer {
-                        // Rows condense into place one after another; on the
-                        // way back the last row leaves first.
-                        val start = 0.1f + index * 0.07f
-                        val shown = ((open.value - start) / 0.42f).coerceIn(0f, 1f)
-                        val eased = PortalEmphasizedDecelerate.transform(shown)
-                        alpha = eased
-                        translationY = (1f - eased) * risePx
-                        portalBlur((1f - eased) * blurPx)
-                    },
-                )
+            // Rows condense into place one after another, group labels
+            // included; on the way back the last row leaves first.
+            val groups = groupedOptionalApps()
+            val stagger = 0.42f / (groups.size + OPTIONAL_APPS.size).coerceAtLeast(6)
+            val condense: (Int) -> Modifier = { index ->
+                Modifier.graphicsLayer {
+                    val start = 0.1f + index * stagger
+                    val shown = ((open.value - start) / 0.42f).coerceIn(0f, 1f)
+                    val eased = PortalEmphasizedDecelerate.transform(shown)
+                    alpha = eased
+                    translationY = (1f - eased) * risePx
+                    portalBlur((1f - eased) * blurPx)
+                }
+            }
+            var index = 0
+            groups.forEach { (label, apps) ->
+                CategoryLabel(label, palette, condense(index++))
+                apps.forEach { app ->
+                    AppSelectionRow(
+                        app = app,
+                        icon = icons[app.id],
+                        checked = app.id in selectedIds,
+                        onToggle = { onToggle(app.id) },
+                        palette = palette,
+                        enabled = enabled && expanded && app.available,
+                        modifier = condense(index++),
+                    )
+                }
             }
         }
     }
+}
+
+/** Small-caps group heading inside the unfolded list. */
+@Composable
+internal fun CategoryLabel(label: String, palette: PortalPalette, modifier: Modifier = Modifier) {
+    Text(
+        text = label.uppercase(),
+        modifier = modifier.padding(start = 14.dp, top = 10.dp, bottom = 2.dp),
+        color = palette.textSecondary.copy(alpha = 0.75f),
+        fontSize = 10.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 1.2.sp,
+        maxLines = 1,
+    )
 }
 
 /** A quiet row of every optional app, with the chosen ones lit. */
@@ -298,6 +322,7 @@ private fun AppSelectionRow(
     Row(
         modifier
             .fillMaxWidth()
+            .graphicsLayer { if (!app.available) alpha = 0.55f }
             .clip(RoundedCornerShape(18.dp))
             .background(fill)
             .clickable(
@@ -307,7 +332,13 @@ private fun AppSelectionRow(
                 role = Role.Checkbox,
                 onClick = onToggle,
             )
-            .semantics { stateDescription = if (checked) "Selected" else "Not selected" }
+            .semantics {
+                stateDescription = when {
+                    !app.available -> app.unavailableReason ?: "Unavailable"
+                    checked -> "Selected"
+                    else -> "Not selected"
+                }
+            }
             .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -320,7 +351,7 @@ private fun AppSelectionRow(
         Column(Modifier.weight(1f)) {
             Text(app.name, color = palette.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text(
-                "${app.blurb} · ${formatInstalledSize(app.installedMb)}",
+                app.unavailableReason ?: "${app.blurb} · ${formatInstalledSize(app.installedMb)}",
                 color = palette.textSecondary,
                 fontSize = 11.sp,
                 maxLines = 1,
@@ -350,5 +381,5 @@ private fun AppSelectionRow(
     }
 }
 
-private fun formatInstalledSize(mb: Int): String =
+internal fun formatInstalledSize(mb: Int): String =
     if (mb >= 1000) "%.1f GB".format(mb / 1000f) else "$mb MB"

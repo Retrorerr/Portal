@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <linux/limits.h>
 
 #include "extension/fake_id0/mk.h"
@@ -40,5 +41,11 @@ int handle_mk_enter_end(Tracee *tracee, Reg fd_sysarg, Reg path_sysarg,
 	
 	mode = peek_reg(tracee, ORIGINAL, mode_sysarg);
 	poke_reg(tracee, mode_sysarg, (mode|0700));
-	return write_meta_file(meta_path, mode, config->euid, config->egid, 1, config);
+	status = write_meta_file(meta_path, mode, config->euid, config->egid, 1, config);
+	/* A missing parent directory: let the kernel fail with ENOENT, since
+	 * write_meta_file's -1 reads as EPERM and callers such as Firefox only
+	 * create missing parents on ENOENT.  */
+	if(status < 0 && errno == ENOENT)
+		return 0;
+	return status;
 }

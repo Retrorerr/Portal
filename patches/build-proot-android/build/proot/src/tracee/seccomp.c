@@ -235,6 +235,43 @@ void set_result_after_seccomp(Tracee *tracee, word_t result) {
 }
 
 /**
+ * Answer set_robust_list(2) or get_robust_list(2) for @tracee from the
+ * head PRoot keeps per thread, and return the syscall result.
+ *
+ * Android's app filter traps set_robust_list(2), so glibc never really
+ * registers its list; answering ENOSYS made glibc refuse robust mutexes,
+ * and Chromium's zygote (Electron, CEF, Steam's webhelper) aborts with
+ * "futex robust_list not initialized by pthreads" when
+ * get_robust_list(2) then returns no head.  Only the kernel's cleanup of
+ * locks a dying thread still holds is lost.
+ */
+int emulate_robust_list(Tracee *tracee, Sysnum sysnum)
+{
+	if (sysnum == PR_set_robust_list) {
+		tracee->robust_list_head = peek_reg(tracee, CURRENT, SYSARG_1);
+		tracee->robust_list_len  = peek_reg(tracee, CURRENT, SYSARG_2);
+		return 0;
+	}
+	if (sysnum == PR_get_robust_list) {
+		pid_t pid = (pid_t) peek_reg(tracee, CURRENT, SYSARG_1);
+		word_t head_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
+		word_t len_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
+		const Tracee *target = tracee;
+
+		if (pid != 0 && pid != tracee->pid) {
+			target = get_tracee(tracee, pid, false);
+			if (target == NULL)
+				return -ESRCH;
+		}
+		if (write_data(tracee, head_ptr, &target->robust_list_head, sizeof(word_t)) < 0
+		    || write_data(tracee, len_ptr, &target->robust_list_len, sizeof(word_t)) < 0)
+			return -EFAULT;
+		return 0;
+	}
+	return -ENOSYS;
+}
+
+/**
  * Handle SIGSYS signal that was caused by system seccomp policy.
  *
  * Return 0 to swallow signal or SIGSYS to deliver it to process.
@@ -822,6 +859,10 @@ static int handle_seccomp_event_common(Tracee *tracee)
 	}
 
 	case PR_set_robust_list:
+	case PR_get_robust_list:
+		set_result_after_seccomp(tracee, emulate_robust_list(tracee, sysnum));
+		break;
+
 	default:
 		/* Set errno to -ENOSYS */
 		set_result_after_seccomp(tracee, -ENOSYS);

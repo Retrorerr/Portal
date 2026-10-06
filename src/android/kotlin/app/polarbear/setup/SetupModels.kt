@@ -126,8 +126,9 @@ class InstallPlan private constructor(
             displayMetrics: InstallDisplayMetrics,
             selectedAppIds: Set<String>,
         ): InstallPlan {
-            require(selectedAppIds.all { it in OPTIONAL_APP_IDS }) {
-                "Install plan contains an unknown optional app"
+            val catalog = OPTIONAL_APPS.associateBy { it.id }
+            require(selectedAppIds.all { catalog[it]?.available == true }) {
+                "Install plan contains an unknown or unavailable optional app"
             }
             return InstallPlan(
                 version = INSTALL_PLAN_VERSION,
@@ -141,24 +142,75 @@ class InstallPlan private constructor(
     }
 }
 
-// Setup-only estimates in decimal MB of installed footprint, not download size.
-// They mirror the genuinely optional, allowlisted plan below; baseline apps are
-// intentionally excluded because their rootfs footprint is already in minimal.
-data class EssentialApp(val id: String, val name: String, val blurb: String, val installedMb: Int)
+// Estimates in decimal MB of installed footprint, not download size. Baseline
+// apps are excluded because their rootfs footprint is already in minimal.
+data class EssentialApp(
+    val id: String,
+    val name: String,
+    val blurb: String,
+    val installedMb: Int,
+    val categoryId: String = "",
+    val categoryLabel: String = "",
+    /** Why this device cannot run the app; null when it can. */
+    val unavailableReason: String? = null,
+) {
+    val available: Boolean get() = unavailableReason == null
+}
 
-val OPTIONAL_APPS = listOf(
-    EssentialApp("claude", "Claude", "Official Anthropic desktop app", 600),
-    EssentialApp("chatgpt", "ChatGPT", "Official OpenAI desktop app", 1940),
-    EssentialApp("libreoffice", "LibreOffice", "Office suite", 790),
-    EssentialApp("vlc", "VLC", "Media player", 215),
-    EssentialApp("gimp", "GIMP", "Image editor", 325),
-    EssentialApp("krita", "Krita", "Digital painting", 615),
-    EssentialApp("inkscape", "Inkscape", "Vector graphics", 300),
-    EssentialApp("thunderbird", "Thunderbird", "Email client", 355),
-)
-val OPTIONAL_APP_IDS: Set<String> = OPTIONAL_APPS.mapTo(linkedSetOf()) { it.id }
+/**
+ * Parse the native catalog: one `id name blurb category-id category-label
+ * installed-mb unavailable-reason` line per app, tab separated, in picker
+ * order. Malformed lines are dropped rather than guessed at.
+ */
+fun parseOptionalAppCatalog(text: String): List<EssentialApp> =
+    text.lineSequence()
+        .filter { it.isNotBlank() }
+        .mapNotNull { line ->
+            val fields = line.split('	')
+            if (fields.size != 7) return@mapNotNull null
+            val size = fields[5].toIntOrNull() ?: return@mapNotNull null
+            EssentialApp(
+                id = fields[0],
+                name = fields[1],
+                blurb = fields[2],
+                installedMb = size,
+                categoryId = fields[3],
+                categoryLabel = fields[4],
+                unavailableReason = fields[6].ifBlank { null },
+            )
+        }
+        .toList()
+
+/**
+ * The optional apps the pickers offer. Native code is the only source: the
+ * Rust allowlist (`OptionalApp`) serves this catalog over JNI, so names,
+ * sizes and availability can never drift from what native will install.
+ */
+object OptionalAppCatalog {
+    @Volatile var loader: (() -> String?)? = null
+    @Volatile private var cached: List<EssentialApp>? = null
+
+    val apps: List<EssentialApp>
+        get() = cached ?: loader?.invoke()
+            ?.let(::parseOptionalAppCatalog)
+            ?.takeIf { it.isNotEmpty() }
+            ?.also { cached = it }
+            ?: emptyList()
+
+    /** Availability can change (graphics mode), so screens re-read it. */
+    fun refresh() {
+        cached = null
+    }
+}
+
+val OPTIONAL_APPS: List<EssentialApp> get() = OptionalAppCatalog.apps
+val OPTIONAL_APP_IDS: Set<String> get() = OPTIONAL_APPS.mapTo(linkedSetOf()) { it.id }
 val DEFAULT_OPTIONAL_APP_IDS: Set<String> = emptySet()
 const val MINIMAL_INSTALLED_MB = 5400L
+
+/** Apps grouped for display, keeping catalog order within and between groups. */
+fun groupedOptionalApps(apps: List<EssentialApp> = OPTIONAL_APPS): List<Pair<String, List<EssentialApp>>> =
+    apps.groupBy { it.categoryLabel }.toList()
 
 fun selectedApps(ids: Set<String>) = OPTIONAL_APPS.filter { it.id in ids }
 fun projectedInstallBytes(ids: Set<String>): Long =

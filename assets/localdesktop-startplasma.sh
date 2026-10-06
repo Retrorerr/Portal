@@ -22,6 +22,9 @@ export KDE_SESSION_VERSION=6
 export KDE_USE_SYSTEMD=0
 export PLASMA_USE_SYSTEMD=0
 export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
+# No udev in the guest: SDL (Steam, Proton, games) then finds Portal's
+# game pads by scanning and watching /dev/input.
+export SDL_JOYSTICK_DISABLE_UDEV=1
 export LOCALDESKTOP_DIAGNOSTICS=${LOCALDESKTOP_DIAGNOSTICS:-0}
 if [ "$LOCALDESKTOP_DIAGNOSTICS" != 1 ]; then
     export QT_LOGGING_RULES="*.debug=false;*.info=false${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"

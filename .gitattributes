@@ -1,2 +1,7 @@
 *.sh text eol=lf
 assets/konsole/* text eol=lf
+tests/fixtures/*.tsv text eol=lf
+assets/steam/*.py text eol=lf
+assets/steam/*.desktop text eol=lf
+assets/steam/**/*.vdf text eol=lf
+assets/steam/**/*.sh text eol=lf
