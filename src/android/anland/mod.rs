@@ -399,7 +399,44 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
         }
     }
     binds.extend(fake_drm_binds(files));
+    binds.extend(fake_pci_binds(files));
+    binds.extend(crate::android::guest_procfs::session_binds());
     binds
+}
+
+/// An empty PCI device list over `/proc/bus/pci/devices`, which the app
+/// sandbox cannot read.
+///
+/// libpci's default error handler calls `exit(1)` when that file cannot be
+/// opened, and Chromium's GPU info collection goes through libpci: Steam's
+/// GPU process (CEF) died that way six times on every start and Steam drew
+/// its UI in software. With an empty list, libpci finds no devices and CEF
+/// composites on the GPU through ANGLE. `lspci` stops failing too.
+fn fake_pci_binds(files: &std::path::Path) -> Vec<crate::core::runtime::BindMount> {
+    use crate::core::runtime::BindMount;
+
+    const GUEST_PATH: &str = "/proc/bus/pci/devices";
+    if std::fs::File::open(GUEST_PATH).is_ok() {
+        return Vec::new();
+    }
+    let devices = files.join("fake-pci/devices");
+    let created = devices
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            if devices.metadata().is_ok_and(|meta| meta.len() == 0) {
+                Ok(())
+            } else {
+                std::fs::write(&devices, "")
+            }
+        });
+    match created {
+        Ok(()) => vec![BindMount::new(devices, GUEST_PATH)],
+        Err(error) => {
+            log::warn!("fake PCI device list could not be created: {error}");
+            Vec::new()
+        }
+    }
 }
 
 /// Fake DRM render node for libdrm clients (see `core::drm_nodes`).

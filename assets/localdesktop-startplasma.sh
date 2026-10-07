@@ -25,11 +25,22 @@ export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
 # No udev in the guest: SDL (Steam, Proton, games) then finds Portal's
 # game pads by scanning and watching /dev/input.
 export SDL_JOYSTICK_DISABLE_UDEV=1
+# Firefox 147+ keeps a new profile in ~/.config/mozilla but switches to
+# ~/.mozilla/firefox once that exists (Debian's firefox-esr creates it), which
+# looks like every setting was lost. Keep every Firefox on ~/.mozilla.
+export MOZ_LEGACY_HOME=1
 export LOCALDESKTOP_DIAGNOSTICS=${LOCALDESKTOP_DIAGNOSTICS:-0}
 if [ "$LOCALDESKTOP_DIAGNOSTICS" != 1 ]; then
     export QT_LOGGING_RULES="*.debug=false;*.info=false${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
 fi
 export SHELL=/bin/bash
+# Portal's audio daemons listen in /tmp. Clients that rebuild their
+# environment (env -i, sudo -u, some launchers) look in XDG_RUNTIME_DIR.
+mkdir -p "$XDG_RUNTIME_DIR/pulse" 2>/dev/null
+ln -sfn /tmp/pulse/native "$XDG_RUNTIME_DIR/pulse/native" 2>/dev/null
+for socket in pipewire-0 pipewire-0-manager; do
+    ln -sfn "/tmp/$socket" "$XDG_RUNTIME_DIR/$socket" 2>/dev/null
+done
 # Debugger capture is opt-in.  Running every KWin instance under gdb changes
 # startup timing and ptrace is commonly denied by Android's sandbox.
 export LOCALDESKTOP_GDB_BACKTRACE=${LOCALDESKTOP_GDB_BACKTRACE:-@GDB_BACKTRACE@}

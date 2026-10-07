@@ -697,3 +697,48 @@ fn a_userapp_for_a_firefox_without_a_packaged_entry_is_left_alone() {
     guest_browser::repair_user_default_browser(dir.path());
     assert_eq!(read(dir.path(), "home/desktop/.config/mimeapps.list"), own);
 }
+
+#[cfg(unix)]
+#[test]
+fn an_xdg_firefox_profile_root_moves_to_mozilla_and_stale_locks_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "home/desktop/.config/mozilla/firefox/profiles.ini", "[Profile0]\nPath=a.default\n");
+    write(root, "home/desktop/.config/mozilla/firefox/a.default/prefs.js", "user_pref(\"x\", 1);\n");
+    std::os::unix::fs::symlink(
+        "127.0.0.1:+1875",
+        root.join("home/desktop/.config/mozilla/firefox/a.default/lock"),
+    )
+    .unwrap();
+    write(root, "home/desktop/.thunderbird/b.default-esr/prefs.js", "");
+    std::os::unix::fs::symlink("127.0.0.1:+42", root.join("home/desktop/.thunderbird/b.default-esr/lock")).unwrap();
+    std::os::unix::fs::symlink("elsewhere", root.join("home/desktop/.thunderbird/b.default-esr/other")).unwrap();
+
+    guest_browser::repair_mozilla_profiles(root);
+
+    let legacy = root.join("home/desktop/.mozilla/firefox");
+    assert_eq!(read(root, "home/desktop/.mozilla/firefox/a.default/prefs.js"), "user_pref(\"x\", 1);\n");
+    assert!(legacy.join("profiles.ini").is_file());
+    assert!(legacy.join("a.default/lock").symlink_metadata().is_err());
+    assert!(root.join("home/desktop/.thunderbird/b.default-esr/lock").symlink_metadata().is_err());
+    assert!(root.join("home/desktop/.thunderbird/b.default-esr/other").symlink_metadata().is_ok());
+}
+
+#[test]
+fn existing_mozilla_profiles_are_never_replaced_by_xdg_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "home/desktop/.mozilla/firefox/profiles.ini", "legacy\n");
+    write(root, "home/desktop/.config/mozilla/firefox/profiles.ini", "xdg\n");
+
+    guest_browser::repair_mozilla_profiles(root);
+
+    assert_eq!(read(root, "home/desktop/.mozilla/firefox/profiles.ini"), "legacy\n");
+    assert_eq!(read(root, "home/desktop/.config/mozilla/firefox/profiles.ini"), "xdg\n");
+}
+
+#[test]
+fn firefox_restores_tabs_after_a_kill_instead_of_the_recovery_page() {
+    assert!(guest_browser::FIREFOX_CFG
+        .contains("defaultPref(\"browser.sessionstore.max_resumed_crashes\", -1);"));
+}

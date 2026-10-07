@@ -10,6 +10,7 @@ MimeType=x-scheme-handler/steam;x-scheme-handler/steamlink;
 Actions=BigPicture;Library;Store;
 PrefersNonDefaultGPU=true
 X-KDE-RunOnDiscreteGpu=true
+StartupWMClass=steam
 X-Portal-Managed=true
 
 [Desktop Action BigPicture]

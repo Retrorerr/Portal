@@ -48,6 +48,14 @@ defaultPref("widget.wayland.fractional-scale.enabled", true);
 // match to the Firefox window (see repair_user_default_browser), so don't ask.
 defaultPref("browser.shell.checkDefaultBrowser", false);
 defaultPref("browser.shell.skipDefaultBrowserCheckOnFirstRun", true);
+// Android ends Portal by killing every process, so Firefox never shuts down
+// cleanly and each start is a crash recovery. After two in a row, or when the
+// last session is over six hours old, Firefox replaces the tabs with "Sorry,
+// we're having trouble getting your pages back"; restore them instead, like a
+// laptop waking up. -1 also keeps Troubleshoot Mode from offering itself
+// after kills during startup.
+defaultPref("browser.sessionstore.max_resumed_crashes", -1);
+defaultPref("toolkit.startup.max_resumed_crashes", -1);
 
 "#;
 
@@ -194,6 +202,78 @@ pub fn sync_firefox_prefs_hook(fs_root: &Path) {
             );
         }
     }
+}
+
+/// Keep the desktop user's Mozilla profiles where Firefox will look for them,
+/// and unlocked. Runs before the session starts, when no guest process can
+/// hold a profile.
+///
+/// The session exports `MOZ_LEGACY_HOME=1`, so every Firefox uses
+/// `~/.mozilla/firefox`. A Firefox 147+ that ran before that kept its profiles
+/// in `~/.config/mozilla/firefox`; move them over unless `~/.mozilla/firefox`
+/// already has profiles of its own.
+///
+/// Android ends Portal by killing it, so Firefox and Thunderbird leave their
+/// `lock` symlink (`<ip>:+<pid>`) behind. Mozilla treats the profile as in
+/// use while any process has that pid, and Android reuses pids, so a later
+/// start could refuse with "already running".
+pub fn repair_mozilla_profiles(fs_root: &Path) {
+    let home = fs_root.join("home/desktop");
+    let legacy = home.join(".mozilla/firefox");
+    let xdg = home.join(".config/mozilla/firefox");
+    if xdg.join("profiles.ini").is_file() && !legacy.join("profiles.ini").exists() {
+        if let Err(error) = move_profile_root(&xdg, &legacy) {
+            log::warn!("Firefox profiles could not be moved to ~/.mozilla: {error}");
+        }
+    }
+    for root in [".mozilla", ".config/mozilla", ".thunderbird"] {
+        remove_stale_profile_locks(&home.join(root), 3);
+    }
+}
+
+fn move_profile_root(from: &Path, to: &Path) -> io::Result<()> {
+    if !to.exists() {
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        return fs::rename(from, to);
+    }
+    // ~/.mozilla/firefox exists without profiles (crash reports only): move
+    // the profile root's entries in, keeping anything already there.
+    for entry in fs::read_dir(from)?.flatten() {
+        let target = to.join(entry.file_name());
+        if target.symlink_metadata().is_err() {
+            fs::rename(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_stale_profile_locks(dir: &Path, depth: u32) {
+    let lock = dir.join("lock");
+    if fs::read_link(&lock).is_ok_and(|target| is_mozilla_lock_target(&target)) {
+        let _ = fs::remove_file(&lock);
+    }
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            remove_stale_profile_locks(&entry.path(), depth - 1);
+        }
+    }
+}
+
+/// Mozilla's profile lock symlink points at `<ip>:+<pid>` (or `<ip>:<pid>`).
+fn is_mozilla_lock_target(target: &Path) -> bool {
+    let target = target.to_string_lossy();
+    target.rsplit_once(':').is_some_and(|(address, pid)| {
+        let pid = pid.strip_prefix('+').unwrap_or(pid);
+        !address.is_empty() && !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 /// Firefox-family desktop entries, most preferred first: Mozilla's own build,

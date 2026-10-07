@@ -100,6 +100,7 @@ fn spawn_failure_monitor(cancel: Arc<AtomicBool>) -> JoinHandle<()> {
         let runtime = crate::android::runtime::proot::PRootRuntime::active();
         let state_dir = runtime.rootfs_path().join("var/lib/localdesktop/session");
         let mut last_net_sync = Instant::now();
+        let mut last_procfs = Instant::now();
         while !cancel.load(Ordering::Acquire) {
             for name in ["plasma-failed", "kwin-crash"] {
                 let path = state_dir.join(name);
@@ -110,6 +111,10 @@ fn spawn_failure_monitor(cancel: Arc<AtomicBool>) -> JoinHandle<()> {
             if last_net_sync.elapsed() >= Duration::from_secs(5) {
                 last_net_sync = Instant::now();
                 crate::android::proot::setup::sync_guest_network_config(runtime.rootfs_path());
+            }
+            if last_procfs.elapsed() >= Duration::from_secs(2) {
+                last_procfs = Instant::now();
+                crate::android::guest_procfs::refresh();
             }
             thread::sleep(Duration::from_millis(100));
         }

@@ -139,6 +139,7 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
 done
 "#;
 const PLASMA_LAUNCHER: &str = include_str!("../../../assets/localdesktop-startplasma.sh");
+const PORTAL_PING: &str = include_str!("../../../assets/portal-ping.sh");
 const PLASMASHELL_SUPERVISOR: &str =
     include_str!("../../../assets/localdesktop-plasmashell-supervisor.sh");
 const RECOVERY_LAUNCHER: &str = include_str!("../../../assets/localdesktop-recovery.sh");
@@ -1302,6 +1303,13 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     // Migrate older APKs that shadowed the distribution's splash executables.
     let _ = fs::remove_file(fs_root.join("usr/local/bin/ksplashqml"));
     let _ = fs::remove_file(fs_root.join("usr/local/bin/plasma_waitforname"));
+    // iputils ping exits when Android refuses its PR_SET_KEEPCAPS; the
+    // wrapper preloads a stand-in for that one call (see the C source).
+    write_guest_binary(
+        &fs_root.join("usr/local/lib/portal/ping-keepcaps.so"),
+        include_bytes!("../../../assets/guest-arm64/ping-keepcaps.so"),
+    );
+    write_executable(&fs_root.join("usr/local/bin/ping"), PORTAL_PING);
     write_executable(
         &fs_root.join("usr/local/bin/portal-ime-bridge"),
         PORTAL_IME_BRIDGE,
@@ -1745,6 +1753,8 @@ while [ $# -gt 0 ]; do
         --unshare-ipc|--unshare-net|--unshare-uts|--unshare-cgroup|\
         --unshare-cgroup-try|--share-net|--remount-ro|\
         --as-pid-1|--die-with-parent|--new-session|--clearenv) shift ;;
+        # Callers probe for bwrap this way before using it.
+        --version) echo "bubblewrap 0.11.0"; exit 0 ;;
         --) shift; break ;;
         *) break ;;
     esac
@@ -2645,6 +2655,7 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
 
     sync_guest_network_config(fs_root);
     sync_android_timezone(fs_root);
+    browser::repair_mozilla_profiles(fs_root);
 }
 
 /// Run Portal-owned session support behind the same recoverable boundary used
@@ -2668,6 +2679,7 @@ pub fn try_sync_session_runtime_files(fs_root: &Path, ui_scale: i32) -> anyhow::
 pub fn prepare_desktop_login(migrate_legacy: bool) -> anyhow::Result<()> {
     ensure_desktop_services(Path::new(PRODUCTION_FS_ROOT))?;
     ensure_mozilla_firefox(Path::new(PRODUCTION_FS_ROOT));
+    ensure_desktop_extras(Path::new(PRODUCTION_FS_ROOT));
     let caches = PRootRuntime::active().execute(
         ProcessSpec::new("/usr/local/bin/localdesktop-system-caches"),
         None,
@@ -2800,6 +2812,77 @@ const MOZILLA_FIREFOX_INSTALL: &str = r#"curl --fail --location --retry 2 --prot
         >/etc/apt/sources.list.d/mozilla.list &&
     apt-get update &&
     apt-get install -y --no-remove --no-install-recommends firefox"#;
+
+/// Everyday tools the runtime image lacks, installed once.
+///
+/// `pipewire-alsa` routes ALSA-only programs (some games, Java and Wine
+/// builds, `aplay`) to Portal's PipeWire; without it they find no default
+/// sound device. `python3-tk` is what Python courses' turtle and GUI
+/// exercises import. The rest are what terminal tutorials and scripts take
+/// for granted. Not fatal: offline, the desktop starts and a later launch
+/// retries.
+const DESKTOP_EXTRA_PACKAGES: &[&str] = &[
+    "pipewire-alsa",
+    "pulseaudio-utils",
+    "alsa-utils",
+    "python3-tk",
+    "iproute2",
+    "iputils-ping",
+    "man-db",
+    "nano",
+    "less",
+    "htop",
+    "file",
+    "git",
+    "libnotify-bin",
+    "xclip",
+];
+
+/// man-db's trigger rebuilds the whole manual index after every package
+/// change, which takes minutes under PRoot; `man` itself does not need it.
+const MAN_DB_NO_AUTO_UPDATE: &str =
+    "echo 'man-db man-db/auto-update boolean false' | debconf-set-selections";
+
+fn ensure_desktop_extras(root: &Path) {
+    let marker = root.join("var/lib/localdesktop/desktop-extras-v1");
+    if marker.is_file() {
+        return;
+    }
+    let missing: Vec<&str> = match installed_dpkg_packages(root) {
+        Ok(installed) => DESKTOP_EXTRA_PACKAGES
+            .iter()
+            .copied()
+            .filter(|package| !installed.contains(*package))
+            .collect(),
+        Err(error) => {
+            log::warn!("desktop extras: package state unreadable: {error:#}");
+            return;
+        }
+    };
+    if !missing.is_empty() {
+        let command = format!(
+            "{MAN_DB_NO_AUTO_UPDATE}; apt-get update && apt-get install -y --no-remove --no-install-recommends {}",
+            missing.join(" ")
+        );
+        let output = PRootRuntime::active().execute(
+            ProcessSpec::new(command).with_env("DEBIAN_FRONTEND", "noninteractive"),
+            None,
+            None,
+        );
+        if !output.status.success() {
+            log::warn!(
+                "desktop extras ({}) could not be installed; a later launch retries: {}",
+                missing.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+    }
+    // A later removal by the user is respected: the marker stops retries.
+    if let Err(error) = fs::write(&marker, b"installed\n") {
+        log::warn!("desktop extras marker could not be written: {error}");
+    }
+}
 
 fn ensure_mozilla_firefox(root: &Path) {
     // Every launch, so the old `.debian-esr` layout is moved over and an ESR
@@ -3280,7 +3363,20 @@ fn sync_android_timezone(fs_root: &Path) {
 pub fn sync_guest_network_config(fs_root: &Path) {
     let context = get_application_context();
     let mut dns_servers = context.get_active_dns_servers();
+
+    let etc_dir = fs_root.join("etc");
+    let _ = fs::create_dir_all(&etc_dir);
+
+    let resolv_conf = etc_dir.join("resolv.conf");
+    let current_content = fs::read_to_string(&resolv_conf).unwrap_or_default();
     if dns_servers.is_empty() {
+        // No active network: Portal is in the background (Android blocks its
+        // network then) or Wi-Fi is switching. Keep the last network's
+        // servers; networks that block public DNS (campus and work Wi-Fi)
+        // would otherwise fail every lookup until the next good sync.
+        if current_content.contains("\nnameserver ") {
+            return;
+        }
         dns_servers = vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()];
     }
 
@@ -3289,12 +3385,6 @@ pub fn sync_guest_network_config(fs_root: &Path) {
     for srv in &dns_servers {
         resolv_content.push_str(&format!("nameserver {srv}\n"));
     }
-
-    let etc_dir = fs_root.join("etc");
-    let _ = fs::create_dir_all(&etc_dir);
-
-    let resolv_conf = etc_dir.join("resolv.conf");
-    let current_content = fs::read_to_string(&resolv_conf).unwrap_or_default();
     // Follow Android network changes only while this file is still Portal-owned.
     // A manually replaced resolver configuration survives the next launch.
     if (current_content.is_empty()

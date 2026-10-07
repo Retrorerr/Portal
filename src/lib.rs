@@ -8,6 +8,7 @@ pub mod core {
     pub mod coordinate_transform;
     pub mod drm_nodes;
     pub mod guest_browser;
+    pub mod guest_procfs;
     pub mod guest_locale;
     pub mod guest_sudo;
     #[cfg(unix)]
@@ -39,6 +40,7 @@ pub mod android {
     pub mod clipboard_broker;
     pub mod diagnostics;
     pub mod gamepad;
+    pub mod guest_procfs;
     pub mod ime;
     pub mod tablet_mode_manager;
 

@@ -318,6 +318,7 @@ impl LinuxRuntime for PRootRuntime {
         };
         let working_dir = spec.working_dir.clone().unwrap_or(guest_home);
 
+        remove_stale_proot_temporaries(&context.data_dir);
         let mut process = Command::new(context.native_library_dir.join("libproot.so"));
         process
             .env(
@@ -617,4 +618,41 @@ impl LinuxRuntime for PRootRuntime {
     fn terminate(&self) {
         log::info!("Terminating PRoot runtime at {}", self.rootfs.display());
     }
+}
+
+/// PRoot keeps a `proot-<pid>-*` directory and a `prootshm-<pid>-*` socket in
+/// `PROOT_TMP_DIR` and removes them when it exits, which a kill (Android's
+/// way of ending Portal) skips. Remove those of PRoot processes that are
+/// gone, once per app process.
+fn remove_stale_proot_temporaries(directory: &Path) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(rest) = name
+                .strip_prefix("prootshm-")
+                .or_else(|| name.strip_prefix("proot-"))
+            else {
+                continue;
+            };
+            let Some(pid) = rest.split('-').next().filter(|pid| {
+                !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())
+            }) else {
+                continue;
+            };
+            if Path::new("/proc").join(pid).exists() {
+                continue;
+            }
+            let path = entry.path();
+            let _ = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+        }
+    });
 }
