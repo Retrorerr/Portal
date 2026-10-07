@@ -713,7 +713,7 @@ impl PolarBearApp {
         }
         accessibility::set_runtime_active(false);
         ime::reset();
-        pipewire_standalone_aaudio::shutdown();
+        pipewire_standalone_aaudio::suspend_output();
         // The next session must present a fresh frame before the Return veil offers the desktop.
         compose_overlay::notify_desktop_suspended(&android_app);
         log::error!("Switching to graphical runtime error screen: {reason}");
@@ -1430,8 +1430,8 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             // must be re-issued on the next resume's fresh window.
             backend.frame_rate_requested = false;
             backend.last_refresh_poll_ms = None;
-            // Kill the standalone-client PipeWire/AAudio backend if it was started.
-            pipewire_standalone_aaudio::shutdown();
+            // Stop Android audio output; the guest keeps its PipeWire connections.
+            pipewire_standalone_aaudio::suspend_output();
         }
     }
 

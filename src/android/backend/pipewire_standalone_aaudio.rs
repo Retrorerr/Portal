@@ -75,11 +75,16 @@ static AAUDIO_WANTED: AtomicBool = AtomicBool::new(false);
 // backend can recover instead of leaving a selectable silent output.
 static AAUDIO_SINK_ERROR_PID: AtomicU32 = AtomicU32::new(0);
 
+/// The daemons outlive Android suspends: guest clients stay connected to
+/// them, so only the AAudio sink (the Android output stream) stops while
+/// Portal is in the background and comes back on resume.
 struct PipewireAaudioChildren {
     pipewire: Child,
     pulse: Option<Child>,
     wireplumber: Option<Child>,
-    sink: Child,
+    sink: Option<Child>,
+    sink_bin: PathBuf,
+    env: PipewireAaudioEnv,
 }
 
 struct PipewireAaudioEnv {
@@ -164,16 +169,37 @@ fn pipewire_runtime_dir() -> PathBuf {
         .join("tmp")
 }
 
-/// Request teardown without blocking Android's lifecycle thread on startup.
-pub fn shutdown() {
+/// Stop Android audio output without blocking Android's lifecycle thread.
+///
+/// Only the AAudio sink stops. PipeWire, pipewire-pulse and WirePlumber keep
+/// running so the guest's audio clients (Plasma, Firefox, games) stay
+/// connected; restarting them broke every open stream ("Broken pipe") on
+/// each return to Portal. Streams idle on PipeWire's dummy driver until the
+/// sink is back and WirePlumber links them to it again.
+pub fn suspend_output() {
     AAUDIO_WANTED.store(false, Ordering::SeqCst);
     thread::spawn(|| {
         let _operation = AAUDIO_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
         // A newer resume may have superseded this queued suspend.
         if !AAUDIO_WANTED.load(Ordering::SeqCst) {
-            stop_running();
+            if let Ok(mut slot) = AAUDIO_CHILDREN.lock() {
+                if let Some(mut sink) = slot.as_mut().and_then(|children| children.sink.take()) {
+                    kill_child("aaudio-sink", &mut sink);
+                }
+            }
         }
     });
+}
+
+/// Start the AAudio sink and make sure it survives its first moments.
+fn start_sink(sink_bin: &Path, env: &PipewireAaudioEnv) -> Result<Child, String> {
+    let mut sink = spawn_aaudio_sink(sink_bin, env)?;
+    if let Err(e) = verify_child_still_running("aaudio-sink", &mut sink, Duration::from_millis(300))
+    {
+        kill_child("aaudio-sink", &mut sink);
+        return Err(e);
+    }
+    Ok(sink)
 }
 
 fn stop_running() {
@@ -197,14 +223,25 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
             .lock()
             .map_err(|e| format!("pipewire aaudio child lock: {e}"))?;
         if let Some(children) = slot.as_mut() {
-            if let Some(reason) = poll_child_exit(children)? {
+            if let Some(reason) = poll_daemon_exit(children)? {
                 pw_warn!(
                     "server",
                     "discarding stale PipeWire/AAudio children: {reason}"
                 );
                 slot.take()
             } else {
-                pw_debug!("server", "reuse running PipeWire/AAudio children");
+                if let Some(reason) = poll_sink_exit(children)? {
+                    pw_warn!("server", "restarting the AAudio sink: {reason}");
+                    if let Some(mut sink) = children.sink.take() {
+                        kill_child("aaudio-sink", &mut sink);
+                    }
+                }
+                if children.sink.is_none() {
+                    children.sink = Some(start_sink(&children.sink_bin, &children.env)?);
+                    pw_info!("server", "AAudio sink restarted for the running PipeWire");
+                } else {
+                    pw_debug!("server", "reuse running PipeWire/AAudio children");
+                }
                 return Ok(true);
             }
         } else {
@@ -290,7 +327,7 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
         None
     };
 
-    let mut sink = match spawn_aaudio_sink(&sink_bin, &env) {
+    let mut sink = match start_sink(&sink_bin, &env) {
         Ok(child) => child,
         Err(e) => {
             if let Some(child) = wireplumber.as_mut() {
@@ -300,15 +337,6 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
             return Err(e);
         }
     };
-    if let Err(e) = verify_child_still_running("aaudio-sink", &mut sink, Duration::from_millis(300))
-    {
-        kill_child("aaudio-sink", &mut sink);
-        if let Some(child) = wireplumber.as_mut() {
-            kill_child("wireplumber", child);
-        }
-        kill_child("pipewire", &mut pipewire);
-        return Err(e);
-    }
 
     let pulse = {
         let config = write_pipewire_pulse_config(&env.config_dir, &env)?;
@@ -339,16 +367,19 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
         Some(child)
     };
 
+    let runtime_dir = env.runtime_dir.clone();
     *AAUDIO_CHILDREN
         .lock()
         .map_err(|e| format!("pipewire aaudio child lock: {e}"))? = Some(PipewireAaudioChildren {
         pipewire,
         pulse,
         wireplumber,
-        sink,
+        sink: Some(sink),
+        sink_bin,
+        env,
     });
     cleanup_on_error.armed = false;
-    spawn_child_monitor(env.runtime_dir.clone(), android_app.clone());
+    spawn_child_monitor(runtime_dir, android_app.clone());
 
     pw_info!(
         "server",
@@ -361,60 +392,93 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
 }
 
 fn spawn_child_monitor(runtime_dir: PathBuf, android_app: AndroidApp) {
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(1));
+    thread::spawn(move || {
+        let mut sink_failures: u32 = 0;
+        let mut next_sink_attempt = Instant::now();
+        loop {
+            thread::sleep(Duration::from_secs(1));
 
-        let _operation = AAUDIO_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+            let _operation = AAUDIO_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
 
-        let exited_children = {
-            let mut slot = match AAUDIO_CHILDREN.lock() {
-                Ok(slot) => slot,
-                Err(e) => {
-                    pw_error!("monitor", "pipewire aaudio child lock: {e}");
+            let exited_children = {
+                let mut slot = match AAUDIO_CHILDREN.lock() {
+                    Ok(slot) => slot,
+                    Err(e) => {
+                        pw_error!("monitor", "pipewire aaudio child lock: {e}");
+                        return;
+                    }
+                };
+
+                let Some(children) = slot.as_mut() else {
                     return;
+                };
+
+                match poll_daemon_exit(children) {
+                    Ok(Some(reason)) => {
+                        pw_warn!(
+                            "monitor",
+                            "{reason}; stopping PipeWire/AAudio backend and cleaning socket"
+                        );
+                        slot.take()
+                    }
+                    Ok(None) => {
+                        // A dead sink or a disconnected AAudio stream (route
+                        // change, Bluetooth, headphones) needs only a new
+                        // sink; the guest's connections stay up.
+                        match poll_sink_exit(children) {
+                            Ok(Some(reason)) => {
+                                pw_warn!("monitor", "{reason}; restarting the AAudio sink");
+                                if let Some(mut sink) = children.sink.take() {
+                                    kill_child("aaudio-sink", &mut sink);
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => pw_error!("monitor", "failed to poll sink state: {e}"),
+                        }
+                        if children.sink.is_some() {
+                            sink_failures = 0;
+                        } else if AAUDIO_WANTED.load(Ordering::SeqCst)
+                            && Instant::now() >= next_sink_attempt
+                        {
+                            match start_sink(&children.sink_bin, &children.env) {
+                                Ok(sink) => children.sink = Some(sink),
+                                Err(e) => {
+                                    sink_failures = sink_failures.saturating_add(1);
+                                    let delay = Duration::from_secs(1 << sink_failures.min(5));
+                                    next_sink_attempt = Instant::now() + delay;
+                                    pw_error!(
+                                        "monitor",
+                                        "AAudio sink restart failed ({e}); retrying in {}s",
+                                        delay.as_secs()
+                                    );
+                                }
+                            }
+                        }
+                        None
+                    }
+                    Err(e) => {
+                        pw_error!("monitor", "failed to poll child state: {e}");
+                        None
+                    }
                 }
             };
 
-            let Some(children) = slot.as_mut() else {
+            if let Some(children) = exited_children {
+                stop_children(children);
+                cleanup_socket(&runtime_dir);
+                drop(_operation);
+                if AAUDIO_WANTED.load(Ordering::SeqCst) {
+                    schedule_start(android_app);
+                }
                 return;
-            };
-
-            match poll_child_exit(children) {
-                Ok(Some(reason)) => {
-                    pw_warn!(
-                        "monitor",
-                        "{reason}; stopping PipeWire/AAudio backend and cleaning socket"
-                    );
-                    slot.take()
-                }
-                Ok(None) => None,
-                Err(e) => {
-                    pw_error!("monitor", "failed to poll child state: {e}");
-                    None
-                }
             }
-        };
-
-        if let Some(children) = exited_children {
-            stop_children(children);
-            cleanup_socket(&runtime_dir);
-            drop(_operation);
-            if AAUDIO_WANTED.load(Ordering::SeqCst) {
-                schedule_start(android_app);
-            }
-            return;
         }
     });
 }
 
-fn poll_child_exit(children: &mut PipewireAaudioChildren) -> Result<Option<String>, String> {
-    if AAUDIO_SINK_ERROR_PID.load(Ordering::SeqCst) == children.sink.id() {
-        AAUDIO_SINK_ERROR_PID.store(0, Ordering::SeqCst);
-        return Ok(Some(format!(
-            "AAudio stream disconnected in sink pid={}",
-            children.sink.id()
-        )));
-    }
+/// Why a PipeWire daemon (pipewire, WirePlumber or pipewire-pulse) is gone,
+/// if one is. Their clients must reconnect then, so everything restarts.
+fn poll_daemon_exit(children: &mut PipewireAaudioChildren) -> Result<Option<String>, String> {
     if let Some(status) = children
         .pipewire
         .try_wait()
@@ -450,17 +514,30 @@ fn poll_child_exit(children: &mut PipewireAaudioChildren) -> Result<Option<Strin
         }
     }
 
-    if let Some(status) = children
-        .sink
+    Ok(None)
+}
+
+/// Why the running AAudio sink failed, if it did.
+fn poll_sink_exit(children: &mut PipewireAaudioChildren) -> Result<Option<String>, String> {
+    let Some(sink) = children.sink.as_mut() else {
+        return Ok(None);
+    };
+    if AAUDIO_SINK_ERROR_PID.load(Ordering::SeqCst) == sink.id() {
+        AAUDIO_SINK_ERROR_PID.store(0, Ordering::SeqCst);
+        return Ok(Some(format!(
+            "AAudio stream disconnected in sink pid={}",
+            sink.id()
+        )));
+    }
+    if let Some(status) = sink
         .try_wait()
         .map_err(|e| format!("aaudio-sink try_wait: {e}"))?
     {
         return Ok(Some(format!(
             "aaudio-sink pid={} exited (status {status})",
-            children.sink.id()
+            sink.id()
         )));
     }
-
     Ok(None)
 }
 
@@ -663,6 +740,23 @@ context.objects = [
             node.group = pipewire.dummy
             node.sync-group = sync.dummy
             priority.driver = 200000
+        }}
+    }}
+    # Silent stand-in for Portal Audio Output, which stops while Portal is in
+    # the background and restarts after an Android route change. Without
+    # another sink, WirePlumber failed every open stream ("no target node
+    # available"); with it, streams wait here and follow the default back
+    # to Portal Audio Output, which outranks it (no priority = 0).
+    {{ factory = adapter
+        args = {{
+            factory.name = support.null-audio-sink
+            node.name = portal-audio-standby
+            node.description = "Portal Audio (standby)"
+            media.class = Audio/Sink
+            audio.position = [ FL FR ]
+            audio.rate = 48000
+            priority.session = -1
+            priority.driver = -1
         }}
     }}
     {{ factory = spa-node-factory
@@ -925,7 +1019,9 @@ fn stop_children(mut children: PipewireAaudioChildren) {
     if let Some(mut pulse) = children.pulse.take() {
         kill_child("pipewire-pulse", &mut pulse);
     }
-    kill_child("aaudio-sink", &mut children.sink);
+    if let Some(mut sink) = children.sink.take() {
+        kill_child("aaudio-sink", &mut sink);
+    }
     if let Some(mut wireplumber) = children.wireplumber.take() {
         kill_child("wireplumber", &mut wireplumber);
     }

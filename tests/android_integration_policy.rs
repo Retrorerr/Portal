@@ -962,7 +962,7 @@ fn anland_suspend_retires_only_the_surface_and_preserves_the_guest_session() {
     assert!(suspended.contains("backend.suspend_input_and_presentation()"));
     assert!(suspended.contains("session.suspend_surface()"));
     assert!(!suspended.contains("backend.anland.take()"));
-    assert!(suspended.contains("pipewire_standalone_aaudio::shutdown()"));
+    assert!(suspended.contains("pipewire_standalone_aaudio::suspend_output()"));
 
     let suspend = ANLAND_CONSUMER_SOURCE
         .split("pub fn suspend_surface")

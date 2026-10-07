@@ -705,6 +705,19 @@ mod android {
         info.set_format(spa::param::audio::AudioFormat::F32LE);
         info.set_rate(rate);
         info.set_channels(channels);
+        // Without positions the channels are AUX: pipewire-pulse then reports
+        // an empty channel map and 0% volume, and Plasma shows the output as
+        // muted.
+        let mut position = [0u32; spa::sys::SPA_AUDIO_MAX_CHANNELS as usize];
+        match channels {
+            1 => position[0] = spa::sys::SPA_AUDIO_CHANNEL_MONO,
+            2 => {
+                position[0] = spa::sys::SPA_AUDIO_CHANNEL_FL;
+                position[1] = spa::sys::SPA_AUDIO_CHANNEL_FR;
+            }
+            _ => {}
+        }
+        info.set_position(position);
 
         pod_bytes(&spa::pod::Value::Object(spa::pod::Object {
             type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
@@ -907,6 +920,7 @@ mod android {
             *pw::keys::NODE_SUSPEND_ON_IDLE => "false",
             *pw::keys::AUDIO_RATE => sink.rate.to_string(),
             *pw::keys::AUDIO_CHANNELS => sink.channels.to_string(),
+            "audio.position" => if sink.channels == 1 { "MONO" } else { "FL,FR" },
         };
 
         let stream = pw::stream::StreamRc::new(core, node_name, props)
