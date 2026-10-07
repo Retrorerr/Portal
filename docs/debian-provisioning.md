@@ -9,14 +9,15 @@ it no longer denotes an optional developer slot. Existing `arch` data and old
 
 `assets/debian-runtime.json` pins the public Portal GitHub release URL, image
 version, compressed size and SHA-256. The current image is
-`debian13-arm64-2026.09.10.1`, published in
-[the runtime release](https://github.com/Retrorerr/Portal/releases/tag/runtime-debian13-arm64-2026.09.10.1).
-It contains 1,141 locked Debian packages plus the pinned lfdevs Anland
+`debian13-arm64-2026.10.01.1`, published in
+[the runtime release](https://github.com/Retrorerr/Portal/releases/tag/runtime-debian13-arm64-2026.10.01.1).
+It contains 1,165 locked Debian packages plus the pinned lfdevs Anland
 KWin/XWayland stack (kwin -95 bundle + XWayland 24.1.6-91, replacing the stock
 Debian KWin/XWayland payloads, which have no Anland backend). The compressed
-archive is 896,140,656 bytes (855 MiB). Bundling that archive in each APK would
-be impractical. The previous stock-KWin image `debian13-arm64-2026.09.05.3`
-remains published untouched; no release asset is ever replaced.
+archive is 965,676,616 bytes (921 MiB). Bundling that archive in each APK would
+be impractical. Only the pinned runtime is kept published; older images are
+removed once no released APK pins them, and a published asset is never
+replaced in place.
 
 Build the image from the existing Debian builder, not a copied guest directory:
 
