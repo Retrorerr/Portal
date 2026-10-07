@@ -178,16 +178,35 @@ open class PortalActivity : GameActivity() {
      */
     fun setHighRefreshPreferred(enable: Boolean) {
         runOnUiThread {
-            try {
-                val modeId = if (enable) highRefreshModeId() else 0
-                val attributes = window.attributes
-                if (attributes.preferredDisplayModeId != modeId) {
-                    window.attributes = attributes.apply { preferredDisplayModeId = modeId }
-                    Log.i(TAG, "display mode request: enable=$enable modeId=$modeId")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "display mode request failed (enable=$enable)", e)
+            desktopHighRefresh = enable
+            applyHighRefresh()
+        }
+    }
+
+    /**
+     * UI thread: Portal's own animated screens (setup, install progress, the
+     * launch and return transitions) also want the panel's full rate; without
+     * this request they ran at OxygenOS's 60 Hz app vote.
+     */
+    fun setOverlayHighRefresh(enable: Boolean) {
+        overlayHighRefresh = enable
+        applyHighRefresh()
+    }
+
+    private var desktopHighRefresh = false
+    private var overlayHighRefresh = false
+
+    private fun applyHighRefresh() {
+        val enable = desktopHighRefresh || overlayHighRefresh
+        try {
+            val modeId = if (enable) highRefreshModeId() else 0
+            val attributes = window.attributes
+            if (attributes.preferredDisplayModeId != modeId) {
+                window.attributes = attributes.apply { preferredDisplayModeId = modeId }
+                Log.i(TAG, "display mode request: enable=$enable modeId=$modeId")
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "display mode request failed (enable=$enable)", e)
         }
     }
 

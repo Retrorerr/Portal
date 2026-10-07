@@ -28,7 +28,9 @@ package app.polarbear
 // happens only after the veil is completely offscreen.
 
 import android.app.Activity
+import android.os.Build
 import android.util.Log
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.runtime.Composable
@@ -477,6 +479,14 @@ object ComposeOverlay {
         }
     }
 
+    private fun requestFrameRate(view: View, rate: Float) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) return
+        view.requestedFrameRate = rate
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) requestFrameRate(view.getChildAt(i), rate)
+        }
+    }
+
     private fun doShow(activity: Activity, returnMode: Boolean) {
         // A recovery dismissal may have been requested before a queued show
         // runnable reached the UI thread. Consume it rather than attaching a
@@ -564,6 +574,15 @@ object ComposeOverlay {
             frame.addView(view)
             container = frame
             composeView = view
+            (activity as? PortalActivity)?.let { portal ->
+                portal.setOverlayHighRefresh(true)
+                // Android 15 votes per drawing View: the Compose view's
+                // default "normal" category is 60 Hz on OxygenOS and
+                // outranks the window's mode request. AndroidComposeView is
+                // created on attach, so apply once the hierarchy exists.
+                val rate = portal.highRefreshTargetMillihz() / 1000f
+                if (rate > 0f) frame.post { requestFrameRate(frame, rate) }
+            }
             // Catch readiness that arrived before or while the Compose
             // hierarchy was being attached, always from this UI thread.
             desktopReadyState.value = desktopReadyLatched.get()
@@ -634,6 +653,7 @@ object ComposeOverlay {
         } catch (e: Exception) {
             Log.e(TAG, "overlay remove failed", e)
         } finally {
+            (container?.context as? PortalActivity)?.setOverlayHighRefresh(false)
             container = null
             composeView = null
             readyPreludeActive.set(false)

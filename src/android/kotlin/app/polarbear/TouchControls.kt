@@ -19,8 +19,9 @@ import kotlin.math.hypot
 import kotlin.math.min
 
 /**
- * On-screen controller for games without touch support, shown over the
- * desktop while Steam runs. It feeds the "touch pad" through the same
+ * On-screen controller for games without touch support. Its toggle shows
+ * only while a Steam game runs, so it never sits over ordinary desktop use;
+ * the controls come back with the next game when they were left on. It feeds the "touch pad" through the same
  * evdev path as physical controllers ([GamepadBridge.touchPad]).
  *
  * The controls are a few separate views sized to their clusters, added as
@@ -53,7 +54,7 @@ object TouchControls {
     private var activity: PortalActivity? = null
     private var toggle: View? = null
     private val clusters = ArrayList<View>()
-    private var steamRunning = false
+    private var gameRunning = false
     private var scanning = false
 
     private val model = PadModel()
@@ -76,11 +77,11 @@ object TouchControls {
             if (!scanning && !ComposeOverlay.isShowing()) {
                 scanning = true
                 scanner.execute {
-                    val running = isSteamRunning()
+                    val running = isGameRunning()
                     main.post {
                         scanning = false
-                        if (running != steamRunning) Log.i(TAG, "Steam running: $running")
-                        steamRunning = running
+                        if (running != gameRunning) Log.i(TAG, "Steam game running: $running")
+                        gameRunning = running
                         refresh(host)
                     }
                 }
@@ -91,8 +92,12 @@ object TouchControls {
         }
     }
 
-    /** Steam's guest processes run under Portal's own uid. */
-    private fun isSteamRunning(): Boolean {
+    /**
+     * Steam starts every game as `reaper SteamLaunch AppId=<id> -- ...`,
+     * which lives exactly as long as the game. Guest processes run under
+     * Portal's own uid, so their command lines are readable.
+     */
+    private fun isGameRunning(): Boolean {
         val processes = File("/proc").listFiles() ?: return false.also { Log.w(TAG, "/proc unreadable") }
         for (entry in processes) {
             val name = entry.name
@@ -100,9 +105,8 @@ object TouchControls {
             try {
                 val cmdline = File(entry, "cmdline").readBytes()
                 val end = cmdline.indexOf(0).let { if (it < 0) cmdline.size else it }
-                // The client retitles itself "steam"; its helpers keep their names.
                 val arg0 = String(cmdline, 0, end).substringAfterLast('/')
-                if (arg0 == "steam" || arg0 == "steamwebhelper") return true
+                if (arg0 == "reaper" && String(cmdline).contains("\u0000SteamLaunch\u0000")) return true
             } catch (_: Exception) {
             }
         }
@@ -112,7 +116,7 @@ object TouchControls {
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private fun refresh(host: PortalActivity) {
-        val visible = steamRunning && !ComposeOverlay.isShowing()
+        val visible = gameRunning && !ComposeOverlay.isShowing()
         if (!visible) {
             removeViews()
             return
