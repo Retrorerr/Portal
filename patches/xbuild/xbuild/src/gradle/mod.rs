@@ -190,6 +190,8 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
                     targetSdk {target_sdk}
                     versionCode {version_code}
                     versionName '{version_name}'
+                    // Portal's UI is English; drop AndroidX's translations.
+                    resourceConfigurations += ['en']
                 }}
                 // SPIKE-ONLY (branch compose-setup-spike): enable @Composable
                 // compilation for the overlay in src/android/kotlin.
@@ -225,6 +227,9 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
                             signingConfig signingConfigs.release
                         }}
                         minifyEnabled true
+                        // Unused AndroidX resources; res/raw/portal_keep.xml
+                        // keeps what Kotlin loads by name.
+                        shrinkResources true
                         proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
                     }}
                 }}
