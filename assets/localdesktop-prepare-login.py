@@ -146,15 +146,20 @@ def write_marker(imported, conflicts):
 
 
 def prepare_account_database():
-    if NSS_MARKER.is_file():
-        return
+    repaired = False
     for path in (PASSWD, GROUP):
         if path.is_symlink() or not path.is_file():
             raise RuntimeError(f"unsafe Debian account database: {path}")
-        # The published image accidentally gave these public NSS databases
-        # root-only permissions. D-Bus and desktop applications need to look
-        # up UID 1000; /etc/shadow remains private and is never touched.
-        os.chmod(path, 0o644)
+        # D-Bus and desktop applications must look up UID 1000. Checked on
+        # every login, not once: useradd (any package that adds a system
+        # user, e.g. tpm-udev's tss) rewrites these with the old file's mode
+        # masked by 0666, which under PRoot reads as 0700 and lands as 0600.
+        # /etc/shadow remains private and is never touched.
+        if stat.S_IMODE(path.stat().st_mode) != 0o644:
+            os.chmod(path, 0o644)
+            repaired = True
+    if NSS_MARKER.is_file() and not repaired:
+        return
     for database, expected in (("passwd", "desktop:x:1000:1000:"),
                                ("group", "desktop:x:1000:")):
         result = subprocess.run(

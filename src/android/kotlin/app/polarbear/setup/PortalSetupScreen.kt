@@ -8,6 +8,7 @@ package app.polarbear.setup
 import android.animation.ValueAnimator
 import android.content.Context
 import android.content.res.Configuration
+import android.os.SystemClock
 import android.util.Log
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -58,6 +59,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -251,6 +253,9 @@ fun PortalSetupScreen(
     // snapshot solely for truthful in-process progress presentation; never
     // regenerate a plan from the visual defaults after a restart.
     var acceptedPlan by remember { mutableStateOf<InstallPlan?>(null) }
+    // When Begin Install was tapped on this screen; 0 when the install was
+    // already running before it (a relaunch), so no duration is claimed.
+    var installStartedAt by remember { mutableLongStateOf(0L) }
     var installSubmissionError by remember { mutableStateOf<String?>(null) }
     val installProgressState: State<Float> = androidx.compose.animation.core.animateFloatAsState(
         targetValue = nativeInstallState.progress / 100f,
@@ -276,6 +281,7 @@ fun PortalSetupScreen(
 
     val beginLocalInstall: () -> Unit = {
         if (previewOnly && previewInstall != null) {
+            if (phase == SetupPhase.Configure) installStartedAt = SystemClock.elapsedRealtime()
             if (phase == SetupPhase.Configure || phase == SetupPhase.Failed) scriptedRun++
         } else if (previewOnly) {
             installSubmissionError = "Preview only: nothing is installed."
@@ -298,6 +304,7 @@ fun PortalSetupScreen(
             } else if (ComposeOverlay.beginInstall(plan)) {
                 beginAccepted = true
                 acceptedPlan = plan
+                installStartedAt = SystemClock.elapsedRealtime()
                 pickerVisible = false
             } else {
                 installSubmissionError = "Portal didn’t accept these install settings. Please try again."
@@ -685,6 +692,7 @@ fun PortalSetupScreen(
                                             errorMessage = installSubmissionError
                                                 ?: nativeInstallState.error?.takeIf { it.isNotBlank() },
                                             summary = acceptedPlan?.let(::planSummary),
+                                            startedAt = installStartedAt,
                                             desktopReady = desktopReady || scriptedDesktopReady,
                                             palette = palette,
                                             onTryAgain = beginLocalInstall,

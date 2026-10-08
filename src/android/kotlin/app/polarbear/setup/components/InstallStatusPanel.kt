@@ -96,6 +96,8 @@ internal fun InstallStatusPanel(
     errorMessage: String?,
     /** The choices being installed, when this process still knows them. */
     summary: String?,
+    /** elapsedRealtime of Begin Install on this screen, or 0 if it began elsewhere. */
+    startedAt: Long,
     desktopReady: Boolean,
     palette: PortalPalette,
     onTryAgain: () -> Unit,
@@ -108,14 +110,10 @@ internal fun InstallStatusPanel(
 
     // How long the install took, only when this screen saw all of it: a
     // relaunch mid-install or a pause in between would make it a lie.
-    var startedAt by rememberSaveable { mutableLongStateOf(0L) }
     var finishedAt by rememberSaveable { mutableLongStateOf(0L) }
     var interrupted by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(phase) {
         when (phase) {
-            SetupPhase.Installing -> if (startedAt == 0L && nativeProgress <= 5) {
-                startedAt = SystemClock.elapsedRealtime()
-            }
             SetupPhase.Failed -> interrupted = true
             SetupPhase.Ready -> if (finishedAt == 0L) finishedAt = SystemClock.elapsedRealtime()
             else -> Unit
