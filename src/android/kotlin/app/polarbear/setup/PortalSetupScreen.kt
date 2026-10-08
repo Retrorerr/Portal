@@ -11,7 +11,10 @@ import android.content.res.Configuration
 import android.util.Log
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.shrinkVertically
+import app.polarbear.setup.components.InstallStatusPanel
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
@@ -54,6 +57,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -202,6 +206,9 @@ fun PortalSetupScreen(
     // Debug preview: shows the first-run stages over a finished install and
     // never reads or starts a real installation.
     previewOnly: Boolean = false,
+    // Debug preview only: Begin Install plays a scripted install instead of
+    // the message above ("ok", or "fail" to stop once and offer Try again).
+    previewInstall: String? = null,
 ) {
     var appearance by remember { mutableStateOf(AppearanceMode.System) }
     // What is painted. It trails [appearance] by the capture of one frame so
@@ -214,9 +221,26 @@ fun PortalSetupScreen(
     var pickerVisible by remember { mutableStateOf(false) }
     var optionalAppIds by remember { mutableStateOf(DEFAULT_OPTIONAL_APP_IDS) }
     var lastPress by remember { mutableStateOf(Offset.Unspecified) }
-    val nativeInstallState by ComposeOverlay.installState()
+    val realInstallState by ComposeOverlay.installState()
+    var scriptedInstall by remember { mutableStateOf<ComposeOverlay.InstallUiState?>(null) }
+    var scriptedRun by remember { mutableIntStateOf(0) }
+    var scriptedDesktopReady by remember { mutableStateOf(false) }
+    if (previewOnly && previewInstall != null && scriptedRun > 0) {
+        LaunchedEffect(scriptedRun) {
+            playScriptedInstall(
+                fail = previewInstall == "fail" && scriptedRun == 1,
+                resume = scriptedRun > 1,
+                update = { scriptedInstall = it },
+            )
+            if (scriptedInstall?.complete == true) {
+                delay(2_400)
+                scriptedDesktopReady = true
+            }
+        }
+    }
+    val nativeInstallState = scriptedInstall ?: realInstallState
     val phase = when {
-        previewOnly -> SetupPhase.Configure
+        previewOnly && scriptedInstall == null -> SetupPhase.Configure
         nativeInstallState.complete -> SetupPhase.Ready
         nativeInstallState.failed -> SetupPhase.Failed
         nativeInstallState.running -> SetupPhase.Installing
@@ -251,7 +275,9 @@ fun PortalSetupScreen(
     }
 
     val beginLocalInstall: () -> Unit = {
-        if (previewOnly) {
+        if (previewOnly && previewInstall != null) {
+            if (phase == SetupPhase.Configure || phase == SetupPhase.Failed) scriptedRun++
+        } else if (previewOnly) {
             installSubmissionError = "Preview only: nothing is installed."
         } else if (phase == SetupPhase.Configure && !beginAccepted) {
             installSubmissionError = null
@@ -467,7 +493,19 @@ fun PortalSetupScreen(
                                         .fillMaxWidth()
                                         .holdWidth(if (compact) 0.dp else settledCardWidth - PortalDimens.SurfacePaddingH * 2),
                                 ) {
-                                    if (maxWidth >= PortalDimens.TwoColumnBreakpoint) {
+                                    val twoColumn = maxWidth >= PortalDimens.TwoColumnBreakpoint
+                                    // Begin Install hands the card over to the install: the
+                                    // settings fold away instead of lingering greyed out, so
+                                    // nothing on screen looks tappable but isn't.
+                                    Column {
+                                    AnimatedVisibility(
+                                        visible = phase == SetupPhase.Configure,
+                                        enter = fadeIn(tween(420, delayMillis = 200)) +
+                                            expandVertically(tween(560, easing = PortalEmphasized)),
+                                        exit = fadeOut(tween(240, easing = PortalEmphasizedAccelerate)) +
+                                            shrinkVertically(tween(620, easing = PortalEmphasized)),
+                                    ) {
+                                    if (twoColumn) {
                                         Column {
                                             Row(
                                                 modifier = Modifier
@@ -548,7 +586,6 @@ fun PortalSetupScreen(
                                                     desktopReady = desktopReady,
                                                     palette = palette,
                                                     actionModifier = primaryAction,
-                                                    inactiveConfigurationModifier = configurationVisual,
                                                     errorMessage = installSubmissionError,
                                                     onBeginInstall = beginLocalInstall,
                                                 )
@@ -618,12 +655,44 @@ fun PortalSetupScreen(
                                                     desktopReady = desktopReady,
                                                     palette = palette,
                                                     actionModifier = primaryAction,
-                                                    inactiveConfigurationModifier = configurationVisual,
                                                     errorMessage = installSubmissionError,
                                                     onBeginInstall = beginLocalInstall,
                                                 )
                                             }
                                         }
+                                    }
+                                    }
+                                    AnimatedVisibility(
+                                        visible = phase != SetupPhase.Configure,
+                                        // Unclipped: Try again's glow reaches past the panel.
+                                        enter = fadeIn(tween(480, delayMillis = 320, easing = PortalEmphasizedDecelerate)) +
+                                            expandVertically(tween(620, easing = PortalEmphasized), clip = false),
+                                        exit = fadeOut(tween(200)) +
+                                            shrinkVertically(tween(420, easing = PortalEmphasized), clip = false),
+                                    ) {
+                                        // Text-only footers keep the card's bottom margin level
+                                        // with its top; Try again gets the same room as Begin.
+                                        val panelBottom by animateDpAsState(
+                                            if (phase == SetupPhase.Failed) 26.dp else 2.dp,
+                                            tween(420, easing = PortalEmphasized),
+                                            label = "panel bottom",
+                                        )
+                                        InstallStatusPanel(
+                                            phase = phase,
+                                            progressState = installProgressState,
+                                            nativeProgress = nativeInstallState.progress,
+                                            message = nativeInstallState.message,
+                                            errorMessage = installSubmissionError
+                                                ?: nativeInstallState.error?.takeIf { it.isNotBlank() },
+                                            summary = acceptedPlan?.let(::planSummary),
+                                            desktopReady = desktopReady || scriptedDesktopReady,
+                                            palette = palette,
+                                            onTryAgain = beginLocalInstall,
+                                            modifier = Modifier
+                                                .padding(horizontal = if (twoColumn) 12.dp else 0.dp)
+                                                .padding(top = 6.dp, bottom = panelBottom),
+                                        )
+                                    }
                                     }
                                 }
                             }
@@ -821,9 +890,71 @@ private val SetupPhase.title: String
     get() = when (this) {
         SetupPhase.Configure -> "Install Portal Desktop"
         SetupPhase.Installing -> "Installing Portal Desktop"
-        SetupPhase.Failed -> "Portal setup needs attention"
+        SetupPhase.Failed -> "Setup paused"
         SetupPhase.Ready -> "Portal is ready"
     }
+
+/**
+ * Debug preview: the native install's messages at roughly real proportions,
+ * about a minute end to end. [fail] stops during setup like a dropped
+ * connection would; [resume] carries on from there.
+ */
+private suspend fun playScriptedInstall(
+    fail: Boolean,
+    resume: Boolean,
+    update: (ComposeOverlay.InstallUiState) -> Unit,
+) {
+    fun state(progress: Int, message: String, error: String? = null, complete: Boolean = false) =
+        update(ComposeOverlay.InstallUiState(if (error != null) "Failed" else "Installing", progress, message, error, complete))
+    if (!resume) {
+        state(5, "Downloading Debian runtime…")
+        delay(900)
+        for (mib in 0..920 step 23) {
+            state(5 + mib * 40 / 920, "Downloading Debian runtime: $mib / 920 MiB")
+            delay(320)
+        }
+        state(45, "Debian runtime download complete; checking it…")
+        delay(1_200)
+        for (entries in 101_888..146_417 step 1_731) {
+            state(55, "Extracting Debian runtime: $entries entries")
+            delay(450)
+        }
+        state(70, "Debian runtime committed; configuring Portal…")
+        delay(800)
+        state(75, "Configuring Portal (mesa-kgsl-layer)")
+        delay(1_400)
+        state(84, "Configuring Portal (desktop-login)")
+        delay(2_600)
+        if (fail) {
+            state(84, "Configuring Portal (desktop-login)", error = "Portal lost its internet connection. Check it and tap Try again.")
+            return
+        }
+    } else {
+        state(84, "Configuring Portal (desktop-login)")
+        delay(2_000)
+    }
+    state(96, "Configuring Portal (xkb-symlink)")
+    delay(1_000)
+    state(99, "Applying your appearance and display size…")
+    delay(2_200)
+    state(100, "Portal is ready", complete = true)
+}
+
+/** What the user picked, echoed under the install progress. */
+private fun planSummary(plan: InstallPlan): String {
+    val appearance = when (plan.appearance) {
+        AppearanceMode.System -> "Match Android"
+        AppearanceMode.Dark -> "Dark"
+        AppearanceMode.Light -> "Light"
+    }
+    val apps = plan.selectedAppIds.size
+    val extras = when (apps) {
+        0 -> "no extra apps"
+        1 -> "1 extra app"
+        else -> "$apps extra apps"
+    }
+    return "$appearance · ${plan.interfaceSize.name} size · $extras"
+}
 
 @Composable
 private fun SectionLabel(text: String, palette: PortalPalette) {
@@ -1016,7 +1147,6 @@ private fun InstallActionArea(
     palette: PortalPalette,
     // Shared with the onboarding's Continue button so one becomes the other.
     actionModifier: Modifier,
-    inactiveConfigurationModifier: Modifier,
     errorMessage: String?,
     onBeginInstall: () -> Unit,
 ) {
@@ -1044,7 +1174,7 @@ private fun InstallActionArea(
                     enabled = phase == SetupPhase.Configure || phase == SetupPhase.Failed,
                     label = if (phase == SetupPhase.Failed) "Retry" else "Begin Install",
                     glowBoundsModifier = actionModifier,
-                    modifier = inactiveConfigurationModifier.dissolveBlur(this, radius = 16.dp),
+                    modifier = Modifier.dissolveBlur(this, radius = 16.dp),
                 )
             }
             this@Column.AnimatedVisibility(

@@ -54,7 +54,8 @@ Pick Steam during setup and you get the ARM64 Steam client running natively.
 
 ## Good to know
 
-- **Keyboard shortcuts:** Android can swallow shortcuts like `Alt+Tab` or `Ctrl+C` before they reach Linux. Turn on Portal under **Android Settings → Accessibility → Downloaded apps** to fix that. It only forwards key presses and doesn't read anything on screen.
+- **Keyboard shortcuts and background running:** Android can swallow shortcuts like `Alt+Tab` or `Ctrl+C` before they reach Linux. Turn on Portal under **Android Settings → Accessibility → Downloaded apps** to fix that. It only forwards key presses and doesn't read anything on screen. As a bonus, Android treats Portal as a visible app while the switch is on, so it's far less likely to close the desktop in the background. Portal's start screen shows a tip while it's off.
+  - If the switch is greyed out, open Portal's **App info**, tap **⋮** and choose **Allow restricted settings**. Android 13 and newer does this for apps installed outside an app store.
 - **Tablet or desktop:** with no keyboard or mouse plugged in, Plasma switches to tablet mode and the Android keyboard pops up when you tap a text field. Plug in a keyboard and mouse and it goes back to desktop mode.
 - **Sound** goes through Android, and pausing and resuming Portal doesn't break it. You might notice a "Portal Audio (standby)" device in the volume list. That's what keeps apps connected while Portal is in the background, so leave it be.
 - **Your Android files:** grant **All files access** if you want to open shared storage (Downloads, Pictures and so on) from Linux. Debian itself lives in Portal's private storage.
@@ -64,7 +65,7 @@ Pick Steam during setup and you get the ARM64 Steam client running natively.
 ## Known limitations
 
 - There's no systemd, so `systemctl`, `timedatectl`, `hostnamectl` and friends don't work. Apps that only run as systemd services need starting by hand.
-- Android can pause or kill apps in the background, so long downloads or builds are safest with Portal on screen.
+- Android can pause or kill apps in the background, so long downloads or builds are safest with Portal on screen. Turning on Portal's accessibility switch (see above) helps a lot.
 - If the whole desktop suddenly vanishes under heavy load, Android's child-process limit is the likely cause. Some devices let you turn it off under **Developer options → Disable child process restrictions**.
 - Only arm64 packages install with `apt`. x86 programs need Box64 or FEX.
 

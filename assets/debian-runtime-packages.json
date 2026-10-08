@@ -6988,5 +6988,173 @@
     "Filename": "pool/main/x/xsettingsd/xsettingsd_1.0.2-1+b1_arm64.deb",
     "SHA256": "2a80a140c74a003d3ccbe5b45a902b30af61e0f60157521a7fde689317d183a2",
     "Size": "27420"
+  },
+  "bubblewrap": {
+    "Version": "0.11.0-2+deb13u1",
+    "Filename": "pool/main/b/bubblewrap/bubblewrap_0.11.0-2+deb13u1_arm64.deb",
+    "SHA256": "c838daebddb7fe169ebb461612e90b1fcb981de838f81bfbecf26d45ab5a71ee",
+    "Size": "50132"
+  },
+  "fuse3": {
+    "Version": "3.17.2-3",
+    "Filename": "pool/main/f/fuse3/fuse3_3.17.2-3_arm64.deb",
+    "SHA256": "713b5cb7d1a035a14d8267446796f4de02805381d657c2130cad25769b86894e",
+    "Size": "39960"
+  },
+  "glib-networking": {
+    "Version": "2.80.1-1",
+    "Filename": "pool/main/g/glib-networking/glib-networking_2.80.1-1_arm64.deb",
+    "SHA256": "06815a6cfd3ad5386eba73db253ea1a25ede4a01b3b92d1dbc5315d001915e21",
+    "Size": "65472"
+  },
+  "glib-networking-common": {
+    "Version": "2.80.1-1",
+    "Filename": "pool/main/g/glib-networking/glib-networking-common_2.80.1-1_all.deb",
+    "SHA256": "aa697ddbd07ba9e16391bd81f73661b2583859c8671d1ce92f28e6a870d37059",
+    "Size": "86004"
+  },
+  "glib-networking-services": {
+    "Version": "2.80.1-1",
+    "Filename": "pool/main/g/glib-networking/glib-networking-services_2.80.1-1_arm64.deb",
+    "SHA256": "231f911c07eb9cb4a68b6709e0963aaeddeda523f21d24f10a593d4c2963f982",
+    "Size": "12248"
+  },
+  "gstreamer1.0-plugins-base": {
+    "Version": "1.26.2-1+deb13u1",
+    "Filename": "pool/main/g/gst-plugins-base1.0/gstreamer1.0-plugins-base_1.26.2-1+deb13u1_arm64.deb",
+    "SHA256": "c6e7fd18acadc13acc6316e34e9b6f4c4b3dae1234a38bbe0e05e2062f412ee4",
+    "Size": "671268"
+  },
+  "gstreamer1.0-plugins-good": {
+    "Version": "1.26.2-1+deb13u2",
+    "Filename": "pool/main/g/gst-plugins-good1.0/gstreamer1.0-plugins-good_1.26.2-1+deb13u2_arm64.deb",
+    "SHA256": "f609da9b63c274524b3eee119179fca1f98abd46242f62beea43a39896231ddf",
+    "Size": "2051756"
+  },
+  "kio-fuse": {
+    "Version": "5.1.0-1+b1",
+    "Filename": "pool/main/k/kio-fuse/kio-fuse_5.1.0-1+b1_arm64.deb",
+    "SHA256": "5430c17ef459b1362997239144a0847167febe175ae93d8209e39a9bb9882e44",
+    "Size": "70528"
+  },
+  "libcdparanoia0": {
+    "Version": "3.10.2+debian-14+b1",
+    "Filename": "pool/main/c/cdparanoia/libcdparanoia0_3.10.2+debian-14+b1_arm64.deb",
+    "SHA256": "c78b7bdfe272bb8d153ddf976a02f2f7a5775d6774c142ab6c7f93e741143d43",
+    "Size": "41316"
+  },
+  "libdv4t64": {
+    "Version": "1.0.0-17.1+b1",
+    "Filename": "pool/main/libd/libdv/libdv4t64_1.0.0-17.1+b1_arm64.deb",
+    "SHA256": "6b094b640c4b2b9c74b80dcb28e581fabeab14894796bf627bf7a3805cadd076",
+    "Size": "65860"
+  },
+  "libgstreamer-plugins-base1.0-0": {
+    "Version": "1.26.2-1+deb13u1",
+    "Filename": "pool/main/g/gst-plugins-base1.0/libgstreamer-plugins-base1.0-0_1.26.2-1+deb13u1_arm64.deb",
+    "SHA256": "bc3205ea9fd35448b2cb6171da0e24bd3af893fb8a01f8eb797cbfb4d1fe7b0e",
+    "Size": "897352"
+  },
+  "libgstreamer1.0-0": {
+    "Version": "1.26.2-2",
+    "Filename": "pool/main/g/gstreamer1.0/libgstreamer1.0-0_1.26.2-2_arm64.deb",
+    "SHA256": "77d44e8bc93793f815ea7b8cdb9c1b0b0bf6fd5797e2e69a7ef95bb37f249a86",
+    "Size": "1294408"
+  },
+  "libjson-glib-1.0-0": {
+    "Version": "1.10.6+ds-2",
+    "Filename": "pool/main/j/json-glib/libjson-glib-1.0-0_1.10.6+ds-2_arm64.deb",
+    "SHA256": "616d3789339acc49ba9bbdfc7e9d5ceb6f9ca6eafa9b466bdbea80f071027da9",
+    "Size": "59056"
+  },
+  "libjson-glib-1.0-common": {
+    "Version": "1.10.6+ds-2",
+    "Filename": "pool/main/j/json-glib/libjson-glib-1.0-common_1.10.6+ds-2_all.deb",
+    "SHA256": "2c6352e0b10b3bf2fe184eeaa5f4e8cfa69b82053dc2e5ef137f951ba59315c8",
+    "Size": "62300"
+  },
+  "libopencore-amrnb0": {
+    "Version": "0.1.6-1+b2",
+    "Filename": "pool/main/o/opencore-amr/libopencore-amrnb0_0.1.6-1+b2_arm64.deb",
+    "SHA256": "56ff1db89f45f7e488fced4b6468001ab5da98638a19d115e7d87233d4f3915c",
+    "Size": "90956"
+  },
+  "libopencore-amrwb0": {
+    "Version": "0.1.6-1+b2",
+    "Filename": "pool/main/o/opencore-amr/libopencore-amrwb0_0.1.6-1+b2_arm64.deb",
+    "SHA256": "d84b048ca977e5103d0c25ece28f07cbb1fe4146edf266febac42f20b2501692",
+    "Size": "49860"
+  },
+  "liborc-0.4-0t64": {
+    "Version": "1:0.4.41-1",
+    "Filename": "pool/main/o/orc/liborc-0.4-0t64_0.4.41-1_arm64.deb",
+    "SHA256": "e69ee68606246657ff19bfe13058a9aef177e686b97638728f9e0e911af07680",
+    "Size": "170796"
+  },
+  "libsoup-3.0-0": {
+    "Version": "3.6.5-3",
+    "Filename": "pool/main/libs/libsoup3/libsoup-3.0-0_3.6.5-3_arm64.deb",
+    "SHA256": "f3f318cbef19328be0e8d09a054bb93b0f26cac8a337398168723756fe2462c0",
+    "Size": "264492"
+  },
+  "libsoup-3.0-common": {
+    "Version": "3.6.5-3",
+    "Filename": "pool/main/libs/libsoup3/libsoup-3.0-common_3.6.5-3_all.deb",
+    "SHA256": "a5a1e8e37214cc4277fc56d6dffe68ff3447356202dfc0e611cea5fe457835d1",
+    "Size": "65552"
+  },
+  "libv4l-0t64": {
+    "Version": "1.30.1-1",
+    "Filename": "pool/main/v/v4l-utils/libv4l-0t64_1.30.1-1_arm64.deb",
+    "SHA256": "0daab812f42d309969a867230d2ec9b6ad2127bf884bf8f208e5035e5defef5a",
+    "Size": "115348"
+  },
+  "libv4lconvert0t64": {
+    "Version": "1.30.1-1",
+    "Filename": "pool/main/v/v4l-utils/libv4lconvert0t64_1.30.1-1_arm64.deb",
+    "SHA256": "b7e56d6e148ef9dcff8074b953ed4c3f3c4014ee63a6bbc5d3e72c4d84697151",
+    "Size": "150968"
+  },
+  "libvisual-0.4-0": {
+    "Version": "0.4.2-2+b2",
+    "Filename": "pool/main/libv/libvisual/libvisual-0.4-0_0.4.2-2+b2_arm64.deb",
+    "SHA256": "73afc7b7a6f2b24ad47a29276243ec3bd7f7592798b99271f9590472bfa3f306",
+    "Size": "131260"
+  },
+  "libwavpack1": {
+    "Version": "5.8.1-1",
+    "Filename": "pool/main/w/wavpack/libwavpack1_5.8.1-1_arm64.deb",
+    "SHA256": "464cc2f7b2c5ae64f37668d834e5e0edd9c051976c92794a1560f0a639df225e",
+    "Size": "82900"
+  },
+  "mount": {
+    "Version": "2.41-5",
+    "Filename": "pool/main/u/util-linux/mount_2.41-5_arm64.deb",
+    "SHA256": "62fd64b4fc9bac520d37eb7b2bee0fa310bbecf66d83d5ef5989092ecd0669b6",
+    "Size": "160584"
+  },
+  "xdg-desktop-portal": {
+    "Version": "1.20.3+ds-1",
+    "Filename": "pool/main/x/xdg-desktop-portal/xdg-desktop-portal_1.20.3+ds-1_arm64.deb",
+    "SHA256": "2daec458c9422722ae1432b42fe14b8df6e83cabc017f4c4839a6aaebfcc3c31",
+    "Size": "383496"
+  },
+  "xdg-desktop-portal-gtk": {
+    "Version": "1.15.3-1",
+    "Filename": "pool/main/x/xdg-desktop-portal-gtk/xdg-desktop-portal-gtk_1.15.3-1_arm64.deb",
+    "SHA256": "20c2e4c7620f2720fdc731503b04ba5875f80148da8d3102f59e50c784d76d53",
+    "Size": "120336"
+  },
+  "xdg-desktop-portal-kde": {
+    "Version": "6.3.5-1",
+    "Filename": "pool/main/x/xdg-desktop-portal-kde/xdg-desktop-portal-kde_6.3.5-1_arm64.deb",
+    "SHA256": "76cfe3d5875d31b6e268bbe153cb7e85b42eb249a46cb5ef68be1f0a245c6f53",
+    "Size": "434524"
+  },
+  "xdg-utils": {
+    "Version": "1.2.1-2",
+    "Filename": "pool/main/x/xdg-utils/xdg-utils_1.2.1-2_all.deb",
+    "SHA256": "01dd31db093f1e810824519200112ec3fd447ba0341f7213244525eaa289355e",
+    "Size": "75840"
   }
 }

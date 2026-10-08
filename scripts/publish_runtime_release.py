@@ -85,7 +85,9 @@ def validate_archive(archive_path: Path, expected_version: str) -> None:
     if not archive_path.is_file():
         raise FileNotFoundError(f"Archive not found: {archive_path}")
 
-    with tarfile.open(archive_path, "r:xz") as tar:
+    # .tar.zst needs Python 3.14's tarfile; .tar.xz is still accepted.
+    mode = "r:zst" if archive_path.name.endswith(".tar.zst") else "r:xz"
+    with tarfile.open(archive_path, mode) as tar:
         found_members = {}
         for member in tar:
             found_members[member.name] = member
@@ -432,7 +434,7 @@ def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | N
 
     # Determine version and tag
     if not version:
-        match = re.search(r"portal-(debian13-arm64-[0-9.]+)\.tar\.xz", archive_path.name)
+        match = re.search(r"portal-(debian13-arm64-[0-9.]+)\.tar\.(?:zst|xz)", archive_path.name)
         if match:
             version = match.group(1)
         elif MANIFEST_PATH.exists():
@@ -545,7 +547,7 @@ def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | N
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("archive", nargs="?", type=Path, help="Path to runtime .tar.xz archive")
+    parser.add_argument("archive", nargs="?", type=Path, help="Path to runtime .tar.zst (or .tar.xz) archive")
     parser.add_argument("--repo", default="Retrorerr/Portal", help="GitHub repo (default: Retrorerr/Portal)")
     parser.add_argument("--version", help="Runtime version (e.g. debian13-arm64-2026.09.05.3)")
     parser.add_argument("--tag", help="Release tag (default: runtime-<version>)")
@@ -559,12 +561,15 @@ def main():
         if MANIFEST_PATH.exists():
             manifest = json.loads(MANIFEST_PATH.read_text())
             ver = manifest.get("version")
-            default_path = REPO_ROOT / f"target/portal-{ver}.tar.xz"
-            if default_path.exists():
-                archive_path = default_path
+            for suffix in ("zst", "xz"):
+                default_path = REPO_ROOT / f"target/portal-{ver}.tar.{suffix}"
+                if default_path.exists():
+                    archive_path = default_path
+                    break
 
     if not archive_path or not archive_path.exists():
-        candidates = list((REPO_ROOT / "target").glob("portal-debian13-arm64-*.tar.xz"))
+        candidates = [path for suffix in ("zst", "xz")
+                      for path in (REPO_ROOT / "target").glob(f"portal-debian13-arm64-*.tar.{suffix}")]
         if len(candidates) == 1:
             archive_path = candidates[0]
         else:

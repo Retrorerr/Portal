@@ -45,6 +45,10 @@ android:
           # PortalActivity as well — this manifest value is defense in depth.
           window_soft_input_mode: adjustNothing
       services:
+        - name: app.polarbear.SetupService
+          # Keeps first setup downloading while the user is in another app.
+          foreground_service_type: dataSync
+          exported: false
         - name: app.polarbear.KeyboardAccessibilityService
           permission: android.permission.BIND_ACCESSIBILITY_SERVICE
           label: "@string/keyboard_service_label"
@@ -69,6 +73,8 @@ android:
       - name: android.permission.INTERNET
       - name: android.permission.ACCESS_NETWORK_STATE
       - name: android.permission.POST_NOTIFICATIONS
+      - name: android.permission.FOREGROUND_SERVICE
+      - name: android.permission.FOREGROUND_SERVICE_DATA_SYNC
       - name: android.permission.VIBRATE
       - name: android.permission.MANAGE_EXTERNAL_STORAGE
       - name: android.permission.READ_EXTERNAL_STORAGE

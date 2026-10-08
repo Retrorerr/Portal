@@ -14,6 +14,10 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc, Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -40,6 +44,74 @@ const IMAGE_ONLY_PREVIOUS_PREFIX: &str = "runtime-B.previous.image-only";
 const UNKNOWN_RUNTIME_PREFIX: &str = "runtime-B.unknown";
 const UNKNOWN_PREVIOUS_PREFIX: &str = "runtime-B.previous.unknown";
 const PRESERVED_LEGACY_RUNTIME_PREFIX: &str = "runtime-B.legacy-preserved";
+/// A body read that stalls this long is a dead connection, not a slow one.
+/// reqwest's blocking timeout applies per read, so this never caps the
+/// length of a whole download on a slow link.
+pub const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Context marking a download that failed because the network went away
+/// (Wi-Fi dropped, Android cut a backgrounded app off). Setup waits these
+/// out instead of failing: the user should never have to tap Retry for them.
+#[derive(Debug)]
+pub struct WaitingForNetwork;
+
+impl std::fmt::Display for WaitingForNetwork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Waiting for a network connection")
+    }
+}
+
+impl std::error::Error for WaitingForNetwork {}
+
+/// Whether a download error is a lost or missing connection that clears up
+/// by itself, as opposed to a bad server response or local failure.
+pub fn is_transient_network_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if let Some(error) = cause.downcast_ref::<reqwest::Error>() {
+            return error.is_connect()
+                || error.is_timeout()
+                || error.is_request()
+                || error.is_body()
+                || error.status().is_some_and(|status| {
+                    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                });
+        }
+        if let Some(error) = cause.downcast_ref::<io::Error>() {
+            return matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::NotConnected
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::UnexpectedEof
+            ) || matches!(error.raw_os_error(), Some(100..=113));
+        }
+        false
+    })
+}
+
+/// Tag a download error so callers can tell "offline" from "broken".
+pub fn tag_network_error(error: anyhow::Error) -> anyhow::Error {
+    if is_transient_network_error(&error) {
+        error.context(WaitingForNetwork)
+    } else {
+        error
+    }
+}
+
+/// Seconds to wait before the next try while offline: quick at first so a
+/// brief drop costs nothing, then a steady 15 s.
+pub fn offline_backoff(waits: u32) -> Duration {
+    Duration::from_secs(match waits {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 4,
+        4 => 8,
+        _ => 15,
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvisioningPhase {
@@ -382,24 +454,21 @@ impl RuntimeArtifact {
         staging: &Path,
         report: &impl Fn(String),
     ) -> anyhow::Result<()> {
+        self.verify(archive)?;
         self.extract_inner(archive, staging, &|message| report(message))
     }
 
+    /// The caller has just verified `archive` (provisioning only reaches this
+    /// after its own check or the download's), so it is not hashed again here.
     fn extract_inner(
         &self,
         archive: &Path,
         staging: &Path,
         report: &impl Fn(String),
     ) -> anyhow::Result<()> {
-        self.verify(archive)?;
-        if path_exists(staging) {
-            remove_path_synced(staging)?;
-        }
-        fs::create_dir_all(staging)?;
-        sync_parent_directory(staging)?;
-        sync_directory(staging)?;
-        let decoder = xz2::read::XzDecoder::new(fs::File::open(archive)?);
-        let mut tar = tar::Archive::new(decoder);
+        reset_staging(staging)?;
+        let (reader, decoder) = spawn_decoder(fs::File::open(archive)?);
+        let mut tar = tar::Archive::new(reader);
         let mut count = 0u64;
         let mut last = Instant::now();
         for entry in tar.entries()? {
@@ -410,6 +479,15 @@ impl RuntimeArtifact {
                 last = Instant::now();
             }
         }
+        io::copy(&mut tar.into_inner(), &mut io::sink())?;
+        decoder
+            .join()
+            .map_err(|_| anyhow::anyhow!("Runtime decoder panicked"))??;
+        self.seal_staging(staging)
+    }
+
+    /// Validate an unpacked tree and mark it as an image candidate.
+    fn seal_staging(&self, staging: &Path) -> anyhow::Result<()> {
         self.validate_image(staging)?;
         write_atomic(
             &staging.join(IMAGE_READY_MARKER),
@@ -601,39 +679,59 @@ impl RuntimeArtifact {
 
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(60 * 60))
+            .timeout(DOWNLOAD_STALL_TIMEOUT)
+            .tcp_keepalive(Duration::from_secs(15))
             .build()?;
-        let mut last_error = None;
-        for attempt in 1..=3 {
+        // Hard failures get three tries. A lost connection is not a failure:
+        // it is waited out for as long as it takes, resuming from the last
+        // checkpoint each time.
+        let mut failures = 0;
+        let mut offline_waits = 0;
+        // Unpacking overlaps the download; it outlives a dropped connection
+        // and simply waits for the resumed bytes.
+        let mut streaming: Option<StreamingExtract> = None;
+        loop {
             let result = (|| -> anyhow::Result<()> {
+                let mut streamed = false;
                 if self.verify(&archive).is_err() {
-                    self.download_archive(
-                        &client,
-                        &archive,
-                        &partial,
-                        &checkpoint,
-                        attempt,
-                        &report,
-                    )?;
-                    self.emit(
-                        &report,
-                        ProvisioningPhase::Verifying,
-                        48,
-                        "Verifying Debian runtime size and SHA-256…",
-                    );
-                    self.verify(&archive)?;
+                    if streaming.is_none() {
+                        streaming = Some(StreamingExtract::start(
+                            self.compressed_bytes,
+                            &partial,
+                            &archive,
+                            &staging,
+                        )?);
+                    }
+                    // Promotes the `.part` to the archive only after its own
+                    // exact size and SHA-256 check, so no second pass here.
+                    self.download_archive(&client, &archive, &partial, &checkpoint, &report)
+                        .map_err(tag_network_error)?;
+                    if let Some(stream) = streaming.take() {
+                        streamed = stream.finish(&self.sha256, &|count| {
+                            self.emit(
+                                &report,
+                                ProvisioningPhase::Extracting,
+                                55,
+                                format!("Extracting Debian runtime: {count} entries"),
+                            );
+                        });
+                    }
                 }
 
-                self.emit(
-                    &report,
-                    ProvisioningPhase::Extracting,
-                    52,
-                    "Extracting the validated Debian runtime…",
-                );
-                let extract_report = |message: String| {
-                    self.emit(&report, ProvisioningPhase::Extracting, 55, message);
-                };
-                self.extract_inner(&archive, &staging, &extract_report)?;
+                if streamed {
+                    self.seal_staging(&staging)?;
+                } else {
+                    self.emit(
+                        &report,
+                        ProvisioningPhase::Extracting,
+                        52,
+                        "Extracting the validated Debian runtime…",
+                    );
+                    let extract_report = |message: String| {
+                        self.emit(&report, ProvisioningPhase::Extracting, 55, message);
+                    };
+                    self.extract_inner(&archive, &staging, &extract_report)?;
+                }
                 self.emit(
                     &report,
                     ProvisioningPhase::Promoting,
@@ -655,23 +753,49 @@ impl RuntimeArtifact {
                 );
                 Ok(())
             })();
-            match result {
+            let error = match result {
                 Ok(()) => return Ok(()),
-                Err(error) => {
-                    log::warn!(
-                        "Debian runtime attempt {attempt}/3 failed: {error:#}; resumable state preserved"
-                    );
-                    self.emit(
-                        &report,
-                        ProvisioningPhase::Preparing,
-                        0,
-                        format!("Debian runtime attempt {attempt}/3 failed; retrying safely…"),
-                    );
-                    last_error = Some(error);
-                }
+                Err(error) => error,
+            };
+            let progress = if path_exists(&archive) {
+                45
+            } else {
+                self.download_progress(&partial)
+            };
+            if error.downcast_ref::<WaitingForNetwork>().is_some() {
+                offline_waits += 1;
+                log::warn!("Debian runtime download lost its connection: {error:#}; waiting to resume");
+                self.emit(
+                    &report,
+                    ProvisioningPhase::Downloading,
+                    progress,
+                    "Waiting for an internet connection…",
+                );
+                std::thread::sleep(offline_backoff(offline_waits));
+                continue;
             }
+            failures += 1;
+            log::warn!(
+                "Debian runtime attempt {failures}/3 failed: {error:#}; resumable state preserved"
+            );
+            if failures >= 3 {
+                return Err(error);
+            }
+            self.emit(
+                &report,
+                ProvisioningPhase::Downloading,
+                progress,
+                "Something went wrong; trying again…",
+            );
+            std::thread::sleep(Duration::from_secs(2));
         }
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Debian runtime provisioning failed")))
+    }
+
+    /// Overall setup progress (5..45) for the bytes already on disk, so a
+    /// retry never sends the bar back to zero.
+    fn download_progress(&self, partial: &Path) -> u16 {
+        let have = regular_file_length(partial).unwrap_or(0);
+        5 + ((have.saturating_mul(40) / self.compressed_bytes.max(1)) as u16).min(40)
     }
 
     fn emit(
@@ -1026,14 +1150,13 @@ impl RuntimeArtifact {
         archive: &Path,
         partial: &Path,
         checkpoint: &Path,
-        attempt: u32,
         report: &impl Fn(ProvisioningSnapshot),
     ) -> anyhow::Result<()> {
         self.emit(
             report,
             ProvisioningPhase::Downloading,
-            5,
-            format!("Downloading Debian runtime (attempt {attempt}/3)…"),
+            self.download_progress(partial),
+            "Downloading Debian runtime…",
         );
         let mut actual_length = regular_file_length(partial).unwrap_or(0);
         if path_exists(partial) && regular_file_length(partial).is_none() {
@@ -1221,6 +1344,299 @@ fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
 }
 
+fn reset_staging(staging: &Path) -> anyhow::Result<()> {
+    if path_exists(staging) {
+        remove_path_synced(staging)?;
+    }
+    fs::create_dir_all(staging)?;
+    sync_parent_directory(staging)?;
+    sync_directory(staging)?;
+    Ok(())
+}
+
+/// Reader over a channel of decoded chunks; a closed channel is the end.
+struct ChunkReader {
+    chunks: mpsc::Receiver<io::Result<Vec<u8>>>,
+    chunk: Vec<u8>,
+    position: usize,
+}
+
+impl Read for ChunkReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while self.position == self.chunk.len() {
+            match self.chunks.recv() {
+                Ok(Ok(chunk)) => {
+                    self.chunk = chunk;
+                    self.position = 0;
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Ok(0),
+            }
+        }
+        let count = buf.len().min(self.chunk.len() - self.position);
+        buf[..count].copy_from_slice(&self.chunk[self.position..self.position + count]);
+        self.position += count;
+        Ok(count)
+    }
+}
+
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+/// Largest zstd window accepted (128 MiB of decoder memory); the packager
+/// compresses with exactly this long-distance window.
+const ZSTD_WINDOW_LOG_MAX: u32 = 27;
+
+type Sniffed<R> = io::Chain<io::Cursor<Vec<u8>>, R>;
+
+/// The runtime stream's compression, told apart by its magic bytes so the
+/// cached file names can stay the same across formats.
+enum RuntimeDecoder<R: Read> {
+    Xz(xz2::read::XzDecoder<Sniffed<R>>),
+    Zstd(zstd::stream::read::Decoder<'static, io::BufReader<Sniffed<R>>>),
+}
+
+impl<R: Read> RuntimeDecoder<R> {
+    fn new(mut input: R) -> io::Result<Self> {
+        let mut magic = vec![0u8; ZSTD_MAGIC.len()];
+        input.read_exact(&mut magic)?;
+        let zstd = magic == ZSTD_MAGIC;
+        let input = io::Cursor::new(magic).chain(input);
+        Ok(if zstd {
+            let mut decoder = zstd::stream::read::Decoder::new(input)?;
+            decoder.window_log_max(ZSTD_WINDOW_LOG_MAX)?;
+            Self::Zstd(decoder)
+        } else {
+            Self::Xz(xz2::read::XzDecoder::new(input))
+        })
+    }
+
+    fn into_inner(self) -> R {
+        match self {
+            Self::Xz(decoder) => decoder.into_inner().into_inner().1,
+            Self::Zstd(decoder) => decoder.finish().into_inner().into_inner().1,
+        }
+    }
+}
+
+impl<R: Read> Read for RuntimeDecoder<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Xz(decoder) => decoder.read(buf),
+            Self::Zstd(decoder) => decoder.read(buf),
+        }
+    }
+}
+
+/// Decompress on its own thread so decoding and writing files use two cores
+/// instead of taking turns on one. The thread hands back `input` once the
+/// compressed stream ends; a decode error reaches the reader before it exits.
+fn spawn_decoder<R: Read + Send + 'static>(
+    input: R,
+) -> (ChunkReader, std::thread::JoinHandle<io::Result<R>>) {
+    let (sender, chunks) = mpsc::sync_channel::<io::Result<Vec<u8>>>(16);
+    let handle = std::thread::Builder::new()
+        .name("portal-decode".into())
+        .spawn(move || {
+            let mut decoder = match RuntimeDecoder::new(input) {
+                Ok(decoder) => decoder,
+                Err(error) => {
+                    let _ = sender.send(Err(io::Error::new(error.kind(), error.to_string())));
+                    return Err(error);
+                }
+            };
+            loop {
+                let mut chunk = vec![0u8; 1024 * 1024];
+                let count = match decoder.read(&mut chunk) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        let _ = sender.send(Err(io::Error::new(error.kind(), error.to_string())));
+                        return Err(error);
+                    }
+                };
+                if count == 0 {
+                    return Ok(decoder.into_inner());
+                }
+                chunk.truncate(count);
+                if sender.send(Ok(chunk)).is_err() {
+                    return Err(io::Error::other("runtime unpacker stopped"));
+                }
+            }
+        })
+        .expect("spawn runtime decoder");
+    (
+        ChunkReader {
+            chunks,
+            chunk: Vec::new(),
+            position: 0,
+        },
+        handle,
+    )
+}
+
+struct HashingReader<R> {
+    inner: R,
+    hash: Sha256,
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        self.hash.update(&buf[..count]);
+        Ok(count)
+    }
+}
+
+/// Reads the `.part` file as the download grows it, up to the pinned size,
+/// waiting at its end for more bytes. Gives up when cancelled or when the
+/// download restarted into a new file.
+struct FollowReader {
+    partial: PathBuf,
+    archive: PathBuf,
+    file: Option<fs::File>,
+    position: u64,
+    length: u64,
+    abort: Arc<AtomicBool>,
+}
+
+impl Read for FollowReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.position >= self.length {
+            return Ok(0);
+        }
+        let want = buf.len().min((self.length - self.position) as usize);
+        loop {
+            if self.abort.load(Ordering::Relaxed) {
+                return Err(io::Error::other("streaming extraction cancelled"));
+            }
+            let Some(file) = self.file.as_mut() else {
+                // A finished download has already been renamed.
+                match fs::File::open(&self.partial).or_else(|_| fs::File::open(&self.archive)) {
+                    Ok(file) => self.file = Some(file),
+                    Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                }
+                continue;
+            };
+            let count = file.read(&mut buf[..want])?;
+            if count > 0 {
+                self.position += count as u64;
+                return Ok(count);
+            }
+            if !same_file(file, &self.partial) && !same_file(file, &self.archive) {
+                return Err(io::Error::other("runtime download restarted"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn same_file(file: &fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), fs::metadata(path)) {
+        (Ok(open), Ok(named)) => open.dev() == named.dev() && open.ino() == named.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_file(_file: &fs::File, path: &Path) -> bool {
+    path_exists(path)
+}
+
+/// Unpacks the runtime into staging while it downloads. The compressed bytes
+/// are hashed as they are read, and the tree is used only when that hash is
+/// the pinned SHA-256: a resumed, rewritten or torn `.part` can at worst cost
+/// a normal extraction afterwards, never a wrong image.
+struct StreamingExtract {
+    abort: Arc<AtomicBool>,
+    entries: Arc<AtomicU64>,
+    handle: Option<std::thread::JoinHandle<anyhow::Result<String>>>,
+}
+
+impl StreamingExtract {
+    fn start(length: u64, partial: &Path, archive: &Path, staging: &Path) -> anyhow::Result<Self> {
+        reset_staging(staging)?;
+        let abort = Arc::new(AtomicBool::new(false));
+        let entries = Arc::new(AtomicU64::new(0));
+        let follow = FollowReader {
+            partial: partial.to_path_buf(),
+            archive: archive.to_path_buf(),
+            file: None,
+            position: 0,
+            length,
+            abort: abort.clone(),
+        };
+        let staging = staging.to_path_buf();
+        let count = entries.clone();
+        let handle = std::thread::Builder::new()
+            .name("portal-unpack".into())
+            .spawn(move || -> anyhow::Result<String> {
+                let (reader, decoder) = spawn_decoder(HashingReader {
+                    inner: follow,
+                    hash: Sha256::new(),
+                });
+                let mut tar = tar::Archive::new(reader);
+                for entry in tar.entries()? {
+                    anyhow::ensure!(entry?.unpack_in(&staging)?, "Unsafe runtime archive path");
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
+                io::copy(&mut tar.into_inner(), &mut io::sink())?;
+                let mut hashing = decoder
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("Runtime decoder panicked"))??;
+                // Any bytes after the xz stream belong to the archive too.
+                io::copy(&mut hashing, &mut io::sink())?;
+                Ok(format!("{:x}", hashing.hash.finalize()))
+            })?;
+        Ok(Self {
+            abort,
+            entries,
+            handle: Some(handle),
+        })
+    }
+
+    /// Wait for the unpack after the download completed; true when staging
+    /// holds exactly the pinned archive's contents.
+    fn finish(mut self, sha256: &str, progress: &impl Fn(u64)) -> bool {
+        let Some(handle) = self.handle.take() else {
+            return false;
+        };
+        let mut last = Instant::now();
+        progress(self.entries.load(Ordering::Relaxed));
+        while !handle.is_finished() {
+            std::thread::sleep(Duration::from_millis(100));
+            if last.elapsed() >= Duration::from_secs(1) {
+                progress(self.entries.load(Ordering::Relaxed));
+                last = Instant::now();
+            }
+        }
+        match handle.join() {
+            Ok(Ok(digest)) if digest == sha256 => true,
+            Ok(Ok(_)) => {
+                log::warn!("Streamed runtime did not match its SHA-256; unpacking again");
+                false
+            }
+            Ok(Err(error)) => {
+                log::warn!("Streamed runtime unpack failed: {error:#}; unpacking again");
+                false
+            }
+            Err(_) => {
+                log::warn!("Streamed runtime unpack panicked; unpacking again");
+                false
+            }
+        }
+    }
+}
+
+impl Drop for StreamingExtract {
+    fn drop(&mut self) {
+        // Never leave a writer in staging behind for the next attempt.
+        self.abort.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn path_exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
@@ -1391,6 +1807,77 @@ mod tests {
             },
             archive,
         )
+    }
+
+    /// The same image recompressed as zstd, the current release format.
+    fn zstd_fixture(directory: &Path, version: &str) -> (RuntimeArtifact, PathBuf) {
+        let (xz, xz_archive) = fixture(directory, version);
+        let mut tar = Vec::new();
+        xz2::read::XzDecoder::new(fs::File::open(&xz_archive).unwrap())
+            .read_to_end(&mut tar)
+            .unwrap();
+        let archive = directory.join(format!("{version}.tar.zst"));
+        let bytes = zstd::stream::encode_all(&tar[..], 3).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+        (
+            RuntimeArtifact {
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                compressed_bytes: bytes.len() as u64,
+                ..xz
+            },
+            archive,
+        )
+    }
+
+    #[test]
+    fn zstd_runtime_extracts_like_xz() {
+        let directory = tempfile::tempdir().unwrap();
+        let (artifact, archive) = zstd_fixture(directory.path(), "zstd-image");
+        let root = directory.path().join("root");
+        extract_image(&artifact, &archive, &root);
+        assert!(artifact.is_image_ready(&root));
+    }
+
+    #[test]
+    fn streaming_extract_follows_a_growing_download() {
+        let directory = tempfile::tempdir().unwrap();
+        let (artifact, archive) = zstd_fixture(directory.path(), "streamed-image");
+        let bytes = fs::read(&archive).unwrap();
+        let partial = directory.path().join("download.part");
+        let staging = directory.path().join("staging");
+        let stream = StreamingExtract::start(
+            artifact.compressed_bytes,
+            &partial,
+            &directory.path().join("download"),
+            &staging,
+        )
+        .unwrap();
+        let mut file = fs::File::create(&partial).unwrap();
+        for chunk in bytes.chunks(97) {
+            file.write_all(chunk).unwrap();
+            file.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(stream.finish(&artifact.sha256, &|_| {}));
+        artifact.seal_staging(&staging).unwrap();
+        assert!(artifact.is_image_ready(&staging));
+    }
+
+    #[test]
+    fn streaming_extract_rejects_other_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let (artifact, archive) = zstd_fixture(directory.path(), "rejected-image");
+        let partial = directory.path().join("download.part");
+        fs::copy(&archive, &partial).unwrap();
+        let stream = StreamingExtract::start(
+            artifact.compressed_bytes,
+            &partial,
+            &directory.path().join("download"),
+            &directory.path().join("staging"),
+        )
+        .unwrap();
+        // Same image, but not the pinned digest: the tree must not be used.
+        assert!(!stream.finish(&"0".repeat(64), &|_| {}));
     }
 
     fn extract_image(artifact: &RuntimeArtifact, archive: &Path, root: &Path) {

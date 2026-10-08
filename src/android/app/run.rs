@@ -929,6 +929,12 @@ impl PolarBearApp {
     /// prepared runtime are checked again by the builder; this event is only a
     /// wake after the setup popup has closed, never installation truth.
     fn handle_initial_preferences_handoff(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        // Setup can finish while Portal is in the background, and returning
+        // delivers onStart before the surface exists. Leave the handoff
+        // queued; resumed() runs it again once Android hands over the window.
+        if self.frontend.android_app.native_window().is_none() {
+            return false;
+        }
         if !webview_handoff::take_initial_preferences_handoff() {
             return false;
         }
@@ -988,6 +994,10 @@ impl PolarBearApp {
     /// Transition from completed provisioning WebView to Wayland backend in-process.
     /// Returns true if a transition occurred.
     fn handle_setup_complete(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        // As for the preferences handoff: wait for the surface, not onStart.
+        if self.frontend.android_app.native_window().is_none() {
+            return false;
+        }
         if !webview_handoff::take_setup_handoff() {
             return false;
         }

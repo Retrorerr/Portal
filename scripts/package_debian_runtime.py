@@ -28,7 +28,22 @@ LOCK = REPO / "assets/debian-runtime-packages.json"
 # New canonical runtime: Debian base plus the pinned lfdevs Anland KWin/XWayland
 # stack. Older versions (e.g. debian13-arm64-2026.09.05.3) are never rebuilt or
 # replaced; pass --version explicitly to target a different image.
-VERSION = "debian13-arm64-2026.10.01.1"
+VERSION = "debian13-arm64-2026.10.08.1"
+# The device decoder caps zstd windows at 2^27 (128 MiB); keep these in step
+# with ZSTD_WINDOW_LOG_MAX in src/core/provisioning.rs.
+ZSTD_LEVEL = 19
+ZSTD_WINDOW_LOG = 27
+
+
+def open_compressed(output):
+    """zstd for .tar.zst (decodes ~7x faster than xz on device), xz otherwise."""
+    if output.name.endswith(".tar.zst"):
+        from compression import zstd  # Python 3.14+
+        from compression.zstd import CompressionParameter as P
+        return zstd.open(output, "wb", options={
+            P.compression_level: ZSTD_LEVEL, P.window_log: ZSTD_WINDOW_LOG,
+            P.enable_long_distance_matching: 1, P.checksum_flag: 1, P.nb_workers: 16})
+    return lzma.open(output, "wb", preset=1)
 
 
 def add_bytes(archive, name, data, mode=0o644):
@@ -91,7 +106,7 @@ def build(output, refresh_lock=False, version=VERSION, with_anland=True):
     with tempfile.TemporaryDirectory(prefix="portal-runtime-") as temporary:
         config = Path(temporary)
         payload_names: list[str] = []
-        with lzma.open(output, "wb", preset=1) as compressed, tarfile.open(fileobj=compressed, mode="w|") as archive:
+        with open_compressed(output) as compressed, tarfile.open(fileobj=compressed, mode="w|") as archive:
             build_rootfs(config, cache, payload_tar=archive, locked_packages=packages,
                          payload_names=payload_names)
             # These are supplied from Android on every setup/launch, not a build machine.
@@ -147,12 +162,13 @@ if __name__ == "__main__":
                         help="Lock these SEED_PACKAGES and their new dependencies (existing versions unchanged) and exit")
     parser.add_argument("--version", default=VERSION, help="Runtime version marker (never reuse a published version)")
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--xz", action="store_true", help="Build the older .tar.xz image instead of .tar.zst")
     parser.add_argument("--no-anland", action="store_true", help="Build the pure Debian base without the lfdevs overlay")
     args = parser.parse_args()
     if args.extend_lock:
         extend_lock(args.extend_lock)
         raise SystemExit(0)
-    output = args.output or (REPO / f"target/portal-{args.version}.tar.xz")
+    output = args.output or (REPO / f"target/portal-{args.version}.tar.{'xz' if args.xz else 'zst'}")
     manifest = build(output, args.refresh_lock, args.version, not args.no_anland)
     # NOTE: assets/debian-runtime.json is only rewritten by
     # scripts/publish_runtime_release.py after the archive passes validation

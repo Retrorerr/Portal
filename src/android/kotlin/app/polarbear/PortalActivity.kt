@@ -109,6 +109,7 @@ open class PortalActivity : GameActivity() {
             ComposeOverlay.markSystemSplashRemoved()
         }
         super.onCreate(savedInstanceState)
+        ComposeOverlay.attachContext(this)
         applyImmersive("onCreate")
         GamepadBridge.attach(this)
     }
@@ -125,6 +126,7 @@ open class PortalActivity : GameActivity() {
         super.onNewIntent(intent)
         // Debug builds only: open the first-run stages on demand.
         //   adb shell am start -n app.polarbear/.PortalActivity --activity-single-top --ez portal_preview_setup true
+        //   (add --es portal_preview_install ok|fail to play a scripted install)
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
             intent.getBooleanExtra(PortalPreview.EXTRA, false)
         ) {
@@ -132,6 +134,7 @@ open class PortalActivity : GameActivity() {
                 this,
                 intent.getFloatExtra(PortalPreview.EXTRA_SLOW, 1f),
                 intent.getBooleanExtra(PortalPreview.EXTRA_GATE, false),
+                intent.getStringExtra(PortalPreview.EXTRA_INSTALL),
             )
         }
     }

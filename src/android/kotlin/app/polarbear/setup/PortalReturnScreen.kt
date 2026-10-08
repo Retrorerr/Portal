@@ -73,6 +73,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.platform.LocalContext
 import app.polarbear.setup.components.LocalPortalVeil
 import app.polarbear.setup.components.SetupChecklist
+import app.polarbear.setup.components.UsageTips
+import app.polarbear.setup.components.usageTipsPending
 import app.polarbear.setup.components.setupChecklistPending
 import app.polarbear.setup.components.PortalEmphasized
 import app.polarbear.setup.components.PortalEmphasizedAccelerate
@@ -367,6 +369,7 @@ internal fun PortalReturnScreen(
     // Decided once per screen: ticking a step off keeps the card (showing it
     // done) instead of yanking it away mid-read.
     val checklistPending = remember { setupChecklistPending(context) }
+    val tipsPending = remember { !checklistPending && usageTipsPending(context) }
     LaunchedEffect(repairBlocked, updateBlocked) {
         currentRepairBlocked(repairBlocked || updateBlocked)
     }
@@ -471,6 +474,16 @@ internal fun PortalReturnScreen(
                     SetupChecklist(
                         palette = palette,
                         title = "Finish setting up Android",
+                        modifier = Modifier
+                            .padding(top = 28.dp)
+                            .widthIn(max = PortalDimens.PickerMaxWidth),
+                    )
+                }
+                // Optional tips wait until the checklist is done, so the
+                // screen never stacks two cards.
+                if (tipsPending) {
+                    UsageTips(
+                        palette = palette,
                         modifier = Modifier
                             .padding(top = 28.dp)
                             .widthIn(max = PortalDimens.PickerMaxWidth),

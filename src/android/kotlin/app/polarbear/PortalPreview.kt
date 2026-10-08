@@ -33,13 +33,15 @@ object PortalPreview {
     const val EXTRA_SLOW = "portal_preview_slow"
     // Show the launch gate of an installed desktop instead of the first-run card.
     const val EXTRA_GATE = "portal_preview_gate"
+    // Begin Install plays a scripted install: "ok", or "fail" to pause once.
+    const val EXTRA_INSTALL = "portal_preview_install"
     private const val TAG = "PortalPreview"
 
     private var frame: FrameLayout? = null
     private var stopSlowClock: (() -> Unit)? = null
     private var backCallback: OnBackPressedCallback? = null
 
-    fun show(activity: PortalActivity, slow: Float = 1f, gate: Boolean = false) {
+    fun show(activity: PortalActivity, slow: Float = 1f, gate: Boolean = false, install: String? = null) {
         hide()
         val root = FrameLayout(activity).apply {
             layoutParams = FrameLayout.LayoutParams(
@@ -59,7 +61,7 @@ object PortalPreview {
                 if (gate) {
                     PortalPrepareGate(launchMarkModifier = Modifier, onCleared = { hide() }, preview = true)
                 } else {
-                    PortalSetupScreen(previewOnly = true)
+                    PortalSetupScreen(previewOnly = true, previewInstall = install)
                 }
             }
         }

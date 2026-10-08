@@ -1210,6 +1210,8 @@ pub mod apk {
             pub enabled: Option<bool>,
             #[serde(rename(serialize = "android:exported"))]
             pub exported: Option<bool>,
+            #[serde(rename(serialize = "android:foregroundServiceType"))]
+            pub foreground_service_type: Option<String>,
             #[serde(rename(serialize = "meta-data"))]
             #[serde(default)]
             pub meta_data: Vec<MetaData>,

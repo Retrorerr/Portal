@@ -43,6 +43,9 @@ khronos-egl = { version = "6.0.0", features = ["dynamic"] }
 libloading = "0.8.6"
 libc = "0.2"
 pathdiff = "0.2"
+# ARMv8 SHA-2 instructions: without "asm" sha2 0.10 hashes in software, ~40 s
+# per pass over the 920 MiB runtime archive instead of under a second.
+sha2 = { version = "0.10.6", features = ["oid", "asm"] }
 pipewire = { version = "0.10", features = ["v1_0_0"], optional = true }
 smithay = { version = "0.5.0", default-features = false, features = [
     "wayland-protocols",
@@ -89,6 +92,9 @@ tempfile = "3.20.0"
 toml = "0.8.12"
 xz2 = { version = "0.1.7", features = ["static"] }
 zip = { version = "0.6.3", default-features = false, features = ["deflate"] }
+# Runtime images from debian13-arm64-2026.10.08 on are zstd: it decodes an
+# order of magnitude faster than xz on phone cores. xz stays for older images.
+zstd = { version = "0.13", default-features = false }
 
 [build-dependencies]
 cc = "1.2"

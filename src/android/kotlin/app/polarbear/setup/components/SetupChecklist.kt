@@ -75,7 +75,7 @@ private const val PHANTOM_MONITOR_PROPERTY =
 /** Settings' preference key for the toggle; Settings highlights it when passed. */
 private const val PHANTOM_MONITOR_PREFERENCE_KEY = "disable_phantom_process_monitor"
 
-private enum class StepState { Todo, Done }
+internal enum class StepState { Todo, Done }
 
 /**
  * Whether the checklist has anything to offer on this device. The child
@@ -152,7 +152,7 @@ internal fun developerOptionsEnabled(context: Context): Boolean =
         0,
     ) != 0
 
-private fun launch(context: Context, intent: Intent): Boolean = try {
+internal fun launch(context: Context, intent: Intent): Boolean = try {
     context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     true
 } catch (error: ActivityNotFoundException) {
@@ -276,7 +276,7 @@ fun SetupChecklist(
 }
 
 @Composable
-private fun ChecklistStep(
+internal fun ChecklistStep(
     number: Int,
     title: String,
     body: String,

@@ -53,7 +53,6 @@ pub const LAYER_MARKER: &str = "mesa-kgsl-layer.complete";
 /// stage (see `setup_mesa_layer`), never inline on the launch path.
 const DOWNLOAD_ATTEMPTS: u32 = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Archive members to extract, relative to the tarball root (`./` stripped).
 /// Mirrors `session_binds` exactly: the DRI drivers (kgsl), the GBM backend,
@@ -159,34 +158,41 @@ fn provision_inner(report: &impl Fn(String)) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut last_error = None;
-    for attempt in 1..=DOWNLOAD_ATTEMPTS {
-        let result = provision_attempt(&base, attempt, report);
-        match result {
+    // As for the Debian runtime: a lost connection is waited out, only hard
+    // failures count against the attempts.
+    let mut failures = 0;
+    let mut offline_waits = 0;
+    loop {
+        let e = match provision_attempt(&base, report) {
             Ok(()) => return Ok(()),
-            Err(e) => {
-                log::warn!("mesa KGSL layer attempt {attempt}/{DOWNLOAD_ATTEMPTS} failed: {e:#}");
-                report(format!(
-                    "Mesa layer attempt {attempt}/{DOWNLOAD_ATTEMPTS} failed: {e:#}"
-                ));
-                last_error = Some(e);
-            }
+            Err(e) => e,
+        };
+        if e.downcast_ref::<crate::core::provisioning::WaitingForNetwork>().is_some() {
+            offline_waits += 1;
+            log::warn!("mesa KGSL layer download lost its connection: {e:#}; waiting to resume");
+            report("Waiting for an internet connection…".to_string());
+            std::thread::sleep(crate::core::provisioning::offline_backoff(offline_waits));
+            continue;
         }
+        failures += 1;
+        log::warn!("mesa KGSL layer attempt {failures}/{DOWNLOAD_ATTEMPTS} failed: {e:#}");
+        if failures >= DOWNLOAD_ATTEMPTS {
+            return Err(e);
+        }
+        report("Something went wrong; trying again…".to_string());
+        std::thread::sleep(Duration::from_secs(2));
     }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Mesa KGSL layer provisioning failed")))
 }
 
-fn provision_attempt(base: &Path, attempt: u32, report: &impl Fn(String)) -> anyhow::Result<()> {
+fn provision_attempt(base: &Path, report: &impl Fn(String)) -> anyhow::Result<()> {
     let paths = crate::core::mesa_layer::layer_paths(base);
 
     // Reuse an already-verified archive from a previous interrupted run.
     if verify_archive(&paths.archive).is_ok() {
         report("Mesa layer download already verified, reusing…".to_string());
     } else {
-        report(format!(
-            "Downloading Mesa layer {LAYER_VERSION} (attempt {attempt}/{DOWNLOAD_ATTEMPTS})…"
-        ));
-        download_archive(&paths.archive)?;
+        report("Downloading graphics drivers…".to_string());
+        download_archive(&paths.archive).map_err(crate::core::provisioning::tag_network_error)?;
     }
 
     report("Verifying Mesa layer SHA-256…".to_string());
@@ -251,13 +257,16 @@ fn download_archive(archive_path: &Path) -> anyhow::Result<()> {
     }
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(ATTEMPT_TIMEOUT)
+        .timeout(crate::core::provisioning::DOWNLOAD_STALL_TIMEOUT)
+        .tcp_keepalive(Duration::from_secs(15))
         .build()
         .map_err(|e| anyhow::anyhow!("http client: {e}"))?;
+    // Keep the reqwest error itself in the chain so a lost connection is
+    // recognised as one.
     let mut response = client
         .get(LAYER_URL)
         .send()
-        .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
+        .map_err(|e| anyhow::Error::new(e).context("download failed"))?;
     if !response.status().is_success() {
         anyhow::bail!("download HTTP {}", response.status());
     }

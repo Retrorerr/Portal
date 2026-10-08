@@ -141,7 +141,7 @@ pub fn device_capabilities() -> DeviceCapabilities {
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     DeviceCapabilities {
         anland: crate::android::anland::is_anland_requested(),
-        kgsl: Path::new(crate::core::drm_nodes::KGSL_DEVICE).exists(),
+        kgsl: crate::android::anland::kgsl_available(),
         page_size: usize::try_from(page_size).unwrap_or(0),
     }
 }

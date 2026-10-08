@@ -274,22 +274,34 @@ impl SetupFailure {
     fn from_detail(index: usize, name: &str, detail: impl Into<String>) -> Self {
         let diagnostic = detail.into();
         let lower = diagnostic.to_ascii_lowercase();
-        let kind = if lower.contains("no space")
+        // Network first: download errors quote the URL, whose ".tar.xz"
+        // would otherwise read as an extraction failure.
+        let kind = if lower.contains("waiting for a network connection")
+            || lower.contains("error sending request")
+            || lower.contains("dns error")
+            || lower.contains("connection")
+        {
+            SetupFailureKind::Network
+        } else if lower.contains("no space")
             || lower.contains("enospc")
             || lower.contains("storage")
             || lower.contains("free space")
         {
             SetupFailureKind::Storage
-        } else if lower.contains("sha")
+        } else if lower.contains("plasma") {
+            // Handoff failures; "start" must not read as "tar" below.
+            SetupFailureKind::Stage
+        } else if lower.contains("sha-256")
+            || lower.contains("sha256")
             || lower.contains("size mismatch")
             || lower.contains("content-range")
-            || lower.contains("range")
             || lower.contains("verify")
         {
             SetupFailureKind::Verification
         } else if lower.contains("extract")
             || lower.contains("archive")
-            || lower.contains("tar")
+            || lower.contains(".tar")
+            || lower.contains("tar:")
             || lower.contains("unsafe runtime")
         {
             SetupFailureKind::Extraction
@@ -312,14 +324,14 @@ impl SetupFailure {
             SetupFailureKind::Stage
         };
         let action = match kind {
-            SetupFailureKind::Network => "Check your connection and tap Retry.",
-            SetupFailureKind::Storage => "Free some storage and tap Retry.",
-            SetupFailureKind::Verification => "The download could not be verified. Tap Retry.",
-            SetupFailureKind::Extraction => "Debian could not be unpacked safely. Tap Retry.",
-            SetupFailureKind::Graphics => "Portal's graphics support could not be prepared. Tap Retry.",
-            SetupFailureKind::Filesystem => "Portal could not write its setup files. Tap Retry.",
-            SetupFailureKind::Unsupported => "This device cannot run Portal.",
-            SetupFailureKind::Stage => "Portal could not finish setup. Tap Retry.",
+            SetupFailureKind::Network => "Portal lost its internet connection. Check it and tap Try again.",
+            SetupFailureKind::Storage => "Your device is out of space. Free some up and tap Try again.",
+            SetupFailureKind::Verification => "The download was damaged on the way. Tap Try again.",
+            SetupFailureKind::Extraction => "Debian couldn’t be unpacked. Tap Try again.",
+            SetupFailureKind::Graphics => "Portal’s graphics drivers couldn’t be set up. Tap Try again.",
+            SetupFailureKind::Filesystem => "Portal couldn’t write its setup files. Tap Try again.",
+            SetupFailureKind::Unsupported => "This device can’t run Portal.",
+            SetupFailureKind::Stage => "Portal couldn’t finish setting up. Tap Try again.",
         };
         Self {
             stage: format!("{index} ({name})"),
@@ -761,9 +773,8 @@ pub fn anland_repair_ui_snapshot() -> (AnlandRepairAvailability, ProvisioningSna
         AnlandRepairState::Idle => {
             let artifact = crate::core::provisioning::RuntimeArtifact::production();
             let root = Path::new(PRODUCTION_FS_ROOT);
-            let eligible = artifact
-                .classify_runtime(root)
-                .is_trusted_recovery()
+            let eligible = crate::android::anland::kgsl_available()
+                && artifact.classify_runtime(root).is_trusted_recovery()
                 && matches!(
                     crate::android::anland::active_renderer(),
                     crate::android::anland::RendererKind::Smithay
@@ -938,14 +949,55 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
     Some(thread::spawn(move || -> anyhow::Result<()> {
         // Every package token comes from fixed allowlist commands in
         // core::optional_apps; the UI only chooses which apps are included.
-        super::optional_apps::install_for_setup(&missing)
-            .context("Optional app installation failed")?;
-        // This is a one-time first-run application to the selected user's
-        // desktop entry. A later cold start must not regenerate it.
-        super::optional_apps::prepare_electron_launchers_for_setup(&electron_apps)?;
+        let mut installed = super::optional_apps::install_for_setup(&missing);
+        if let Err(error) = &installed {
+            log::warn!("Optional app installation failed, trying once more: {error:#}");
+            thread::sleep(Duration::from_secs(3));
+            installed = super::optional_apps::install_for_setup(&missing);
+        }
+        match installed {
+            // This is a one-time first-run application to the selected
+            // user's desktop entry. A later cold start must not regenerate it.
+            Ok(()) => super::optional_apps::prepare_electron_launchers_for_setup(&electron_apps)?,
+            // An extra app must never stand between the user and the
+            // desktop: the app manager installs it once Plasma is up.
+            Err(error) => {
+                log::warn!("Deferring optional apps to the app manager: {error:#}");
+                diagnostics::host_event("optional-apps-deferred", &format!("{error:#}"));
+                defer_optional_apps(&missing)?;
+            }
+        }
         provision_ibus_packages(Path::new(PRODUCTION_FS_ROOT));
         Ok(())
     }))
+}
+
+/// Optional apps setup could not install; queued for the app manager.
+const DEFERRED_OPTIONAL_APPS: &str = "optional-apps-deferred";
+
+fn defer_optional_apps(apps: &[OptionalApp]) -> anyhow::Result<()> {
+    let ids = apps.iter().map(|app| app.id()).collect::<Vec<_>>().join("\n");
+    fs::write(Path::new(APP_FILES_ROOT).join(DEFERRED_OPTIONAL_APPS), ids)
+        .context("could not record the optional apps left for later")
+}
+
+/// Hand apps setup deferred to the app manager. Runs once the runtime is
+/// bootable, after first setup or on the next start if the process died.
+fn queue_deferred_optional_apps() {
+    let path = Path::new(APP_FILES_ROOT).join(DEFERRED_OPTIONAL_APPS);
+    let Ok(ids) = fs::read_to_string(&path) else {
+        return;
+    };
+    let mut all_queued = true;
+    for id in ids.lines().map(str::trim).filter(|id| !id.is_empty()) {
+        if !super::optional_apps::request(id, true) {
+            log::warn!("Could not queue deferred optional app {id}; a later start retries");
+            all_queued = false;
+        }
+    }
+    if all_queued {
+        let _ = fs::remove_file(&path);
+    }
 }
 
 /// Establish renderer selection before Mesa and Plasma stages inspect it.
@@ -2677,9 +2729,11 @@ pub fn try_sync_session_runtime_files(fs_root: &Path, ui_scale: i32) -> anyhow::
 /// account validation, one-time non-destructive root-profile import, and
 /// private runtime/session directories; Plasma itself is never run as root.
 pub fn prepare_desktop_login(migrate_legacy: bool) -> anyhow::Result<()> {
+    ensure_apt_lock_wait(Path::new(PRODUCTION_FS_ROOT));
     ensure_desktop_services(Path::new(PRODUCTION_FS_ROOT))?;
-    ensure_mozilla_firefox(Path::new(PRODUCTION_FS_ROOT));
-    ensure_desktop_extras(Path::new(PRODUCTION_FS_ROOT));
+    sync_firefox_esr_diversion(Path::new(PRODUCTION_FS_ROOT));
+    // Mozilla's Firefox and the everyday extras are downloads the desktop
+    // does not need to start: see `spawn_background_installs`.
     let caches = PRootRuntime::active().execute(
         ProcessSpec::new("/usr/local/bin/localdesktop-system-caches"),
         None,
@@ -2802,9 +2856,10 @@ const FIREFOX_ESR_DIVERSION: &str = r#"if dpkg-divert --list /usr/bin/firefox | 
 const MOZILLA_FIREFOX_INSTALL: &str = r#"curl --fail --location --retry 2 --proto '=https' --proto-redir '=https' --tlsv1.2 \
         --output /tmp/portal-mozilla-key.asc.part \
         https://packages.mozilla.org/apt/repo-signing-key.gpg &&
-    test "$(gpg --batch --with-colons --show-keys /tmp/portal-mozilla-key.asc.part |
-        awk -F: '$1 == "pub" { keys++ } $1 == "fpr" && primary == "" { primary = $10 }
-            END { if (keys == 1) print primary }')" = 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 &&
+    gpg --batch --with-colons --show-keys /tmp/portal-mozilla-key.asc.part >/tmp/portal-mozilla-key.colons &&
+    test "$(grep -c '^pub:' /tmp/portal-mozilla-key.colons)" = 1 &&
+    test "$(grep '^fpr:' /tmp/portal-mozilla-key.colons | head -n 1 | cut -d: -f10)" = 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 &&
+    rm -f /tmp/portal-mozilla-key.colons &&
     install -d -m 0755 /etc/apt/keyrings &&
     install -m 0644 /tmp/portal-mozilla-key.asc.part /etc/apt/keyrings/packages.mozilla.org.asc &&
     rm -f /tmp/portal-mozilla-key.asc.part &&
@@ -2884,10 +2939,10 @@ fn ensure_desktop_extras(root: &Path) {
     }
 }
 
-fn ensure_mozilla_firefox(root: &Path) {
-    // Every launch, so the old `.debian-esr` layout is moved over and an ESR
-    // reinstalled since gets its diversion; a dpkg state file read skips the
-    // PRoot call when nothing is to do.
+/// Every launch, so the old `.debian-esr` layout is moved over and an ESR
+/// reinstalled since gets its diversion; a dpkg state file read skips the
+/// PRoot call when nothing is to do. Returns whether the layout is right.
+fn sync_firefox_esr_diversion(root: &Path) -> bool {
     let diversions = fs::read_to_string(root.join("var/lib/dpkg/diversions")).unwrap_or_default();
     let esr_diverted = diversions.lines().any(|line| line == "/usr/bin/firefox.real");
     let esr_installed = installed_dpkg_packages(root).is_ok_and(|installed| installed.contains("firefox-esr"));
@@ -2898,9 +2953,49 @@ fn ensure_mozilla_firefox(root: &Path) {
                 "/usr/bin/firefox diversion could not be set up: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            return;
+            return false;
         }
     }
+    true
+}
+
+/// apt in the guest waits for a busy dpkg lock instead of failing at once:
+/// Portal's background installs (IBus, extras, Firefox, deferred apps) and
+/// the user's own apt can then overlap safely.
+fn ensure_apt_lock_wait(root: &Path) {
+    let path = root.join("etc/apt/apt.conf.d/50portal-lock-wait");
+    if path.is_file() {
+        return;
+    }
+    if let Err(error) = fs::write(&path, "DPkg::Lock::Timeout \"600\";\n") {
+        log::warn!("apt lock wait could not be configured: {error}");
+    }
+}
+
+static BACKGROUND_INSTALLS_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Downloads the desktop can start without (everyday tools, Mozilla's
+/// Firefox, optional apps first setup deferred) run here, behind the running
+/// desktop instead of in front of it. Each keeps its own marker, so an
+/// offline launch simply leaves it for the next one.
+pub fn spawn_background_installs() {
+    if BACKGROUND_INSTALLS_RUNNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    thread::spawn(|| {
+        // Let Plasma have the CPU while it starts.
+        thread::sleep(Duration::from_secs(20));
+        let root = Path::new(PRODUCTION_FS_ROOT);
+        ensure_desktop_extras(root);
+        if sync_firefox_esr_diversion(root) {
+            install_mozilla_firefox(root);
+        }
+        queue_deferred_optional_apps();
+        BACKGROUND_INSTALLS_RUNNING.store(false, Ordering::Release);
+    });
+}
+
+fn install_mozilla_firefox(root: &Path) {
     let marker = root.join("var/lib/localdesktop/mozilla-firefox-v1");
     if marker.is_file() {
         return;
@@ -4213,7 +4308,10 @@ fn wait_for_initial_preferences_proof(
     appearance: AppliedAppearance,
     attempt_id: &str,
 ) -> anyhow::Result<()> {
-    let started = Instant::now();
+    // The clock runs only once Plasma has actually been launched: while the
+    // user is away there is no window to launch it in, and the handoff simply
+    // waits for them to come back.
+    let mut launched_at: Option<Instant> = None;
     loop {
         let handoff = setup_coordinator()
             .lock()
@@ -4247,7 +4345,10 @@ fn wait_for_initial_preferences_proof(
                 _ => anyhow::bail!("Initial-preferences proof arrived for an inactive plan"),
             }
         }
-        if started.elapsed() >= INITIAL_APPEARANCE_HANDOFF_TIMEOUT {
+        if matches!(&handoff, InitialPreferencesHandoff::Launched(_)) {
+            launched_at.get_or_insert_with(Instant::now);
+        }
+        if launched_at.is_some_and(|at| at.elapsed() >= INITIAL_APPEARANCE_HANDOFF_TIMEOUT) {
             anyhow::bail!("Timed out waiting for verified KScreen appearance and scale state");
         }
         thread::sleep(INITIAL_APPEARANCE_POLL_INTERVAL);
@@ -4312,8 +4413,90 @@ fn apply_initial_preferences_before_commit(
     Ok(())
 }
 
+/// Whether a failed attempt may be re-run in place, with no user action:
+/// only before the provisional Plasma handoff, for the same running plan, on
+/// a runtime that is still a plain image (exactly what Retry would accept).
+fn can_rerun_in_place(failure: &SetupFailure) -> bool {
+    if matches!(failure.kind, SetupFailureKind::Unsupported | SetupFailureKind::Storage) {
+        return false;
+    }
+    let idle = setup_coordinator().lock().is_ok_and(|coordinator| {
+        coordinator.state == InstallOperationState::Running
+            && matches!(coordinator.initial_preferences_handoff, InitialPreferencesHandoff::Idle)
+    });
+    idle && matches!(
+        crate::core::provisioning::RuntimeArtifact::production()
+            .classify_runtime(Path::new(PRODUCTION_FS_ROOT)),
+        crate::core::provisioning::RuntimeClassification::Absent
+            | crate::core::provisioning::RuntimeClassification::ValidatedImageOnly
+    )
+}
+
 fn run_installation(registration: SetupRegistration) {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    // Setup heals itself before it asks for help: a lost connection is waited
+    // out for as long as it lasts, and any other failure gets one automatic
+    // re-run (stages are idempotent and resume where they stopped).
+    let mut automatic_retries = 0;
+    let mut offline_waits = 0;
+    let result = loop {
+        let result = run_installation_attempt(&registration);
+        let Ok(Err(failure)) = &result else {
+            break result;
+        };
+        if !can_rerun_in_place(failure) {
+            break result;
+        }
+        let progress = registration
+            .progress()
+            .and_then(|progress| progress.lock().ok().map(|progress| *progress))
+            .unwrap_or(0);
+        let offline = failure
+            .diagnostic
+            .to_ascii_lowercase()
+            .contains("waiting for a network connection");
+        let delay = if offline {
+            offline_waits += 1;
+            log::warn!("Portal setup is offline at stage {}; waiting", failure.stage);
+            publish_snapshot(
+                &registration,
+                ProvisioningSnapshot::update(
+                    ProvisioningPhase::Configuring,
+                    progress,
+                    "Waiting for an internet connection…",
+                ),
+            );
+            crate::core::provisioning::offline_backoff(offline_waits)
+        } else if automatic_retries < 1 {
+            automatic_retries += 1;
+            log::warn!(
+                "Portal setup stage {} failed ({:?}), re-running once: {}",
+                failure.stage,
+                failure.kind,
+                failure.diagnostic
+            );
+            diagnostics::host_event("setup-auto-retry", &failure.diagnostic);
+            publish_snapshot(
+                &registration,
+                ProvisioningSnapshot::update(
+                    ProvisioningPhase::Configuring,
+                    progress,
+                    "Something went wrong; trying again…",
+                ),
+            );
+            Duration::from_secs(3)
+        } else {
+            break result;
+        };
+        thread::sleep(delay);
+    };
+    finish_installation(&registration, result);
+}
+
+fn run_installation_attempt(
+    registration: &SetupRegistration,
+) -> std::thread::Result<Result<(), SetupFailure>> {
+    let registration = registration.clone();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let progress_registration = registration.clone();
         let progress: Arc<dyn Fn(ProvisioningSnapshot) + Send + Sync> = Arc::new(move |snapshot| {
             publish_snapshot(&progress_registration, snapshot);
@@ -4355,10 +4538,18 @@ fn run_installation(registration: SetupRegistration) {
                 )
             })
             .and_then(|()| finalise_installation(&registration))
-    }));
+    }))
+}
+
+fn finish_installation(
+    registration: &SetupRegistration,
+    result: std::thread::Result<Result<(), SetupFailure>>,
+) {
+    let registration = registration.clone();
     match result {
         Ok(Ok(())) => {
             mark_active_plan_complete();
+            queue_deferred_optional_apps();
             crate::android::utils::webview_handoff::cancel_initial_preferences_handoff();
             let snapshot = ProvisioningSnapshot::complete("Portal installed. Starting Plasma…");
             if let Ok(mut coordinator) = setup_coordinator().lock() {
@@ -4774,7 +4965,7 @@ pub fn fail_initial_preferences_handoff(reason: &str) -> bool {
         coordinator.initial_preferences_handoff =
             InitialPreferencesHandoff::Failed(reason.clone());
         coordinator.pending_initial_preferences_failure = Some(
-            "Portal could not verify the selected appearance and display size. Tap Retry Setup."
+            "Portal couldn’t apply your appearance and display size. Tap Try again."
                 .to_string(),
         );
         Some(plan)
@@ -4978,6 +5169,7 @@ fn prepare_committed_runtime(registration: &SetupRegistration) -> Result<(), Set
         .map_err(|error| SetupFailure::from_detail(10, "crash-handler", format!("{error:#}")))?;
     prepare_desktop_login(true)
         .map_err(|error| SetupFailure::from_detail(11, "desktop-login", format!("{error:#}")))?;
+    queue_deferred_optional_apps();
     Ok(())
 }
 
@@ -5068,7 +5260,7 @@ pub fn setup_with_completion(
                 .lock()
                 .ok()
                 .and_then(|coordinator| coordinator.snapshot.error.clone())
-                .unwrap_or_else(|| "Portal setup needs attention. Tap Retry.".to_string()),
+                .unwrap_or_else(|| "Portal setup paused. Tap Try again.".to_string()),
         );
         return PolarBearBackend::WebView(backend);
     }
@@ -5168,18 +5360,11 @@ pub fn setup_with_completion(
                     "Portal has a completed setup plan but its runtime marker is missing. The existing guest was preserved; export diagnostics before recovery.",
                 );
             }
-            InstallPlanState::Failed => {
-                let message =
-                    "Portal setup previously failed and preserved its accepted choices. Tap Retry Setup to continue.";
-                return setup_failure_backend(
-                    &registration,
-                    receiver,
-                    progress,
-                    Some(record.plan().clone()),
-                    message,
-                );
-            }
-            InstallPlanState::InProgress => {
+            InstallPlanState::Failed | InstallPlanState::InProgress => {
+                // Reopening Portal continues setup, whether it was stopped
+                // by Android or failed last time: that is what Retry would
+                // do, and the user already said Begin.
+                let retrying = record.state() == InstallPlanState::Failed;
                 let classification = artifact.classify_runtime(root);
                 if !matches!(
                     classification,
@@ -5197,7 +5382,7 @@ pub fn setup_with_completion(
                         &message,
                     );
                 }
-                let plan = match persist_plan_before_start(None, false) {
+                let plan = match persist_plan_before_start(None, retrying) {
                     Ok(plan) => plan,
                     Err(error) => {
                         let message = format!(
@@ -5218,7 +5403,7 @@ pub fn setup_with_completion(
                         receiver,
                         progress,
                         Some(record.plan().clone()),
-                        "Portal could not restart its accepted setup worker. The guest and choices were preserved; tap Retry Setup or export diagnostics.",
+                        "Portal could not restart its accepted setup worker. The guest and choices were preserved; tap Try again or export diagnostics.",
                     );
                 }
                 return PolarBearBackend::WebView(WebviewBackend::build(receiver, progress));

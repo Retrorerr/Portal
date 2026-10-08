@@ -223,6 +223,7 @@ pub fn launch() {
             ));
             return;
         }
+        crate::android::proot::setup::spawn_background_installs();
 
         // Clean up potential leftover files for display :1 in one guest process.
         ArchProcess {

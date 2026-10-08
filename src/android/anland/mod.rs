@@ -16,6 +16,10 @@
 //! and is recorded explicitly. There is deliberately **no silent renderer
 //! migration** after a choice exists.
 //!
+//! Anland needs Qualcomm's KGSL GPU device. On any other GPU (Mali and
+//! PowerVR Pixels, for example) the stored choice is left alone but resolves
+//! to QPainter, so an install that already chose Anland still boots.
+//!
 //! Upstream reference: `third_party/anland/` (protocol, broker/consumer
 //! design, hidden window ABI) + `docs/anland-*.md` as added.
 
@@ -35,6 +39,33 @@ use std::sync::Arc;
 pub enum RendererKind {
     Smithay,
     Anland,
+}
+
+/// Debug builds only: while this file exists in app files, Portal behaves as
+/// if the device had no KGSL GPU, so a GPU-less first install can be tested
+/// on an Adreno device.
+#[cfg(feature = "portal-debug")]
+pub const EMULATE_NO_GPU_FILE: &str = "emulate-no-gpu";
+
+/// Whether the Adreno KGSL device Anland and Turnip drive exists.
+pub fn kgsl_available() -> bool {
+    #[cfg(feature = "portal-debug")]
+    if std::path::Path::new(crate::core::config::APP_FILES_ROOT)
+        .join(EMULATE_NO_GPU_FILE)
+        .exists()
+    {
+        return false;
+    }
+    std::path::Path::new(crate::core::drm_nodes::KGSL_DEVICE).exists()
+}
+
+/// Anland on a device without KGSL can never present a frame.
+fn without_kgsl(kind: RendererKind) -> RendererKind {
+    if kind == RendererKind::Anland && !kgsl_available() {
+        log::info!("anland.renderer=smithay-qpainter (no KGSL GPU on this device)");
+        return RendererKind::Smithay;
+    }
+    kind
 }
 
 /// App-private flag file selecting the renderer (content `anland`).
@@ -72,7 +103,7 @@ pub fn active_renderer() -> RendererKind {
             log::info!("anland.renderer=smithay-qpainter (explicit/legacy-safe fallback)");
         }
     }
-    kind
+    without_kgsl(kind)
 }
 
 /// Initialize or validate the durable renderer selection used by setup and
@@ -85,10 +116,10 @@ pub fn ensure_renderer_mode() -> anyhow::Result<RendererKind> {
         crate::core::config::PRODUCTION_FS_ROOT,
     ));
     let selection = crate::core::renderer_policy::ensure_renderer_mode(&mode_flag_path(), runtime)?;
-    Ok(match selection {
+    Ok(without_kgsl(match selection {
         crate::core::renderer_policy::RendererSelection::Anland => RendererKind::Anland,
         crate::core::renderer_policy::RendererSelection::QPainter => RendererKind::Smithay,
-    })
+    }))
 }
 
 /// Explicit repair action: select Anland even when an existing Portal install
@@ -96,6 +127,7 @@ pub fn ensure_renderer_mode() -> anyhow::Result<RendererKind> {
 /// must continue through [`ensure_renderer_mode`]; only the user-requested
 /// graphics repair is allowed to intentionally change an existing choice.
 pub fn force_anland_renderer() -> anyhow::Result<RendererKind> {
+    anyhow::ensure!(kgsl_available(), "this device has no KGSL GPU for Anland");
     let selection = crate::core::renderer_policy::set_renderer_mode(
         &mode_flag_path(),
         crate::core::renderer_policy::RendererSelection::Anland,

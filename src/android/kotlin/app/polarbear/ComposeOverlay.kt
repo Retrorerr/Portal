@@ -293,6 +293,16 @@ object ComposeOverlay {
         )
         installStateSnapshot = next
         composeView?.post { installStateValue.value = installStateSnapshot }
+        appContext?.let { SetupService.sync(it, next) }
+    }
+
+    // For the setup foreground service, which must outlive the overlay.
+    @Volatile private var appContext: android.content.Context? = null
+
+    @JvmStatic fun attachContext(context: android.content.Context) {
+        appContext = context.applicationContext
+        // A setup resumed before the Activity existed starts its service now.
+        SetupService.sync(context, installStateSnapshot)
     }
 
     /** Subscribe to the process-lifetime native provisioning snapshot. */
