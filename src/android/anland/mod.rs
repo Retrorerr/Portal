@@ -25,7 +25,7 @@ pub mod consumer;
 pub mod protocol;
 pub mod sys;
 
-pub use consumer::{AnlandConfig, AnlandSession};
+pub use consumer::{AnlandConfig, AnlandKeySink, AnlandSession};
 
 use std::ffi::c_void;
 use std::sync::Arc;

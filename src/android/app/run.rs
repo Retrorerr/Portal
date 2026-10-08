@@ -402,6 +402,9 @@ fn resume_anland(
         );
     }
     accessibility::set_runtime_active(true);
+    if let Some(session) = backend.anland.as_ref() {
+        accessibility::set_anland_key_sink(session.key_sink());
+    }
     pipewire_standalone_aaudio::spawn_after_ready(android_app.clone());
     if existing_session {
         // A normal Android resume must not call launch(): the tracked Plasma
@@ -1252,6 +1255,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         }
 
         for event in accessibility::drain_pending_events() {
+            // Keys queued just before the Anland sink was registered.
+            if let Some(session) = backend.anland.as_ref() {
+                anland_key(session, event.scancode, event.state == ElementState::Pressed);
+                continue;
+            }
             let event = centralize_injected_keyboard(
                 event.scancode,
                 event.state,

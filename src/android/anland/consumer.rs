@@ -742,50 +742,74 @@ impl AnlandSession {
     /// Forward one fixed-size input event to the producer. No-op unless the
     /// current generation completed its BUFS_READY push.
     pub fn send_input(&self, ev: &InputEvent) {
-        let inner = &self.inner;
-        if !inner.running.load(Ordering::Acquire)
-            || !inner.window_live.load(Ordering::Acquire)
-        {
-            return;
-        }
-        if inner.rebind_active.load(Ordering::Acquire) {
-            // A rotation rebind owns the surface right now: events observed
-            // against the obsolete geometry must not mutate the new state.
-            log::debug!("anland.input dropped during surface rebind");
-            return;
-        }
-        // Input means the user is active: full-rate presentation window plus
-        // an immediate wake (the select bypasses the vsync gate once, then
-        // subsequent frames lock to ticks — low latency without free-spin).
-        kick(inner, INPUT_BURST_MS);
-        let _guard = inner.io_lock.lock().unwrap();
-        let gen_guard = inner.gen.lock().unwrap();
-        let Some(gen) = gen_guard.as_ref() else {
-            return;
-        };
-        if inner.connected_gen.lock().unwrap().as_ref() != Some(&gen.id) {
-            return;
-        }
-        let mut wire = [0u8; 8 + 20];
-        wire[0..4].copy_from_slice(&DATA_MSG_INPUT_EVENT.to_ne_bytes());
-        wire[4..8].copy_from_slice(&20u32.to_ne_bytes());
-        wire[8..12].copy_from_slice(&ev.ev_type.to_ne_bytes());
-        wire[12..28].copy_from_slice(&ev.payload);
-        if sys::send_all(&gen.data, &wire).is_err() {
-            let failed_gen = gen.id;
-            drop(gen_guard);
-            drop(_guard);
-            enter_fallback(inner, failed_gen, "input send failed");
-        } else if let Some((code, pressed)) = ev.press_edge() {
-            let mut held = inner.held_inputs.lock().unwrap();
-            if pressed {
-                held.insert((ev.ev_type, code));
-            } else {
-                held.remove(&(ev.ev_type, code));
-            }
-        }
+        send_input_inner(&self.inner, ev);
     }
 
+    /// A thread-safe handle for key edges, so the accessibility service can
+    /// forward keys from its binder thread without waking the event loop.
+    pub fn key_sink(&self) -> AnlandKeySink {
+        AnlandKeySink(self.inner.clone())
+    }
+}
+
+/// Key-only input handle shared with the accessibility bridge. A sink that
+/// outlives its session is harmless: `send_input_inner` drops input once the
+/// session stops running.
+#[derive(Clone)]
+pub struct AnlandKeySink(Arc<Inner>);
+
+impl AnlandKeySink {
+    pub fn send_key(&self, scancode: u32, pressed: bool) {
+        let action = if pressed { INPUT_ACTION_DOWN } else { INPUT_ACTION_UP };
+        send_input_inner(&self.0, &InputEvent::key(action, scancode as i32));
+    }
+}
+
+fn send_input_inner(inner: &Arc<Inner>, ev: &InputEvent) {
+    if !inner.running.load(Ordering::Acquire)
+        || !inner.window_live.load(Ordering::Acquire)
+    {
+        return;
+    }
+    if inner.rebind_active.load(Ordering::Acquire) {
+        // A rotation rebind owns the surface right now: events observed
+        // against the obsolete geometry must not mutate the new state.
+        log::debug!("anland.input dropped during surface rebind");
+        return;
+    }
+    // Input means the user is active: full-rate presentation window plus
+    // an immediate wake (the select bypasses the vsync gate once, then
+    // subsequent frames lock to ticks — low latency without free-spin).
+    kick(inner, INPUT_BURST_MS);
+    let _guard = inner.io_lock.lock().unwrap();
+    let gen_guard = inner.gen.lock().unwrap();
+    let Some(gen) = gen_guard.as_ref() else {
+        return;
+    };
+    if inner.connected_gen.lock().unwrap().as_ref() != Some(&gen.id) {
+        return;
+    }
+    let mut wire = [0u8; 8 + 20];
+    wire[0..4].copy_from_slice(&DATA_MSG_INPUT_EVENT.to_ne_bytes());
+    wire[4..8].copy_from_slice(&20u32.to_ne_bytes());
+    wire[8..12].copy_from_slice(&ev.ev_type.to_ne_bytes());
+    wire[12..28].copy_from_slice(&ev.payload);
+    if sys::send_all(&gen.data, &wire).is_err() {
+        let failed_gen = gen.id;
+        drop(gen_guard);
+        drop(_guard);
+        enter_fallback(inner, failed_gen, "input send failed");
+    } else if let Some((code, pressed)) = ev.press_edge() {
+        let mut held = inner.held_inputs.lock().unwrap();
+        if pressed {
+            held.insert((ev.ev_type, code));
+        } else {
+            held.remove(&(ev.ev_type, code));
+        }
+    }
+}
+
+impl AnlandSession {
     /// Forward absolute pointer motion with session-synthesized relative
     /// deltas. winit carries only absolute positions; the KWin backend emits
     /// both absolute and relative motion per event, and relative clients

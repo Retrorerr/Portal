@@ -9,6 +9,7 @@ use jni::{
     sys::{jboolean, jint, jlong, JNI_FALSE, JNI_TRUE},
     JNIEnv,
 };
+use crate::android::anland::AnlandKeySink;
 use winit::{event::ElementState, event_loop::EventLoopProxy};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +49,9 @@ struct AccessibilityBridgeState {
     /// Android key codes whose press went to the guest. Their release is
     /// still forwarded after focus moves, so no guest key is left held down.
     held_keys: HashSet<jint>,
+    /// GPU (Anland) sessions take keys straight from the service's binder
+    /// thread; KWin is fed by the session, not by Smithay's keyboard.
+    anland_keys: Option<AnlandKeySink>,
     service_connected: bool,
     pending_events: VecDeque<AccessibilityKeyEvent>,
 }
@@ -87,7 +91,17 @@ pub fn set_runtime_active(active: bool) {
     if !active {
         bridge.pending_events.clear();
         bridge.held_keys.clear();
+        bridge.anland_keys = None;
     }
+}
+
+/// Route service keys to an Anland session. Cleared whenever the runtime
+/// goes inactive; each Anland resume registers the session again.
+pub fn set_anland_key_sink(sink: AnlandKeySink) {
+    let mut bridge = bridge()
+        .lock()
+        .expect("Failed to lock accessibility bridge");
+    bridge.anland_keys = Some(sink);
 }
 
 /// Follow the Portal window's input focus (winit `WindowEvent::Focused`).
@@ -161,9 +175,19 @@ fn enqueue_key_event(action: jint, key_code: jint, scan_code: jint, event_time_m
         if bridge.window_unfocused {
             return false;
         }
-        bridge.held_keys.insert(key_code);
+        if !bridge.held_keys.insert(key_code) {
+            // Android auto-repeat. Wayland clients repeat held keys
+            // themselves, so consume it without forwarding.
+            return true;
+        }
     } else if !bridge.held_keys.remove(&key_code) && bridge.window_unfocused {
         return false;
+    }
+
+    if let Some(sink) = bridge.anland_keys.clone() {
+        drop(bridge);
+        sink.send_key(scancode, state == ElementState::Pressed);
+        return true;
     }
 
     bridge.pending_events.push_back(AccessibilityKeyEvent {
