@@ -225,6 +225,20 @@ fn a_tree_without_account_databases_is_not_an_error() {
 }
 
 #[test]
+fn a_missing_shadow_file_is_created_with_locked_entries() {
+    // Portal's image ships no /etc/shadow, and since the xdg-desktop-portal
+    // packages were baked in no first-setup apt run creates one.
+    let dir = sudo_rootfs();
+    fs::remove_file(dir.path().join("etc/shadow")).unwrap();
+    let report = guest_sudo::sync_sudo_access(dir.path());
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert!(report.changed.contains(&"shadow"));
+    let shadow = read(dir.path(), "etc/shadow");
+    assert!(shadow.starts_with("root:*:") && shadow.contains("\ndesktop:*:"), "{shadow}");
+    assert!(!guest_sudo::sync_sudo_access(dir.path()).changed.contains(&"shadow"));
+}
+
+#[test]
 fn the_dropin_grants_exactly_the_sudo_group_without_a_password() {
     let policy: Vec<&str> = guest_sudo::SUDOERS_DROPIN
         .lines()

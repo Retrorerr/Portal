@@ -2911,6 +2911,46 @@ const DESKTOP_EXTRA_PACKAGES: &[&str] = &[
 const MAN_DB_NO_AUTO_UPDATE: &str =
     "echo 'man-db man-db/auto-update boolean false' | debconf-set-selections";
 
+/// The image leaves out packages other installed packages depend on
+/// (systemd, udev, libglib2.0-data; see EXCLUDE_PACKAGES in
+/// scripts/build_debian_rootfs.py), so apt refuses every install until its
+/// dependencies are repaired. First setup used to do that while installing
+/// xdg-desktop-portal; with those packages in the image, a setup without
+/// optional apps runs no apt at all, and the extras, Mozilla's Firefox and
+/// the user's own `sudo apt install` all failed. Runs once, before them.
+fn repair_package_dependencies(root: &Path) {
+    let marker = root.join("var/lib/localdesktop/package-dependencies-v1");
+    if marker.is_file() {
+        return;
+    }
+    if let Err(error) = validate_optional_app_apt_setup(root)
+        .and_then(|()| super::system_updates::sync_apt_policy(root))
+    {
+        log::warn!("package dependencies: apt is not ready: {error:#}");
+        return;
+    }
+    let command = format!(
+        "{MAN_DB_NO_AUTO_UPDATE}; apt-get check >/dev/null 2>&1 || \
+         (dpkg --configure -a && apt-get update && \
+          apt-get install -y --no-remove --no-install-recommends --fix-broken)"
+    );
+    let output = PRootRuntime::active().execute(
+        ProcessSpec::new(command).with_env("DEBIAN_FRONTEND", "noninteractive"),
+        None,
+        None,
+    );
+    if !output.status.success() {
+        log::warn!(
+            "package dependencies could not be repaired; a later launch retries: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    if let Err(error) = fs::write(&marker, b"repaired\n") {
+        log::warn!("package dependency marker could not be written: {error}");
+    }
+}
+
 fn ensure_desktop_extras(root: &Path) {
     let marker = root.join("var/lib/localdesktop/desktop-extras-v1");
     if marker.is_file() {
@@ -2999,6 +3039,7 @@ pub fn spawn_background_installs() {
         // Let Plasma have the CPU while it starts.
         thread::sleep(Duration::from_secs(20));
         let root = Path::new(PRODUCTION_FS_ROOT);
+        repair_package_dependencies(root);
         ensure_desktop_extras(root);
         if sync_firefox_esr_diversion(root) {
             install_mozilla_firefox(root);

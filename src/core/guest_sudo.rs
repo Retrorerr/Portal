@@ -68,10 +68,16 @@ pub fn sync_sudo_access(fs_root: &Path) -> SudoAccessReport {
         "gshadow",
         edit_file(&fs_root.join("etc/gshadow"), ensure_gshadow_member),
     );
+    // The image ships no /etc/shadow. Installs used to get one from the apt
+    // run first setup did for xdg-desktop-portal; with those packages baked
+    // into the image nothing creates it, so it is created here.
     record(
         "shadow",
-        edit_file(&fs_root.join("etc/shadow"), |text| {
-            ensure_shadow_entries(text, &passwd, days_since_epoch())
+        create_missing(&fs_root.join("etc/shadow"), 0o640).and_then(|created| {
+            let edited = edit_file(&fs_root.join("etc/shadow"), |text| {
+                ensure_shadow_entries(text, &passwd, days_since_epoch())
+            })?;
+            Ok(created || edited)
         }),
     );
     record("setuid", ensure_setuid(&fs_root.join("usr/bin/sudo")));
@@ -97,6 +103,22 @@ fn edit_file(path: &Path, edit: impl FnOnce(&str) -> Option<String>) -> io::Resu
     fs::set_permissions(&temporary, permissions)?;
     // PRoot keys its ownership/mode metadata by path, so a rename keeps
     // reporting the file as root-owned with its original mode.
+    fs::rename(&temporary, path).inspect_err(|_| {
+        let _ = fs::remove_file(&temporary);
+    })?;
+    Ok(true)
+}
+
+/// Create `path` empty with `mode` when it does not exist, so `edit_file`
+/// can fill it. Only when its directory exists: a tree without `/etc` is not
+/// a configured image.
+fn create_missing(path: &Path, mode: u32) -> io::Result<bool> {
+    if fs::symlink_metadata(path).is_ok() || !path.parent().is_some_and(Path::is_dir) {
+        return Ok(false);
+    }
+    let temporary = sibling_temporary(path);
+    fs::write(&temporary, "")?;
+    set_mode(&temporary, mode)?;
     fs::rename(&temporary, path).inspect_err(|_| {
         let _ = fs::remove_file(&temporary);
     })?;
@@ -252,13 +274,17 @@ fn ensure_sudoers_dropin(fs_root: &Path) -> io::Result<bool> {
 }
 
 /// sudo insists on mode 0440 (no write for group/other).
-#[cfg(unix)]
 fn set_read_only_mode(path: &Path) -> io::Result<()> {
+    set_mode(path, 0o440)
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o440))
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
 #[cfg(not(unix))]
-fn set_read_only_mode(_: &Path) -> io::Result<()> {
+fn set_mode(_: &Path, _: u32) -> io::Result<()> {
     Ok(())
 }
