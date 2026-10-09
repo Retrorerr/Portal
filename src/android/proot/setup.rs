@@ -1,5 +1,4 @@
 use super::process::ArchProcess;
-use anyhow::Context;
 use crate::{
     android::{
         app::build::PolarBearBackend,
@@ -14,16 +13,16 @@ use crate::{
         },
     },
     core::{
-        config::{APP_FILES_ROOT, DESKTOP_USER, DOCS_HOME_URL, PRODUCTION_FS_ROOT},
-        guest_browser as browser,
-        guest_sudo,
+        config::{APP_FILES_ROOT, DESKTOP_USER, PRODUCTION_FS_ROOT},
+        guest_browser as browser, guest_sudo,
         install_plan::{
-            validate_initial_setup_proof, AppliedAppearance, AppearanceChoice, InstallPlan,
+            validate_initial_setup_proof, AppearanceChoice, AppliedAppearance, InstallPlan,
             InstallPlanState, OptionalApp, PersistedInstallPlan, INSTALL_PLAN_FILE,
         },
         provisioning::{InstallOperationState, ProvisioningPhase, ProvisioningSnapshot},
     },
 };
+use anyhow::Context;
 use jni::{objects::JObject, sys::_jobject};
 use pathdiff::diff_paths;
 use smithay::utils::Clock;
@@ -35,19 +34,19 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        mpsc::{self, Sender},
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Sender},
         Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use winit::platform::android::activity::AndroidApp;
 use crate::{
     android::runtime::proot::PRootRuntime,
     core::runtime::{LinuxRuntime, ProcessSpec},
 };
+use winit::platform::android::activity::AndroidApp;
 
 #[derive(Clone, Debug)]
 pub enum SetupMessage {
@@ -324,11 +323,17 @@ impl SetupFailure {
             SetupFailureKind::Stage
         };
         let action = match kind {
-            SetupFailureKind::Network => "Portal lost its internet connection. Check it and tap Try again.",
-            SetupFailureKind::Storage => "Your device is out of space. Free some up and tap Try again.",
+            SetupFailureKind::Network => {
+                "Portal lost its internet connection. Check it and tap Try again."
+            }
+            SetupFailureKind::Storage => {
+                "Your device is out of space. Free some up and tap Try again."
+            }
             SetupFailureKind::Verification => "The download was damaged on the way. Tap Try again.",
             SetupFailureKind::Extraction => "Debian couldn’t be unpacked. Tap Try again.",
-            SetupFailureKind::Graphics => "Portal’s graphics drivers couldn’t be set up. Tap Try again.",
+            SetupFailureKind::Graphics => {
+                "Portal’s graphics drivers couldn’t be set up. Tap Try again."
+            }
             SetupFailureKind::Filesystem => "Portal couldn’t write its setup files. Tap Try again.",
             SetupFailureKind::Unsupported => "This device can’t run Portal.",
             SetupFailureKind::Stage => "Portal couldn’t finish setting up. Tap Try again.",
@@ -438,7 +443,8 @@ impl SetupRegistration {
         let Ok(mut sink) = self.sink.lock() else {
             return None;
         };
-        sink.senders.retain(|sender| sender.send(message.clone()).is_ok());
+        sink.senders
+            .retain(|sender| sender.send(message.clone()).is_ok());
         Some(sink.android_app.clone())
     }
 }
@@ -501,10 +507,7 @@ pub fn load_persisted_install_plan() -> anyhow::Result<Option<PersistedInstallPl
     PersistedInstallPlan::read(&persisted_install_plan_path())
 }
 
-fn persist_install_plan_state(
-    plan: &InstallPlan,
-    state: InstallPlanState,
-) -> anyhow::Result<()> {
+fn persist_install_plan_state(plan: &InstallPlan, state: InstallPlanState) -> anyhow::Result<()> {
     let path = persisted_install_plan_path();
     let existing = PersistedInstallPlan::read(&path)?;
     if let Some(existing) = existing {
@@ -869,8 +872,8 @@ pub(crate) fn validate_optional_app_apt_setup(fs_root: &Path) -> anyhow::Result<
         "Portal's PRoot-safe apt sandbox policy is invalid"
     );
     let policy_rc_d = fs_root.join("usr/sbin/policy-rc.d");
-    let metadata = fs::metadata(&policy_rc_d)
-        .context("Portal's PRoot service-start policy is missing")?;
+    let metadata =
+        fs::metadata(&policy_rc_d).context("Portal's PRoot service-start policy is missing")?;
     #[cfg(unix)]
     anyhow::ensure!(
         metadata.permissions().mode() & 0o111 != 0,
@@ -956,7 +959,11 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
         let progress = reached
             .fetch_max(progress, std::sync::atomic::Ordering::Relaxed)
             .max(progress);
-        report(ProvisioningSnapshot::update(ProvisioningPhase::Configuring, progress, message));
+        report(ProvisioningSnapshot::update(
+            ProvisioningPhase::Configuring,
+            progress,
+            message,
+        ));
     });
     Some(thread::spawn(move || -> anyhow::Result<()> {
         // Every package token comes from fixed allowlist commands in
@@ -988,7 +995,11 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
 const DEFERRED_OPTIONAL_APPS: &str = "optional-apps-deferred";
 
 fn defer_optional_apps(apps: &[OptionalApp]) -> anyhow::Result<()> {
-    let ids = apps.iter().map(|app| app.id()).collect::<Vec<_>>().join("\n");
+    let ids = apps
+        .iter()
+        .map(|app| app.id())
+        .collect::<Vec<_>>()
+        .join("\n");
     fs::write(Path::new(APP_FILES_ROOT).join(DEFERRED_OPTIONAL_APPS), ids)
         .context("could not record the optional apps left for later")
 }
@@ -1021,9 +1032,7 @@ fn queue_deferred_optional_apps() {
 fn setup_renderer_mode(_options: &SetupOptions) -> StageOutput {
     match crate::android::anland::ensure_renderer_mode() {
         Ok(_) => None,
-        Err(error) => Some(thread::spawn(move || -> anyhow::Result<()> {
-            Err(error)
-        })),
+        Err(error) => Some(thread::spawn(move || -> anyhow::Result<()> { Err(error) })),
     }
 }
 
@@ -1199,9 +1208,9 @@ fn sync_guest_session_directories(fs_root: &Path) -> anyhow::Result<()> {
 pub fn stage_initial_appearance_helper(fs_root: &Path) -> anyhow::Result<()> {
     let completion_marker = fs_root.join(".portal-runtime-complete");
     match fs::symlink_metadata(&completion_marker) {
-        Ok(_) => anyhow::bail!(
-            "Refusing to stage initial-appearance setup into a completed runtime"
-        ),
+        Ok(_) => {
+            anyhow::bail!("Refusing to stage initial-appearance setup into a completed runtime")
+        }
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
@@ -1276,7 +1285,10 @@ fn stage_initial_appearance_asset(
 fn supervise_plasmashell_autostart(original: &str) -> anyhow::Result<String> {
     const STOCK: &str = "Exec=/usr/bin/plasmashell";
     const SUPERVISED: &str = "Exec=/usr/local/bin/localdesktop-plasmashell-supervisor";
-    let exec_lines: Vec<_> = original.lines().filter(|line| line.starts_with("Exec=")).collect();
+    let exec_lines: Vec<_> = original
+        .lines()
+        .filter(|line| line.starts_with("Exec="))
+        .collect();
     anyhow::ensure!(
         exec_lines.len() == 1 && (exec_lines[0] == STOCK || exec_lines[0] == SUPERVISED),
         "unexpected Plasma shell autostart command"
@@ -1488,7 +1500,10 @@ fn sync_guest_host_path_alias(fs_root: &Path) {
         }
         if alias.symlink_metadata().is_ok() {
             // Never replace something that is not our alias.
-            log::warn!("guest host-path alias {} exists and is not ours", alias.display());
+            log::warn!(
+                "guest host-path alias {} exists and is not ours",
+                alias.display()
+            );
             continue;
         }
         let created = alias
@@ -1526,7 +1541,10 @@ fn sync_chromium_entries(fs_root: &Path) {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        if !text.lines().any(|line| line == "X-LocalDesktop-NoSandbox=true") {
+        if !text
+            .lines()
+            .any(|line| line == "X-LocalDesktop-NoSandbox=true")
+        {
             continue;
         }
         let updated = text
@@ -1597,7 +1615,12 @@ fn sync_libreoffice_launchers(fs_root: &Path) {
     for name in ["libreoffice", "soffice"] {
         let launcher = fs_root.join("usr/local/bin").join(name);
         // Stale after an uninstall; resynced on the launch after an install.
-        if fs_root.join("usr/bin").join(name).symlink_metadata().is_err() {
+        if fs_root
+            .join("usr/bin")
+            .join(name)
+            .symlink_metadata()
+            .is_err()
+        {
             if fs::read_to_string(&launcher).is_ok_and(|text| text.contains("Managed by Portal")) {
                 let _ = fs::remove_file(launcher);
             }
@@ -1669,10 +1692,7 @@ fn sync_crash_handler(fs_root: &Path) -> anyhow::Result<()> {
 /// repair routine. It refreshes only root-owned session assets and graphics
 /// integration; Debian package state and all user home/configuration files
 /// remain untouched.
-fn sync_anland_required_session_files(
-    fs_root: &Path,
-    ui_scale: i32,
-) -> anyhow::Result<()> {
+fn sync_anland_required_session_files(fs_root: &Path, ui_scale: i32) -> anyhow::Result<()> {
     sync_guest_session_directories(fs_root)?;
     browser::sync_firefox_config(fs_root);
     sync_portal_runtime_assets(fs_root, ui_scale);
@@ -2757,7 +2777,11 @@ pub fn prepare_desktop_login(migrate_legacy: bool) -> anyhow::Result<()> {
         "privileged Debian desktop cache preparation failed: {}",
         String::from_utf8_lossy(&caches.stderr)
     );
-    let mode = if migrate_legacy { "--migrate" } else { "--prepare" };
+    let mode = if migrate_legacy {
+        "--migrate"
+    } else {
+        "--prepare"
+    };
     let command = format!("/usr/local/bin/localdesktop-prepare-login {mode}");
     let output = PRootRuntime::active().execute(ProcessSpec::new(command), None, None);
     anyhow::ensure!(
@@ -2836,8 +2860,12 @@ fn ensure_desktop_services(root: &Path) -> anyhow::Result<()> {
     fs::write(&temporary, b"installed\n")?;
     fs::File::open(&temporary)?.sync_all()?;
     fs::rename(&temporary, &marker)?;
-    fs::File::open(marker.parent().context("Missing desktop service marker parent")?)?
-        .sync_all()?;
+    fs::File::open(
+        marker
+            .parent()
+            .context("Missing desktop service marker parent")?,
+    )?
+    .sync_all()?;
     Ok(())
 }
 
@@ -2997,10 +3025,14 @@ fn ensure_desktop_extras(root: &Path) {
 /// PRoot call when nothing is to do. Returns whether the layout is right.
 fn sync_firefox_esr_diversion(root: &Path) -> bool {
     let diversions = fs::read_to_string(root.join("var/lib/dpkg/diversions")).unwrap_or_default();
-    let esr_diverted = diversions.lines().any(|line| line == "/usr/bin/firefox.real");
-    let esr_installed = installed_dpkg_packages(root).is_ok_and(|installed| installed.contains("firefox-esr"));
+    let esr_diverted = diversions
+        .lines()
+        .any(|line| line == "/usr/bin/firefox.real");
+    let esr_installed =
+        installed_dpkg_packages(root).is_ok_and(|installed| installed.contains("firefox-esr"));
     if (esr_installed && !esr_diverted) || diversions.contains("/usr/bin/firefox.debian-esr") {
-        let output = PRootRuntime::active().execute(ProcessSpec::new(FIREFOX_ESR_DIVERSION), None, None);
+        let output =
+            PRootRuntime::active().execute(ProcessSpec::new(FIREFOX_ESR_DIVERSION), None, None);
         if !output.status.success() {
             log::warn!(
                 "/usr/bin/firefox diversion could not be set up: {}",
@@ -3031,6 +3063,26 @@ static BACKGROUND_INSTALLS_RUNNING: AtomicBool = AtomicBool::new(false);
 /// Firefox, optional apps first setup deferred) run here, behind the running
 /// desktop instead of in front of it. Each keeps its own marker, so an
 /// offline launch simply leaves it for the next one.
+/// useradd (systemd, udev and other packages adding system users) rewrites
+/// /etc/passwd and /etc/group with the old mode masked by 0666, which under
+/// PRoot lands as root-only. The login script repairs them, but these apt runs
+/// happen inside a running session, whose D-Bus daemon then refuses every new
+/// client because it cannot look up UID 1000. The mode PRoot reports lives in
+/// its own metadata, so the chmod runs in the guest.
+pub(crate) fn keep_account_databases_readable() {
+    let output = PRootRuntime::active().execute(
+        ProcessSpec::new("chmod 0644 /etc/passwd /etc/group"),
+        None,
+        None,
+    );
+    if !output.status.success() {
+        log::warn!(
+            "could not make /etc/passwd and /etc/group readable: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 pub fn spawn_background_installs() {
     if BACKGROUND_INSTALLS_RUNNING.swap(true, Ordering::AcqRel) {
         return;
@@ -3040,9 +3092,12 @@ pub fn spawn_background_installs() {
         thread::sleep(Duration::from_secs(20));
         let root = Path::new(PRODUCTION_FS_ROOT);
         repair_package_dependencies(root);
+        keep_account_databases_readable();
         ensure_desktop_extras(root);
+        keep_account_databases_readable();
         if sync_firefox_esr_diversion(root) {
             install_mozilla_firefox(root);
+            keep_account_databases_readable();
         }
         queue_deferred_optional_apps();
         BACKGROUND_INSTALLS_RUNNING.store(false, Ordering::Release);
@@ -3138,8 +3193,7 @@ fn validate_required_session_files(fs_root: &Path) -> anyhow::Result<()> {
             ("libkwin.so", "libkwin.so.6"),
         ] {
             anyhow::ensure!(
-                fs::read_link(anland_dir.join(link)).ok().as_deref()
-                    == Some(Path::new(target)),
+                fs::read_link(anland_dir.join(link)).ok().as_deref() == Some(Path::new(target)),
                 "Required Anland KWin symlink is incomplete: {link}"
             );
         }
@@ -3204,7 +3258,9 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
 /// payload's hash. Hashing the embedded bytes is cheaper than reading the
 /// guest copy back on every launch.
 fn payload_is_current(target: &Path, payload: &[u8]) -> bool {
-    fs::metadata(target).map(|m| m.len() == payload.len() as u64).unwrap_or(false)
+    fs::metadata(target)
+        .map(|m| m.len() == payload.len() as u64)
+        .unwrap_or(false)
         && fs::read_to_string(payload_stamp_path(target))
             .map(|stamp| stamp == payload_fingerprint(payload))
             .unwrap_or(false)
@@ -3482,8 +3538,14 @@ fn seed_plasma_locale(fs_root: &Path) {
     if let Some(parent) = localerc.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    match fs::write(&localerc, crate::core::guest_locale::plasma_localerc(&locale)) {
-        Ok(()) => log::info!("Seeded Plasma language {} from Android {tag}", locale.language),
+    match fs::write(
+        &localerc,
+        crate::core::guest_locale::plasma_localerc(&locale),
+    ) {
+        Ok(()) => log::info!(
+            "Seeded Plasma language {} from Android {tag}",
+            locale.language
+        ),
         Err(error) => log::warn!("Could not seed Plasma language from Android {tag}: {error}"),
     }
 }
@@ -3687,7 +3749,7 @@ fn setup_mesa_layer(options: &SetupOptions) -> StageOutput {
     }))
 }
 
-fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
+fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let username = get_application_context().local_config.user.username;
     let home_dir = chroot_home_dir(fs_root, &username);
@@ -3763,18 +3825,45 @@ fn setup_plasma_wayland(_options: &SetupOptions) -> StageOutput {
 
     let desktop_dir = home_dir.join("Desktop");
     let _ = fs::create_dir_all(&desktop_dir);
-    let online_docs = desktop_dir.join("localdesktop-online-docs.desktop");
-    if !online_docs.exists() {
-        fs::write(
-            online_docs,
-            format!(
-                "[Desktop Entry]\nType=Application\nName=Portal - Online Docs\nExec=firefox {DOCS_HOME_URL}\nIcon=firefox\nTerminal=false\n"
-            ),
-        )
-        .expect("Failed to write documentation desktop entry");
+    // First setup only (this stage never runs on an installed runtime): a
+    // deleted folder stays deleted.
+    let stuff = desktop_dir.join("Stuff");
+    if !stuff.exists() {
+        if let Err(error) = seed_desktop_stuff(&options.android_app, &stuff) {
+            log::error!("Could not create the Stuff Desktop folder: {error:#}");
+            let _ = fs::remove_dir_all(&stuff);
+        }
     }
 
     None
+}
+
+/// Files of the `Stuff` Desktop folder: the Portal GitHub link and the
+/// optional Cloud Dark rice. Plasma itself starts with its stock look.
+const DESKTOP_STUFF_FILES: &[&str] = include!(concat!(env!("OUT_DIR"), "/desktop_stuff_files.rs"));
+
+fn seed_desktop_stuff(android_app: &AndroidApp, stuff: &Path) -> anyhow::Result<()> {
+    let assets = android_app.asset_manager();
+    for relative in DESKTOP_STUFF_FILES {
+        let name = std::ffi::CString::new(format!("desktop-stuff/{relative}"))?;
+        let mut asset = assets
+            .open(&name)
+            .with_context(|| format!("missing Android asset desktop-stuff/{relative}"))?;
+        let mut bytes = Vec::with_capacity(asset.length());
+        asset.read_to_end(&mut bytes)?;
+        let path = stuff.join(relative);
+        fs::create_dir_all(path.parent().context("Stuff file has no parent")?)?;
+        fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
+        // Plasma only runs a .desktop launcher that is executable.
+        let executable = relative.ends_with(".sh")
+            || relative.ends_with(".desktop")
+            || relative.contains("/bin/")
+            || relative.ends_with("/rice-powermenu")
+            || relative.ends_with("/rice-tray-fix");
+        let mode = if executable { 0o755 } else { 0o644 };
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
 }
 fn fix_xkb_symlink(_options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
@@ -3793,11 +3882,9 @@ fn fix_xkb_symlink(_options: &SetupOptions) -> StageOutput {
                     // Both are inside the chroot, so strip the fs_root prefix
                     let xkb_inside = Path::new("/usr/share/X11/xkb");
                     let target_inside = Path::new("/usr/share/xkeyboard-config-2");
-                    let rel_target = diff_paths(
-                        target_inside,
-                        xkb_inside.parent().unwrap_or(Path::new("/")),
-                    )
-                        .unwrap_or_else(|| target_inside.to_path_buf());
+                    let rel_target =
+                        diff_paths(target_inside, xkb_inside.parent().unwrap_or(Path::new("/")))
+                            .unwrap_or_else(|| target_inside.to_path_buf());
                     log::info!(
                         "Fixing with new relative symlink: {} -> {}",
                         xkb_path.display(),
@@ -3815,7 +3902,8 @@ fn fix_xkb_symlink(_options: &SetupOptions) -> StageOutput {
                     }
                     if let Err(error) = fs::rename(&temporary, &xkb_path) {
                         let _ = fs::remove_file(&temporary);
-                        let message = format!("Failed to install relative symlink for xkb: {error}");
+                        let message =
+                            format!("Failed to install relative symlink for xkb: {error}");
                         return Some(thread::spawn(move || Err(anyhow::anyhow!(message))));
                     }
                 }
@@ -3880,8 +3968,7 @@ fn publish_failure(registration: &SetupRegistration, failure: &SetupFailure) {
         if provisional {
             coordinator.initial_preferences_handoff =
                 InitialPreferencesHandoff::Failed(failure.user_message.clone());
-            coordinator.pending_initial_preferences_failure =
-                Some(failure.user_message.clone());
+            coordinator.pending_initial_preferences_failure = Some(failure.user_message.clone());
         }
         coordinator.state = InstallOperationState::Failed;
         coordinator.snapshot = snapshot.clone();
@@ -3963,7 +4050,10 @@ fn publish_repair_success(registration: &SetupRegistration) {
             "Anland graphics ready. Restarting Plasma…",
         ),
     );
-    diagnostics::host_event("anland-repair-complete", "targeted graphics repair committed");
+    diagnostics::host_event(
+        "anland-repair-complete",
+        "targeted graphics repair committed",
+    );
     crate::android::utils::webview_handoff::wake_event_loop();
 }
 
@@ -4029,11 +4119,7 @@ fn run_anland_repair_inner(registration: &SetupRegistration) -> anyhow::Result<(
             };
             publish_repair_snapshot(
                 &progress_registration,
-                ProvisioningSnapshot::update(
-                    ProvisioningPhase::Configuring,
-                    82,
-                    display_message,
-                ),
+                ProvisioningSnapshot::update(ProvisioningPhase::Configuring, 82, display_message),
             );
         })?;
     }
@@ -4098,8 +4184,7 @@ fn invoke_stage(
     name: &'static str,
     stage: &SetupStage,
     options: &SetupOptions,
-)
-    -> Result<StageOutput, SetupFailure> {
+) -> Result<StageOutput, SetupFailure> {
     diagnostics::setup_stage(index, name, "start");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage(options)));
     match result {
@@ -4125,7 +4210,11 @@ fn stage_progress(done: usize, total: usize) -> u16 {
 /// few seconds except optional apps, which can take minutes: each selected
 /// app gets room to move the bar instead of all of them sharing one notch.
 fn stage_weight(name: &str, options: &SetupOptions) -> usize {
-    match (name, options.install_optional_apps, options.install_plan.as_ref()) {
+    match (
+        name,
+        options.install_optional_apps,
+        options.install_plan.as_ref(),
+    ) {
         ("optional-apps", true, Some(plan)) => 1 + 2 * plan.selected_apps().len(),
         _ => 1,
     }
@@ -4144,7 +4233,10 @@ fn stage_span(name: &str, options: &SetupOptions) -> (u16, u16) {
         .map(|(_, weight)| weight)
         .sum::<usize>();
     let own = stage_weight(name, options);
-    (stage_progress(before, total), stage_progress(before + own, total))
+    (
+        stage_progress(before, total),
+        stage_progress(before + own, total),
+    )
 }
 
 fn join_stage(
@@ -4218,9 +4310,8 @@ fn finalise_installation(registration: &SetupRegistration) -> Result<(), SetupFa
             "Finalising Portal installation…",
         ),
     );
-    let renderer = crate::android::anland::ensure_renderer_mode().map_err(|error| {
-        SetupFailure::from_detail(2, "renderer-mode", format!("{error:#}"))
-    })?;
+    let renderer = crate::android::anland::ensure_renderer_mode()
+        .map_err(|error| SetupFailure::from_detail(2, "renderer-mode", format!("{error:#}")))?;
     if matches!(renderer, crate::android::anland::RendererKind::Anland)
         && !super::mesa_layer::is_provisioned()
     {
@@ -4233,7 +4324,9 @@ fn finalise_installation(registration: &SetupRegistration) -> Result<(), SetupFa
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
     artifact
         .mark_installation_complete(Path::new(PRODUCTION_FS_ROOT))
-        .map_err(|error| SetupFailure::from_detail(11, "installation-marker", format!("{error:#}")))?;
+        .map_err(|error| {
+            SetupFailure::from_detail(11, "installation-marker", format!("{error:#}"))
+        })?;
     if !artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)) {
         return Err(SetupFailure::from_detail(
             11,
@@ -4249,8 +4342,8 @@ fn atomic_write_guest_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         .parent()
         .context("Initial-preferences payload has no parent directory")?;
     fs::create_dir_all(parent).context("Could not create initial-preferences directory")?;
-    let parent_metadata = fs::symlink_metadata(parent)
-        .context("Could not inspect initial-preferences directory")?;
+    let parent_metadata =
+        fs::symlink_metadata(parent).context("Could not inspect initial-preferences directory")?;
     anyhow::ensure!(
         parent_metadata.is_dir() && !parent_metadata.file_type().is_symlink(),
         "Initial-preferences directory is not a real directory"
@@ -4274,8 +4367,7 @@ fn atomic_write_guest_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         file.sync_all()
             .context("Could not sync staged initial-preferences payload")?;
         drop(file);
-        fs::rename(&temporary, path)
-            .context("Could not commit initial-preferences payload")?;
+        fs::rename(&temporary, path).context("Could not commit initial-preferences payload")?;
         fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .context("Could not sync initial-preferences directory")?;
@@ -4442,10 +4534,13 @@ fn apply_initial_preferences_before_commit(
     plan: &InstallPlan,
 ) -> Result<(), SetupFailure> {
     let root = Path::new(PRODUCTION_FS_ROOT);
-    stage_initial_appearance_helper(root)
-        .map_err(|error| SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}")))?;
-    let prepared = prepare_initial_preferences_handoff(root, android_app, plan)
-        .map_err(|error| SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}")))?;
+    stage_initial_appearance_helper(root).map_err(|error| {
+        SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}"))
+    })?;
+    let prepared =
+        prepare_initial_preferences_handoff(root, android_app, plan).map_err(|error| {
+            SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}"))
+        })?;
     let (appearance, attempt_id) = prepared;
     {
         let mut coordinator = setup_coordinator().lock().map_err(|_| {
@@ -4464,8 +4559,7 @@ fn apply_initial_preferences_before_commit(
                 "Accepted install plan changed before provisional Plasma handoff",
             ));
         }
-        coordinator.initial_preferences_handoff =
-            InitialPreferencesHandoff::Pending(plan.clone());
+        coordinator.initial_preferences_handoff = InitialPreferencesHandoff::Pending(plan.clone());
         coordinator.pending_initial_preferences_failure = None;
     }
     publish_snapshot(
@@ -4484,13 +4578,16 @@ fn apply_initial_preferences_before_commit(
         ));
     };
     crate::android::utils::webview_handoff::request_initial_preferences_handoff(android_app);
-    wait_for_initial_preferences_proof(root, plan, appearance, &attempt_id)
-        .map_err(|error| SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}")))?;
+    wait_for_initial_preferences_proof(root, plan, appearance, &attempt_id).map_err(|error| {
+        SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}"))
+    })?;
     // The helper remains installed but has nothing to apply after this point.
     // Remove both staged files before the durable runtime marker is written.
     remove_guest_file(&root.join(INITIAL_APPEARANCE_PLAN), true)
         .and_then(|()| remove_guest_file(&initial_appearance_proof_path(root), true))
-        .map_err(|error| SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}")))?;
+        .map_err(|error| {
+            SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}"))
+        })?;
     Ok(())
 }
 
@@ -4498,12 +4595,18 @@ fn apply_initial_preferences_before_commit(
 /// only before the provisional Plasma handoff, for the same running plan, on
 /// a runtime that is still a plain image (exactly what Retry would accept).
 fn can_rerun_in_place(failure: &SetupFailure) -> bool {
-    if matches!(failure.kind, SetupFailureKind::Unsupported | SetupFailureKind::Storage) {
+    if matches!(
+        failure.kind,
+        SetupFailureKind::Unsupported | SetupFailureKind::Storage
+    ) {
         return false;
     }
     let idle = setup_coordinator().lock().is_ok_and(|coordinator| {
         coordinator.state == InstallOperationState::Running
-            && matches!(coordinator.initial_preferences_handoff, InitialPreferencesHandoff::Idle)
+            && matches!(
+                coordinator.initial_preferences_handoff,
+                InitialPreferencesHandoff::Idle
+            )
     });
     idle && matches!(
         crate::core::provisioning::RuntimeArtifact::production()
@@ -4537,7 +4640,10 @@ fn run_installation(registration: SetupRegistration) {
             .contains("waiting for a network connection");
         let delay = if offline {
             offline_waits += 1;
-            log::warn!("Portal setup is offline at stage {}; waiting", failure.stage);
+            log::warn!(
+                "Portal setup is offline at stage {}; waiting",
+                failure.stage
+            );
             publish_snapshot(
                 &registration,
                 ProvisioningSnapshot::update(
@@ -4601,7 +4707,9 @@ fn run_installation_attempt(
             .ok()
             .and_then(|coordinator| coordinator.install_plan.clone())
             .context("Accepted install plan is unavailable to the worker")
-            .map_err(|error| SetupFailure::from_detail(0, "setup-coordinator", format!("{error:#}")))?;
+            .map_err(|error| {
+                SetupFailure::from_detail(0, "setup-coordinator", format!("{error:#}"))
+            })?;
         let preferences_app = android_app.clone();
         let options = SetupOptions {
             android_app,
@@ -4649,16 +4757,16 @@ fn finish_installation(
                 .is_some_and(|coordinator| coordinator.install_plan.is_some());
             if !initial_plan {
                 if let Some(on_complete) = registration.completion_callback() {
-                if let Err(payload) =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        on_complete();
-                    }))
-                {
-                    log::error!(
-                        "Portal setup handoff callback panicked after installation commit: {}",
-                        panic_text(payload.as_ref())
-                    );
-                }
+                    if let Err(payload) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            on_complete();
+                        }))
+                    {
+                        log::error!(
+                            "Portal setup handoff callback panicked after installation commit: {}",
+                            panic_text(payload.as_ref())
+                        );
+                    }
                 }
             }
         }
@@ -4675,12 +4783,18 @@ fn set_registration(
     state: InstallOperationState,
     snapshot: ProvisioningSnapshot,
 ) {
-    let (active_registration, active_snapshot) = if let Ok(mut coordinator) = setup_coordinator().lock()
-    {
-        if coordinator.state == InstallOperationState::Running {
-            if let Some(active_registration) = coordinator.registration.clone() {
-                active_registration.rebind_from(&registration);
-                (active_registration, coordinator.snapshot.clone())
+    let (active_registration, active_snapshot) =
+        if let Ok(mut coordinator) = setup_coordinator().lock() {
+            if coordinator.state == InstallOperationState::Running {
+                if let Some(active_registration) = coordinator.registration.clone() {
+                    active_registration.rebind_from(&registration);
+                    (active_registration, coordinator.snapshot.clone())
+                } else {
+                    coordinator.registration = Some(registration.clone());
+                    coordinator.state = state;
+                    coordinator.snapshot = snapshot.clone();
+                    (registration, snapshot)
+                }
             } else {
                 coordinator.registration = Some(registration.clone());
                 coordinator.state = state;
@@ -4688,14 +4802,8 @@ fn set_registration(
                 (registration, snapshot)
             }
         } else {
-            coordinator.registration = Some(registration.clone());
-            coordinator.state = state;
-            coordinator.snapshot = snapshot.clone();
             (registration, snapshot)
-        }
-    } else {
-        (registration, snapshot)
-    };
+        };
     publish_snapshot(&active_registration, active_snapshot);
 }
 
@@ -4830,8 +4938,8 @@ pub fn retry_install() -> bool {
         return false;
     }
     let root = Path::new(PRODUCTION_FS_ROOT);
-    let classification = crate::core::provisioning::RuntimeArtifact::production()
-        .classify_runtime(root);
+    let classification =
+        crate::core::provisioning::RuntimeArtifact::production().classify_runtime(root);
     if !matches!(
         classification,
         crate::core::provisioning::RuntimeClassification::Absent
@@ -4885,9 +4993,7 @@ pub fn repair_enable_anland() -> bool {
         let Ok(mut coordinator) = anland_repair_coordinator().lock() else {
             return false;
         };
-        if coordinator.state == AnlandRepairState::Running
-            || coordinator.result.is_some()
-        {
+        if coordinator.state == AnlandRepairState::Running || coordinator.result.is_some() {
             (false, coordinator.snapshot.clone())
         } else {
             coordinator.state = AnlandRepairState::Running;
@@ -4936,13 +5042,16 @@ fn attach_to_anland_repair(
     registration: &SetupRegistration,
     progress: &Arc<Mutex<u16>>,
 ) -> Option<ProvisioningSnapshot> {
-    let snapshot = anland_repair_coordinator().lock().ok().and_then(|coordinator| {
-        if coordinator.state == AnlandRepairState::Running || coordinator.result.is_some() {
-            Some(coordinator.snapshot.clone())
-        } else {
-            None
-        }
-    })?;
+    let snapshot = anland_repair_coordinator()
+        .lock()
+        .ok()
+        .and_then(|coordinator| {
+            if coordinator.state == AnlandRepairState::Running || coordinator.result.is_some() {
+                Some(coordinator.snapshot.clone())
+            } else {
+                None
+            }
+        })?;
     let active_registration = setup_coordinator()
         .lock()
         .ok()
@@ -5002,9 +5111,7 @@ pub fn can_launch_pending_initial_preferences(root: &Path) -> bool {
 /// Build the temporary Wayland backend used only to run first-session
 /// appearance/scale provisioning. The runtime marker remains absent until the
 /// setup worker validates the helper's readback proof.
-pub fn build_pending_wayland_backend(
-    android_app: AndroidApp,
-) -> anyhow::Result<PolarBearBackend> {
+pub fn build_pending_wayland_backend(android_app: AndroidApp) -> anyhow::Result<PolarBearBackend> {
     let root = Path::new(PRODUCTION_FS_ROOT);
     anyhow::ensure!(
         can_launch_pending_initial_preferences(root),
@@ -5042,12 +5149,12 @@ pub fn fail_initial_preferences_handoff(reason: &str) -> bool {
             InitialPreferencesHandoff::Failed(_) => return true,
             InitialPreferencesHandoff::Idle | InitialPreferencesHandoff::Proven(_) => None,
         };
-        let Some(plan) = active_plan else { return false };
-        coordinator.initial_preferences_handoff =
-            InitialPreferencesHandoff::Failed(reason.clone());
+        let Some(plan) = active_plan else {
+            return false;
+        };
+        coordinator.initial_preferences_handoff = InitialPreferencesHandoff::Failed(reason.clone());
         coordinator.pending_initial_preferences_failure = Some(
-            "Portal couldn’t apply your appearance and display size. Tap Try again."
-                .to_string(),
+            "Portal couldn’t apply your appearance and display size. Tap Try again.".to_string(),
         );
         Some(plan)
     } else {
@@ -5205,12 +5312,12 @@ fn setup_failure_backend(
 
 fn is_truly_fresh_runtime(root: &Path) -> bool {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
-    if artifact.classify_runtime(root)
-        != crate::core::provisioning::RuntimeClassification::Absent
-    {
+    if artifact.classify_runtime(root) != crate::core::provisioning::RuntimeClassification::Absent {
         return false;
     }
-    let Some(base) = root.parent() else { return false };
+    let Some(base) = root.parent() else {
+        return false;
+    };
     [
         "runtime-B.staging",
         "runtime-B.previous",
@@ -5225,9 +5332,8 @@ fn is_truly_fresh_runtime(root: &Path) -> bool {
 /// migration; the first-run provisioning stages must never be replayed here.
 fn prepare_committed_runtime(registration: &SetupRegistration) -> Result<(), SetupFailure> {
     let root = Path::new(PRODUCTION_FS_ROOT);
-    let renderer = crate::android::anland::ensure_renderer_mode().map_err(|error| {
-        SetupFailure::from_detail(2, "renderer-mode", format!("{error:#}"))
-    })?;
+    let renderer = crate::android::anland::ensure_renderer_mode()
+        .map_err(|error| SetupFailure::from_detail(2, "renderer-mode", format!("{error:#}")))?;
     if matches!(renderer, crate::android::anland::RendererKind::Anland)
         && !super::mesa_layer::is_provisioned()
     {
@@ -5287,7 +5393,9 @@ pub fn setup_with_completion(
             "This device can't run Portal's Linux environment.",
         ));
     }
-    let _ = sender.send(SetupMessage::Progress("✅ Your device is supported!".to_string()));
+    let _ = sender.send(SetupMessage::Progress(
+        "✅ Your device is supported!".to_string(),
+    ));
 
     let registration = SetupRegistration::new(
         android_app.clone(),
@@ -5316,8 +5424,7 @@ pub fn setup_with_completion(
     if matches!(
         existing_operation,
         Some((InstallOperationState::Running, _))
-    )
-    {
+    ) {
         let _ = set_registration(
             registration,
             InstallOperationState::Running,
@@ -5409,11 +5516,8 @@ pub fn setup_with_completion(
                 match build_wayland_backend(android_app) {
                     Ok(backend) => return backend,
                     Err(error) => {
-                        let failure = SetupFailure::from_detail(
-                            12,
-                            "wayland-backend",
-                            format!("{error:#}"),
-                        );
+                        let failure =
+                            SetupFailure::from_detail(12, "wayland-backend", format!("{error:#}"));
                         publish_failure(&registration, &failure);
                         let mut backend = WebviewBackend::build(receiver, progress);
                         backend.error = ErrorVariant::Setup(failure.user_message);
@@ -5534,7 +5638,10 @@ mod tests {
                 "Exec=/usr/local/bin/localdesktop-plasmashell-supervisor"
             )
         );
-        assert_eq!(supervise_plasmashell_autostart(&supervised).unwrap(), supervised);
+        assert_eq!(
+            supervise_plasmashell_autostart(&supervised).unwrap(),
+            supervised
+        );
         assert!(supervise_plasmashell_autostart("[Desktop Entry]\nExec=/tmp/other\n").is_err());
     }
 }

@@ -165,7 +165,11 @@ fn installed_now(fs_root: &Path) -> HashSet<OptionalApp> {
 
 fn idle_entry(installed: bool) -> Entry {
     Entry {
-        state: if installed { AppState::Installed } else { AppState::Absent },
+        state: if installed {
+            AppState::Installed
+        } else {
+            AppState::Absent
+        },
         progress: 0,
         message: String::new(),
     }
@@ -254,7 +258,11 @@ pub fn request(app_id: &str, install: bool) -> bool {
             return false;
         }
     }
-    let action = if install { Action::Install } else { Action::Remove };
+    let action = if install {
+        Action::Install
+    } else {
+        Action::Remove
+    };
     let spawn = {
         let Ok(mut coordinator) = coordinator().lock() else {
             return false;
@@ -287,16 +295,13 @@ pub fn request(app_id: &str, install: bool) -> bool {
 
 fn run_queue() {
     loop {
-        let next = coordinator()
-            .lock()
-            .ok()
-            .and_then(|mut coordinator| {
-                let next = coordinator.queue.pop_front();
-                if next.is_none() {
-                    coordinator.worker = false;
-                }
-                next
-            });
+        let next = coordinator().lock().ok().and_then(|mut coordinator| {
+            let next = coordinator.queue.pop_front();
+            if next.is_none() {
+                coordinator.worker = false;
+            }
+            next
+        });
         let Some((app, action)) = next else {
             break;
         };
@@ -406,6 +411,7 @@ fn run_apt_lines(
         })),
         None,
     );
+    crate::android::proot::setup::keep_account_databases_readable();
     if !output.status.success() {
         let detail = last_error
             .lock()
@@ -464,7 +470,10 @@ fn install(app: OptionalApp, progress: Progress) -> anyhow::Result<()> {
 fn prepare_electron_launcher(app: OptionalApp) -> anyhow::Result<()> {
     let desktop_file = app.desktop_file_id();
     anyhow::ensure!(
-        root().join("usr/share/applications").join(desktop_file).is_file(),
+        root()
+            .join("usr/share/applications")
+            .join(desktop_file)
+            .is_file(),
         "The official {} desktop entry is missing",
         app.name()
     );
@@ -513,7 +522,11 @@ fn install_steam(progress: Progress) -> anyhow::Result<()> {
             let scaled = 42 + (done * 56 / total) as u16;
             progress(
                 scaled,
-                format!("Downloading Steam… {} / {} MB", done / 1_000_000, total / 1_000_000),
+                format!(
+                    "Downloading Steam… {} / {} MB",
+                    done / 1_000_000,
+                    total / 1_000_000
+                ),
             );
         })),
         None,
@@ -604,19 +617,59 @@ fn guest_text(text: &str) -> Vec<u8> {
 }
 
 fn sync_steam_files(fs_root: &Path) -> anyhow::Result<()> {
-    write_file(&fs_root.join(STEAM_LAUNCHER_REL), &guest_text(STEAM_LAUNCHER), 0o755)?;
-    write_file(&fs_root.join(STEAM_BOOTSTRAP_REL), &guest_text(STEAM_BOOTSTRAP), 0o755)?;
-    write_file(&fs_root.join(STEAM_DESKTOP_REL), &guest_text(STEAM_DESKTOP), 0o644)?;
+    write_file(
+        &fs_root.join(STEAM_LAUNCHER_REL),
+        &guest_text(STEAM_LAUNCHER),
+        0o755,
+    )?;
+    write_file(
+        &fs_root.join(STEAM_BOOTSTRAP_REL),
+        &guest_text(STEAM_BOOTSTRAP),
+        0o755,
+    )?;
+    write_file(
+        &fs_root.join(STEAM_DESKTOP_REL),
+        &guest_text(STEAM_DESKTOP),
+        0o644,
+    )?;
     write_file(&fs_root.join(STEAM_ICON_REL), STEAM_ICON, 0o644)?;
     let compat = fs_root.join(STEAM_COMPAT_DIR_REL);
-    write_file(&compat.join("compatibilitytool.vdf"), &guest_text(STEAM_COMPAT_TOOL_VDF), 0o644)?;
-    write_file(&compat.join("toolmanifest.vdf"), &guest_text(STEAM_COMPAT_MANIFEST_VDF), 0o644)?;
-    write_file(&compat.join("portal-proton"), &guest_text(STEAM_COMPAT_SCRIPT), 0o755)?;
+    write_file(
+        &compat.join("compatibilitytool.vdf"),
+        &guest_text(STEAM_COMPAT_TOOL_VDF),
+        0o644,
+    )?;
+    write_file(
+        &compat.join("toolmanifest.vdf"),
+        &guest_text(STEAM_COMPAT_MANIFEST_VDF),
+        0o644,
+    )?;
+    write_file(
+        &compat.join("portal-proton"),
+        &guest_text(STEAM_COMPAT_SCRIPT),
+        0o755,
+    )?;
     let box64 = fs_root.join(STEAM_BOX64_DIR_REL);
-    write_file(&box64.join("compatibilitytool.vdf"), &guest_text(STEAM_BOX64_TOOL_VDF), 0o644)?;
-    write_file(&box64.join("toolmanifest.vdf"), &guest_text(STEAM_BOX64_MANIFEST_VDF), 0o644)?;
-    write_file(&box64.join("portal-box64"), &guest_text(STEAM_BOX64_SCRIPT), 0o755)?;
-    write_file(&fs_root.join(STEAM_COMPAT_MAPPER_REL), &guest_text(STEAM_COMPAT_MAPPER), 0o755)?;
+    write_file(
+        &box64.join("compatibilitytool.vdf"),
+        &guest_text(STEAM_BOX64_TOOL_VDF),
+        0o644,
+    )?;
+    write_file(
+        &box64.join("toolmanifest.vdf"),
+        &guest_text(STEAM_BOX64_MANIFEST_VDF),
+        0o644,
+    )?;
+    write_file(
+        &box64.join("portal-box64"),
+        &guest_text(STEAM_BOX64_SCRIPT),
+        0o755,
+    )?;
+    write_file(
+        &fs_root.join(STEAM_COMPAT_MAPPER_REL),
+        &guest_text(STEAM_COMPAT_MAPPER),
+        0o755,
+    )?;
     write_file(&fs_root.join(PORTAL_LSOF_REL), PORTAL_LSOF, 0o755)?;
     Ok(())
 }
@@ -690,7 +743,10 @@ pub fn install_for_setup(apps: &[OptionalApp], report: SetupAppsProgress) -> any
         .map(|(index, &app)| format!("echo portal-app:{index} >&3 && {}", install_command(app)))
         .collect::<Vec<_>>()
         .join(" && ");
-    report(0.0, "Installing optional apps: refreshing package lists".to_owned());
+    report(
+        0.0,
+        "Installing optional apps: refreshing package lists".to_owned(),
+    );
     let names = apps.iter().map(|app| app.name()).collect::<Vec<_>>();
     let cursor = Mutex::new(SetupAppsCursor {
         app: None,
@@ -699,52 +755,59 @@ pub fn install_for_setup(apps: &[OptionalApp], report: SetupAppsProgress) -> any
         published: Instant::now(),
     });
     let apt_report = report.clone();
-    run_apt_lines(&format!("{} && {commands}", prepare_apt_command()), move |line| {
-        let Ok(mut cursor) = cursor.lock() else {
-            return;
-        };
-        if let Some(index) = line
-            .trim()
-            .strip_prefix("portal-app:")
-            .and_then(|index| index.parse::<usize>().ok())
-            .filter(|&index| index < names.len())
-        {
-            cursor.app = Some(index);
-            cursor.within = 0.0;
-            cursor.installing = false;
-        } else {
-            if cursor.app.is_none() {
+    run_apt_lines(
+        &format!("{} && {commands}", prepare_apt_command()),
+        move |line| {
+            let Ok(mut cursor) = cursor.lock() else {
                 return;
-            }
-            // Downloading fills the first half of an app, dpkg the second.
-            let (within, installing) = match parse_apt_status(line) {
-                Some(AptStatus::Download(percent)) => (percent / 200.0, false),
-                Some(AptStatus::Install(percent, _)) => (0.5 + percent / 200.0, true),
-                _ => return,
             };
-            cursor.within = cursor.within.max(within);
-            let phase_changed = installing != cursor.installing;
-            cursor.installing = installing;
-            if !phase_changed && cursor.published.elapsed() < PUBLISH_INTERVAL {
-                return;
+            if let Some(index) = line
+                .trim()
+                .strip_prefix("portal-app:")
+                .and_then(|index| index.parse::<usize>().ok())
+                .filter(|&index| index < names.len())
+            {
+                cursor.app = Some(index);
+                cursor.within = 0.0;
+                cursor.installing = false;
+            } else {
+                if cursor.app.is_none() {
+                    return;
+                }
+                // Downloading fills the first half of an app, dpkg the second.
+                let (within, installing) = match parse_apt_status(line) {
+                    Some(AptStatus::Download(percent)) => (percent / 200.0, false),
+                    Some(AptStatus::Install(percent, _)) => (0.5 + percent / 200.0, true),
+                    _ => return,
+                };
+                cursor.within = cursor.within.max(within);
+                let phase_changed = installing != cursor.installing;
+                cursor.installing = installing;
+                if !phase_changed && cursor.published.elapsed() < PUBLISH_INTERVAL {
+                    return;
+                }
             }
-        }
-        let Some(index) = cursor.app else {
-            return;
-        };
-        cursor.published = Instant::now();
-        let done = 0.5 + index as f32 + cursor.within;
-        apt_report(
-            (done / units).min(1.0),
-            format!(
-                "Installing optional app {} of {}: {} ({})",
-                index + 1,
-                names.len(),
-                names[index],
-                if cursor.installing { "installing" } else { "downloading" }
-            ),
-        );
-    })?;
+            let Some(index) = cursor.app else {
+                return;
+            };
+            cursor.published = Instant::now();
+            let done = 0.5 + index as f32 + cursor.within;
+            apt_report(
+                (done / units).min(1.0),
+                format!(
+                    "Installing optional app {} of {}: {} ({})",
+                    index + 1,
+                    names.len(),
+                    names[index],
+                    if cursor.installing {
+                        "installing"
+                    } else {
+                        "downloading"
+                    }
+                ),
+            );
+        },
+    )?;
     let installed = fs::read_to_string(root().join("var/lib/dpkg/status"))
         .map(|status| installed_packages(&status))
         .context("could not read the Debian package status")?;
