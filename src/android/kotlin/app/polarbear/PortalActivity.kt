@@ -152,6 +152,22 @@ open class PortalActivity : GameActivity() {
         super.onPause()
     }
 
+    /**
+     * GameActivity's native onDestroy blocks this thread until Rust
+     * android_main returns, and Portal's never does: the event loop and the
+     * Plasma session live for the whole process. If the process outlives the
+     * Activity (swiped from recents while the session keeps it alive), the
+     * UI thread deadlocks here and the next launch sits on the splash
+     * forever. End the process instead, like closeAfterLogout; the next
+     * launch starts clean. Config changes are handled in place, so this
+     * only runs when the Activity is really going away.
+     */
+    override fun onDestroy() {
+        Log.i(TAG, "Activity destroyed (finishing=$isFinishing); ending the process")
+        Process.killProcess(Process.myPid())
+        super.onDestroy()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         // Android legitimately clears bar visibility on focus changes;
