@@ -127,7 +127,8 @@ step_packages() {
   # JetBrainsMono Nerd Font (OFL, bundled from the laptop): Konsole + fastfetch's glyph keys
   if ! fc-list | grep -q "JetBrainsMono Nerd Font Propo"; then
     install -Dm644 -t ~/.local/share/fonts/JetBrainsMonoNerd "$D"/fonts/*.ttf "$D"/fonts/OFL.txt
-    fc-cache -f ~/.local/share/fonts >/dev/null
+    # some older homes can't write the user font cache; the fonts load without it
+    fc-cache -f ~/.local/share/fonts >/dev/null 2>&1 || echo "  font cache not written (the fonts still work)"
   fi
   [ ${#need[@]} -eq 0 ] && { echo "  apt packages already installed"; return; }
   sudo -n apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${need[@]}"
