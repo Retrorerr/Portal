@@ -24,7 +24,9 @@ data class InstallStep(
 
 private val DOWNLOADED = Regex("""Downloading Debian runtime: (\d+) / (\d+) MiB""")
 private val EXTRACTED = Regex("""Extracting Debian runtime: (\d+) entries""")
-private val STAGE = Regex("""Configuring Portal \(([a-z0-9-]+)\)""")
+private val STAGE = Regex("""(?:Configuring Portal \(|Portal setup stage complete: )([a-z0-9-]+)""")
+private val APP = Regex("""Installing optional app (\d+) of (\d+): (.+) \((downloading|installing)\)""")
+private val STEAM_CLIENT = Regex("""Downloading Steam client(?:: (\d+) / (\d+) MB)?""")
 
 fun installStep(progress: Int, message: String): InstallStep {
     val index = when {
@@ -46,6 +48,20 @@ fun installStep(progress: Int, message: String): InstallStep {
     EXTRACTED.find(message)?.let { match ->
         val count = match.groupValues[1].toIntOrNull() ?: 0
         return InstallStep(index, "Unpacking Debian", "${"%,d".format(count)} files")
+    }
+    // Optional apps, one at a time: "Downloading GIMP · 3 of 9".
+    APP.find(message)?.let { match ->
+        val (number, count, name, action) = match.destructured
+        val verb = if (action == "installing") "Installing" else "Downloading"
+        return InstallStep(index, "$verb $name", "$number of $count")
+    }
+    STEAM_CLIENT.find(message)?.let { match ->
+        val (done, total) = match.destructured
+        val figure = if ((total.toLongOrNull() ?: 0L) > 0L) "$done of $total MB" else null
+        return InstallStep(index, "Downloading Steam", figure)
+    }
+    if (message.startsWith("Installing optional apps")) {
+        return InstallStep(index, "Getting your apps ready")
     }
     val label = when (index) {
         0 -> "Downloading Debian"

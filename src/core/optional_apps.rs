@@ -64,6 +64,7 @@ pub fn install_command(app: OptionalApp) -> String {
     match app {
         OptionalApp::Chatgpt => format!(
             r#"({APT_INSTALL} curl &&
+            echo 'dlstatus:0:0:Downloading chatgpt_arm64.deb' >&3 &&
             curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --output /tmp/portal-chatgpt_arm64.deb.part \
                 https://persistent.oaistatic.com/codex-app-prod/linux/deb/latest/chatgpt_arm64.deb &&

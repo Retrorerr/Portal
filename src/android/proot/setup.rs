@@ -946,14 +946,26 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
         provision_ibus_packages(fs_root);
         return None;
     }
+    // The stage owns its slice of the bar; each app moves through it.
+    let (from, to) = stage_span("optional-apps", options);
+    let report = options.progress.clone();
+    // A second attempt starts its count over; the bar holds where it was.
+    let reached = Arc::new(std::sync::atomic::AtomicU16::new(from));
+    let apps_report: super::optional_apps::SetupAppsProgress = Arc::new(move |done, message| {
+        let progress = from + (f32::from(to - from) * done.clamp(0.0, 1.0)) as u16;
+        let progress = reached
+            .fetch_max(progress, std::sync::atomic::Ordering::Relaxed)
+            .max(progress);
+        report(ProvisioningSnapshot::update(ProvisioningPhase::Configuring, progress, message));
+    });
     Some(thread::spawn(move || -> anyhow::Result<()> {
         // Every package token comes from fixed allowlist commands in
         // core::optional_apps; the UI only chooses which apps are included.
-        let mut installed = super::optional_apps::install_for_setup(&missing);
+        let mut installed = super::optional_apps::install_for_setup(&missing, apps_report.clone());
         if let Err(error) = &installed {
             log::warn!("Optional app installation failed, trying once more: {error:#}");
             thread::sleep(Duration::from_secs(3));
-            installed = super::optional_apps::install_for_setup(&missing);
+            installed = super::optional_apps::install_for_setup(&missing, apps_report);
         }
         match installed {
             // This is a one-time first-run application to the selected
@@ -1018,12 +1030,13 @@ fn setup_renderer_mode(_options: &SetupOptions) -> StageOutput {
 fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let report = options.progress.clone();
+    let (at, _) = stage_span("linux-sysdata", options);
 
     if !fs_root.join("proc/.version").exists() {
         return Some(thread::spawn(move || {
             report(ProvisioningSnapshot::update(
                 ProvisioningPhase::Configuring,
-                72,
+                at,
                 "Preparing Linux system data…",
             ));
 
@@ -3612,6 +3625,7 @@ fn setup_mesa_layer(options: &SetupOptions) -> StageOutput {
     // runs, so KWin can never launch while provisioning is unfinished.
     let report = options.progress.clone();
     let sender = options.mpsc_sender.clone();
+    let (at, _) = stage_span("mesa-kgsl-layer", options);
     Some(thread::spawn(move || {
         super::mesa_layer::provision_with_progress(|message| {
             diagnostics::host_event("mesa-provisioning", &message);
@@ -3625,7 +3639,7 @@ fn setup_mesa_layer(options: &SetupOptions) -> StageOutput {
             let _ = sender.send(SetupMessage::Progress(display_message.clone()));
             report(ProvisioningSnapshot::update(
                 ProvisioningPhase::Configuring,
-                78,
+                at,
                 display_message,
             ));
         })
@@ -4060,10 +4074,36 @@ fn complete_stage(index: usize, name: &'static str) {
     diagnostics::setup_stage(index, name, "complete");
 }
 
-fn stage_progress(index: usize, count: usize) -> u16 {
+fn stage_progress(done: usize, total: usize) -> u16 {
     // Debian image work occupies 0..70; setup stages occupy 70..99. The
     // final marker write owns 100, so no stage can visually finish early.
-    70 + ((index * 29) / count.max(1)).min(28) as u16
+    70 + ((done * 29) / total.max(1)).min(28) as u16
+}
+
+/// Share of the 70..99 band a stage gets. Every stage takes about the same
+/// few seconds except optional apps, which can take minutes: each selected
+/// app gets room to move the bar instead of all of them sharing one notch.
+fn stage_weight(name: &str, options: &SetupOptions) -> usize {
+    match (name, options.install_optional_apps, options.install_plan.as_ref()) {
+        ("optional-apps", true, Some(plan)) => 1 + 2 * plan.selected_apps().len(),
+        _ => 1,
+    }
+}
+
+/// The progress a stage starts and ends at.
+fn stage_span(name: &str, options: &SetupOptions) -> (u16, u16) {
+    let weights = stages()
+        .iter()
+        .map(|(stage, _)| (*stage, stage_weight(stage, options)))
+        .collect::<Vec<_>>();
+    let total = weights.iter().map(|(_, weight)| weight).sum::<usize>();
+    let before = weights
+        .iter()
+        .take_while(|(stage, _)| *stage != name)
+        .map(|(_, weight)| weight)
+        .sum::<usize>();
+    let own = stage_weight(name, options);
+    (stage_progress(before, total), stage_progress(before + own, total))
 }
 
 fn join_stage(
@@ -4101,13 +4141,13 @@ fn run_all_stages(
     options: &SetupOptions,
     registration: &SetupRegistration,
 ) -> Result<(), SetupFailure> {
-    let stage_count = stages.len();
     for (index, (name, stage)) in stages.into_iter().enumerate() {
+        let (start, end) = stage_span(name, options);
         publish_snapshot(
             registration,
             ProvisioningSnapshot::update(
                 ProvisioningPhase::Configuring,
-                stage_progress(index, stage_count),
+                start,
                 format!("Configuring Portal ({name})…"),
             ),
         );
@@ -4120,7 +4160,7 @@ fn run_all_stages(
             registration,
             ProvisioningSnapshot::update(
                 ProvisioningPhase::Configuring,
-                stage_progress(index + 1, stage_count),
+                end,
                 format!("Portal setup stage complete: {name}"),
             ),
         );

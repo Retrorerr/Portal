@@ -13,6 +13,7 @@ import android.os.SystemClock
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -57,11 +58,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -81,7 +89,10 @@ import app.polarbear.setup.SetupPhase
 import app.polarbear.setup.installStep
 import app.polarbear.setup.installedIn
 import app.polarbear.setup.pausedLabel
+import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /** Wide enough for the failure message and Try again to sit side by side. */
 private val SideBySideFooter = 560.dp
@@ -141,7 +152,7 @@ internal fun InstallStatusPanel(
     }
 
     Column(modifier = modifier.fillMaxWidth()) {
-        StepTrack(activeIndex = activeIndex, failed = failed, palette = palette)
+        StepTrack(activeIndex = activeIndex, failed = failed, moving = working && !step.waiting, palette = palette)
         Spacer(Modifier.height(26.dp))
         Row(
             verticalAlignment = Alignment.Bottom,
@@ -413,14 +424,17 @@ private fun FailureFooter(errorMessage: String?, palette: PortalPalette, onTryAg
     }
 }
 
-/** Download › Unpack › Set up › Finish, with the current step lit. */
+/**
+ * Download › Unpack › Set up › Finish. The current step shows a small glyph
+ * acting out what it does; it holds still while Portal waits on the network.
+ */
 @Composable
-private fun StepTrack(activeIndex: Int, failed: Boolean, palette: PortalPalette) {
-    val pulse by rememberInfiniteTransition(label = "step pulse").animateFloat(
-        initialValue = 0.35f,
+private fun StepTrack(activeIndex: Int, failed: Boolean, moving: Boolean, palette: PortalPalette) {
+    val cycle = rememberInfiniteTransition(label = "step glyph").animateFloat(
+        initialValue = 0f,
         targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(900, easing = PortalEmphasized), RepeatMode.Reverse),
-        label = "step pulse alpha",
+        animationSpec = infiniteRepeatable(tween(STEP_GLYPH_PERIOD_MS, easing = LinearEasing), RepeatMode.Restart),
+        label = "step glyph time",
     )
     Row(
         modifier = Modifier
@@ -445,7 +459,7 @@ private fun StepTrack(activeIndex: Int, failed: Boolean, palette: PortalPalette)
                     when {
                         done -> {
                             drawCircle(PortalColors.Orange, radius)
-                            val tick = androidx.compose.ui.graphics.Path().apply {
+                            val tick = Path().apply {
                                 moveTo(size.width * 0.29f, size.height * 0.52f)
                                 lineTo(size.width * 0.44f, size.height * 0.67f)
                                 lineTo(size.width * 0.72f, size.height * 0.36f)
@@ -454,8 +468,9 @@ private fun StepTrack(activeIndex: Int, failed: Boolean, palette: PortalPalette)
                         }
                         current && failed -> drawCircle(palette.accent, radius - 1.dp.toPx(), style = Stroke(2.dp.toPx()))
                         current -> {
-                            drawCircle(PortalColors.Orange.copy(alpha = 0.22f * pulse), radius)
-                            drawCircle(PortalColors.Orange, radius * 0.42f)
+                            drawCircle(PortalColors.Orange.copy(alpha = 0.16f), radius)
+                            // Read here, in the draw phase: the glyph never recomposes the track.
+                            drawStepGlyph(index, if (moving) cycle.value else STEP_GLYPH_REST)
                         }
                         else -> drawCircle(
                             palette.textPrimary.copy(alpha = 0.16f),
@@ -504,6 +519,90 @@ private fun StepTrack(activeIndex: Int, failed: Boolean, palette: PortalPalette)
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+private const val STEP_GLYPH_PERIOD_MS = 1_800
+
+/** Where a glyph rests when there is nothing to act out: whole and visible. */
+private const val STEP_GLYPH_REST = 0.5f
+
+/**
+ * The current step's glyph at loop time [t] (0..1), drawn in an 18dp disc:
+ * an arrow dropping in (Download), layers sliding out (Unpack), a cog turning
+ * (Set up), a tick drawing itself (Finish).
+ */
+private fun DrawScope.drawStepGlyph(index: Int, t: Float) {
+    val u = size.minDimension
+    val c = center
+    val stroke = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+    val ink = PortalColors.Orange
+    when (index) {
+        0 -> {
+            // Falls through the disc, fading in at the top and out at the bottom.
+            val y = c.y + u * 0.2f * (PortalEmphasized.transform(t) * 2f - 1f)
+            val alpha = sin(PI.toFloat() * t).coerceIn(0f, 1f)
+            val arrow = Path().apply {
+                moveTo(c.x, y - u * 0.17f)
+                lineTo(c.x, y + u * 0.17f)
+                moveTo(c.x - u * 0.13f, y + u * 0.04f)
+                lineTo(c.x, y + u * 0.17f)
+                lineTo(c.x + u * 0.13f, y + u * 0.04f)
+            }
+            clipPath(Path().apply { addOval(Rect(c, u * 0.42f)) }) {
+                drawPath(arrow, ink.copy(alpha = alpha), style = stroke)
+            }
+        }
+        1 -> {
+            // Three layers slide out one after another, then clear together.
+            val fade = 1f - ((t - 0.8f) / 0.2f).coerceIn(0f, 1f)
+            val left = c.x - u * 0.2f
+            listOf(1f, 0.7f, 0.88f).forEachIndexed { row, length ->
+                val grown = PortalEmphasized.transform(((t - row * 0.12f) / 0.42f).coerceIn(0f, 1f))
+                if (grown <= 0f) return@forEachIndexed
+                val y = c.y + (row - 1) * u * 0.17f
+                drawLine(
+                    color = ink.copy(alpha = fade * grown),
+                    start = Offset(left, y),
+                    end = Offset(left + u * 0.4f * length * grown, y),
+                    strokeWidth = stroke.width,
+                    cap = StrokeCap.Round,
+                )
+            }
+        }
+        2 -> {
+            // Six teeth: a 60° turn per loop reads as one steady rotation.
+            rotate(60f * t, c) {
+                drawCircle(ink, u * 0.13f, c, style = stroke)
+                for (tooth in 0 until 6) {
+                    val angle = tooth * PI.toFloat() / 3f
+                    val dx = cos(angle)
+                    val dy = sin(angle)
+                    drawLine(
+                        color = ink,
+                        start = Offset(c.x + dx * u * 0.22f, c.y + dy * u * 0.22f),
+                        end = Offset(c.x + dx * u * 0.3f, c.y + dy * u * 0.3f),
+                        strokeWidth = stroke.width,
+                        cap = StrokeCap.Round,
+                    )
+                }
+            }
+        }
+        else -> {
+            // Draws itself, holds, and lets go before the next stroke.
+            val tick = Path().apply {
+                moveTo(size.width * 0.29f, size.height * 0.52f)
+                lineTo(size.width * 0.44f, size.height * 0.67f)
+                lineTo(size.width * 0.72f, size.height * 0.36f)
+            }
+            val measure = PathMeasure().apply { setPath(tick, false) }
+            val drawn = PortalEmphasized.transform((t / 0.55f).coerceIn(0f, 1f))
+            val fade = 1f - ((t - 0.82f) / 0.18f).coerceIn(0f, 1f)
+            val partial = Path()
+            if (drawn > 0f && measure.getSegment(0f, measure.length * drawn, partial, true)) {
+                drawPath(partial, ink.copy(alpha = fade), style = stroke)
             }
         }
     }

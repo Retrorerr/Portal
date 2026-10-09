@@ -941,6 +941,23 @@ private suspend fun playScriptedInstall(
         state(84, "Configuring Portal (desktop-login)")
         delay(2_000)
     }
+    state(85, "Installing optional apps: refreshing package lists")
+    delay(1_600)
+    val apps = listOf("GIMP", "VLC", "Steam")
+    apps.forEachIndexed { index, name ->
+        for (step in 0..5) {
+            state(85 + index * 3 + step / 3, "Installing optional app ${index + 1} of ${apps.size}: $name (downloading)")
+            delay(400)
+        }
+        for (step in 0..3) {
+            state(87 + index * 3, "Installing optional app ${index + 1} of ${apps.size}: $name (installing)")
+            delay(450)
+        }
+    }
+    for (mb in 0..310 step 31) {
+        state(94 + mb / 160, "Downloading Steam client: $mb / 310 MB")
+        delay(300)
+    }
     state(96, "Configuring Portal (xkb-symlink)")
     delay(1_000)
     state(99, "Applying your appearance and display size…")

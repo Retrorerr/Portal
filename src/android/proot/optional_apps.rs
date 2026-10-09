@@ -354,10 +354,40 @@ fn log_tail(bytes: &[u8]) -> String {
 /// Run guest shell as root with apt status on fd 3 reported through
 /// `progress`, scaled into `[from, to]`.
 fn run_apt(command: &str, from: u16, to: u16, progress: Progress) -> anyhow::Result<()> {
+    let last_publish = Mutex::new(Instant::now() - PUBLISH_INTERVAL);
+    run_apt_lines(command, move |line| {
+        let Some(status) = parse_apt_status(line) else {
+            return;
+        };
+        let Ok(mut last) = last_publish.lock() else {
+            return;
+        };
+        if last.elapsed() < PUBLISH_INTERVAL {
+            return;
+        }
+        *last = Instant::now();
+        let Some(overall) = overall_progress(&status) else {
+            return;
+        };
+        let scaled = from + (u32::from(overall) * u32::from(to - from) / 100) as u16;
+        let message = match &status {
+            AptStatus::Download(_) => "Downloading…".to_owned(),
+            AptStatus::Install(_, message) => crate::core::system_updates::friendly_status(message),
+            AptStatus::Error(_) => return,
+        };
+        progress(scaled, message);
+    })
+}
+
+/// Run guest shell as root, handing every fd 3 line (apt status and any
+/// markers the command echoes there) to `on_line`.
+fn run_apt_lines(
+    command: &str,
+    on_line: impl Fn(&str) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
     crate::android::proot::system_updates::sync_apt_policy(root())?;
     let last_error = Arc::new(Mutex::new(None::<String>));
     let callback_error = last_error.clone();
-    let last_publish = Mutex::new(Instant::now() - PUBLISH_INTERVAL);
     let shell = format!(
         "exec 3>&1 >>{OPTIONAL_APPS_LOG} 2>&1; echo \"== Portal optional apps $(date -Is) ==\"; {command}"
     );
@@ -366,34 +396,13 @@ fn run_apt(command: &str, from: u16, to: u16, progress: Progress) -> anyhow::Res
             .with_env("DEBIAN_FRONTEND", "noninteractive")
             .with_env("APT_LISTCHANGES_FRONTEND", "none"),
         Some(Arc::new(move |line: String| {
-            let Some(status) = parse_apt_status(&line) else {
-                return;
-            };
-            if let AptStatus::Error(message) = &status {
+            if let Some(AptStatus::Error(message)) = parse_apt_status(&line) {
                 if let Ok(mut error) = callback_error.lock() {
-                    *error = Some(message.clone());
+                    *error = Some(message);
                 }
                 return;
             }
-            let Ok(mut last) = last_publish.lock() else {
-                return;
-            };
-            if last.elapsed() < PUBLISH_INTERVAL {
-                return;
-            }
-            *last = Instant::now();
-            let Some(overall) = overall_progress(&status) else {
-                return;
-            };
-            let scaled = from + (u32::from(overall) * u32::from(to - from) / 100) as u16;
-            let message = match &status {
-                AptStatus::Download(_) => "Downloading…".to_owned(),
-                AptStatus::Install(_, message) => {
-                    crate::core::system_updates::friendly_status(message)
-                }
-                AptStatus::Error(_) => return,
-            };
-            progress(scaled, message);
+            on_line(&line);
         })),
         None,
     );
@@ -647,19 +656,95 @@ pub fn sync_steam_integration(fs_root: &Path) {
     let _ = fs::remove_dir_all(fs_root.join(STEAM_BOX64_DIR_REL));
 }
 
+/// First-run setup progress: the share of the apps work done (0..1) and a
+/// line the setup screen reads (see `InstallSteps.kt`):
+///
+/// `Installing optional apps: refreshing package lists`
+/// `Installing optional app 3 of 9: GIMP (downloading)` / `(installing)`
+/// `Downloading Steam client: 120 / 310 MB`
+pub type SetupAppsProgress = Arc<dyn Fn(f32, String) + Send + Sync>;
+
+/// Where the guest run is, from the `portal-app:<index>` markers echoed on
+/// fd 3 before each app's commands.
+struct SetupAppsCursor {
+    app: Option<usize>,
+    /// Within the current app, 0..1, never moving backwards: one app may run
+    /// apt more than once (Claude's repository, ChatGPT's .deb).
+    within: f32,
+    installing: bool,
+    published: Instant,
+}
+
 /// First-run setup: install `apps` (already known to be missing) in one
 /// guest run, then their follow-ups. Fails on the first app that fails.
-pub fn install_for_setup(apps: &[OptionalApp]) -> anyhow::Result<()> {
+pub fn install_for_setup(apps: &[OptionalApp], report: SetupAppsProgress) -> anyhow::Result<()> {
     if apps.is_empty() {
         return Ok(());
     }
-    let quiet: Progress = Arc::new(|_, _| {});
+    let steam = apps.contains(&OptionalApp::Steam);
+    // Package lists take half a unit, each app one, Steam's own client one.
+    let units = 0.5 + apps.len() as f32 + if steam { 1.0 } else { 0.0 };
     let commands = apps
         .iter()
-        .map(|&app| install_command(app))
+        .enumerate()
+        .map(|(index, &app)| format!("echo portal-app:{index} >&3 && {}", install_command(app)))
         .collect::<Vec<_>>()
         .join(" && ");
-    run_apt(&format!("{} && {commands}", prepare_apt_command()), 0, 100, quiet.clone())?;
+    report(0.0, "Installing optional apps: refreshing package lists".to_owned());
+    let names = apps.iter().map(|app| app.name()).collect::<Vec<_>>();
+    let cursor = Mutex::new(SetupAppsCursor {
+        app: None,
+        within: 0.0,
+        installing: false,
+        published: Instant::now(),
+    });
+    let apt_report = report.clone();
+    run_apt_lines(&format!("{} && {commands}", prepare_apt_command()), move |line| {
+        let Ok(mut cursor) = cursor.lock() else {
+            return;
+        };
+        if let Some(index) = line
+            .trim()
+            .strip_prefix("portal-app:")
+            .and_then(|index| index.parse::<usize>().ok())
+            .filter(|&index| index < names.len())
+        {
+            cursor.app = Some(index);
+            cursor.within = 0.0;
+            cursor.installing = false;
+        } else {
+            if cursor.app.is_none() {
+                return;
+            }
+            // Downloading fills the first half of an app, dpkg the second.
+            let (within, installing) = match parse_apt_status(line) {
+                Some(AptStatus::Download(percent)) => (percent / 200.0, false),
+                Some(AptStatus::Install(percent, _)) => (0.5 + percent / 200.0, true),
+                _ => return,
+            };
+            cursor.within = cursor.within.max(within);
+            let phase_changed = installing != cursor.installing;
+            cursor.installing = installing;
+            if !phase_changed && cursor.published.elapsed() < PUBLISH_INTERVAL {
+                return;
+            }
+        }
+        let Some(index) = cursor.app else {
+            return;
+        };
+        cursor.published = Instant::now();
+        let done = 0.5 + index as f32 + cursor.within;
+        apt_report(
+            (done / units).min(1.0),
+            format!(
+                "Installing optional app {} of {}: {} ({})",
+                index + 1,
+                names.len(),
+                names[index],
+                if cursor.installing { "installing" } else { "downloading" }
+            ),
+        );
+    })?;
     let installed = fs::read_to_string(root().join("var/lib/dpkg/status"))
         .map(|status| installed_packages(&status))
         .context("could not read the Debian package status")?;
@@ -670,8 +755,17 @@ pub fn install_for_setup(apps: &[OptionalApp]) -> anyhow::Result<()> {
             .all(|package| installed.contains(*package))),
         "A requested optional app is not fully installed after apt completed"
     );
-    if apps.contains(&OptionalApp::Steam) {
-        install_steam(quiet)?;
+    if steam {
+        // install_steam reports 42..98 with "Downloading Steam… 120 / 310 MB".
+        let steam_report: Progress = Arc::new(move |percent, message| {
+            let within = f32::from(percent.saturating_sub(42)) / 56.0;
+            let message = match message.strip_prefix("Downloading Steam… ") {
+                Some(figure) => format!("Downloading Steam client: {figure}"),
+                None => "Downloading Steam client".to_owned(),
+            };
+            report(((units - 1.0 + within.min(1.0)) / units).min(1.0), message);
+        });
+        install_steam(steam_report)?;
     }
     Ok(())
 }
