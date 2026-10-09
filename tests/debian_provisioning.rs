@@ -3,11 +3,46 @@ mod provisioning;
 #[path = "../src/core/runtime.rs"]
 mod runtime;
 use provisioning::{
-    begin_installation, InstallOperationState, InstallStart, RuntimeArtifact, IMAGE_MARKER,
-    ProvisioningPhase, ProvisioningSnapshot, IMAGE_READY_MARKER, PARTIAL_ARCHIVE, READY_MARKER,
+    begin_installation, InstallOperationState, InstallStart, ProvisioningPhase,
+    ProvisioningSnapshot, RuntimeArtifact, IMAGE_MARKER, IMAGE_READY_MARKER, PARTIAL_ARCHIVE,
+    READY_MARKER,
 };
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::Path};
+
+/// Answers every request the client makes, recording each request head. A
+/// hard failure is retried, so a server that only answers once would leave the
+/// retry on a closed port, which provisioning waits out as being offline.
+fn serve(
+    respond: impl Fn(&mut std::net::TcpStream) + Send + 'static,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/runtime", listener.local_addr().unwrap());
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"
+
+") {
+                if stream.read_exact(&mut byte).is_err() {
+                    break;
+                }
+                request.push(byte[0]);
+            }
+            seen.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&request).to_lowercase());
+            respond(&mut stream);
+        }
+    });
+    (url, requests)
+}
 
 #[test]
 fn interrupted_download_resumes_and_servers_ignoring_ranges_restart_safely() {
@@ -102,7 +137,7 @@ fn fixture(directory: &Path, version: &str) -> (RuntimeArtifact, std::path::Path
     (
         RuntimeArtifact {
             version: version.into(),
-            url: "http://127.0.0.1:1/not-used".into(),
+            url: "portal-test://not-used".into(),
             sha256: format!("{:x}", Sha256::digest(&bytes)),
             compressed_bytes: bytes.len() as u64,
             source_commit: None,
@@ -203,8 +238,6 @@ fn legacy_completed_runtime_is_migrated_in_place_without_download() {
 
 #[test]
 fn invalid_resume_range_is_rejected_without_mutating_the_partial_prefix() {
-    use std::io::Read;
-
     let temp = tempfile::tempdir().unwrap();
     let (mut artifact, archive) = fixture(temp.path(), "test-v1");
     let bytes = fs::read(&archive).unwrap();
@@ -214,41 +247,35 @@ fn invalid_resume_range_is_rejected_without_mutating_the_partial_prefix() {
     fs::write(&partial, &prefix).unwrap();
     fs::write(
         temp.path().join("portal-runtime.tar.xz.part.offset"),
-        format!("{offset}\n"),
+        format!("{offset}
+"),
     )
     .unwrap();
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    artifact.url = format!("http://{}/runtime", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-            .unwrap();
-        let mut request = Vec::new();
-        let mut byte = [0];
-        while !request.ends_with(b"\r\n\r\n") {
-            stream.read_exact(&mut byte).unwrap();
-            request.push(byte[0]);
-        }
-        assert!(String::from_utf8(request)
-            .unwrap()
-            .to_lowercase()
-            .contains(&format!("range: bytes={offset}-")));
-        write!(
+    let (url, requests) = serve(move |stream| {
+        let _ = write!(
             stream,
-            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 206 Partial Content
+Content-Length: {}
+Content-Range: bytes {}-{}/{}
+Connection: close
+
+",
             bytes.len() - offset,
             offset + 1,
             bytes.len() - 1,
             bytes.len()
-        )
-        .unwrap();
+        );
         let _ = stream.write_all(&bytes[offset..]);
     });
+    artifact.url = url;
 
     assert!(artifact.provision(temp.path(), |_| {}).is_err());
-    server.join().unwrap();
+    let requests = requests.lock().unwrap();
+    assert!(!requests.is_empty());
+    assert!(requests
+        .iter()
+        .all(|request| request.contains(&format!("range: bytes={offset}-"))));
     assert_eq!(fs::read(&partial).unwrap(), prefix);
     assert!(!temp.path().join("portal-runtime.tar.xz").exists());
     assert!(!temp.path().join("runtime-B").exists());
@@ -256,35 +283,24 @@ fn invalid_resume_range_is_rejected_without_mutating_the_partial_prefix() {
 
 #[test]
 fn incorrect_response_size_is_rejected_before_any_archive_is_committed() {
-    use std::io::Read;
-
     let temp = tempfile::tempdir().unwrap();
     let (mut artifact, archive) = fixture(temp.path(), "test-v1");
     let bytes = fs::read(&archive).unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    artifact.url = format!("http://{}/runtime", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-            .unwrap();
-        let mut request = Vec::new();
-        let mut byte = [0];
-        while !request.ends_with(b"\r\n\r\n") {
-            stream.read_exact(&mut byte).unwrap();
-            request.push(byte[0]);
-        }
-        write!(
+    let (url, _) = serve(move |stream| {
+        let _ = write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+",
             bytes.len() + 1
-        )
-        .unwrap();
-        stream.write_all(&bytes).unwrap();
+        );
+        let _ = stream.write_all(&bytes);
     });
+    artifact.url = url;
 
     assert!(artifact.provision(temp.path(), |_| {}).is_err());
-    server.join().unwrap();
     assert!(!temp.path().join("portal-runtime.tar.xz").exists());
     assert!(!temp.path().join(PARTIAL_ARCHIVE).exists());
     assert!(!temp.path().join("runtime-B").exists());
@@ -318,7 +334,7 @@ fn compatible_runtime_survives_artifact_revision_and_preserves_user_files() {
     // points at a newer exact artifact identity.  Mutable runtime-B must be
     // reused without a download or rotation.
     let mut newer = fixture(temp.path(), "test-v2").0;
-    newer.url = "http://127.0.0.1:1/not-used".into();
+    newer.url = "portal-test://not-used".into();
     assert!(!newer.is_ready(&root));
     assert!(newer.is_bootable(&root));
     newer
@@ -399,7 +415,7 @@ fn full_size_wrong_hash_and_overlong_partial_are_discarded_before_retry() {
         vec![0u8; bytes.len() + 1],
     )
     .unwrap();
-    artifact.url = "http://127.0.0.1:1/not-used".into();
+    artifact.url = "portal-test://not-used".into();
     let error = artifact.provision(temp.path(), |_| {});
     assert!(error.is_err());
     assert!(!temp.path().join("portal-runtime.tar.xz").exists());
@@ -521,7 +537,8 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
     let provisioning = include_str!("../src/core/provisioning.rs");
     let run = include_str!("../src/android/app/run.rs");
     let compose = include_str!("../src/android/kotlin/app/polarbear/ComposeOverlay.kt");
-    let setup_screen = include_str!("../src/android/kotlin/app/polarbear/setup/PortalSetupScreen.kt");
+    let setup_screen =
+        include_str!("../src/android/kotlin/app/polarbear/setup/PortalSetupScreen.kt");
     let config_full = include_str!("../src/core/config.rs");
     // Production defaults live above the unit-test module; legacy migration
     // fixtures below `#[cfg(test)]` intentionally mention old managers.
@@ -617,15 +634,15 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
 #[test]
 fn production_runtime_artifact_matches_manifest_and_archive_verification() {
     let artifact = RuntimeArtifact::production();
-    assert_eq!(artifact.version, "debian13-arm64-2026.10.01.1");
+    assert_eq!(artifact.version, "debian13-arm64-2026.10.08.1");
     assert_eq!(
         artifact.sha256,
-        "b398740319af13a0823da776fd7edf1ccdfb3ab010812ea63a4258027dd7eeb0"
+        "5e3716bd35c81665964a8e01eb88724a0d8f193143885a08d09b224244f80d20"
     );
-    assert_eq!(artifact.compressed_bytes, 965676616);
-    assert!(artifact.url.starts_with("https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.10.01.1/"));
+    assert_eq!(artifact.compressed_bytes, 917941452);
+    assert!(artifact.url.starts_with("https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.10.08.1/"));
     let archive_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target/portal-debian13-arm64-2026.10.01.1.tar.xz");
+        .join("target/portal-debian13-arm64-2026.10.08.1.tar.zst");
     if archive_path.exists() {
         artifact
             .verify(&archive_path)
@@ -638,10 +655,9 @@ fn runtime_manifest_provenance_is_optional_and_forward_compatible() {
     // Older manifests without `source_commit` must still parse, newer ones
     // with provenance (and unknown future fields) must be accepted: the
     // serde model has no `deny_unknown_fields` and `source_commit` defaults.
-    let legacy: RuntimeArtifact = serde_json::from_str(
-        r#"{"version":"v","url":"u","sha256":"s","compressed_bytes":1}"#,
-    )
-    .unwrap();
+    let legacy: RuntimeArtifact =
+        serde_json::from_str(r#"{"version":"v","url":"u","sha256":"s","compressed_bytes":1}"#)
+            .unwrap();
     assert_eq!(legacy.source_commit, None);
     let modern: RuntimeArtifact = serde_json::from_str(
         r#"{"version":"v","url":"u","sha256":"s","compressed_bytes":1,"source_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","future_field":42}"#,
@@ -669,7 +685,10 @@ fn runtime_builder_pins_lfdevs_anland_stack_and_publish_validates_it() {
         "prepare_locked_packages_with_anland",
         "assert_overlay_payload_safe",
     ] {
-        assert!(builder.contains(pin), "builder missing lfdevs pin/guard: {pin}");
+        assert!(
+            builder.contains(pin),
+            "builder missing lfdevs pin/guard: {pin}"
+        );
     }
     let publisher = include_str!("../scripts/publish_runtime_release.py");
     for guard in [
@@ -687,4 +706,3 @@ fn runtime_builder_pins_lfdevs_anland_stack_and_publish_validates_it() {
         );
     }
 }
-

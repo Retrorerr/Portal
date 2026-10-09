@@ -68,6 +68,7 @@ fn optional_libreoffice_has_a_wayland_backend_and_guest_proc_version() {
     assert!(proot.contains("/proc/.version:/proc/version"));
     // The package list lives in the optional-app allowlist; installs use it verbatim.
     assert!(include_str!("../src/core/install_plan.rs")
+        .replace("\r\n", "\n")
         .contains("\"libreoffice\",
                 \"libreoffice-kf6\","));
     assert!(ANDROID_SETUP_SOURCE.contains("!launchers.contains(&\"preferred://filemanager\")"));
