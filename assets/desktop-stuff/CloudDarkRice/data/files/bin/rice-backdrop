@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Blurred, darkened copy of the current desktop wallpaper for the rofi power menu
+# (rofi can't blur what's behind it). Rebuilt only when the wallpaper changes, or with --force.
+out=~/.local/share/rice/powermenu-bg.png; stamp=~/.local/share/rice/powermenu-bg.src
+wall=$(awk '/^\[Containments\]\[[0-9]+\]\[Wallpaper\]\[org.kde.image\]\[General\]/{f=1;next} /^\[/{f=0} f&&/^Image=/{sub(/^Image=(file:\/\/)?/,""); print; exit}' ~/.config/plasma-org.kde.plasma.desktop-appletsrc)
+[ -f "$wall" ] || exit 0
+key="$wall $(stat -c %Y "$wall")"
+[ "$1" != --force ] && [ -f "$out" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$key" ] && exit 0
+mkdir -p "${out%/*}"
+read -r W H < <(kscreen-doctor -j | jq -r '[.outputs[] | select(.enabled)][0] | .modes[] as $m | select($m.id == .currentModeId) | "\($m.size.width) \($m.size.height)"' 2>/dev/null)
+W=${W:-2560}; H=${H:-1440}
+magick "$wall" -resize "$((W / 4))x$((H / 4))^" -gravity center -extent "$((W / 4))x$((H / 4))" \
+  -blur 0x6 -resize "${W}x${H}!" -fill "#181717" -colorize 66 "$out" && echo "$key" > "$stamp"

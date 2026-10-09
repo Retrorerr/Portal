@@ -3,6 +3,7 @@ android:
   assets:
     - assets/ld-linux-aarch64.so.1
     - assets/wireplumber-share.tar
+    - assets/desktop-stuff
   runtime_libs:
     - assets/libs
   gradle: true

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Rice: power menu
+Exec=bash /home/desktop/.local/bin/rice-powermenu
+Icon=system-shutdown
+NoDisplay=true
+X-KDE-GlobalAccel-CommandShortcut=true

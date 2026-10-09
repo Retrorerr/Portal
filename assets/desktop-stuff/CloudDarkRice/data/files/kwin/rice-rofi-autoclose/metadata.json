@@ -1,0 +1,14 @@
+{
+  "KPlugin": {
+    "Id": "rice-rofi-autoclose",
+    "Name": "Rofi auto-close",
+    "Description": "Closes rofi (launcher / power menu) when you click into another window",
+    "Authors": [{ "Name": "rice" }],
+    "License": "GPL-2.0-or-later",
+    "Version": "1.0",
+    "EnabledByDefault": true
+  },
+  "KPackageStructure": "KWin/Script",
+  "X-Plasma-API": "javascript",
+  "X-Plasma-MainScript": "code/main.js"
+}

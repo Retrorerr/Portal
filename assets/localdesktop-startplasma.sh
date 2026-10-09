@@ -267,12 +267,46 @@ if [ "$ready" -ne 1 ]; then
     exec /usr/local/bin/start-localdesktop-recovery
 fi
 
+# Log out, Restart and Shut down all end ksmserver, but the rest of the
+# session never follows: KWin crashes once Xwayland is gone and KCrash's
+# drkonqi waits forever with no display, while the shell supervisor keeps
+# respawning plasmashell. Once ksmserver is gone, end the whole session so
+# Portal can close instead of showing a frozen desktop.
+logout_marker="$state_dir/plasma-logout"
+rm -f "$logout_marker"
+(
+    seen=0
+    gone=0
+    while kill -0 "$session_pid" 2>/dev/null; do
+        if pgrep -x ksmserver >/dev/null 2>&1; then
+            seen=1
+            gone=0
+        elif [ "$seen" -eq 1 ]; then
+            gone=$((gone + 1))
+            if [ "$gone" -ge 2 ]; then
+                printf 'stage=logout timestamp=%s\n' "$(date +%s)" >> "$session_log"
+                date +%s > "$logout_marker"
+                reap_session
+                break
+            fi
+        fi
+        sleep 1
+    done
+) &
+logout_watch_pid=$!
+
 wait "$session_pid"
 status=$?
-kill "$log_monitor_pid" 2>/dev/null || true
+kill "$log_monitor_pid" "$logout_watch_pid" 2>/dev/null || true
 runtime=$(( $(date +%s) - started ))
 printf 'stage=exit status=%s runtime=%s timestamp=%s\n' "$status" "$runtime" "$(date +%s)" >> "$session_log"
 trim_log "$session_log"
+
+# The user ended the session: a clean exit tells Portal to close.
+if [ -s "$logout_marker" ]; then
+    [ -z "$clipboard_bridge_pid" ] || signal_tree "$clipboard_bridge_pid" TERM
+    exit 0
+fi
 
 if [ "$status" -ne 0 ] || [ "$runtime" -lt 30 ]; then
     printf 'reason=session-exit status=%s runtime=%s attempt=%s timestamp=%s\n' \

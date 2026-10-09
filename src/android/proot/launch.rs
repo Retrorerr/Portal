@@ -1,7 +1,5 @@
 use super::process::ArchProcess;
-use crate::android::{
-    diagnostics, utils::webview_handoff,
-};
+use crate::android::{diagnostics, utils::webview_handoff};
 use crate::core::runtime::LinuxRuntime;
 use std::fs;
 use std::path::Path;
@@ -57,6 +55,13 @@ fn report_failure(reason: impl Into<String>) {
         diagnostics::host_event("desktop-failure", &reason);
         webview_handoff::wake_event_loop();
     }
+}
+
+static SESSION_ENDED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the user ended the Plasma session since the last call.
+pub fn take_session_ended() -> bool {
+    SESSION_ENDED.swap(false, Ordering::AcqRel)
 }
 
 /// Consume a failure reported by the guest-session monitor.
@@ -161,8 +166,8 @@ pub fn launch() {
     let runtime = crate::android::runtime::proot::PRootRuntime::active();
     let rootfs = runtime.rootfs_path();
     let committed = crate::core::provisioning::RuntimeArtifact::production().is_bootable(rootfs);
-    let pending_initial_preferences = !committed
-        && crate::android::proot::setup::can_launch_pending_initial_preferences(rootfs);
+    let pending_initial_preferences =
+        !committed && crate::android::proot::setup::can_launch_pending_initial_preferences(rootfs);
     if !committed && !pending_initial_preferences {
         log::error!("Refusing to launch an incomplete or incompatible Debian runtime");
         LAUNCH_RUNNING.store(false, Ordering::Release);
@@ -291,6 +296,12 @@ pub fn launch() {
         // graphics repair, a system update); its signal exit is no failure.
         if !output.status.success() && !thread_cancel.load(Ordering::Acquire) {
             report_failure(format!("Desktop session exited with status {status:?}"));
+        } else if output.status.success() && !thread_cancel.load(Ordering::Acquire) {
+            // The launcher exits 0 only when the user ended the session
+            // (Log out / Restart / Shut down): close Portal.
+            SESSION_ENDED.store(true, Ordering::Release);
+            diagnostics::host_event("desktop-logout", "session ended by the user");
+            webview_handoff::wake_event_loop();
         }
         thread_cancel.store(true, Ordering::Release);
     });

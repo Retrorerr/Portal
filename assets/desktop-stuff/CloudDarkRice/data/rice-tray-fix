@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Plasma 6.3 (Portal) version of rice-tray-prune. Run while plasmashell is down.
+
+panel-layout.js writes the tray's item lists to the tray applet's [General] (where Plasma 6.7 reads
+them). Plasma 6.3 reads them from the tray's own containment (SystrayContainmentId), so copy them
+there, then drop the tray's child applets that aren't listed (its own volume / notifications)."""
+import os, re
+
+KEYS = ("extraItems", "knownItems", "shownItems", "hiddenItems", "showAllItems", "scaleIconsToFit", "iconSpacing")
+p = os.path.expanduser("~/.config/plasma-org.kde.plasma.desktop-appletsrc")
+blocks = re.split(r'(?m)^(?=\[)', open(p).read())
+head = lambda b: b.split("\n", 1)[0]
+
+def setkeys(block, values):
+    for k, v in values.items():
+        line = f"{k}={v}"
+        block, n = re.subn(rf'(?m)^{k}=.*$', line, block)
+        if not n:
+            block = block.rstrip("\n") + "\n" + line + "\n"
+    return block
+
+for b in list(blocks):
+    if not re.search(r'(?m)^plugin=org\.kde\.plasma\.systemtray$', b):
+        continue
+    applet = head(b)[:-1]                                   # "[Containments][44][Applets][53"
+    # Plasma 6.3 keeps applet config under [Configuration]; newer Plasma under [General]
+    group = lambda name: next((x for x in blocks if head(x) == applet + "]" + name), "")
+    gen = group("[Configuration][General]") or group("[General]")
+    cid = re.search(r'(?m)^SystrayContainmentId=(\d+)$', group("[Configuration]") + gen)
+    values = {k: m.group(1) for k in KEYS for m in [re.search(rf'(?m)^{k}=(.*)$', gen)] if m}
+    if not cid or "extraItems" not in values:
+        continue
+    cont = f"[Containments][{cid.group(1)}]"
+    i = next((i for i, x in enumerate(blocks) if head(x) == cont + "[General]"), None)
+    if i is None:
+        blocks.append(cont + "[General]\n"); i = len(blocks) - 1
+    blocks[i] = setkeys(blocks[i], values)
+    allowed = set(values["extraItems"].split(","))
+    drop = set()
+    for x in blocks:
+        m = re.fullmatch(re.escape(cont) + r'\[Applets\]\[(\d+)\]', head(x))
+        pm = m and re.search(r'(?m)^plugin=(.*)$', x)
+        if pm and pm.group(1) not in allowed:
+            drop.add(head(x)[:-1]); print("dropping", pm.group(1))
+    blocks = [x for x in blocks if not any(head(x).startswith(d + "]") for d in drop)]
+    print("tray", cid.group(1), "items synced")
+
+open(p, "w").write("".join(blocks))

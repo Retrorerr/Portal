@@ -1,0 +1,18 @@
+{
+  "KPlugin": {
+    "Id": "org.rice.desktopnumbers",
+    "Name": "Desktop Numbers",
+    "Description": "Virtual desktops as numbers with an underline for active and occupied.",
+    "Icon": "virtual-desktops",
+    "Category": "Windows and Tasks",
+    "Authors": [
+      {
+        "Name": "rice"
+      }
+    ],
+    "License": "GPL-2.0-or-later",
+    "Version": "1.1"
+  },
+  "KPackageStructure": "Plasma/Applet",
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

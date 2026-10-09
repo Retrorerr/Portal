@@ -377,7 +377,12 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::copy(&source_path, &dest_path)?;
+            if source_path.is_dir() {
+                std::fs::create_dir_all(&dest_path)?;
+                xcommon::copy_dir_all(&source_path, &dest_path)?;
+            } else {
+                std::fs::copy(&source_path, &dest_path)?;
+            }
         }
     }
 

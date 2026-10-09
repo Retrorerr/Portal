@@ -34,7 +34,8 @@ fn graphical_login_is_nonroot_and_keeps_privileged_install_plan_separate() {
     assert!(!PLASMA_LAUNCHER.contains("state_dir=/var/lib/localdesktop\n"));
     assert!(ROOTFS_BUILDER.contains("desktop:x:1000:1000"));
     assert!(SETUP.contains(".with_user(DESKTOP_USER)"));
-    assert!(SETUP.contains("fs_root.join(\"root/.config/autostart/localdesktop-session-init.desktop\")"));
+    assert!(SETUP
+        .contains("fs_root.join(\"root/.config/autostart/localdesktop-session-init.desktop\")"));
 }
 
 #[test]
@@ -280,9 +281,7 @@ fn drmshim_reports_version_with_correct_drm_version_layout() {
     assert!(source.contains("size_t name_len;\n    char *name;"));
     assert!(source.contains("size_t date_len;\n    char *date;"));
     assert!(source.contains("size_t desc_len;\n    char *desc;"));
-    assert!(source.contains(
-        "_Static_assert(sizeof(struct drm_version) == 64"
-    ));
+    assert!(source.contains("_Static_assert(sizeof(struct drm_version) == 64"));
     assert!(source.contains("KGSL-backed DRM node (portal-shimmed)"));
     // close() must stay uninterposed: a raw-SVC close replacement breaks
     // processes under PRoot (proven by bisect: EFAULT after successful
@@ -305,7 +304,10 @@ fn drmshim_reports_version_with_correct_drm_version_layout() {
     // exporting exactly open/open64/openat/openat64/ioctl/dup/fcntl-family
     // (never close).
     assert_eq!(&DRMSHIM_BINARY[..4], b"\x7fELF");
-    assert_eq!(u16::from_le_bytes([DRMSHIM_BINARY[18], DRMSHIM_BINARY[19]]), 183);
+    assert_eq!(
+        u16::from_le_bytes([DRMSHIM_BINARY[18], DRMSHIM_BINARY[19]]),
+        183
+    );
     for symbol in [
         b"\x00open\x00".as_slice(),
         b"\x00open64\x00".as_slice(),
@@ -324,9 +326,7 @@ fn drmshim_reports_version_with_correct_drm_version_layout() {
         );
     }
     assert!(
-        !DRMSHIM_BINARY
-            .windows(7)
-            .any(|w| w == b"\x00close\x00"),
+        !DRMSHIM_BINARY.windows(7).any(|w| w == b"\x00close\x00"),
         "staged drmshim.so must not interpose close()"
     );
     assert!(SETUP.contains("DRMSHIM_BINARY"));
@@ -342,4 +342,21 @@ fn android_logging_is_local_and_warn_in_release() {
     assert!(ANDROID_MAIN.contains("cfg!(debug_assertions)"));
     assert!(!ANDROID_MAIN.contains("LevelFilter::Debug"));
     assert!(!ANDROID_MAIN.contains("LevelFilter::Trace"));
+}
+
+#[test]
+fn logout_ends_the_session_and_is_not_a_kwin_crash() {
+    // ksmserver gone => the launcher reaps the hung session and exits 0, which
+    // closes Portal; KWin's exit during that teardown is no crash.
+    assert!(PLASMA_LAUNCHER.contains("pgrep -x ksmserver"));
+    assert!(PLASMA_LAUNCHER.contains("date +%s > \"$logout_marker\""));
+    let marker = PLASMA_LAUNCHER
+        .find("if [ -s \"$logout_marker\" ]; then")
+        .unwrap();
+    let recovery = PLASMA_LAUNCHER
+        .rfind("exec /usr/local/bin/start-localdesktop-recovery")
+        .unwrap();
+    assert!(marker < recovery);
+    let skip = KWIN_WRAPPER.find("plasma-logout").unwrap();
+    assert!(skip < KWIN_WRAPPER.find("> \"$crash_file\"").unwrap());
 }

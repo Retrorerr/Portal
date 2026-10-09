@@ -42,6 +42,9 @@ import android.content.pm.ApplicationInfo
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
@@ -165,6 +168,19 @@ open class PortalActivity : GameActivity() {
      * or recreate the SurfaceView.
      */
     fun overlayHost(): FrameLayout = findViewById(contentViewId)
+
+    /**
+     * Native (any thread): the user logged out of Plasma (or chose Restart /
+     * Shut down). Leave the task, then end the process so its guest
+     * processes go with it and the next launch starts a fresh session.
+     */
+    fun closeAfterLogout() {
+        runOnUiThread {
+            Log.i(TAG, "Plasma session ended by the user; closing Portal")
+            finishAndRemoveTask()
+            Handler(Looper.getMainLooper()).postDelayed({ Process.killProcess(Process.myPid()) }, 500)
+        }
+    }
 
     /**
      * Native (any thread): ask for the fastest display mode the user allows

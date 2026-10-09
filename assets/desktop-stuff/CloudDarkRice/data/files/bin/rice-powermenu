@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Power button / Meta+Esc: full-screen rofi power menu over the blurred wallpaper.
+# Shut down / restart / log out go through KDE's session manager, so apps still get to save.
+pkill -x rofi && exit 0   # pressing it again closes the menu
+~/.local/bin/rice-backdrop 2>/dev/null   # rebuilds the backdrop only if the wallpaper changed
+up=$(uptime -p | sed 's/^up /uptime: /')
+choice=$(printf '%s\n' "󰐥" "󰑓" "󰍃" "󰌾" "󰒲" |
+  rofi -dmenu -i -format i -no-custom -p "" -mesg "$up" -theme ~/.config/rofi/powermenu.rasi) || exit 0
+ksm() { qdbus6 org.kde.Shutdown /Shutdown "org.kde.Shutdown.$1"; }
+case $choice in
+  0) ksm logoutAndShutdown ;;
+  1) ksm logoutAndReboot ;;
+  2) ksm logout ;;
+  3) loginctl lock-session ;;
+  4) systemctl suspend ;;
+esac

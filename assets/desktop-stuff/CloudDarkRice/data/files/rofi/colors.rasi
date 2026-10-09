@@ -1,0 +1,13 @@
+/* Cloud Dark — pale fog-grey accent from the wallpaper, same values as CloudDark.colors */
+* {
+    bg:      #1c1b1b;
+    bg-alt:  #262423;
+    bg-dim:  #181717;
+    bg-tile: #1c1b1b;
+    fg:      #ddd6d0;
+    grey:    #968f8a;
+    accent:  #c8c0ba;
+    yellow:  #d8a657;
+    aqua:    #89b482;
+    pink:    #d3869b;
+}

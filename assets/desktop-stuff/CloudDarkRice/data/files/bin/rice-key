@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Set a KDE global shortcut live through kglobalaccel (works on Plasma 6 Wayland,
+where kglobalaccel lives inside kwin and edits to kglobalshortcutsrc are ignored).
+
+  rice-key <component> <action> [key ...]     e.g. rice-key kwin "Window Close" Meta+Q Alt+F4
+  rice-key <component> <action> none          clear it
+  rice-key --get <component> <action>
+"""
+import re, subprocess, sys
+
+MODS = {"meta": 0x10000000, "ctrl": 0x04000000, "alt": 0x08000000, "shift": 0x02000000}
+NAMED = {"left": 0x01000012, "up": 0x01000013, "right": 0x01000014, "down": 0x01000015,
+         "space": 0x20, "escape": 0x01000000, "esc": 0x01000000, "return": 0x01000004,
+         "tab": 0x01000001, "backspace": 0x01000003, "print": 0x01000009,
+         "meta": 0x01000022,   # bare Meta tap (only valid on its own)
+         "pgup": 0x01000016, "pgdown": 0x01000017, "home": 0x01000010, "end": 0x01000011}
+for i in range(1, 13):
+    NAMED[f"f{i}"] = 0x01000030 + i - 1
+
+def code(seq: str) -> int:
+    parts = seq.split("+")
+    key = parts[-1]
+    if key == "" and seq.endswith("+"):      # "Meta++"
+        key = "+"
+    n = 0
+    for m in parts[:-1]:
+        n |= MODS[m.lower()]
+    k = NAMED.get(key.lower())
+    if k is None:
+        if len(key) != 1:
+            sys.exit(f"unknown key: {key}")
+        k = ord(key.upper())
+    return n | k
+
+def gdbus(method, *args):
+    return subprocess.run(["gdbus", "call", "--session", "--dest", "org.kde.kglobalaccel",
+                           "--object-path", "/kglobalaccel", "--method",
+                           f"org.kde.KGlobalAccel.{method}", *args],
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+def action_id(comp, action):
+    return "[" + ",".join(repr(s) for s in (comp, action, "", "")) + "]"
+
+if sys.argv[1] == "--who":           # which actions own these keys
+    for k in sys.argv[2:]:
+        out = gdbus("getGlobalShortcutsByKey", str(code(k)))
+        names = re.findall(r"\('([^']*)', '([^']*)', '[^']*', '([^']*)'", out)
+        print(f"{k:18} " + ("; ".join(f"{c}/{u}" for u, f, c in names) or "-"))
+    sys.exit()
+
+if sys.argv[1] == "--get":
+    print(gdbus("shortcutKeys", action_id(sys.argv[2], sys.argv[3])))
+    sys.exit()
+
+comp, action, keys = sys.argv[1], sys.argv[2], sys.argv[3:]
+keys = [] if keys in ([], ["none"]) else keys
+variant = "[" + ",".join(f"([{code(k)},0,0,0],)" for k in keys) + "]" if keys else "@a(ai) []"
+gdbus("setForeignShortcutKeys", action_id(comp, action), variant)

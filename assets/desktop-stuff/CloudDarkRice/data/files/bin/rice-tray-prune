@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Drop widgets inside the system tray that aren't in its extraItems list (e.g. the tray's own
+volume icon, which would duplicate the bar's). Run while plasmashell is stopped."""
+import os, re
+p = os.path.expanduser("~/.config/plasma-org.kde.plasma.desktop-appletsrc")
+text = open(p).read()
+blocks = re.split(r'(?m)^(?=\[)', text)          # one block per [group] header
+head = lambda b: b.split("\n", 1)[0]
+trays, allowed = [], {}
+for b in blocks:
+    if re.search(r'(?m)^plugin=org\.kde\.plasma\.systemtray$', b):
+        trays.append(head(b))
+for b in blocks:
+    for t in trays:
+        if head(b) == t[:-1] + "][General]":
+            m = re.search(r'(?m)^extraItems=(.*)$', b)
+            allowed[t] = set(m.group(1).split(",")) if m else None
+drop = set()
+for b in blocks:
+    for t in trays:
+        m = re.fullmatch(re.escape(t[:-1]) + r'\]\[Applets\]\[(\d+)\]', head(b))
+        if m and allowed.get(t):
+            pm = re.search(r'(?m)^plugin=(.*)$', b)
+            if pm and pm.group(1) not in allowed[t]:
+                drop.add(head(b)[:-1]); print("dropping", pm.group(1))
+keep = [b for b in blocks if not any(head(b).startswith(d + "]") for d in drop)]
+open(p, "w").write("".join(keep))

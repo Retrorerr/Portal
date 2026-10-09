@@ -1,0 +1,77 @@
+/* Power menu (Meta+Escape / bar power button). Full-screen over a blurred, darkened wallpaper. */
+@import "colors.rasi"
+configuration {
+    show-icons: false;
+    hover-select: false;   /* pointer position must never change what Enter does */
+    me-select-entry: "";
+    me-accept-entry: "MousePrimary";
+}
+* {
+    font: "Inter 11";
+    background-color: transparent;
+    text-color: @fg;
+}
+window {
+    fullscreen: true;
+    background-color: rgba(24, 23, 23, 0.92);
+    background-image: url("~/.local/share/rice/powermenu-bg.png", both);
+}
+mainbox {
+    children: [ top, banner, listview, message, bottom ];
+    spacing: 30px;
+    padding: 0;
+}
+top, bottom { expand: true; }
+banner {
+    orientation: horizontal;
+    expand: false;
+    children: [ pad-l, textbox-question, pad-r ];
+}
+pad-l, pad-r { expand: true; }
+textbox-question {
+    expand: false;
+    str: "What do you want to do?";
+    background-color: @accent;
+    text-color: @bg-dim;
+    font: "Inter SemiBold 18";
+    padding: 12px 34px;
+}
+listview {
+    columns: 5;
+    lines: 1;
+    expand: false;
+    fixed-columns: true;
+    spacing: 22px;
+    scrollbar: false;
+    layout: vertical;
+    flow: horizontal;
+    margin: 0 189px;    /* (1766 - 5×260 - 4×22) / 2 */
+}
+element {
+    padding: 0;
+    width: 260px;
+    border: 2px;
+    border-color: @bg-tile;
+    background-color: @bg-tile;
+    cursor: pointer;
+}
+element selected.normal {
+    background-color: @bg-alt;
+    border-color: @accent;
+    text-color: @accent;
+}
+element-text {
+    font: "JetBrainsMono Nerd Font Propo 40";
+    horizontal-align: 0.5;
+    vertical-align: 0.5;
+    padding: 50px 0;
+    background-color: inherit;
+    text-color: inherit;
+    cursor: inherit;
+}
+message { expand: false; }
+textbox {
+    horizontal-align: 0.5;
+    text-color: #b4aca6;   /* lighter than @grey so it reads on a bright wallpaper */
+    font: "Inter 10";
+}

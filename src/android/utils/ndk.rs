@@ -50,6 +50,19 @@ pub fn recreate_activity(env: &mut JNIEnv, android_app: &AndroidApp) {
     }
 }
 
+/// The user ended the Plasma session: PortalActivity leaves the task and ends the process.
+pub fn close_after_logout(android_app: &AndroidApp) {
+    run_in_jvm(
+        |env, app| {
+            let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            if let Err(error) = env.call_method(activity, "closeAfterLogout", "()V", &[]) {
+                log::error!("Failed to close Portal after logout: {error}");
+            }
+        },
+        android_app.clone(),
+    );
+}
+
 /// Current Android display refresh rate expressed in Wayland mode units (millihertz).
 ///
 /// This is the legacy `Display.getRefreshRate()` reading. New code should prefer
@@ -430,10 +443,8 @@ pub fn log_display_modes(android_app: &AndroidApp) {
             // Preferred target evidence: what the nominal `wl_output` mode and
             // the frame-rate hint will use (highest supported rate within the
             // user's peak-refresh setting).
-            let preferred_millihz = select_preferred_refresh_with_peak_millihz(
-                &supported_rates,
-                peak_millihz,
-            );
+            let preferred_millihz =
+                select_preferred_refresh_with_peak_millihz(&supported_rates, peak_millihz);
             let peak = peak_millihz.map_or_else(|| "unset".to_string(), |p| p.to_string());
             log::info!(
                 "display.modes active={active_hz:.2}Hz mode=[{mode_detail}] supported=[{supported_detail}] user_peak_millihz={peak} preferred_millihz={preferred_millihz}"

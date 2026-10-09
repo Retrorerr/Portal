@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Rice: close rofi
+Exec=pkill -x rofi
+NoDisplay=true
+X-KDE-GlobalAccel-CommandShortcut=true

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0">
+  <kcfgfile name=""/>
+  <group name="General">
+    <entry name="cellWidth" type="Int"><default>28</default></entry>
+    <entry name="underline" type="Int"><default>3</default></entry>
+    <entry name="fontFamily" type="String"><default>Inter</default></entry>
+    <entry name="fontSize" type="Double"><default>10</default></entry>
+    <entry name="textColor" type="Color"><default>#a8a09a</default></entry>
+    <entry name="activeTextColor" type="Color"><default>#ddd6d0</default></entry>
+    <entry name="activeColor" type="Color"><default>#c8c0ba</default></entry>
+    <entry name="occupiedColor" type="Color"><default>#5c5753</default></entry>
+  </group>
+</kcfg>

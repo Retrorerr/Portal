@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Turn Polonium tiling off/on for the current desktop (Meta+Shift+T).
+# "Off" = Polonium's KWin engine: windows float, keep their title bars, quick-tiling works.
+state_dir=${XDG_RUNTIME_DIR:-/tmp}/rice-tiling
+mkdir -p "$state_dir"
+desk=$(qdbus6 org.kde.KWin /VirtualDesktopManager org.kde.KWin.VirtualDesktopManager.current)
+f=$state_dir/$desk
+invoke() { qdbus6 org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component.invokeShortcut "$1"; }
+osd() { qdbus6 org.kde.plasmashell /org/kde/osdService org.kde.osdService.showText "$1" "$2" >/dev/null 2>&1; }
+
+if [ -e "$f" ]; then
+  invoke PoloniumSetEngineBTree; rm -f "$f"; osd view-split-left-right "Tiling on"
+else
+  invoke PoloniumSetEngineKWin; touch "$f"; osd window "Tiling off"
+fi

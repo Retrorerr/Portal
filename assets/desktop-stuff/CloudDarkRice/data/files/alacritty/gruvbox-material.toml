@@ -1,0 +1,46 @@
+# Gruvbox Material on Cloud Dark + JetBrains Mono — imported from alacritty.toml
+[font]
+normal = { family = "JetBrainsMono Nerd Font Mono", style = "Regular" }
+bold = { family = "JetBrainsMono Nerd Font Mono", style = "Bold" }
+italic = { family = "JetBrainsMono Nerd Font Mono", style = "Italic" }
+bold_italic = { family = "JetBrainsMono Nerd Font Mono", style = "Bold Italic" }
+size = 11.0
+
+[window]
+padding = { x = 10, y = 8 }
+opacity = 1.0
+
+[colors]
+draw_bold_text_with_bright_colors = false
+
+[colors.primary]
+background = "#181717"
+foreground = "#ddd6d0"
+
+[colors.cursor]
+text = "#181717"
+cursor = "#c8c0ba"
+
+[colors.selection]
+text = "CellForeground"
+background = "#45403d"
+
+[colors.normal]
+black = "#3c3836"
+red = "#ea6962"
+green = "#a9b665"
+yellow = "#d8a657"
+blue = "#7daea3"
+magenta = "#d3869b"
+cyan = "#89b482"
+white = "#d4be98"
+
+[colors.bright]
+black = "#7c6f64"   # fish autosuggestions use this; #3c3836 would be invisible on #181717
+red = "#ea6962"
+green = "#a9b665"
+yellow = "#d8a657"
+blue = "#7daea3"
+magenta = "#d3869b"
+cyan = "#89b482"
+white = "#ddc7a1"

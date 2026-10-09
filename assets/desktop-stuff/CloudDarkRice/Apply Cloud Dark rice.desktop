@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Apply Cloud Dark rice
+Comment=Runs apply-portal.sh in Konsole (theme, bar, dock, wallpaper, outline, power menu, shortcuts)
+Exec=sh -c 'exec konsole --hold -e bash "${0%/*}/apply-portal.sh"' %k
+Icon=preferences-desktop-theme-global
+Terminal=false

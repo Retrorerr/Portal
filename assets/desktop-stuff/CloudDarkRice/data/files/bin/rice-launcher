@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# App launcher toggle (Meta tap / Meta+Space / Alt+F1): closes rofi if it's open, else opens it.
+# rofi is started detached so this script returns at once — the bar widget that receives the
+# Meta tap won't re-run a command that is still running, which would make Meta unable to close it.
+pkill -x rofi && exit 0
+setsid -f rofi -show drun -theme ~/.config/rofi/launcher.rasi >/dev/null 2>&1

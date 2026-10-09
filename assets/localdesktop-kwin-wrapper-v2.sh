@@ -486,6 +486,13 @@ trim_log "$log_file"
 trim_log "$trace_file"
 trim_log "$debugger_output"
 
+# After a logout the launcher ends the session itself (KWin crashes as
+# Xwayland goes and KCrash hangs): that is no crash to recover from.
+if [ "$status" -ge 128 ] && [ -s "$state_dir/plasma-logout" ]; then
+    printf 'kwin-exit-after-logout attempt=%s status=%s\n' "$attempt_id" "$status" >> "$trace_file"
+    exit "$status"
+fi
+
 if [ "$status" -ge 128 ]; then
     printf 'timestamp_ms=%s attempt=%s status=%s pid=%s args=%q\n' \
         "$(date +%s%3N 2>/dev/null || date +%s000)" "$attempt_id" "$status" "$$" "$*" \
