@@ -504,6 +504,8 @@ def publish(archive_path: Path, repo: str = "Retrorerr/Portal", version: str | N
             "--title", tag,
             "--target", source_sha,
             "--notes", f"Canonical Debian 13 ARM64 runtime {version} for Portal.",
+            # The app release stays "Latest": the README badge and download link follow it.
+            "--latest=false",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
