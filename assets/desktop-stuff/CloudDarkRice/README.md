@@ -1,6 +1,6 @@
 # Cloud Dark rice for Portal
 
-The laptop's Cloud Dark KDE rice, ported to Portal (Debian 13, Plasma 6.3).
+Cloud Dark, a KDE rice first made for a laptop, ported to Portal (Debian 13, Plasma 6.3).
 
 ## Apply
 
@@ -24,7 +24,7 @@ Steps: `packages theme windows outline bar power wallpaper apps terminal keys`
 | outline | the 2px cloud-grey active-window outline (KDE-Rounded-Corners effect, built for Portal's KWin) |
 | bar | top bar (launcher, desktops, clock, now playing, tray, power) and the floating dock on the left |
 | power | full-screen rofi power menu over the blurred wallpaper |
-| wallpaper | the laptop's wallpaper |
+| wallpaper | the Cloud Dark wallpaper |
 | apps | Dolphin / Konsole without menu bars, volume above 100%, night colour; turns off Baloo's file-tags worker (Portal has no file index, and it popped up a "Could not enter folder tags:/" error at every start) |
 | terminal | Konsole Gruvbox colours + Nerd Font profile, fastfetch config, Alacritty colours |
 | keys | the shortcuts below |
@@ -43,7 +43,7 @@ Steps: `packages theme windows outline bar power wallpaper apps terminal keys`
 | Meta+Shift+1…7 | Send window to desktop N |
 | Meta+Ctrl+←/→/↑/↓ | Previous / next desktop |
 
-## Different from the laptop
+## Differences from the original
 
 - The dock is on the left edge instead of the bottom.
 - The power menu has no lock or suspend: Portal has no lock screen, and Android handles sleep.

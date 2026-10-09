@@ -1,14 +1,14 @@
-Hey, thanks for trying Portal!
+Thanks for trying Portal!
 
-Seriously, it means a lot. Portal started as a "wait, could a tablet run a
-real Linux desktop?" kind of idea, and now here you are, sitting in one.
-Hope you have fun with it.
+Portal is a fork of Local Desktop (github.com/localdesktop), which did the
+hard groundwork of running Linux on Android without root. Portal builds on
+it with Debian 13, KDE Plasma 6 and GPU acceleration.
 
 A few things to get you going:
 
   - This is a real Debian 13 with KDE Plasma 6. Install stuff with
     `sudo apt install <whatever>` in Konsole (no password needed).
-  - Want a fancier look? Open CloudDarkRice and run
+  - Want a different look? Open CloudDarkRice and run
     "Apply Cloud Dark rice". It downloads about 25 MB the first time
     and you can undo it any time (the README in there says how).
   - Logging out closes Portal. Just open it again to come back.
@@ -16,10 +16,7 @@ A few things to get you going:
     like Alt+Tab work and Android doesn't close the desktop in the
     background.
 
-If something breaks, or you just want to say hi, come find us on GitHub
-(the "Portal on GitHub" link right next to this note). Bug reports,
-screenshots of your setup, ideas, all welcome.
-
-Thanks again, and enjoy your new desktop :)
+Bug reports and ideas are welcome on GitHub (the "Portal on GitHub" link
+next to this note).
 
 - Retro
