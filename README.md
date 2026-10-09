@@ -9,24 +9,60 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Retrorerr/Portal/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Retrorerr/Portal?include_prereleases&label=release&color=e8794a" /></a>
+  <a href="https://github.com/Retrorerr/Portal/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Retrorerr/Portal?label=release&color=e8794a" /></a>
   <a href="https://github.com/Retrorerr/Portal/actions/workflows/build.yml"><img alt="Android build" src="https://github.com/Retrorerr/Portal/actions/workflows/build.yml/badge.svg" /></a>
   <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-6f78ff" /></a>
   <img alt="ARM64" src="https://img.shields.io/badge/Android-ARM64-43d7f2" />
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/rice-fastfetch.png" width="860" alt="Portal running KDE Plasma with the Cloud Dark rice on a OnePlus Pad 3" />
+</p>
+
 Portal installs Debian on your device and runs the full KDE Plasma desktop right on the screen, with GPU acceleration, sound, your keyboard and mouse, and the Android clipboard all hooked up. It's everything running locally, not a remote desktop or a VNC window.
 
-> **Heads up:** Portal is in early pre-release. It's built and tested on a **OnePlus Pad 3** (Snapdragon 8 Elite, Adreno 830). Other 64-bit Android devices might work, but nobody has checked yet, and GPU acceleration is built around Qualcomm Adreno GPUs. Bug reports from other devices are very welcome.
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/stock-note.png" alt="Stock KDE Plasma on first boot, with the thank-you note open in Kate" /></td>
+    <td width="50%"><img src="docs/screenshots/rice-dolphin.png" alt="Dolphin showing the Stuff folder with the Cloud Dark rice applied" /></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Stock Plasma, right after setup</sub></td>
+    <td align="center"><sub>One click later: the Cloud Dark rice</sub></td>
+  </tr>
+</table>
+
+<p align="center"><sub>Screenshots from a OnePlus Pad 3.</sub></p>
+
+## What you need
+
+Portal is made for **Android tablets with a Snapdragon chip**. That's where it's built and tested, and where it runs best.
+
+- **Tested on:** OnePlus Pad 3 (Snapdragon 8 Elite, Adreno 830). This is the daily driver, so it gets the most love.
+- **Should work on:** other 64-bit (arm64) Android devices with a Qualcomm Adreno GPU. The GPU path goes through Mesa's freedreno and Turnip drivers, which cover recent Adreno chips. Nobody's tried most of them yet though, so reports are super welcome.
+- **Other GPUs** (Mali, PowerVR, Xclipse): GPU acceleration is built around Adreno, so these get Portal's slower fallback renderer at best. Totally untested so far, and proper support is on the wishlist.
+- **Storage:** around 6 GB free. Debian itself is about a 1 GB download.
+- **RAM:** more is better. A desktop with Firefox and a few apps open is comfy with 8 GB or more.
+- **Nice to have:** a keyboard and mouse or trackpad. Touch works fine, but a real desktop really clicks with a proper keyboard.
+
+No root, no PC and no unlocked bootloader needed.
 
 ## Getting started
 
 1. Grab the latest `Portal-x.y.z.apk` from [Releases](https://github.com/Retrorerr/Portal/releases) and install it.
 2. Open Portal, pick a theme and interface size, and tick any extra apps you want.
-3. Tap **Begin Install**. Portal downloads Debian (about 1 GB) and sets everything up. Plan for around 6 GB of free space, and keep the app open while it works.
+3. Tap **Begin Install**. Portal downloads Debian and sets everything up, which takes a couple of minutes on a fast connection. You can leave the app while it works.
 4. When it's done, swipe up to enter your desktop.
 
 If setup gets interrupted, just open Portal again. It picks up where it left off.
+
+## Using Portal
+
+- **Coming back:** leaving Portal keeps the desktop running in the background. Open it again and swipe up to jump back in, with your windows right where you left them.
+- **Logging out** (or shutting down or restarting from Plasma) closes the desktop and Portal with it. Open Portal again to start a fresh session.
+- **The Stuff folder:** your desktop starts with stock KDE Plasma and a folder called **Stuff**. Inside there's a link to this repo, a little note from me, and **CloudDarkRice**, an optional dark theme with a top bar, a dock, a nicer power menu and a bunch of shortcuts. Open the folder, run **Apply Cloud Dark rice** and log out once it's done. It downloads about 25 MB the first time. Don't like it? `apply-portal.sh restore` puts everything back (the README in that folder has the details).
+- **Managing apps:** leave the desktop and come back to Portal's start screen to add or remove the optional apps whenever you like.
+- **Keyboard and mouse:** plug them in (USB or Bluetooth) and Plasma switches from tablet mode to desktop mode by itself. Trackpad scrolling works too.
 
 ## What you get
 
