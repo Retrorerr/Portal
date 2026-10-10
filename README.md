@@ -34,6 +34,12 @@ Portal is a fork of [Local Desktop](https://github.com/localdesktop/localdesktop
   </tr>
 </table>
 
+<p align="center">
+  <img src="docs/screenshots/ksp.png" width="860" alt="Kerbal Space Program in a window on the Plasma desktop, a rocket lifting off" />
+</p>
+
+<p align="center"><sub>Kerbal Space Program from Steam, an x86-64 Linux game running through Box64</sub></p>
+
 <p align="center"><sub>Screenshots from a OnePlus Pad 3.</sub></p>
 
 ## What you need
