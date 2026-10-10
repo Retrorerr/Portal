@@ -168,6 +168,8 @@ jobs:
         run: |
           mv target/x/release/android/gradle/app/build/outputs/apk/debug/app-debug.apk target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
           mv target/x/release/android/gradle/app/build/outputs/apk/release/app-release.apk target/x/Portal-${{ steps.extract_version.outputs.version }}.apk
+          # Fixed name so releases/latest/download/Portal.apk always points at the newest build
+          cp target/x/Portal-${{ steps.extract_version.outputs.version }}.apk target/x/Portal.apk
 
       - name: Prepare PR APK artifact
         id: pr_apk_artifact
@@ -241,6 +243,7 @@ jobs:
           body_path: ${{ steps.release_notes.outputs.path }}
           files: |
             target/x/Portal-${{ steps.extract_version.outputs.version }}.apk
+            target/x/Portal.apk
             target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
             target/x/Portal-${{ steps.extract_version.outputs.version }}.aab
             target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.aab

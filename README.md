@@ -16,6 +16,12 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/Retrorerr/Portal/releases/latest/download/Portal.apk" title="Download Portal">
+    <img src="assets/download-portal.svg" width="300" alt="Download Portal" />
+  </a>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/rice-fastfetch.png" width="860" alt="Portal running KDE Plasma with the Cloud Dark rice on a OnePlus Pad 3" />
 </p>
 
@@ -57,7 +63,7 @@ No root, no PC and no unlocked bootloader needed.
 
 ## Getting started
 
-1. Grab the latest `Portal-x.y.z.apk` from [Releases](https://github.com/Retrorerr/Portal/releases) and install it.
+1. Tap **[Download Portal](https://github.com/Retrorerr/Portal/releases/latest/download/Portal.apk)** on your tablet and install the APK (allow installs from your browser if Android asks). Older versions are on [Releases](https://github.com/Retrorerr/Portal/releases).
 2. Open Portal, pick a theme and interface size, and tick any extra apps you want.
 3. Tap **Begin Install**. Portal downloads Debian and sets everything up, which takes a couple of minutes on a fast connection. You can leave the app while it works.
 4. When it's done, swipe up to enter your desktop.
