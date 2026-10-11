@@ -1,0 +1,175 @@
+From 81f26957b1e4c7bf0f65c75abb79fc6fa1de3af7 Mon Sep 17 00:00:00 2001
+From: Portal <masobazee@gmail.com>
+Date: Sun, 11 Oct 2026 16:08:18 +0100
+Subject: [PATCH] backends/anland: Ask for Android pointer capture during
+ pointer locks
+
+While a client holds a zwp_locked_pointer_v1 lock (a game, or Xwayland
+emulating an X11 pointer warp), send OUTPUT_TYPE_SET_CONSUMER_VAR with
+CONSUMER_VAR_CAPTURE_MOUSE = 1, as upstream Anland's consumer expects,
+and 0 when it ends. The consumer then takes Android pointer capture, so
+the host cursor hides and relative motion no longer stops at the screen
+edges. The value is resent after a consumer reconnect.
+---
+ src/backends/anland/anland_backend.cpp | 50 ++++++++++++++++++++++++++
+ src/backends/anland/anland_backend.h   |  7 ++++
+ src/backends/anland/protocol.h         | 13 +++++++
+ 3 files changed, 70 insertions(+)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index 706ec40..d713df2 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -20,8 +20,11 @@
+ #include "utils/filedescriptor.h"
+ #include "utils/pipe.h"
+ #include "wayland/abstract_data_source.h"
++#include "wayland/compositor.h"
+ #include "wayland/display.h"
++#include "wayland/pointerconstraints_v1.h"
+ #include "wayland/seat.h"
++#include "wayland/surface.h"
+ #include "wayland_server.h"
+ 
+ #include <QFutureWatcher>
+@@ -197,6 +200,10 @@ bool AnlandBackend::initialize()
+         });
+     }
+ 
++    if (CompositorInterface *compositor = waylandServer()->compositor()) {
++        connect(compositor, &CompositorInterface::surfaceCreated, this, &AnlandBackend::watchPointerConstraints);
++    }
++
+     return true;
+ }
+ 
+@@ -286,6 +293,45 @@ void AnlandBackend::onInputReadable()
+     }
+ }
+ 
++/*
++ * A game locks the pointer (zwp_locked_pointer_v1, which Xwayland also uses
++ * to emulate X11 pointer warps) to read relative motion. The host cursor is
++ * absolute and stops at the screen edges, so while a lock is active the
++ * consumer takes Android pointer capture: the system cursor hides and raw
++ * relative motion arrives instead. KWin locks and unlocks a surface's pointer
++ * as focus and the lock request change, and both show up as lockedChanged.
++ */
++void AnlandBackend::watchPointerConstraints(SurfaceInterface *surface)
++{
++    connect(surface, &SurfaceInterface::pointerConstraintsChanged, this, [this, surface]() {
++        if (LockedPointerV1Interface *lock = surface->lockedPointer()) {
++            connect(lock, &LockedPointerV1Interface::lockedChanged, this, &AnlandBackend::updatePointerCapture, Qt::UniqueConnection);
++        }
++        updatePointerCapture();
++    });
++}
++
++void AnlandBackend::updatePointerCapture()
++{
++    if (m_inFallback) {
++        return;
++    }
++    const SeatInterface *seat = waylandServer()->seat();
++    const SurfaceInterface *surface = seat ? seat->focusedPointerSurface() : nullptr;
++    const LockedPointerV1Interface *lock = surface ? surface->lockedPointer() : nullptr;
++    const bool capture = lock && lock->isLocked();
++    if (capture == m_pointerCaptured) {
++        return;
++    }
++    m_pointerCaptured = capture;
++    qCInfo(KWIN_ANLAND) << "pointer capture" << capture;
++    OutputEvent ev = {};
++    ev.type = OUTPUT_TYPE_SET_CONSUMER_VAR;
++    ev.set_consumer_var.var = CONSUMER_VAR_CAPTURE_MOUSE;
++    ev.set_consumer_var.value = capture ? 1 : 0;
++    push_output_event(m_display, &ev);
++}
++
+ QPointF AnlandBackend::mapInputToLogical(const QPointF &devicePoint) const
+ {
+     AnlandOutput *output = m_outputs[0];
+@@ -509,6 +555,8 @@ void AnlandBackend::enterFallback()
+ 
+     m_consumerReady = false;
+     m_inFallback = true;
++    // The consumer releases capture itself when it loses us.
++    m_pointerCaptured = false;
+ 
+     // Detach the audio socket before the transport closes the borrowed fd. The streams
+     // keep running (capture drops its PCM, the mic Source feeds silence), so PipeWire
+@@ -559,6 +607,8 @@ void AnlandBackend::onReconnectTimer()
+     }
+     setupNotifiers();
+     qCDebug(KWIN_ANLAND) << "reconnect: notifiers installed";
++    // A lock that outlived the old consumer must reach the new one.
++    updatePointerCapture();
+     // Attach the fresh audio socket (a new socketpair was installed by pickup_fds).
+     qCDebug(KWIN_ANLAND) << "reconnect: attaching audio fd" << get_audio_fd(m_display);
+     anland_audio_set_fd(get_audio_fd(m_display));
+diff --git a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
+index 8df71bb..d60beac 100644
+--- a/src/backends/anland/anland_backend.h
++++ b/src/backends/anland/anland_backend.h
+@@ -36,6 +36,7 @@ class DrmDevice;
+ class OpenGLBackend;
+ class EglDisplay;
+ class InputBackend;
++class SurfaceInterface;
+ 
+ class KWIN_EXPORT AnlandBackend : public OutputBackend
+ {
+@@ -109,6 +110,10 @@ private:
+     // Inject UTF-8 text from the consumer's IME into the focused KWin client.
+     void sendTextInputToKWin(const QByteArray &text);
+ 
++    // Android pointer capture follows Wayland pointer locks.
++    void watchPointerConstraints(SurfaceInterface *surface);
++    void updatePointerCapture();
++
+     static void fallbackTrampoline(void *data);
+ 
+     QString m_socketPath;
+@@ -127,6 +132,8 @@ private:
+     bool m_consumerReady = false;
+     bool m_inFallback = false;
+     bool m_noDrmDeviceMode = false;
++    // Last CONSUMER_VAR_CAPTURE_MOUSE value sent to the connected consumer.
++    bool m_pointerCaptured = false;
+ 
+     // Last known clipboard text — used to de-duplicate (KWin changed -> we sent ->
+     // consumer sets the same text on Android -> consumer sends back to KWin).
+diff --git a/src/backends/anland/protocol.h b/src/backends/anland/protocol.h
+index 29fc4e1..212f7c5 100644
+--- a/src/backends/anland/protocol.h
++++ b/src/backends/anland/protocol.h
+@@ -177,6 +177,10 @@ struct OutputEvent{
+             uint32_t type;
+             uint32_t args[3]; //support 3 args
+         } resources_request;
++        struct {
++            uint32_t var;   /* CONSUMER_VAR_* */
++            uint32_t value; /* 0 = default / release */
++        } set_consumer_var;
+         struct
+         {
+             uint32_t padding[4];
+@@ -187,6 +191,15 @@ struct OutputEvent{
+ 
+ #define OUTPUT_TYPE_CLIPBOARD 1
+ #define OUTPUT_TYPE_RESOURCES_REQUEST 2
++/* Producer -> consumer: a transient runtime override the consumer applies while
++ * the producer asserts it; 0 withdraws it. The consumer drops every var on its
++ * own fallback, so the producer resends the current value on each reconnect. */
++#define OUTPUT_TYPE_SET_CONSUMER_VAR 3
++
++/* 1 while a client holds a zwp_locked_pointer_v1 lock (a game grabbed the
++ * mouse): the consumer takes Android pointer capture and sends raw relative
++ * motion. 0 hands the pointer back. */
++#define CONSUMER_VAR_CAPTURE_MOUSE 1
+ 
+ /*
+  * Audio runs on its own dedicated bidirectional socketpair (hello fd slot 4),
+-- 
+2.54.0.windows.1
+
