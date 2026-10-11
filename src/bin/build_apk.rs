@@ -416,6 +416,8 @@ pub mod apk {
                     "orientation",
                     "keyboardHidden",
                     "keyboard",
+                    "navigation",
+                    "touchscreen",
                     "screenSize",
                     "smallestScreenSize",
                     "locale",
@@ -424,6 +426,10 @@ pub mod apk {
                     "screenLayout",
                     "density",
                     "uiMode",
+                    "colorMode",
+                    "fontWeightAdjustment",
+                    "mcc",
+                    "mnc",
                 ]
                 .join("|"),
             );

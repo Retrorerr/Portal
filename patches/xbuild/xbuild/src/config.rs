@@ -182,6 +182,8 @@ impl Config {
                 "orientation",
                 "keyboardHidden",
                 "keyboard",
+                "navigation",
+                "touchscreen",
                 "screenSize",
                 "smallestScreenSize",
                 "locale",
@@ -190,6 +192,10 @@ impl Config {
                 "screenLayout",
                 "density",
                 "uiMode",
+                "colorMode",
+                "fontWeightAdjustment",
+                "mcc",
+                "mnc",
             ]
             .join("|")
         });
