@@ -56,6 +56,15 @@ defaultPref("browser.shell.skipDefaultBrowserCheckOnFirstRun", true);
 // after kills during startup.
 defaultPref("browser.sessionstore.max_resumed_crashes", -1);
 defaultPref("toolkit.startup.max_resumed_crashes", -1);
+// Firefox here rejects requestPointerLock({unadjustedMovement: true}) with
+// NotSupportedError. Games retry without the option, but by then fullscreen
+// has used up the click's activation, so the retry is denied too and the game
+// drops out of fullscreen (surfd.net). Off, the option is ignored and the
+// first request locks.
+defaultPref("dom.pointer-lock.unadjusted-movement.enabled", false);
+// WebGPU is off by default on Linux; on, wgpu finds the Adreno through the
+// turnip Vulkan driver, which WebGPU games (Bevy/wgpu web builds) need.
+defaultPref("dom.webgpu.enabled", true);
 
 "#;
 
