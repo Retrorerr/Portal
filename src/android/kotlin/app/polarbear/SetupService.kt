@@ -71,11 +71,46 @@ class SetupService : Service() {
         private const val TAG = "PortalSetupService"
         private const val CHANNEL_ID = "portal-setup"
         private const val NOTIFICATION_ID = 1001
+        private const val NOTIFICATION_PERMISSION_REQUEST = 1001
 
         @Volatile private var running = false
         @Volatile private var lastState: ComposeOverlay.InstallUiState? = null
         @Volatile private var lastShownPercent = -1
         @Volatile private var lastShownMessage = ""
+        @Volatile private var portalVisible = true
+
+        /**
+         * Android 13+ hides the notification until the user allows it. Ask
+         * once, when the user starts setup; setup runs either way.
+         */
+        fun requestNotificationPermission(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+            var activity: Context? = context
+            while (activity is android.content.ContextWrapper && activity !is android.app.Activity) {
+                activity = activity.baseContext
+            }
+            if (activity !is android.app.Activity) return
+            val permission = android.Manifest.permission.POST_NOTIFICATIONS
+            if (activity.checkSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED) return
+            activity.requestPermissions(arrayOf(permission), NOTIFICATION_PERMISSION_REQUEST)
+        }
+
+        /**
+         * The last setup step runs Plasma in Portal's own window, so it waits
+         * while Portal is in the background; the notification says so instead
+         * of sitting on 99%.
+         */
+        fun setPortalVisible(context: Context, visible: Boolean) {
+            portalVisible = visible
+            val state = lastState ?: return
+            if (!running) return
+            lastShownMessage = friendlyStatus(state)
+            notify(context.applicationContext, buildNotification(context.applicationContext, state))
+        }
+
+        private fun needsPortalOpen(state: ComposeOverlay.InstallUiState?): Boolean =
+            !portalVisible && state != null && state.progress >= 99 &&
+                state.message.contains("appearance", ignoreCase = true)
 
         /** Follow the native install state: run while installing, stop otherwise. */
         fun sync(context: Context, state: ComposeOverlay.InstallUiState) {
@@ -139,6 +174,7 @@ class SetupService : Service() {
 
         private fun friendlyStatus(state: ComposeOverlay.InstallUiState?): String {
             if (state == null) return "Getting ready…"
+            if (needsPortalOpen(state)) return "Open Portal to finish setup"
             return app.polarbear.setup.installStep(state.progress, state.message).detail
         }
 
@@ -157,9 +193,10 @@ class SetupService : Service() {
                 Notification.Builder(context)
             }
             val percent = state?.progress ?: 0
+            val title = if (needsPortalOpen(state)) "Almost done · tap to open Portal" else "Installing Portal · $percent%"
             return builder
                 .setSmallIcon(context.applicationInfo.icon)
-                .setContentTitle("Installing Portal · $percent%")
+                .setContentTitle(title)
                 .setContentText(friendlyStatus(state))
                 .setProgress(100, percent, state == null)
                 .setOngoing(true)

@@ -302,6 +302,7 @@ fun PortalSetupScreen(
                 installSubmissionError =
                     "Current display settings are outside Portal’s supported range. Adjust them in Android Settings and try again."
             } else if (ComposeOverlay.beginInstall(plan)) {
+                app.polarbear.SetupService.requestNotificationPermission(context)
                 beginAccepted = true
                 acceptedPlan = plan
                 installStartedAt = SystemClock.elapsedRealtime()
