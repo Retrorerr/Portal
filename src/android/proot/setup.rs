@@ -224,6 +224,11 @@ const DRMSHIM_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/drmshi
 /// Optional (a missing hint only restores heartbeat pacing); preloaded ONLY
 /// in Anland sessions. Source: `assets/guest-arm64/anland-damage.c`.
 const ANLAND_DAMAGE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/anland-damage.so");
+/// The layer's turnip plus the KGSL zero-timeout poll fix (polls used to
+/// wait for GPU idle, capping WebGPU). Bound over the layer's copy by
+/// `anland::session_binds`. Source: `assets/mesa-turnip/README.md`.
+const TURNIP_BINARY: &[u8] = include_bytes!("../../../assets/mesa-turnip/libvulkan_freedreno.so");
+pub const TURNIP_FILE: &str = "portal-turnip/libvulkan_freedreno.so";
 /// Qt Wayland input coalescing for LibreOffice, which repaints inside every
 /// scroll/drag event and starved its own presents (3.7 -> 21 frames/s on a
 /// scrollbar drag). Preloaded only by the LibreOffice launchers.
@@ -3350,6 +3355,15 @@ fn sync_kwin_overlay(fs_root: &Path) {
             if fs::rename(&shim_tmp, &shim_path).is_ok() {
                 mark_payload_current(&shim_path, DRMSHIM_BINARY);
             }
+        }
+    }
+    // Patched turnip (see TURNIP_BINARY). Optional: without it the layer's
+    // own turnip is bound.
+    let turnip_path = Path::new(crate::core::config::APP_FILES_ROOT).join(TURNIP_FILE);
+    if !payload_is_current(&turnip_path, TURNIP_BINARY) {
+        match write_guest_binary_result(&turnip_path, TURNIP_BINARY) {
+            Ok(()) => mark_payload_current(&turnip_path, TURNIP_BINARY),
+            Err(error) => log::warn!("patched turnip not installed: {error:#}"),
         }
     }
     // Project Anland damage hint (see ANLAND_DAMAGE_BINARY). Content-compared:

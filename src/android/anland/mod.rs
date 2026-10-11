@@ -425,8 +425,14 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
         (share.join("vulkan/icd.d"), "/usr/share/vulkan/icd.d"),
         (share.join("drirc.d"), "/usr/share/drirc.d"),
     ];
+    let turnip = files.join(crate::android::proot::setup::TURNIP_FILE);
     for (host, guest) in pairs {
-        if host.exists() {
+        if guest == "/usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so"
+            && host.exists()
+            && turnip.exists()
+        {
+            binds.push(BindMount::new(turnip.clone(), guest));
+        } else if host.exists() {
             binds.push(BindMount::new(host, guest));
         }
     }
