@@ -233,6 +233,9 @@ struct Inner {
     /// Active touchpad finger-scroll axes as a bitmask (bit 0 = vertical,
     /// bit 1 = horizontal). Scroll-stop events go only to live streams.
     finger_axes: Mutex<u8>,
+    /// Unsent fractions of a wheel click per axis. High-resolution wheels
+    /// (Logitech G305) report steps of 1/8 click, which truncated to zero.
+    wheel_carry: Mutex<[f32; 2]>,
     /// Key/button presses actually delivered to KWin, released before resize.
     held_inputs: Mutex<std::collections::BTreeSet<(u32, i32)>>,
     /// Display-VSYNC tick source (Choreographer, timer fallback).
@@ -482,6 +485,7 @@ impl AnlandSession {
             high_refresh_until_ns: AtomicU64::new(0),
             last_pointer: Mutex::new(None),
             finger_axes: Mutex::new(0),
+            wheel_carry: Mutex::new([0.0; 2]),
             held_inputs: Mutex::new(std::collections::BTreeSet::new()),
             vsync: Mutex::new(Some(vsync)),
             motion_logged_gen: Mutex::new(0),
@@ -745,10 +749,44 @@ impl AnlandSession {
         send_input_inner(&self.inner, ev);
     }
 
+    /// Mouse wheel motion in clicks (axis 0 = vertical, 1 = horizontal).
+    pub fn send_wheel(&self, axis: u32, value: f32) {
+        send_wheel_inner(&self.inner, axis, value);
+    }
+
     /// A thread-safe handle for key edges, so the accessibility service can
     /// forward keys from its binder thread without waking the event loop.
     pub fn key_sink(&self) -> AnlandKeySink {
         AnlandKeySink(self.inner.clone())
+    }
+
+    /// A thread-safe handle for captured pointer input, which arrives on the
+    /// Java UI thread while Android pointer capture is on.
+    pub fn pointer_sink(&self) -> AnlandPointerSink {
+        AnlandPointerSink(self.inner.clone())
+    }
+}
+
+/// Pointer input handle for Android pointer capture. Like [`AnlandKeySink`],
+/// a sink that outlives its session is harmless.
+#[derive(Clone)]
+pub struct AnlandPointerSink(Arc<Inner>);
+
+impl AnlandPointerSink {
+    /// Raw relative motion. KWin keeps a locked pointer where it is, so the
+    /// position stays at the last host cursor position and only dx/dy move.
+    pub fn send_relative(&self, dx: f32, dy: f32) {
+        let anchor = *self.0.last_pointer.lock().unwrap();
+        let (x, y) = anchor.map_or((0.0, 0.0), |a| (a.x, a.y));
+        send_input_inner(&self.0, &InputEvent::pointer_motion(x, y, dx, dy));
+    }
+
+    pub fn send_button(&self, code: u32, pressed: bool) {
+        send_input_inner(&self.0, &InputEvent::pointer_button(code, pressed));
+    }
+
+    pub fn send_wheel(&self, axis: u32, value: f32) {
+        send_wheel_inner(&self.0, axis, value);
     }
 }
 
@@ -762,6 +800,27 @@ impl AnlandKeySink {
     pub fn send_key(&self, scancode: u32, pressed: bool) {
         let action = if pressed { INPUT_ACTION_DOWN } else { INPUT_ACTION_UP };
         send_input_inner(&self.0, &InputEvent::key(action, scancode as i32));
+    }
+}
+
+/// Wheel motion in clicks (axis 0 = vertical, 1 = horizontal), as Android
+/// reports it. KWin takes whole clicks, so fractions add up until they make
+/// one; a direction change drops the leftover.
+fn send_wheel_inner(inner: &Arc<Inner>, axis: u32, value: f32) {
+    let Some(clicks) = inner.wheel_carry.lock().ok().and_then(|mut carry| {
+        let slot = carry.get_mut(axis as usize)?;
+        if *slot * value < 0.0 {
+            *slot = 0.0;
+        }
+        *slot += value;
+        let clicks = slot.trunc();
+        *slot -= clicks;
+        Some(clicks)
+    }) else {
+        return;
+    };
+    if clicks != 0.0 {
+        send_input_inner(inner, &InputEvent::pointer_axis(axis, clicks, clicks as i32));
     }
 }
 
@@ -2233,6 +2292,8 @@ fn event_loop(inner: Arc<Inner>) {
         if gen_id != cur_gen {
             cur_gen = gen_id;
             cur_data = None;
+            // KWin resends an active lock to the new connection.
+            crate::android::utils::pointer_capture::request(false);
             if gen_id != 0 {
                 let dup = inner
                     .gen
@@ -2296,7 +2357,11 @@ fn event_loop(inner: Arc<Inner>) {
                 log::info!("anland.event resources request (camera): unanswered, producer treats as disabled");
             }
             OUTPUT_TYPE_SET_CONSUMER_VAR => {
-                log::info!("anland.event set-consumer-var (pointer capture tracking pending)");
+                let (var, value) = ev.consumer_var();
+                log::info!("anland.event set-consumer-var var={var} value={value}");
+                if var == CONSUMER_VAR_CAPTURE_MOUSE {
+                    crate::android::utils::pointer_capture::request(value != 0);
+                }
             }
             OUTPUT_TYPE_SCHEDULING => {
                 log::info!("anland.event scheduling hint (cgroup boost needs root; ignored)");
@@ -2306,6 +2371,7 @@ fn event_loop(inner: Arc<Inner>) {
             }
         }
     }
+    crate::android::utils::pointer_capture::request(false);
     log::info!("anland.event thread stopped");
 }
 

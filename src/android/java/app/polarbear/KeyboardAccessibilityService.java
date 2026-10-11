@@ -3,6 +3,7 @@ package app.polarbear;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.util.Log;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 
@@ -31,12 +32,24 @@ public class KeyboardAccessibilityService extends AccessibilityService {
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
+        if (isMouseSideButton(event)) {
+            // Android turns mouse side buttons into Back/Forward keys; let
+            // them through so PortalActivity sends them as mouse buttons.
+            return super.onKeyEvent(event);
+        }
         return nativeOnKeyEvent(
                 event.getAction(),
                 event.getKeyCode(),
                 event.getScanCode(),
                 event.getEventTime())
             || super.onKeyEvent(event);
+    }
+
+    /** Android reports a mouse's side buttons as Back/Forward keys. */
+    static boolean isMouseSideButton(KeyEvent event) {
+        int code = event.getKeyCode();
+        return (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_FORWARD)
+            && (event.getSource() & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE;
     }
 
     @Override

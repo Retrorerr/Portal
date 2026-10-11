@@ -409,6 +409,7 @@ fn resume_anland(
     accessibility::set_runtime_active(true);
     if let Some(session) = backend.anland.as_ref() {
         accessibility::set_anland_key_sink(session.key_sink());
+        crate::android::utils::pointer_capture::attach(android_app, session.pointer_sink());
     }
     pipewire_standalone_aaudio::spawn_after_ready(android_app.clone());
     if existing_session {
@@ -573,10 +574,10 @@ fn forward_anland_input(
                 MouseScrollDelta::LineDelta(x, y) => {
                     log::debug!("anland.input wheel lines x={x} y={y}");
                     if *y != 0.0 {
-                        session.send_input(&AnlandInput::pointer_axis(0, *y, *y as i32));
+                        session.send_wheel(0, *y);
                     }
                     if *x != 0.0 {
-                        session.send_input(&AnlandInput::pointer_axis(1, *x, *x as i32));
+                        session.send_wheel(1, *x);
                     }
                 }
                 MouseScrollDelta::PixelDelta(pos) => {

@@ -82,6 +82,9 @@ pub const INPUT_ACTION_MOVE: i32 = 2;
 pub const OUTPUT_TYPE_CLIPBOARD: u32 = 1;
 pub const OUTPUT_TYPE_RESOURCES_REQUEST: u32 = 2;
 pub const OUTPUT_TYPE_SET_CONSUMER_VAR: u32 = 3;
+/// `OUTPUT_TYPE_SET_CONSUMER_VAR` var: 1 while a guest client holds a
+/// pointer lock, asking for Android pointer capture.
+pub const CONSUMER_VAR_CAPTURE_MOUSE: u32 = 1;
 pub const OUTPUT_TYPE_SCHEDULING: u32 = 4;
 
 // ---- pixel format (consumer-side enum; KWin maps 1 -> DRM ABGR8888) --------
@@ -316,6 +319,12 @@ impl InputEvent {
 }
 
 impl OutputEvent {
+    /// `OUTPUT_TYPE_SET_CONSUMER_VAR` payload: `(var, value)`.
+    pub fn consumer_var(&self) -> (u32, u32) {
+        let word = |at: usize| u32::from_ne_bytes(self.payload[at..at + 4].try_into().unwrap());
+        (word(0), word(4))
+    }
+
     /// Clipboard payload length as carried in the fixed header. A non-zero
     /// value means `size` trailing bytes must be drained from the data channel
     /// even when the payload itself is discarded.

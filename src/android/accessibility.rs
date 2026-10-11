@@ -64,6 +64,8 @@ const ACTION_UP: jint = 1;
 const KEYCODE_VOLUME_UP: jint = 24;
 const KEYCODE_VOLUME_DOWN: jint = 25;
 const KEYCODE_POWER: jint = 26;
+const KEYCODE_BACK: jint = 4;
+const EVDEV_KEY_ESC: u32 = 1;
 
 fn bridge() -> &'static Mutex<AccessibilityBridgeState> {
     ACCESSIBILITY_BRIDGE.get_or_init(|| Mutex::new(AccessibilityBridgeState::default()))
@@ -148,7 +150,13 @@ fn enqueue_key_event(action: jint, key_code: jint, scan_code: jint, event_time_m
     // Android's AccessibilityService legitimately reports scanCode == 0 for virtual and
     // Bluetooth keyboards. Do not inject evdev code 0 (it is not a real key); use Android's
     // stable key-code table as a fallback so those keyboards still reach the Wayland seat.
-    let scancode = if scan_code > 0 {
+    let scancode = if key_code == KEYCODE_BACK && scan_code > 0 {
+        // A hardware Back key sits where Esc belongs (the OnePlus Pad 3
+        // Keyboard's Esc sends KEY_BACK), as in keymap::key_event_to_scancode.
+        // Forwarded raw it reached the guest as a browser Back key, so games
+        // never saw Esc and Chrome's hold-Esc fullscreen exit never fired.
+        EVDEV_KEY_ESC
+    } else if scan_code > 0 {
         scan_code as u32
     } else {
         match android_keycode_to_scancode(key_code.max(0) as u32) {
