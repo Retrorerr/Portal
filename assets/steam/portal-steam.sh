@@ -81,8 +81,26 @@ if [ ! -e "$STEAM_ROOT/config/config.vdf" ]; then
 VDF
 fi
 
+# Steam's update window dlopens the unversioned libGLX.so, which only
+# libglvnd-dev provides. Without it the updater falls back to console
+# output and the ~660 MB first-run update runs with no window at all.
+portal_lib="$HOME/.steam/portal-lib"
+glx=/usr/lib/aarch64-linux-gnu/libGLX.so.0
+if [ -e "$glx" ] && [ "$(readlink "$portal_lib/libGLX.so")" != "$glx" ]; then
+    mkdir -p "$portal_lib" && ln -sfn "$glx" "$portal_lib/libGLX.so"
+fi
+
+# Steam's title bar only drags once its draggable regions are cut out of
+# CEF's input shape, which this webhelper build never does; the preload turns
+# that on and starts the same window move for a finger (see its C source).
+touchdrag=/usr/local/lib/portal/steam/portal-sdl-touchdrag.so
+case ":$LD_PRELOAD:" in
+    *":$touchdrag:"*) ;;
+    *) [ -f "$touchdrag" ] && export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$touchdrag" ;;
+esac
+
 export STEAM_RUNTIME_ROOT="$STEAM_ROOT/steamrtarm64"
-export LD_LIBRARY_PATH="$STEAM_ROOT/steamrtarm64:$STEAM_ROOT/steamrtarm64/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$STEAM_ROOT/steamrtarm64:$STEAM_ROOT/steamrtarm64/libs:$portal_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # Wine esync wants many descriptors; Android caps the hard limit at 32768.
 ulimit -n "$(ulimit -Hn)" 2>/dev/null
 # Steam's own scaling follows the KWin output scale it reads through Xwayland.

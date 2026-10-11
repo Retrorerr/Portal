@@ -60,6 +60,10 @@ const STEAM_COMPAT_MAPPER: &str = include_str!("../../../assets/steam/portal-ste
 /// Source: `assets/guest-arm64/portal-lsof.c`. Steam checks its websocket
 /// peers with `lsof -i`, which needs /proc/net/tcp; Android denies it.
 const PORTAL_LSOF: &[u8] = include_bytes!("../../../assets/guest-arm64/portal-lsof");
+/// Source: `assets/guest-arm64/portal-sdl-touchdrag.c`. Makes Steam's own title
+/// bar drag the window for a mouse and a finger; the launcher preloads it.
+const STEAM_TOUCHDRAG: &[u8] =
+    include_bytes!("../../../assets/guest-arm64/portal-sdl-touchdrag.so");
 
 const STEAM_LAUNCHER_REL: &str = "usr/local/bin/steam";
 const STEAM_BOOTSTRAP_REL: &str = "usr/local/lib/portal/steam/portal-steam-bootstrap.py";
@@ -69,6 +73,7 @@ const STEAM_COMPAT_DIR_REL: &str = "usr/share/steam/compatibilitytools.d/portal-
 const STEAM_BOX64_DIR_REL: &str = "usr/share/steam/compatibilitytools.d/portal-box64";
 const STEAM_COMPAT_MAPPER_REL: &str = "usr/local/lib/portal/steam/portal-steam-compat.py";
 const PORTAL_LSOF_REL: &str = "usr/sbin/lsof";
+const STEAM_TOUCHDRAG_REL: &str = "usr/local/lib/portal/steam/portal-sdl-touchdrag.so";
 const GUEST_STEAM_BOOTSTRAP: &str = "/usr/local/lib/portal/steam/portal-steam-bootstrap.py";
 
 /// Per-app state codes shared with Kotlin (`ComposeOverlay.APP_*`).
@@ -671,6 +676,7 @@ fn sync_steam_files(fs_root: &Path) -> anyhow::Result<()> {
         0o755,
     )?;
     write_file(&fs_root.join(PORTAL_LSOF_REL), PORTAL_LSOF, 0o755)?;
+    write_file(&fs_root.join(STEAM_TOUCHDRAG_REL), STEAM_TOUCHDRAG, 0o755)?;
     Ok(())
 }
 
@@ -690,11 +696,13 @@ pub fn sync_steam_integration(fs_root: &Path) {
         STEAM_DESKTOP_REL,
         STEAM_ICON_REL,
         PORTAL_LSOF_REL,
+        STEAM_TOUCHDRAG_REL,
     ] {
         let path = fs_root.join(rel);
         let ours = match rel {
             STEAM_ICON_REL => fs::read(&path).is_ok_and(|bytes| bytes == STEAM_ICON),
             PORTAL_LSOF_REL => fs::read(&path).is_ok_and(|bytes| bytes == PORTAL_LSOF),
+            STEAM_TOUCHDRAG_REL => fs::read(&path).is_ok_and(|bytes| bytes == STEAM_TOUCHDRAG),
             _ => fs::read_to_string(&path).is_ok_and(|text| {
                 text.contains("Managed by Portal")
                     || text.contains("X-Portal-Managed=true")
