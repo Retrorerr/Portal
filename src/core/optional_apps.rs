@@ -82,9 +82,9 @@ pub fn install_command(app: OptionalApp) -> String {
             {APT_INSTALL} /tmp/portal-chatgpt_arm64.deb git ripgrep python3-venv &&
             rm -f /tmp/portal-chatgpt_arm64.deb &&
             {{ {{ mkdir -p "$(dirname /{CHATGPT_STAMP_REL})" &&
-                {{ tr -d '\r' </tmp/portal-chatgpt.headers | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | tail -n 1 &&
-                  tr -d '\r' </tmp/portal-chatgpt.headers | sed -n 's/^[Ll]ast-[Mm]odified: *//p' | tail -n 1 ; }} \
-                  >/{CHATGPT_STAMP_REL}.part &&
+                etag=$(tr -d '\r' </tmp/portal-chatgpt.headers | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | tail -n 1) &&
+                modified=$(tr -d '\r' </tmp/portal-chatgpt.headers | sed -n 's/^[Ll]ast-[Mm]odified: *//p' | tail -n 1) &&
+                printf '%s\n%s\n' "$etag" "$modified" >/{CHATGPT_STAMP_REL}.part &&
                 mv -f /{CHATGPT_STAMP_REL}.part /{CHATGPT_STAMP_REL} ; }} || true ; }} ;
             portal_status=$? ; rm -f /tmp/portal-chatgpt.headers ; exit $portal_status)"#
         ),

@@ -751,6 +751,10 @@ mod tests {
         // No ETag from the server: Last-Modified decides.
         assert!(deb_refresh_needed(Some(&stamp), None, None, Some(1_791_507_394)));
         assert!(!deb_refresh_needed(Some(&stamp), None, None, Some(1_791_507_393)));
+        // A server that sent no ETag leaves the first line empty.
+        let dated = DebStamp::parse("\nFri, 09 Oct 2026 00:56:33 GMT\n");
+        assert_eq!(dated.etag, None);
+        assert_eq!(dated.last_modified, stamp.last_modified);
         // Pre-stamp installs compare with dpkg's install time.
         assert!(deb_refresh_needed(None, Some(100), Some("\"x\""), Some(200)));
         assert!(!deb_refresh_needed(None, Some(300), Some("\"x\""), Some(200)));
