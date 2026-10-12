@@ -1,0 +1,307 @@
+From 2133159b53ce9f46348c98e63dc339a0cb9211f6 Mon Sep 17 00:00:00 2001
+From: Retrorerr <masobazee@gmail.com>
+Date: Mon, 12 Oct 2026 20:17:21 +0100
+Subject: [PATCH] freedreno/kgsl: implicit sync for dma-buf BOs
+
+KGSL attaches no fences to dma-bufs, so nothing ordered this context's GPU work against other processes sharing a buffer: a compositor could sample a client frame the GPU had not finished, or a client overwrite a buffer still being read, showing stale or torn content. Do in userspace what the msm kernel driver does: before a submit, wait on the GPU for other contexts' unsignaled fences on its dma-buf BOs (unless the pipe uses explicit sync), attach the submit's fence to them afterwards, and wait on the dma-buf in cpu_prep.
+---
+ src/freedreno/drm/kgsl/kgsl_bo.c            |  24 ++-
+ src/freedreno/drm/kgsl/kgsl_priv.h          |   5 +
+ src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c | 190 +++++++++++++++++++-
+ 3 files changed, 216 insertions(+), 3 deletions(-)
+
+diff --git a/src/freedreno/drm/kgsl/kgsl_bo.c b/src/freedreno/drm/kgsl/kgsl_bo.c
+index c676b81..7f4785b 100644
+--- a/src/freedreno/drm/kgsl/kgsl_bo.c
++++ b/src/freedreno/drm/kgsl/kgsl_bo.c
+@@ -3,6 +3,7 @@
+ #include "util/os_mman.h"
+ 
+ #include <linux/dma-heap.h>
++#include <poll.h>
+ 
+ static uint64_t
+ kgsl_bo_iova(struct fd_bo *bo)
+@@ -37,8 +38,27 @@ kgsl_bo_madvise(struct fd_bo *bo, int willneed)
+ static int
+ kgsl_bo_cpu_prep(struct fd_bo *bo, struct fd_pipe *pipe, uint32_t op)
+ {
+-    /* only need to handle implicit sync here which is a NOP for KGSL */
+-    return 0;
++    /* Implicit sync: KGSL does not wait on dma-buf fences, so wait on the
++     * dma-buf itself (the fences attached in kgsl_ringbuffer_sp.c and by
++     * other processes), as msm's GEM_CPU_PREP does in the kernel.
++     */
++    struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
++
++    if (kgsl_bo->bo_type != KGSL_BO_IMPORT || kgsl_bo->import_fd < 0)
++        return 0;
++
++    struct pollfd idle = {
++        .fd = kgsl_bo->import_fd,
++        .events = (op & FD_BO_PREP_WRITE) ? POLLOUT : POLLIN,
++    };
++    int timeout = (op & FD_BO_PREP_NOSYNC) ? 0 : -1;
++    int ret;
++
++    do {
++        ret = poll(&idle, 1, timeout);
++    } while (ret < 0 && (errno == EINTR || errno == EAGAIN));
++
++    return ret == 0 ? -EBUSY : 0;
+ }
+ 
+ void
+diff --git a/src/freedreno/drm/kgsl/kgsl_priv.h b/src/freedreno/drm/kgsl/kgsl_priv.h
+index 09e77a1..15ddb61 100644
+--- a/src/freedreno/drm/kgsl/kgsl_priv.h
++++ b/src/freedreno/drm/kgsl/kgsl_priv.h
+@@ -29,6 +29,11 @@ struct kgsl_pipe {
+     uint32_t gmem_size;
+     uint64_t gmem_base;
+     uint32_t queue_id;
++
++    /* Sync timeline name of this context's fences, learnt from the first
++     * one (see kgsl_ringbuffer_sp.c implicit sync).
++     */
++    char timeline[32];
+ };
+ FD_DEFINE_CAST(fd_pipe, kgsl_pipe);
+ 
+diff --git a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+index e8b2842..769eb07 100644
+--- a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
++++ b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+@@ -1,6 +1,13 @@
++#include <poll.h>
++
+ #include "kgsl_priv.h"
+ #include "freedreno_ringbuffer_sp.h"
+ 
++#include "drm-uapi/dma-buf.h"
++#include "util/libsync.h"
++#include "util/os_file.h"
++#include "util/u_dynarray.h"
++
+ static int
+ timestamp_to_fd(struct fd_pipe *pipe, uint32_t timestamp)
+ {
+@@ -21,6 +28,147 @@ timestamp_to_fd(struct fd_pipe *pipe, uint32_t timestamp)
+     return fd;
+ }
+ 
++/*
++ * Implicit sync for dma-bufs.
++ *
++ * KGSL attaches no fences to dma-bufs, so unlike msm nothing orders this
++ * context's GPU work against another process using the same buffer: a
++ * compositor samples a client frame the GPU has not finished (or the client
++ * overwrites a buffer the compositor still reads), and the screen shows
++ * stale or torn content. Do in userspace what the msm kernel driver does
++ * for every BO in a submit:
++ *
++ *  - before the submit, wait on the GPU for the buffer's unsignaled fences
++ *    from other contexts, unless the pipe uses explicit sync (msm's
++ *    MSM_SUBMIT_NO_IMPLICIT); our own fences are skipped because the
++ *    context executes in order,
++ *  - after the submit, attach its fence to the buffer.
++ *
++ * Every BO backed by a dma-buf (KGSL_BO_IMPORT: imports and the dma-heap
++ * allocations used for shared/scanout BOs) takes part.
++ */
++static int
++bo_dmabuf_fd(struct fd_bo *bo)
++{
++    struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
++
++    if (kgsl_bo->bo_type != KGSL_BO_IMPORT)
++        return -1;
++    return kgsl_bo->import_fd;
++}
++
++static void
++collect_dmabuf_bos(struct list_head *submit_list, struct util_dynarray *bos)
++{
++    foreach_submit (submit, submit_list) {
++        struct fd_submit_sp *fd_submit = to_fd_submit_sp(submit);
++
++        for (unsigned i = 0; i < fd_submit->nr_bos; i++) {
++            struct fd_bo *bo = fd_submit->bos[i];
++            bool seen = false;
++
++            if (bo_dmabuf_fd(bo) < 0)
++                continue;
++            util_dynarray_foreach (bos, struct fd_bo *, b) {
++                if (*b == bo) {
++                    seen = true;
++                    break;
++                }
++            }
++            if (!seen)
++                util_dynarray_append_typed(bos, struct fd_bo *, fd_bo_ref(bo));
++        }
++    }
++}
++
++/* Remember the name of our own sync timeline from one of our fences. */
++static void
++learn_timeline(struct kgsl_pipe *kgsl_pipe, int fence_fd)
++{
++    struct sync_file_info *info = sync_file_info(fence_fd);
++
++    if (!info)
++        return;
++    if (info->num_fences == 1) {
++        struct sync_fence_info *fence =
++            (struct sync_fence_info *)(uintptr_t)info->sync_fence_info;
++        memcpy(kgsl_pipe->timeline, fence->obj_name, sizeof(kgsl_pipe->timeline));
++        kgsl_pipe->timeline[sizeof(kgsl_pipe->timeline) - 1] = '\0';
++    }
++    free(info);
++}
++
++/* True when every unsignaled fence in fence_fd is on our own timeline. */
++static bool
++only_own_fences(struct kgsl_pipe *kgsl_pipe, int fence_fd)
++{
++    if (!kgsl_pipe->timeline[0])
++        return false;
++
++    struct sync_file_info *info = sync_file_info(fence_fd);
++    if (!info)
++        return false;
++
++    struct sync_fence_info *fences =
++        (struct sync_fence_info *)(uintptr_t)info->sync_fence_info;
++    bool own = true;
++    for (unsigned i = 0; i < info->num_fences; i++) {
++        if (fences[i].status != 0)
++            continue;
++        if (strncmp(fences[i].obj_name, kgsl_pipe->timeline,
++                    sizeof(kgsl_pipe->timeline) - 1)) {
++            own = false;
++            break;
++        }
++    }
++    free(info);
++    return own;
++}
++
++/* Merged fence of the other contexts' pending work on the bos, or -1. */
++static int
++implicit_in_fence(struct kgsl_pipe *kgsl_pipe, struct util_dynarray *bos)
++{
++    int in_fence_fd = -1;
++
++    util_dynarray_foreach (bos, struct fd_bo *, b) {
++        int dmabuf = bo_dmabuf_fd(*b);
++        struct pollfd idle = {
++            .fd = dmabuf,
++            .events = POLLOUT,
++        };
++
++        /* POLLOUT: every fence, readers' and writers', has signaled. */
++        if (poll(&idle, 1, 0) == 1)
++            continue;
++
++        struct dma_buf_export_sync_file export = {
++            .flags = DMA_BUF_SYNC_WRITE,
++            .fd = -1,
++        };
++        if (drmIoctl(dmabuf, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &export))
++            continue;
++
++        if (!only_own_fences(kgsl_pipe, export.fd))
++            sync_accumulate("kgsl implicit sync", &in_fence_fd, export.fd);
++        close(export.fd);
++    }
++
++    return in_fence_fd;
++}
++
++static void
++attach_out_fence(struct util_dynarray *bos, int fence_fd)
++{
++    util_dynarray_foreach (bos, struct fd_bo *, b) {
++        struct dma_buf_import_sync_file import = {
++            .flags = DMA_BUF_SYNC_WRITE,
++            .fd = fence_fd,
++        };
++        drmIoctl(bo_dmabuf_fd(*b), DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &import);
++    }
++}
++
+ static int
+ flush_submit_list(struct list_head *submit_list)
+ {
+@@ -28,10 +176,32 @@ flush_submit_list(struct list_head *submit_list)
+     struct fd_pipe *pipe = fd_submit->base.pipe;
+     struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
+     unsigned nr_cmds = 0;
++    int implicit_fence_fd = -1;
++    int in_fence_fd = fd_submit->in_fence_fd;
+ 
+ 
+     MESA_TRACE_FUNC();
+ 
++    struct util_dynarray dmabuf_bos;
++    util_dynarray_init(&dmabuf_bos, NULL);
++    collect_dmabuf_bos(submit_list, &dmabuf_bos);
++
++    if (!pipe->no_implicit_sync)
++        implicit_fence_fd = implicit_in_fence(kgsl_pipe, &dmabuf_bos);
++
++    if (implicit_fence_fd != -1) {
++        if (in_fence_fd == -1) {
++            in_fence_fd = implicit_fence_fd;
++        } else {
++            /* On a failed merge keep the explicit fence alone. */
++            int merged = sync_merge("kgsl implicit sync", in_fence_fd, implicit_fence_fd);
++            close(implicit_fence_fd);
++            implicit_fence_fd = merged >= 0 ? merged : -1;
++            if (implicit_fence_fd != -1)
++                in_fence_fd = implicit_fence_fd;
++        }
++    }
++
+     foreach_submit (submit, submit_list) {
+         assert(submit->pipe == &kgsl_pipe->base);
+         nr_cmds += to_fd_ringbuffer_sp(submit->primary)->u.nr_cmds;
+@@ -65,7 +235,7 @@ flush_submit_list(struct list_head *submit_list)
+     }
+ 
+     struct kgsl_cmd_syncpoint_fence sync_fence = {
+-        .fd = fd_submit->in_fence_fd,
++        .fd = in_fence_fd,
+     };
+ 
+     struct kgsl_command_syncpoint sync = {
+@@ -105,10 +275,28 @@ flush_submit_list(struct list_head *submit_list)
+         fd_submit->out_fence->fence_fd = fd;
+     }
+ 
++    if (util_dynarray_num_elements(&dmabuf_bos, struct fd_bo *)) {
++        int fd = fd_submit->out_fence->use_fence_fd ?
++            fd_submit->out_fence->fence_fd : timestamp_to_fd(pipe, req.timestamp);
++
++        if (fd >= 0) {
++            if (!kgsl_pipe->timeline[0])
++                learn_timeline(kgsl_pipe, fd);
++            attach_out_fence(&dmabuf_bos, fd);
++            if (fd != fd_submit->out_fence->fence_fd)
++                close(fd);
++        }
++    }
++
+     if (fd_submit->in_fence_fd != -1)
+         close(fd_submit->in_fence_fd);
+ 
+ fail:
++    if (implicit_fence_fd != -1)
++        close(implicit_fence_fd);
++    util_dynarray_foreach (&dmabuf_bos, struct fd_bo *, b)
++        fd_bo_del(*b);
++    util_dynarray_fini(&dmabuf_bos);
+     return ret;
+ }
+ 

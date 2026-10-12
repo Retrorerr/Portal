@@ -1,0 +1,72 @@
+# Portal's Mesa KGSL layer, built from source on ARM64.
+#
+# Builds the layer tarball src/android/proot/mesa_layer.rs downloads with
+# patches/mesa/kgsl-layer-26.3.0/build.sh inside a digest-pinned Debian 13
+# (trixie) container on a native ARM64 runner: lfdevs' Debian trixie release
+# plus Portal's patches. Uploads the tarball and its SHA-256 sum.
+#
+# "baseline" builds the pinned lfdevs source without Portal's patches, to
+# compare against lfdevs' own release.
+#
+# permissions: contents:read. No secrets, releases or pushes.
+
+name: Mesa KGSL layer ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: Which tree to build
+        required: true
+        default: portal
+        type: choice
+        options:
+          - portal
+          - baseline
+  pull_request:
+    paths:
+      - patches/mesa/kgsl-layer-26.3.0/**
+      - .github/workflows/mesa-kgsl-layer-arm64.yml
+  push:
+    branches:
+      - main
+    paths:
+      - patches/mesa/kgsl-layer-26.3.0/**
+      - .github/workflows/mesa-kgsl-layer-arm64.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ github.event.inputs.variant || 'portal' }} Mesa layer (ARM64 trixie)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    container:
+      # Same digest-pinned trixie image as the libkwin workflow.
+      image: debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install git (trixie base has none)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+        with:
+          path: portal
+
+      - name: Build
+        run: portal/patches/mesa/kgsl-layer-26.3.0/build.sh portal out "${{ github.event.inputs.variant || 'portal' }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mesa-kgsl-layer-26.3.0-${{ github.event.inputs.variant || 'portal' }}
+          path: out/
+          if-no-files-found: error
