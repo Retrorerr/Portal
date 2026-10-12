@@ -1,0 +1,261 @@
+diff --git a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
+index a73e16214..224803edf 100644
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -1184,7 +1184,6 @@ add_gpus([
+         wave_granularity = 2,
+         fibers_per_sp = 128 * 2 * 16,
+         highest_bank_bit = 16,
+-        magic_regs = a730_magic_regs,
+         raw_magic_regs = a730_raw_magic_regs,
+     ))
+ 
+@@ -1204,7 +1203,6 @@ add_gpus([
+         wave_granularity = 2,
+         fibers_per_sp = 128 * 2 * 16,
+         highest_bank_bit = 16,
+-        magic_regs = a730_magic_regs,
+         raw_magic_regs = a730_raw_magic_regs,
+     ))
+ 
+@@ -1224,13 +1222,15 @@ add_gpus([
+         wave_granularity = 2,
+         fibers_per_sp = 128 * 2 * 16,
+         highest_bank_bit = 16,
+-        magic_regs = a730_magic_regs,
+         raw_magic_regs = a730_raw_magic_regs,
+     ))
+ 
+ add_gpus([
+         GPUId(chip_id=0xffff43030c00, name="Adreno X1-45"),
+         GPUId(chip_id=0x43030B00, name="FD735"),
++        GPUId(chip_id=0xffff43030b00, name="FD735"), # any-speedbin fallback (covers a732 = binned a735 theory)
++        GPUId(chip_id=0x43030a00, name="FD735"),     # speculative a732 own id
++        GPUId(chip_id=0xffff43030a00, name="FD735"),  # speculative a732 any-speedbin
+         GPUId(chip_id=0xffff43030E01, name="Adreno (TM) 735"),
+     ], A6xxGPUInfo(
+         CHIP.A7XX,
+@@ -1643,7 +1643,6 @@ add_gpus([
+         cs_shared_mem_size = 32 * 1024,
+         wave_granularity = 2,
+         fibers_per_sp = 128 * 2 * 16,
+-        magic_regs = dict(),
+         raw_magic_regs = a8xx_base_raw_magic_regs,
+     ))
+ 
+@@ -1722,7 +1721,6 @@ add_gpus([
+         wave_granularity = 2,
+         fibers_per_sp = 128 * 2 * 16,
+         highest_bank_bit = 16,
+-        magic_regs = dict(),
+         raw_magic_regs = a8xx_base_raw_magic_regs,
+     ))
+ 
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index cffce48d3..0a5850a7b 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -80,11 +80,12 @@ static void kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo);
+ static VkResult
+ kgsl_import_allocated_dmabuf(struct tu_device *dev,
+                              struct tu_bo **out_bo,
+-                             uint64_t size,
++                             uint64_t align,
+                              int fd)
+ {
++   /* tu_bo_init_dmabuf() only borrows the fd and keeps a dup of its own. */
+    VkResult result =
+-      tu_bo_init_dmabuf(dev, out_bo, size, TU_BO_ALLOC_NO_FLAGS, fd);
++      tu_bo_init_dmabuf(dev, out_bo, -1, align, TU_BO_ALLOC_NO_FLAGS, fd);
+ 
+    close(fd);
+    return result;
+@@ -92,7 +93,7 @@ kgsl_import_allocated_dmabuf(struct tu_device *dev,
+ 
+ static VkResult
+ bo_init_new_ion_fd(struct tu_device *dev, struct tu_bo **out_bo,
+-                   uint64_t size, int ion_fd)
++                   uint64_t size, uint64_t align, int ion_fd)
+ {
+    struct ion_new_allocation_data alloc = {
+       .len = size,
+@@ -107,12 +108,12 @@ bo_init_new_ion_fd(struct tu_device *dev, struct tu_bo **out_bo,
+                        "ION_IOC_NEW_ALLOC failed (%s)", strerror(errno));
+    }
+ 
+-   return kgsl_import_allocated_dmabuf(dev, out_bo, size, alloc.fd);
++   return kgsl_import_allocated_dmabuf(dev, out_bo, align, alloc.fd);
+ }
+ 
+ static VkResult
+ bo_init_new_ion_legacy_fd(struct tu_device *dev, struct tu_bo **out_bo,
+-                          uint64_t size, int ion_fd)
++                          uint64_t size, uint64_t align, int ion_fd)
+ {
+    struct ion_allocation_data alloc = {
+       .len = size,
+@@ -135,6 +136,11 @@ bo_init_new_ion_legacy_fd(struct tu_device *dev, struct tu_bo **out_bo,
+ 
+    ret = safe_ioctl(ion_fd, ION_IOC_SHARE, &share);
+    if (ret) {
++      struct ion_handle_data free = {
++         .handle = alloc.handle,
++      };
++      safe_ioctl(ion_fd, ION_IOC_FREE, &free);
++
+       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                        "ION_IOC_SHARE failed (%s)", strerror(errno));
+    }
+@@ -149,12 +155,12 @@ bo_init_new_ion_legacy_fd(struct tu_device *dev, struct tu_bo **out_bo,
+                        "ION_IOC_FREE failed (%s)", strerror(errno));
+    }
+ 
+-   return kgsl_import_allocated_dmabuf(dev, out_bo, size, share.fd);
++   return kgsl_import_allocated_dmabuf(dev, out_bo, align, share.fd);
+ }
+ 
+ static VkResult
+ bo_init_new_ion_fallback(struct tu_device *dev, struct tu_bo **out_bo,
+-                         uint64_t size)
++                         uint64_t size, uint64_t align)
+ {
+    int ion_fd = open("/dev/ion", O_RDONLY);
+    if (ion_fd < 0)
+@@ -164,8 +170,8 @@ bo_init_new_ion_fallback(struct tu_device *dev, struct tu_bo **out_bo,
+    bool legacy = safe_ioctl(ion_fd, ION_IOC_FREE, &free) >= 0 || errno != ENOTTY;
+ 
+    VkResult result = legacy ?
+-      bo_init_new_ion_legacy_fd(dev, out_bo, size, ion_fd) :
+-      bo_init_new_ion_fd(dev, out_bo, size, ion_fd);
++      bo_init_new_ion_legacy_fd(dev, out_bo, size, align, ion_fd) :
++      bo_init_new_ion_fd(dev, out_bo, size, align, ion_fd);
+    close(ion_fd);
+    return result;
+ }
+@@ -185,7 +191,7 @@ bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
+ 
+    if (ret) {
+       int dmaheap_errno = errno;
+-      VkResult fallback = bo_init_new_ion_fallback(dev, out_bo, size);
++      VkResult fallback = bo_init_new_ion_fallback(dev, out_bo, size, align);
+       if (fallback == VK_SUCCESS)
+          return VK_SUCCESS;
+ 
+@@ -194,96 +200,23 @@ bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
+                        "DMA_HEAP_IOCTL_ALLOC failed (%s)", strerror(errno));
+    }
+ 
+-   /* tu_bo_init_dmabuf() only borrows the fd: it keeps a dup of its own in
+-    * bo->shared_fd, which is what kgsl_bo_finish() closes. That is correct for
+-    * an imported dma-buf, whose fd belongs to the caller, but here the fd is
+-    * ours and nobody else will ever drop it. Leaking it keeps the dma-buf
+-    * alive after the BO is destroyed, so the memory is never reclaimed.
+-    */
+-   VkResult result =
+-      tu_bo_init_dmabuf(dev, out_bo, -1, align, TU_BO_ALLOC_NO_FLAGS, alloc.fd);
+-   close(alloc.fd);
+-
+-   return result;
++   return kgsl_import_allocated_dmabuf(dev, out_bo, align, alloc.fd);
+ }
+ 
+ static VkResult
+ bo_init_new_ion(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
+                 uint64_t align, enum tu_bo_alloc_flags flags)
+ {
+-   struct ion_new_allocation_data alloc = {
+-      .len = size,
+-      .heap_id_mask = KGSL_ION_SYSTEM_HEAP_MASK,
+-      .flags = 0,
+-      .fd = -1,
+-   };
+-
+-   int ret;
+-   ret = safe_ioctl(dev->physical_device->kgsl_dma_fd, ION_IOC_NEW_ALLOC, &alloc);
+-   if (ret) {
+-      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+-                       "ION_IOC_NEW_ALLOC failed (%s)", strerror(errno));
+-   }
+-
+-   /* See bo_init_new_dmaheap(): the fd is ours to close. */
+-   VkResult result =
+-      tu_bo_init_dmabuf(dev, out_bo, -1, align, TU_BO_ALLOC_NO_FLAGS, alloc.fd);
+-   close(alloc.fd);
+-
+-   return result;
++   return bo_init_new_ion_fd(dev, out_bo, size, align,
++                             dev->physical_device->kgsl_dma_fd);
+ }
+ 
+ static VkResult
+ bo_init_new_ion_legacy(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
+                        uint64_t align, enum tu_bo_alloc_flags flags)
+ {
+-   struct ion_allocation_data alloc = {
+-      .len = size,
+-      .align = 4096,
+-      .heap_id_mask = KGSL_ION_SYSTEM_HEAP_MASK,
+-      .flags = 0,
+-      .handle = -1,
+-   };
+-
+-   int ret;
+-   ret = safe_ioctl(dev->physical_device->kgsl_dma_fd, ION_IOC_ALLOC, &alloc);
+-   if (ret) {
+-      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+-                       "ION_IOC_ALLOC failed (%s)", strerror(errno));
+-   }
+-
+-   struct ion_fd_data share = {
+-      .handle = alloc.handle,
+-      .fd = -1,
+-   };
+-
+-   ret = safe_ioctl(dev->physical_device->kgsl_dma_fd, ION_IOC_SHARE, &share);
+-   if (ret) {
+-      struct ion_handle_data free = {
+-         .handle = alloc.handle,
+-      };
+-      safe_ioctl(dev->physical_device->kgsl_dma_fd, ION_IOC_FREE, &free);
+-
+-      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+-                       "ION_IOC_SHARE failed (%s)", strerror(errno));
+-   }
+-
+-   struct ion_handle_data free = {
+-      .handle = alloc.handle,
+-   };
+-   ret = safe_ioctl(dev->physical_device->kgsl_dma_fd, ION_IOC_FREE, &free);
+-   if (ret) {
+-      close(share.fd);
+-      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+-                       "ION_IOC_FREE failed (%s)", strerror(errno));
+-   }
+-
+-   /* See bo_init_new_dmaheap(): the fd is ours to close. */
+-   VkResult result =
+-      tu_bo_init_dmabuf(dev, out_bo, -1, align, TU_BO_ALLOC_NO_FLAGS, share.fd);
+-   close(share.fd);
+-
+-   return result;
++   return bo_init_new_ion_legacy_fd(dev, out_bo, size, align,
++                                    dev->physical_device->kgsl_dma_fd);
+ }
+ 
+ static VkResult
+diff --git a/src/gallium/include/pipe/p_defines.h b/src/gallium/include/pipe/p_defines.h
+index 68b2debde..4a9aedbbf 100644
+--- a/src/gallium/include/pipe/p_defines.h
++++ b/src/gallium/include/pipe/p_defines.h
+@@ -1239,6 +1239,11 @@ enum pipe_context_param
+     */
+    PIPE_CONTEXT_PARAM_UPDATE_THREAD_SCHEDULING,
+ 
++   /* The next flush is used as an explicit presentation fence.  Drivers may
++    * use this to avoid implicit-sync fallbacks while the frontend requests a
++    * native fence from the same submission.
++    */
++   PIPE_CONTEXT_PARAM_EXPLICIT_PRESENT_FENCE,
+    /* The minification/magnification switch-over point, the constant c of the
+     * GL and ES specs. Value 1 selects c = 0.5, value 0 selects c = 0.
+     *

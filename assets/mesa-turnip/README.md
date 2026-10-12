@@ -1,13 +1,29 @@
 # Patched turnip
 
 `libvulkan_freedreno.so` replaces the pinned lfdevs layer's turnip
-(`mesa-26.3.0-devel-20260824`, commit 98f3d622) with the same source plus
-`patches/mesa/lfdevs-26.3.0-20260824/0001-tu-kgsl-poll-zero-timeout-waits.patch`.
+(`mesa-26.3.0-devel-20260824`) with a newer one: lfdevs
+`dev/adreno-main` 71160a88 (2026-10-08: KGSL Present wait-fence and native
+BO fixes, A850) merged with upstream Mesa main 1f495287 (2026-10-12).
 
-The stock build sends KGSL WAITTIMESTAMP with timeout 0 for fence polls, and
-KGSL treats 0 as "wait forever", so every wgpu/Firefox WebGPU poll blocked
-until the GPU idled. The patch is a backport of upstream Mesa MR 44838: polls read the
-retired timestamp instead. Drop this file once the layer pin moves past it.
+Upstream main brings the KGSL fixes Portal used to carry or lacked:
+e984ef29 (fence polls sent WAITTIMESTAMP with timeout 0, which KGSL treats
+as "wait forever", so wgpu/VKD3D-Proton polls blocked until the GPU idled)
+and 1da50a1b (a submit waiting on both a timestamp and a sync file
+converted the wrong one and crashed; Cemu, RPCS3, Dolphin).
+
+Source:
+
+    git fetch https://github.com/lfdevs/mesa-for-android-container 71160a888e198d11befe5f782cb007a5017ff503
+    git checkout FETCH_HEAD
+    git fetch https://gitlab.freedesktop.org/mesa/mesa.git 1f4952878d78caba95afcb4efa1a1dfaf4fbc692
+    git merge -X theirs FETCH_HEAD     # then `git rm` .github/workflows/macos.yml
+    git apply patches/mesa/lfdevs-71160a88-up-1f495287/0001-merge-resolution.patch
+
+The patch keeps lfdevs' KGSL dma-buf/ION fallback (adapted to upstream's
+new `tu_bo_init_dmabuf` signature), both new pipe context params, lfdevs'
+extra A732 ids, and drops `magic_regs` from lfdevs-only GPU entries
+(removed upstream). Verify with `vulkaninfo --summary`: driverInfo
+`Mesa 26.3.0-devel (git-70a14c293a)`, apiVersion 1.4.363.
 
 Build (cross, Debian trixie amd64 -> arm64; the cross file also needs
 `nm = 'aarch64-linux-gnu-nm'`):
