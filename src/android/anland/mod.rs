@@ -215,15 +215,12 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         // via xinput). Without this Firefox X11 only sees KWin's pointer
         // emulation (tap works, drag/scroll/pinch don't).
         ("MOZ_USE_XINPUT2".into(), "1".into()),
-        // Phase B XWayland A/B: explicit per-launch selection consumed by the
-        // KWin wrapper (stock default; candidate only with SHA-validated
-        // staging, otherwise deterministic stock fallback before Plasma).
+        // XWayland build selection consumed by the KWin wrapper (Portal
+        // build default; staged builds only after SHA validation, otherwise
+        // deterministic stock fallback before Plasma).
         (
             "LOCALDESKTOP_XWAYLAND_VARIANT".into(),
-            match xwayland_variant() {
-                XwaylandVariant::Candidate => "candidate".to_string(),
-                XwaylandVariant::Stock => "stock".to_string(),
-            },
+            xwayland_variant().as_env().to_string(),
         ),
         // GTK input method: IBus. The Portal IBus engine bridges X11/GTK
         // editable focus to the Android IME (real FocusIn/FocusOut, commit,
@@ -322,29 +319,43 @@ pub fn software_gl_fallback_requested() -> bool {
         .unwrap_or(false)
 }
 
-/// Phase B XWayland A/B selection. `Candidate` serves the 0005
-/// touchpad-source build from `/usr/local/lib/portal-xwayland`; `Stock` is
-/// the untouched `/usr/bin/Xwayland` and MUST remain the default until a
-/// real mouse validates the candidate (no mouse is available in this task).
+/// XWayland build selection. `Portal` (default) serves the pinned -91 build
+/// with Portal 0006 (no window-buffer leak in the KGSL frame-callback
+/// recovery) from `/usr/local/lib/portal-xwayland-default`; `Candidate` adds
+/// the 0005 touchpad-source patch from `/usr/local/lib/portal-xwayland`;
+/// `Stock` is the untouched `/usr/bin/Xwayland`, which the wrapper also uses
+/// whenever a staged build fails its SHA gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XwaylandVariant {
+    Portal,
     Stock,
     Candidate,
 }
 
-/// Parse an xwayland-variant flag value. Only the exact word `candidate`
-/// (case-insensitive, trimmed) selects the candidate; anything else —
-/// including absent/unreadable — is stock. Pure function for unit tests.
-pub fn parse_xwayland_variant(raw: &str) -> XwaylandVariant {
-    if raw.trim().to_ascii_lowercase() == "candidate" {
-        XwaylandVariant::Candidate
-    } else {
-        XwaylandVariant::Stock
+impl XwaylandVariant {
+    /// Value passed to the guest as `LOCALDESKTOP_XWAYLAND_VARIANT`.
+    pub fn as_env(self) -> &'static str {
+        match self {
+            XwaylandVariant::Portal => "portal",
+            XwaylandVariant::Stock => "stock",
+            XwaylandVariant::Candidate => "candidate",
+        }
     }
 }
 
-/// App-private flag file selecting the XWayland variant (content
-/// `candidate`; absent or anything else means stock).
+/// Parse an xwayland-variant flag value (case-insensitive, trimmed): the
+/// words `stock` and `candidate` select those builds; anything else,
+/// including absent/unreadable, is `Portal`. Pure function for unit tests.
+pub fn parse_xwayland_variant(raw: &str) -> XwaylandVariant {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "stock" => XwaylandVariant::Stock,
+        "candidate" => XwaylandVariant::Candidate,
+        _ => XwaylandVariant::Portal,
+    }
+}
+
+/// App-private flag file selecting the XWayland variant (content `stock` or
+/// `candidate`; absent or anything else means the Portal build).
 pub fn xwayland_variant_flag_path() -> std::path::PathBuf {
     std::path::Path::new(crate::core::config::APP_FILES_ROOT).join("xwayland-variant")
 }
@@ -355,15 +366,11 @@ pub fn xwayland_variant_flag_path() -> std::path::PathBuf {
 pub fn xwayland_variant() -> XwaylandVariant {
     let variant = std::fs::read_to_string(xwayland_variant_flag_path())
         .map(|s| parse_xwayland_variant(&s))
-        .unwrap_or(XwaylandVariant::Stock);
-    match variant {
-        XwaylandVariant::Candidate => {
-            log::info!("anland.xwayland=candidate selected via xwayland-variant flag (stock remains default; wrapper SHA-gates staging)");
-        }
-        XwaylandVariant::Stock => {
-            log::info!("anland.xwayland=stock (default; write 'candidate' to xwayland-variant to try the 0005 build)");
-        }
-    }
+        .unwrap_or(XwaylandVariant::Portal);
+    log::info!(
+        "anland.xwayland={} (write 'stock' or 'candidate' to xwayland-variant to switch; wrapper SHA-gates staging)",
+        variant.as_env()
+    );
     variant
 }
 

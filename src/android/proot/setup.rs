@@ -204,6 +204,14 @@ const XWAYLAND_CANDIDATE_BINARY: &[u8] =
 /// gate refuses anything else; mirrors SHA256SUMS).
 const XWAYLAND_CANDIDATE_SHA256: &str =
     "b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d";
+/// Portal's default XWayland: pinned lfdevs 461772ae (2:24.1.6-91) plus
+/// Portal 0006 (package 2:24.1.6-91portal2), which stops the KGSL stale
+/// frame-callback recovery leaking a window-sized buffer each time it fires
+/// (fullscreen DXVK games leaked GBs and Android killed the app). Served
+/// from `/usr/local/lib/portal-xwayland-default`; `/usr/bin/Xwayland` stays
+/// stock and the wrapper falls back to it on any staging problem. Pins:
+/// `assets/xwayland-portal/SHA256SUMS`.
+const XWAYLAND_PORTAL_BINARY: &[u8] = include_bytes!("../../../assets/xwayland-portal/Xwayland");
 /// Stock Debian trixie arm64 xinput (diagnostic tool for the XI2 proof;
 /// same overlay staging, never in the default loader path).
 const XWAYLAND_XINPUT_BINARY: &[u8] = include_bytes!("../../../assets/xwayland-candidate/xinput");
@@ -3450,23 +3458,25 @@ fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow:
     Ok(())
 }
 
-/// Stage the Phase B XWayland touchpad-source candidate plus the xinput
-/// diagnostic into `/usr/local/lib/portal-xwayland` (NOT `/usr/bin`, NOT
-/// the default loader path). Runs on every provisioning pass AND every
-/// session launch, so existing runtimes converge without re-provisioning.
+/// Stage Portal's default XWayland into `/usr/local/lib/portal-xwayland-default`
+/// and the touchpad-source candidate plus the xinput diagnostic into
+/// `/usr/local/lib/portal-xwayland` (NOT `/usr/bin`, NOT the default loader
+/// path). Runs on every provisioning pass AND every session launch, so
+/// existing runtimes converge without re-provisioning.
 ///
-/// Staging is inert by itself: the KWin wrapper only puts this dir on PATH
-/// when the session explicitly selects `xwayland-variant=candidate`, and it
-/// SHA-validates the binary there first (falling back to stock otherwise).
+/// Staging is inert by itself: the KWin wrapper only puts a dir on PATH for
+/// the selected variant, and it SHA-validates the binary there first
+/// (falling back to stock otherwise).
 /// Sync is idempotent (size-freshness, atomic temp+rename, 0755) mirroring
 /// the KWin overlay above.
 fn sync_xwayland_candidate_overlay(fs_root: &Path) {
-    let candidate_dir = fs_root.join("usr/local/lib/portal-xwayland");
-    let _ = fs::create_dir_all(&candidate_dir);
-    for (name, payload) in [
-        ("Xwayland", XWAYLAND_CANDIDATE_BINARY),
-        ("xinput", XWAYLAND_XINPUT_BINARY),
+    for (dir, name, payload) in [
+        ("usr/local/lib/portal-xwayland-default", "Xwayland", XWAYLAND_PORTAL_BINARY),
+        ("usr/local/lib/portal-xwayland", "Xwayland", XWAYLAND_CANDIDATE_BINARY),
+        ("usr/local/lib/portal-xwayland", "xinput", XWAYLAND_XINPUT_BINARY),
     ] {
+        let candidate_dir = fs_root.join(dir);
+        let _ = fs::create_dir_all(&candidate_dir);
         let target = candidate_dir.join(name);
         if !payload_is_current(&target, payload) {
             let tmp = candidate_dir.join(format!("{name}.tmp"));

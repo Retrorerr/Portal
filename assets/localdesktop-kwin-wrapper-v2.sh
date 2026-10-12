@@ -127,64 +127,72 @@ else
             sha256sum /usr/lib/aarch64-linux-gnu/libkwin.so.6 >> "$log_file" 2>/dev/null || true
         fi
     fi
-    # Project Anland XWayland variant selection (Phase B A/B without APK
-    # rebuilds): explicit selection only. files/xwayland-variant arrives as
-    # LOCALDESKTOP_XWAYLAND_VARIANT ("candidate" or "stock");
-    # /var/lib/localdesktop/xwayland-variant is the out-of-band test
-    # override (same pattern as kwin-variant above). Default MUST remain
-    # stock: anything unrecognized, and any failed staging check, falls back
-    # to stock and is logged. Stock keeps today's exact PATH/environment:
-    # no wrapper binary, no extra processes, no behavior change.
+    # Project Anland XWayland variant selection. files/xwayland-variant
+    # arrives as LOCALDESKTOP_XWAYLAND_VARIANT ("portal", "candidate" or
+    # "stock"); /var/lib/localdesktop/xwayland-variant is the out-of-band
+    # test override (same pattern as kwin-variant above). "portal" is the
+    # pinned -91 build with Portal 0006 (no window-buffer leak), the app's
+    # default; "candidate" adds the 0005 touchpad patch. Without the env var
+    # (older app), anything unrecognized, and any failed staging check, the
+    # session uses stock and logs it. Stock keeps today's exact
+    # PATH/environment: no wrapper binary, no extra processes.
     xwayland_variant=stock
     case "${LOCALDESKTOP_XWAYLAND_VARIANT:-}" in
-        candidate|stock) xwayland_variant="$LOCALDESKTOP_XWAYLAND_VARIANT" ;;
+        portal|candidate|stock) xwayland_variant="$LOCALDESKTOP_XWAYLAND_VARIANT" ;;
     esac
     if [ -r /var/lib/localdesktop/xwayland-variant ]; then
         read -r xwayland_override < /var/lib/localdesktop/xwayland-variant
         case "$xwayland_override" in
-            candidate|stock) xwayland_variant="$xwayland_override" ;;
+            portal|candidate|stock) xwayland_variant="$xwayland_override" ;;
             *)
-                printf 'xwayland_variant override=%q rejected (want candidate|stock), keeping %s\n' \
-                    "$xwayland_override" "$xwayland_variant" >> "$log_file"
+                printf 'xwayland_variant override=%q rejected (want portal|candidate|stock), keeping %s
+'                     "$xwayland_override" "$xwayland_variant" >> "$log_file"
                 ;;
         esac
     fi
     xwayland_bin=/usr/bin/Xwayland
-    if [ "$xwayland_variant" = "candidate" ]; then
+    case "$xwayland_variant" in
+        candidate)
+            xwayland_cand_dir=/usr/local/lib/portal-xwayland
+            xwayland_cand_sha_expected="b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d"
+            ;;
+        portal)
+            xwayland_cand_dir=/usr/local/lib/portal-xwayland-default
+            xwayland_cand_sha_expected="dbfd83bbf796bafa62a3f029e737f7d1835c942d4a581b060cfd7fab6c21637d"
+            ;;
+    esac
+    if [ "$xwayland_variant" != "stock" ]; then
         # Staging gate (single decision per launch, no retry loop): readable
         # + plausible size + exact pinned SHA. SHA equality also pins ELF
         # architecture and every staged byte. Any failure selects stock.
-        xwayland_cand_dir=/usr/local/lib/portal-xwayland
         xwayland_cand_bin="$xwayland_cand_dir/Xwayland"
-        xwayland_cand_sha_expected="b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d"
-        if [ -x "$xwayland_cand_bin" ] \
-            && [ "$(wc -c < "$xwayland_cand_bin" 2>/dev/null || echo 0)" -ge 1000000 ]; then
+        if [ -x "$xwayland_cand_bin" ]             && [ "$(wc -c < "$xwayland_cand_bin" 2>/dev/null || echo 0)" -ge 1000000 ]; then
             xwayland_cand_sha=$(sha256sum "$xwayland_cand_bin" 2>/dev/null | cut -d' ' -f1)
             if [ "$xwayland_cand_sha" = "$xwayland_cand_sha_expected" ]; then
                 # KWin locates Xwayland via PATH: prepending the Portal dir
-                # selects the candidate with no wrapper and no stock impact
+                # selects the build with no wrapper and no stock impact
                 # (stock never touches PATH here).
                 PATH="$xwayland_cand_dir:$PATH"
                 export PATH
                 xwayland_bin="$xwayland_cand_bin"
-                printf 'xwayland_variant=candidate status=active sha=%s\n' \
-                    "$xwayland_cand_sha" >> "$log_file"
+                printf 'xwayland_variant=%s status=active sha=%s
+'                     "$xwayland_variant" "$xwayland_cand_sha" >> "$log_file"
             else
-                printf 'xwayland_variant=candidate status=rejected-bad-sha falling back to stock\n' \
-                    >> "$log_file"
+                printf 'xwayland_variant=%s status=rejected-bad-sha falling back to stock
+'                     "$xwayland_variant" >> "$log_file"
                 xwayland_variant=stock
             fi
         else
-            printf 'xwayland_variant=candidate status=incomplete-staging falling back to stock\n' \
-                >> "$log_file"
+            printf 'xwayland_variant=%s status=incomplete-staging falling back to stock
+'                 "$xwayland_variant" >> "$log_file"
             xwayland_variant=stock
         fi
     fi
-    printf 'xwayland_variant=%s bin=%s resolved=%s\n' \
-        "$xwayland_variant" "$xwayland_bin" "$(command -v Xwayland)" >> "$log_file"
+    printf 'xwayland_variant=%s bin=%s resolved=%s
+'         "$xwayland_variant" "$xwayland_bin" "$(command -v Xwayland)" >> "$log_file"
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum /usr/bin/Xwayland >> "$log_file" 2>/dev/null || true
-        if [ "$xwayland_variant" = "candidate" ]; then
+        if [ "$xwayland_variant" != "stock" ]; then
             sha256sum "$xwayland_cand_bin" >> "$log_file" 2>/dev/null || true
         fi
     fi

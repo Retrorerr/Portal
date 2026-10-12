@@ -1,0 +1,93 @@
+From: Retrorerr <116828772+Retrorerr@users.noreply.github.com>
+Subject: xwayland: stop the KGSL frame callback recovery leaking window buffers
+
+lfdevs 0003/0004 recover from a stale frame callback by recreating the
+window's wl_buffer. The recreate dropped the pixmap's buffer release
+callback, so the window buffer that owned it never returned to the
+available list and was never freed: every recovery leaked one
+window-sized dma-buf in Xwayland and in the compositor, even after the
+client exited.
+
+The recovery also counted post_damage passes instead of time. Clients
+that stream pixels through PutImage (Mesa's Vulkan X11 software path,
+e.g. DXVK games) trigger dozens of passes per frame, so it fired about
+4-45 times a second against a healthy compositor. A fullscreen game at
+3392x2400 leaked several GB in seconds and Android killed the app.
+
+Keep the release callback, and recover only once the callback has been
+pending for 250 ms as well.
+---
+diff --git a/hw/xwayland/xwayland-glamor-gbm.c b/hw/xwayland/xwayland-glamor-gbm.c
+index bf0bb19..c89a7be 100644
+--- a/hw/xwayland/xwayland-glamor-gbm.c
++++ b/hw/xwayland/xwayland-glamor-gbm.c
+@@ -174,7 +174,12 @@ xwl_glamor_kgsl_refresh_wl_buffer(PixmapPtr pixmap)
+         !xwl_pixmap || !xwl_pixmap->buffer)
+         return;
+ 
+-    xwl_pixmap_del_buffer_release_cb(pixmap);
++    /* Keep the pixmap's release callback: the window buffer that owns this
++     * pixmap is waiting for it, and the wl_buffer recreated below reports
++     * its release through the same callback. Dropping it left the buffer
++     * unavailable forever, so every recovery leaked one window-sized
++     * buffer in Xwayland and in the compositor.
++     */
+     wl_buffer_destroy(xwl_pixmap->buffer);
+     xwl_pixmap->buffer = NULL;
+ }
+diff --git a/hw/xwayland/xwayland-screen.c b/hw/xwayland/xwayland-screen.c
+index 2516f2d..a6551d5 100644
+--- a/hw/xwayland/xwayland-screen.c
++++ b/hw/xwayland/xwayland-screen.c
+@@ -430,6 +430,9 @@ xwl_screen_check_resolution_change_emulation(struct xwl_screen *xwl_screen)
+         xwl_window_check_resolution_change_emulation(xwl_window);
+ }
+ 
++/* A frame callback still pending after this long is treated as lost. */
++#define XWL_KGSL_STALE_FRAME_CALLBACK_MS 250
++
+ void
+ xwl_screen_post_damage(struct xwl_screen *xwl_screen)
+ {
+@@ -448,8 +451,16 @@ xwl_screen_post_damage(struct xwl_screen *xwl_screen)
+         if (xwl_window->frame_callback) {
+ #ifdef XWL_HAS_GLAMOR
+             if (kgsl) {
++                /* Recover only from a frame callback that has really gone
++                 * stale. Counting post_damage passes fired many times per
++                 * frame for clients that stream pixels (Vulkan through
++                 * PutImage), long before the compositor's next repaint.
++                 */
+                 xwl_window->blocked_frame_callback_count++;
+-                if (xwl_window->blocked_frame_callback_count < 64)
++                if (xwl_window->blocked_frame_callback_count < 64 ||
++                    (CARD32) (GetTimeInMillis() -
++                              xwl_window->frame_callback_time) <
++                    XWL_KGSL_STALE_FRAME_CALLBACK_MS)
+                     continue;
+                 xwl_window->blocked_frame_callback_count = 0;
+                 wl_callback_destroy(xwl_window->frame_callback);
+diff --git a/hw/xwayland/xwayland-window.c b/hw/xwayland/xwayland-window.c
+index b5ff3c5..bacc101 100644
+--- a/hw/xwayland/xwayland-window.c
++++ b/hw/xwayland/xwayland-window.c
+@@ -1930,6 +1930,7 @@ void
+ xwl_window_create_frame_callback(struct xwl_window *xwl_window)
+ {
+     xwl_window->frame_callback = wl_surface_frame(xwl_window->surface);
++    xwl_window->frame_callback_time = GetTimeInMillis();
+     wl_callback_add_listener(xwl_window->frame_callback, &frame_listener,
+                              xwl_window);
+ 
+diff --git a/hw/xwayland/xwayland-window.h b/hw/xwayland/xwayland-window.h
+index 752ed2d..0c04cec 100644
+--- a/hw/xwayland/xwayland-window.h
++++ b/hw/xwayland/xwayland-window.h
+@@ -90,6 +90,7 @@ struct xwl_window {
+     Bool allow_commits;
+     Bool force_refresh_wl_buffer;
+     unsigned int blocked_frame_callback_count;
++    CARD32 frame_callback_time;
+     struct xorg_list window_buffers_available;
+     struct xorg_list window_buffers_unavailable;
+     OsTimerPtr window_buffers_timer;

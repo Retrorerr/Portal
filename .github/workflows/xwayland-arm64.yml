@@ -2,7 +2,9 @@
 #
 # Builds the pinned lfdevs 2:24.1.6-91 XWayland source natively on ARM64
 # inside a digest-pinned Debian 13 (trixie) container, either unmodified
-# (baseline reproduction) or with the Portal 0005 input patch (candidate).
+# (baseline reproduction), with the Portal 0006 buffer-leak fix (portal,
+# the app's default Xwayland) or with the Portal 0005 input patch
+# (candidate).
 #
 # Safety properties (do not weaken without review):
 # - permissions: contents:read; no secrets, no releases, no ref updates,
@@ -37,6 +39,7 @@ on:
         options:
           - both
           - baseline
+          - portal
           - candidate
 
 permissions:
@@ -57,6 +60,7 @@ env:
   # Never depend on the mutable tag alone.
   TRIXIE_IMAGE: debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1
   PORTAL_PATCH: patches/xwayland/0005-xwayland-preserve-finger-axis-source.patch
+  LEAK_PATCH: patches/xwayland/0006-xwayland-kgsl-frame-callback-recovery-leak.patch
 
 jobs:
   setup:
@@ -71,8 +75,9 @@ jobs:
           script: |
             const input = context.eventName === 'workflow_dispatch'
               ? context.payload.inputs.variant : 'both';
-            const variants = input === 'both' ? ['baseline', 'candidate'] : [input];
-            if (!variants.every((v) => v === 'baseline' || v === 'candidate')) {
+            const all = ['baseline', 'portal', 'candidate'];
+            const variants = input === 'both' ? all : [input];
+            if (!variants.every((v) => all.includes(v))) {
               core.setFailed(`unknown variant: ${input}`);
               return;
             }
@@ -147,6 +152,23 @@ jobs:
           sed -i '1s/xwayland (2:24.1.6-91)/xwayland (2:24.1.6-91portal1)/' xwayland-src/debian/changelog
           head -n 3 xwayland-src/debian/changelog
           tail -n 2 xwayland-src/debian/patches/series
+
+      - name: Apply Portal 0006 patch (portal only)
+        if: matrix.variant == 'portal'
+        run: |
+          set -eu
+          test -f "portal/$LEAK_PATCH"
+          cp "portal/$LEAK_PATCH" xwayland-src/debian/patches/0006-xwayland-kgsl-frame-callback-recovery-leak.patch
+          printf '%s
+' '0006-xwayland-kgsl-frame-callback-recovery-leak.patch' >> xwayland-src/debian/patches/series
+          sed -i '1s/xwayland (2:24.1.6-91)/xwayland (2:24.1.6-91portal2)/' xwayland-src/debian/changelog
+          # 0006 builds on lfdevs 0003/0004 (KGSL recovery): prove it applies
+          # on top of the full -91 series before the build does.
+          apt-get update
+          apt-get install -y --no-install-recommends quilt
+          cd xwayland-src
+          QUILT_PATCHES=debian/patches quilt push -a
+          QUILT_PATCHES=debian/patches quilt pop -a
 
       - name: Assert patch scope (candidate only)
         if: matrix.variant == 'candidate'

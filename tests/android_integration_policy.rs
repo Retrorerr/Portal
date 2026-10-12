@@ -48,6 +48,8 @@ const PORTAL_LAUNCH_TRANSITION_SOURCE: &str =
     include_str!("../src/android/kotlin/app/polarbear/setup/PortalLaunchTransition.kt");
 const XWAYLAND_SHA256SUMS_SOURCE: &str =
     include_str!("../assets/xwayland-candidate/SHA256SUMS");
+const XWAYLAND_PORTAL_SHA256SUMS_SOURCE: &str =
+    include_str!("../assets/xwayland-portal/SHA256SUMS");
 
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
@@ -738,10 +740,19 @@ fn xwayland_variant_selection_policy() {
         assert!(KWIN_WRAPPER_SOURCE.contains(pinned));
         assert!(XWAYLAND_SHA256SUMS_SOURCE.contains(pinned));
     }
+    // 2b. Portal's default build (0006 leak fix) is staged in its own dir and
+    // pinned the same way.
+    assert!(ANDROID_SETUP_SOURCE.contains("usr/local/lib/portal-xwayland-default"));
+    assert!(KWIN_WRAPPER_SOURCE.contains("xwayland_cand_dir=/usr/local/lib/portal-xwayland-default"));
+    for pinned in ["dbfd83bbf796bafa62a3f029e737f7d1835c942d4a581b060cfd7fab6c21637d"] {
+        assert!(KWIN_WRAPPER_SOURCE.contains(pinned));
+        assert!(XWAYLAND_PORTAL_SHA256SUMS_SOURCE.contains(pinned));
+    }
+    assert!(ANLAND_ENV_SOURCE.contains(".unwrap_or(XwaylandVariant::Portal)"));
     // 3. files/xwayland-variant reaches the guest as an explicit env var.
     assert!(ANLAND_ENV_SOURCE.contains("LOCALDESKTOP_XWAYLAND_VARIANT"));
     assert!(ANLAND_ENV_SOURCE.contains("xwayland-variant"));
-    // 4. Wrapper default is stock, pinned as the exact assignment block so a
+    // 4. Without the env var (older app) the wrapper default is stock, pinned as the exact assignment block so a
     // bare substring (also used by fallback lines) proves nothing.
     assert!(KWIN_WRAPPER_SOURCE.contains(
         "xwayland_variant=stock\n    case \"${LOCALDESKTOP_XWAYLAND_VARIANT:-}\" in"
