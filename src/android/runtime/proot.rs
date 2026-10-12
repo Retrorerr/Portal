@@ -29,6 +29,11 @@ const SUPPORT_CHECK_BINARY: &str = "ld-linux-aarch64.so.1";
 /// bursts, so a short poll after each stop keeps file-heavy work 2-4x
 /// faster for at most this much CPU time per stop.
 const PROOT_SPIN_US: &str = "50";
+/// Host directory (under the app's files) that Portal's game panel writes
+/// `game.conf` / `app-<appid>.conf` into, and where the guest sees it.
+/// Must match `GameSettings.DIR` / `GameSettings.GUEST_DIR` in Kotlin.
+const GAME_SETTINGS_DIR: &str = "game-settings";
+const GAME_SETTINGS_GUEST: &str = "/usr/local/lib/portal/settings";
 
 /// Concrete PRoot-based Linux runtime.
 #[derive(Debug, Clone)]
@@ -379,6 +384,21 @@ impl LinuxRuntime for PRootRuntime {
 
         if pads_ready {
             process.arg(format!("--bind={}:/dev/input", pad_input.display()));
+        }
+
+        // Game settings from Portal's game panel (gaming/GameSettings.kt),
+        // read by the Steam compatibility tools at each launch.
+        // Only into an unpacked rootfs: PRoot needs the guest directory.
+        let game_settings = Path::new(config::APP_FILES_ROOT).join(GAME_SETTINGS_DIR);
+        if self.rootfs.join("usr").is_dir()
+            && fs::create_dir_all(&game_settings).is_ok()
+            && fs::create_dir_all(self.rootfs.join(GAME_SETTINGS_GUEST.trim_start_matches('/'))).is_ok()
+        {
+            process.arg(format!(
+                "--bind={}:{}",
+                game_settings.display(),
+                GAME_SETTINGS_GUEST
+            ));
         }
 
         if context.permission_all_files_access {
