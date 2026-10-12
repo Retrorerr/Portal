@@ -37,6 +37,26 @@ extern void *dlsym(void *handle, const char *symbol);
 extern void *dlopen(const char *file, int mode);
 extern long readlink(const char *path, char *buf, unsigned long size);
 
+/* elf.h / link.h (64-bit) */
+#define PT_LOAD 1
+#define PF_X 1
+#define PF_R 4
+
+typedef struct {
+    uint32_t p_type, p_flags;
+    uint64_t p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align;
+} Elf64_Phdr;
+
+struct dl_phdr_info {
+    uint64_t dlpi_addr;
+    const char *dlpi_name;
+    const Elf64_Phdr *dlpi_phdr;
+    uint16_t dlpi_phnum;
+};
+
+extern int dl_iterate_phdr(int (*callback)(struct dl_phdr_info *, unsigned long, void *),
+                           void *data);
+
 /* SDL3 (SDL_video.h, SDL_events.h). */
 typedef struct SDL_Window SDL_Window;
 typedef struct { int x, y; } SDL_Point;
@@ -117,6 +137,29 @@ static int is_webhelper(void) {
     return active;
 }
 
+/* The readable code segment around an address. */
+struct segment {
+    uintptr_t addr, start, end;
+};
+
+static int find_segment(struct dl_phdr_info *info, unsigned long size, void *data) {
+    (void)size;
+    struct segment *segment = data;
+    for (unsigned i = 0; i < info->dlpi_phnum; i++) {
+        const Elf64_Phdr *phdr = &info->dlpi_phdr[i];
+        uintptr_t start = info->dlpi_addr + phdr->p_vaddr;
+        if (phdr->p_type != PT_LOAD || segment->addr < start ||
+            segment->addr >= start + phdr->p_memsz)
+            continue;
+        if ((phdr->p_flags & (PF_X | PF_R)) != (PF_X | PF_R))
+            return -1;
+        segment->start = start;
+        segment->end = start + phdr->p_memsz;
+        return 1;
+    }
+    return 0;
+}
+
 /*
  * The shaping function opens with
  *     ldrb w1, [x0, #flag]
@@ -124,14 +167,26 @@ static int is_webhelper(void) {
  *     sub  sp, sp, #0x100
  * and sits next to the hit-test callback in the webhelper's text. Returns the
  * flag's offset in the window object, or 0 when the pattern is not there.
+ * The scan stays inside the callback's own code segment, so a Steam build
+ * that moved the code cannot make it read unmapped memory.
  */
 static unsigned long shape_flag_offset(SDL_HitTest callback) {
     static long offset = -1;
     if (offset >= 0)
         return offset;
     offset = 0;
-    const uint32_t *code = (const uint32_t *)((uintptr_t)callback & ~(uintptr_t)3);
-    for (long i = -0x4000; i < 0x4000; i++) {
+    struct segment segment = {(uintptr_t)callback & ~(uintptr_t)3, 0, 0};
+    if (dl_iterate_phdr(find_segment, &segment) != 1)
+        return offset;
+    const uint32_t *code = (const uint32_t *)segment.addr;
+    long first = -0x4000, last = 0x4000;
+    long before = (long)((segment.addr - segment.start) / 4);
+    long after = (long)((segment.end - segment.addr) / 4) - 2; /* room for code[i + 2] */
+    if (first < -before)
+        first = -before;
+    if (last > after)
+        last = after;
+    for (long i = first; i < last; i++) {
         if ((code[i] & 0xffc003ff) == 0x39400001 &&      /* ldrb w1, [x0, #imm] */
             (code[i + 1] & 0xff00001f) == 0x34000001 &&  /* cbz w1 */
             code[i + 2] == 0xd10403ff) {                 /* sub sp, sp, #0x100 */
