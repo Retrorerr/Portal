@@ -34,10 +34,10 @@ on:
       variant:
         description: Which tree to build
         required: true
-        default: both
+        default: all
         type: choice
         options:
-          - both
+          - all
           - baseline
           - portal
           - candidate
@@ -74,9 +74,9 @@ jobs:
         with:
           script: |
             const input = context.eventName === 'workflow_dispatch'
-              ? context.payload.inputs.variant : 'both';
+              ? context.payload.inputs.variant : 'all';
             const all = ['baseline', 'portal', 'candidate'];
-            const variants = input === 'both' ? all : [input];
+            const variants = input === 'all' ? all : [input];
             if (!variants.every((v) => all.includes(v))) {
               core.setFailed(`unknown variant: ${input}`);
               return;

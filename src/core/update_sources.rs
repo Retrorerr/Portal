@@ -350,7 +350,7 @@ pub fn mesa_update(
         let Some(version) = mesa_version_from_tag(&release.tag_name) else {
             continue;
         };
-        if denied.iter().any(|bad| *bad == version) || !policy.allows_mesa(&version) {
+        if denied.contains(&version) || !policy.allows_mesa(&version) {
             continue;
         }
         if compare_mesa_versions(&version, installed) != Some(Ordering::Greater) {
@@ -472,23 +472,14 @@ mod tests {
     #[test]
     fn release_summary_is_the_first_prose_line() {
         assert_eq!(
-            release_summary("Bug fixes on top of v2.4.0.
-
-- one
-- two").as_deref(),
+            release_summary("Bug fixes on top of v2.4.0.\n\n- one\n- two").as_deref(),
             Some("Bug fixes on top of v2.4.0.")
         );
         assert_eq!(
-            release_summary("## What's new
-
-- **Faster** `Proton` starts
-").as_deref(),
+            release_summary("## What's new\n\n- **Faster** `Proton` starts\n").as_deref(),
             Some("Faster Proton starts")
         );
-        assert_eq!(release_summary("
-# Title
-
-"), None);
+        assert_eq!(release_summary("\n# Title\n\n"), None);
         let long = "word ".repeat(40);
         let summary = release_summary(&long).unwrap();
         assert!(summary.ends_with('…') && summary.chars().count() <= 111, "{summary}");

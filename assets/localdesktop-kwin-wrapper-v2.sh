@@ -145,8 +145,8 @@ else
         case "$xwayland_override" in
             portal|candidate|stock) xwayland_variant="$xwayland_override" ;;
             *)
-                printf 'xwayland_variant override=%q rejected (want portal|candidate|stock), keeping %s
-'                     "$xwayland_override" "$xwayland_variant" >> "$log_file"
+                printf 'xwayland_variant override=%q rejected (want portal|candidate|stock), keeping %s\n' \
+                    "$xwayland_override" "$xwayland_variant" >> "$log_file"
                 ;;
         esac
     fi
@@ -166,7 +166,8 @@ else
         # + plausible size + exact pinned SHA. SHA equality also pins ELF
         # architecture and every staged byte. Any failure selects stock.
         xwayland_cand_bin="$xwayland_cand_dir/Xwayland"
-        if [ -x "$xwayland_cand_bin" ]             && [ "$(wc -c < "$xwayland_cand_bin" 2>/dev/null || echo 0)" -ge 1000000 ]; then
+        if [ -x "$xwayland_cand_bin" ] \
+            && [ "$(wc -c < "$xwayland_cand_bin" 2>/dev/null || echo 0)" -ge 1000000 ]; then
             xwayland_cand_sha=$(sha256sum "$xwayland_cand_bin" 2>/dev/null | cut -d' ' -f1)
             if [ "$xwayland_cand_sha" = "$xwayland_cand_sha_expected" ]; then
                 # KWin locates Xwayland via PATH: prepending the Portal dir
@@ -175,21 +176,21 @@ else
                 PATH="$xwayland_cand_dir:$PATH"
                 export PATH
                 xwayland_bin="$xwayland_cand_bin"
-                printf 'xwayland_variant=%s status=active sha=%s
-'                     "$xwayland_variant" "$xwayland_cand_sha" >> "$log_file"
+                printf 'xwayland_variant=%s status=active sha=%s\n' \
+                    "$xwayland_variant" "$xwayland_cand_sha" >> "$log_file"
             else
-                printf 'xwayland_variant=%s status=rejected-bad-sha falling back to stock
-'                     "$xwayland_variant" >> "$log_file"
+                printf 'xwayland_variant=%s status=rejected-bad-sha falling back to stock\n' \
+                    "$xwayland_variant" >> "$log_file"
                 xwayland_variant=stock
             fi
         else
-            printf 'xwayland_variant=%s status=incomplete-staging falling back to stock
-'                 "$xwayland_variant" >> "$log_file"
+            printf 'xwayland_variant=%s status=incomplete-staging falling back to stock\n' \
+                "$xwayland_variant" >> "$log_file"
             xwayland_variant=stock
         fi
     fi
-    printf 'xwayland_variant=%s bin=%s resolved=%s
-'         "$xwayland_variant" "$xwayland_bin" "$(command -v Xwayland)" >> "$log_file"
+    printf 'xwayland_variant=%s bin=%s resolved=%s\n' \
+        "$xwayland_variant" "$xwayland_bin" "$(command -v Xwayland)" >> "$log_file"
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum /usr/bin/Xwayland >> "$log_file" 2>/dev/null || true
         if [ "$xwayland_variant" != "stock" ]; then

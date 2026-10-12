@@ -36,7 +36,11 @@ Verify with `vulkaninfo --summary`: driverInfo
 Build (cross, Debian trixie amd64 -> arm64; the cross file also needs
 `nm = 'aarch64-linux-gnu-nm'`):
 
-    meson setup build --cross-file cross-arm64.ini --buildtype=release -Db_ndebug=true       -Dvulkan-drivers=freedreno -Dfreedreno-kmds=kgsl -Dgallium-drivers=freedreno       -Dplatforms=x11,wayland -Dopengl=false -Dgles1=disabled -Dgles2=disabled       -Degl=disabled -Dglx=disabled -Dgbm=disabled -Dllvm=disabled -Dvideo-codecs=       -Dtools= -Dvulkan-layers= -Dbuild-tests=false
+    meson setup build --cross-file cross-arm64.ini --buildtype=release -Db_ndebug=true \
+      -Dvulkan-drivers=freedreno -Dfreedreno-kmds=kgsl -Dgallium-drivers=freedreno \
+      -Dplatforms=x11,wayland -Dopengl=false -Dgles1=disabled -Dgles2=disabled \
+      -Degl=disabled -Dglx=disabled -Dgbm=disabled -Dllvm=disabled -Dvideo-codecs= \
+      -Dtools= -Dvulkan-layers= -Dbuild-tests=false
     ninja -C build src/freedreno/vulkan/libvulkan_freedreno.so
     aarch64-linux-gnu-strip build/src/freedreno/vulkan/libvulkan_freedreno.so
 
