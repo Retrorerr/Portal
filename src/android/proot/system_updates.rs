@@ -367,12 +367,14 @@ fn write_host_cache(cache: &HostCache) -> anyhow::Result<()> {
 }
 
 /// Drop cached findings that no longer apply: an app release this build
-/// already is, a driver Portal already has (or must not take), ChatGPT
-/// removed since.
+/// already is (or no longer updates from), a driver Portal already has (or
+/// must not take), ChatGPT removed since.
 fn still_relevant(mut cache: HostCache, installed: Option<&HashMap<String, String>>) -> HostCache {
     let policy = current_policy();
     if cache.app.as_ref().is_some_and(|app| {
-        parse_semver(&app.version) <= parse_semver(VERSION) || !policy.allows_app(&app.version)
+        !app_update::enabled()
+            || parse_semver(&app.version) <= parse_semver(VERSION)
+            || !policy.allows_app(&app.version)
     }) {
         cache.app = None;
     }
@@ -689,6 +691,7 @@ pub fn schedule_background_check(android_app: &AndroidApp) {
     }
     let android_app = android_app.clone();
     thread::spawn(move || {
+        app_update::discard_installed();
         thread::sleep(CHECK_DELAY);
         let mut failures = 0u32;
         loop {

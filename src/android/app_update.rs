@@ -16,7 +16,9 @@
 
 use crate::core::{
     config::{APP_FILES_ROOT, VERSION},
-    update_sources::{app_update, AppRelease, GithubRelease, UpdatePolicy, APP_DOWNLOAD_PREFIX, APP_RELEASE_API},
+    update_sources::{
+        app_update, parse_semver, AppRelease, GithubRelease, UpdatePolicy, APP_DOWNLOAD_PREFIX, APP_RELEASE_API,
+    },
 };
 use std::{
     fs,
@@ -96,6 +98,26 @@ fn discard_stale_locked(keep: Option<&AppRelease>) {
         });
         if !kept {
             let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// Remove downloads of this build or older: Android has installed them, so
+/// the APK need not wait for the next check to go.
+pub fn discard_installed() {
+    let _download = download_lock();
+    let Ok(entries) = fs::read_dir(updates_dir()) else {
+        return;
+    };
+    let current = parse_semver(VERSION);
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let version = name
+            .strip_prefix("Portal-")
+            .and_then(|rest| rest.strip_suffix(".apk").or_else(|| rest.strip_suffix(".apk.part")))
+            .and_then(parse_semver);
+        if version.is_some_and(|version| Some(version) <= current) {
+            let _ = fs::remove_file(entry.path());
         }
     }
 }
