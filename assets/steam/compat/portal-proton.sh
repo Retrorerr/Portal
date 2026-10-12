@@ -11,6 +11,8 @@
 #
 # Per-game launch options (Properties > General > Launch Options):
 #   PORTAL_PROTON=/path/to/proton %command%   use a specific Proton build
+#   PORTAL_PROTON=stable %command%            newest stable Proton (ARM64)
+#                                             instead of Experimental
 #   PORTAL_WOW64=box64 %command%              32-bit games through Box64's
 #                                             WoW64 backend instead of FEX
 #   PORTAL_VRAM_MB=6144 %command%             video memory games are told
@@ -35,18 +37,30 @@ library_folders() {
     [ -r "$vdf" ] && sed -n 's/^[[:space:]]*"path"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$vdf"
 }
 
+# Proton Experimental (ARM64) carries the newest FEX, DXVK and VKD3D-Proton
+# (FEX's JIT disk cache needs FEX-2609 or later; Proton 11.0-2 ships older),
+# so it wins when installed; the tool manifest makes Steam install and
+# update it. Otherwise, or with PORTAL_PROTON=stable, the newest stable one.
 find_proton() {
     library_folders | while IFS= read -r library; do
         for proton in "$library"/steamapps/common/Proton*ARM64*/proton \
                       "$library"/steamapps/common/Proton*arm64*/proton; do
-            [ -f "$proton" ] && echo "$proton"
+            [ -f "$proton" ] || continue
+            case "$proton" in
+                *Experimental*) [ "$1" = stable ] || echo "1 $proton" ;;
+                *) echo "0 $proton" ;;
+            esac
         done
-    done | sort -uV | tail -n 1
+    done | sort -uV | tail -n 1 | cut -d' ' -f2-
 }
 
-proton="${PORTAL_PROTON:-$(find_proton)}"
+case "$PORTAL_PROTON" in
+    ""|experimental) proton=$(find_proton) ;;
+    stable) proton=$(find_proton stable) ;;
+    *) proton="$PORTAL_PROTON" ;;
+esac
 if [ -z "$proton" ] || [ ! -f "$proton" ]; then
-    message "Proton for ARM64 is not installed yet.\n\nIn Steam, open Library, show Tools, and install \"Proton 11.0 (ARM64)\" (or newer), then start the game again."
+    message "Proton for ARM64 is not installed yet.\n\nIn Steam, open Library, show Tools, and install \"Proton Experimental (ARM64)\" or \"Proton 11.0 (ARM64)\", then start the game again."
     exit 1
 fi
 
