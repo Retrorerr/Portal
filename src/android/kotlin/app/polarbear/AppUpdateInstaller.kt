@@ -39,7 +39,10 @@ object AppUpdateInstaller {
     /**
      * Some Android versions send nothing when the confirmation is dismissed.
      * Once Portal is back in front, a session still unanswered after this is
-     * treated as cancelled; a confirmed install ends the process well before.
+     * reported as cancelled. The session itself stays: an accepted install
+     * can take longer than this (a large APK, Play Protect's scan), and
+     * abandoning it would abort the update the user just allowed. The next
+     * install clears it.
      */
     private const val CONFIRMATION_GRACE_MS = 10_000L
 
@@ -130,6 +133,11 @@ object AppUpdateInstaller {
         registerReceiver(context)
 
         val installer = context.packageManager.packageInstaller
+        // Sessions an earlier attempt left open (unanswered, or reported as
+        // cancelled while still pending): this install replaces them.
+        for (stale in installer.mySessions) {
+            runCatching { installer.abandonSession(stale.sessionId) }
+        }
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(context.packageName)
             setSize(apk.length())
@@ -281,7 +289,6 @@ object AppUpdateInstaller {
         }
         if (!expired) return
         Log.i(TAG, "session $session left unanswered; treating it as cancelled")
-        runCatching { activity.packageManager.packageInstaller.abandonSession(session) }
         finish(RESULT_CANCELLED, "")
     }
 
