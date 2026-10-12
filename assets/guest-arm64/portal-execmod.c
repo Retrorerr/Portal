@@ -40,6 +40,7 @@ extern int open(const char *path, int flags, ...);
 extern long read(int fd, void *buf, size_t len);
 extern int close(int fd);
 extern void *memcpy(void *dst, const void *src, size_t len);
+extern int getpagesize(void);
 
 typedef int (*mprotect_fn)(void *, size_t, int);
 
@@ -95,6 +96,10 @@ int mprotect(void *addr, size_t len, int prot) {
     int ret = real(addr, len, prot);
     if (ret == 0 || !(prot & PROT_EXEC) || *__errno_location() != EACCES || len == 0)
         return ret;
+    /* mprotect covers whole pages, and so does the remap below: copy them
+     * whole, or the end of the last page would come back zeroed. */
+    size_t page = (size_t)getpagesize();
+    len = (len + page - 1) & ~(page - 1);
     uintptr_t start = (uintptr_t)addr;
     if (!range_is_private(start, start + len)) {
         *__errno_location() = EACCES;
