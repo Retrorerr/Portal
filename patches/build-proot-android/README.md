@@ -51,6 +51,9 @@ Portal performance patches (September 2026):
   `waitpid()`.
 - Netlink uevent sockets become route sockets whose `bind()` succeeds, so
   udev monitors (SDL2) start instead of retrying every frame.
+- The tracer finds the stopped tracee through a pid cache and only sweeps
+  the tracee list for terminated tracees after one has exited; both used
+  to walk every traced thread on every stop (700+ with Steam and a game).
 
 Portal launches PRoot with `-H` and `PROOT_L2S_DIR=<rootfs>/.proot.l2s`.
 

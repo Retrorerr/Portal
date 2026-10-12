@@ -52,6 +52,25 @@
 
 static Tracees tracees;
 
+/* Direct-mapped pid -> tracee cache in front of the tracee list.  The
+ * event loop looks up the stopped tracee on every ptrace stop, and a
+ * desktop session with Steam and a Wine game has several hundred
+ * threads, so walking the list each time cost most of the tracer's
+ * CPU.  Entries are validated against tracee->pid on use (the first
+ * tracee's pid is assigned after creation) and dropped when their
+ * tracee is freed.  */
+#define TRACEE_CACHE_SIZE 4096
+static Tracee *tracee_cache[TRACEE_CACHE_SIZE];
+
+static inline Tracee **tracee_cache_slot(pid_t pid)
+{
+	return &tracee_cache[(unsigned int) pid % TRACEE_CACHE_SIZE];
+}
+
+/* Number of tracees marked terminated since the last sweep, so the
+ * event loop only walks the list when there is something to free.  */
+static size_t nb_terminated;
+
 
 /**
  * Remove @zombie from its parent's list of zombies.  Note: this is a
@@ -93,6 +112,8 @@ static int remove_tracee(Tracee *tracee)
 	int event;
 
 	LIST_REMOVE(tracee, link);
+	if (*tracee_cache_slot(tracee->pid) == tracee)
+		*tracee_cache_slot(tracee->pid) = NULL;
 
 	/* Clean objects that are linked to this tracee's life
 	 * span.  */
@@ -332,14 +353,22 @@ Tracee *get_tracee(const Tracee *current_tracee, pid_t pid, bool create)
 	if (current_tracee != NULL && current_tracee->pid == pid)
 		return (Tracee *)current_tracee;
 
-	LIST_FOREACH(tracee, &tracees, link) {
-		if (tracee->pid == pid) {
-			/* Flush then allocate a new memory collector.  */
-			TALLOC_FREE(tracee->ctx);
-			tracee->ctx = talloc_new(tracee);
-
-			return tracee;
+	tracee = *tracee_cache_slot(pid);
+	if (tracee == NULL || tracee->pid != pid) {
+		LIST_FOREACH(tracee, &tracees, link) {
+			if (tracee->pid == pid)
+				break;
 		}
+	}
+
+	if (tracee != NULL) {
+		*tracee_cache_slot(pid) = tracee;
+
+		/* Flush then allocate a new memory collector.  */
+		TALLOC_FREE(tracee->ctx);
+		tracee->ctx = talloc_new(tracee);
+
+		return tracee;
 	}
 
 	return (create ? new_tracee(pid) : NULL);
@@ -350,6 +379,8 @@ Tracee *get_tracee(const Tracee *current_tracee, pid_t pid, bool create)
  */
 void terminate_tracee(Tracee *tracee)
 {
+	if (!tracee->terminated)
+		nb_terminated++;
 	tracee->terminated = true;
 
 	/* Case where the terminated tracee is marked
@@ -367,6 +398,13 @@ void terminate_tracee(Tracee *tracee)
 void free_terminated_tracees()
 {
 	Tracee *next;
+
+	if (nb_terminated == 0)
+		return;
+
+	/* Reset first: tracees terminated while freeing (destructors
+	 * restart pending ptracees) count toward the next sweep.  */
+	nb_terminated = 0;
 
 	/* Items can't be deleted when using LIST_FOREACH.  */
 	next = tracees.lh_first;
