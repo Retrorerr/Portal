@@ -57,8 +57,8 @@ library_folders() {
 
 # Proton Experimental (ARM64) carries the newest FEX, DXVK and VKD3D-Proton
 # (FEX's JIT disk cache needs FEX-2609 or later; Proton 11.0-2 ships older),
-# so it wins when installed; the tool manifest makes Steam install and
-# update it. Otherwise, or with PORTAL_PROTON=stable, the newest stable one.
+# so it wins when installed (Steam updates it like any other tool).
+# Otherwise, or with PORTAL_PROTON=stable, the newest stable one.
 find_proton() {
     library_folders | while IFS= read -r library; do
         for proton in "$library"/steamapps/common/Proton*ARM64*/proton \
@@ -78,7 +78,14 @@ case "$PORTAL_PROTON" in
     *) proton="$PORTAL_PROTON" ;;
 esac
 if [ -z "$proton" ] || [ ! -f "$proton" ]; then
-    message "Proton for ARM64 is not installed yet.\n\nIn Steam, open Library, show Tools, and install \"Proton Experimental (ARM64)\" or \"Proton 11.0 (ARM64)\", then start the game again."
+    case "$PORTAL_PROTON" in
+        ""|experimental)
+            message "Proton for ARM64 is not installed yet.\n\nIn Steam, open Library, show Tools, and install \"Proton Experimental (ARM64)\" or \"Proton 11.0 (ARM64)\", then start the game again." ;;
+        stable)
+            message "No stable Proton for ARM64 is installed.\n\nIn Steam, open Library, show Tools, and install \"Proton 11.0 (ARM64)\". Or choose Newest for Proton in Portal's game panel (and drop PORTAL_PROTON=stable from the game's launch options, if it is there)." ;;
+        *)
+            message "PORTAL_PROTON is set to a Proton that does not exist:\n$PORTAL_PROTON\n\nCorrect or remove it in the game's launch options." ;;
+    esac
     exit 1
 fi
 
