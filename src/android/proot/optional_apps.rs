@@ -71,6 +71,10 @@ const STEAM_EXECMOD: &[u8] = include_bytes!("../../../assets/guest-arm64/portal-
 /// shared GPU buffers (KGSL has no implicit sync) so Steam's window stops
 /// flickering; the launcher preloads it.
 const STEAM_KGSL_SYNC: &[u8] = include_bytes!("../../../assets/guest-arm64/portal-kgsl-sync.so");
+/// Source: `assets/guest-arm64/portal-appindicator.c`. Steam's tray icon needs
+/// the GTK2 libappindicator.so.1 Debian dropped; the launcher links this in.
+const STEAM_APPINDICATOR: &[u8] =
+    include_bytes!("../../../assets/guest-arm64/portal-appindicator.so");
 
 const STEAM_LAUNCHER_REL: &str = "usr/local/bin/steam";
 const STEAM_BOOTSTRAP_REL: &str = "usr/local/lib/portal/steam/portal-steam-bootstrap.py";
@@ -83,6 +87,7 @@ const PORTAL_LSOF_REL: &str = "usr/sbin/lsof";
 const STEAM_TOUCHDRAG_REL: &str = "usr/local/lib/portal/steam/portal-sdl-touchdrag.so";
 const STEAM_EXECMOD_REL: &str = "usr/local/lib/portal/steam/portal-execmod.so";
 const STEAM_KGSL_SYNC_REL: &str = "usr/local/lib/portal/steam/portal-kgsl-sync.so";
+const STEAM_APPINDICATOR_REL: &str = "usr/local/lib/portal/steam/portal-appindicator.so";
 const GUEST_STEAM_BOOTSTRAP: &str = "/usr/local/lib/portal/steam/portal-steam-bootstrap.py";
 
 /// Per-app state codes shared with Kotlin (`ComposeOverlay.APP_*`).
@@ -688,6 +693,7 @@ fn sync_steam_files(fs_root: &Path) -> anyhow::Result<()> {
     write_file(&fs_root.join(STEAM_TOUCHDRAG_REL), STEAM_TOUCHDRAG, 0o755)?;
     write_file(&fs_root.join(STEAM_EXECMOD_REL), STEAM_EXECMOD, 0o755)?;
     write_file(&fs_root.join(STEAM_KGSL_SYNC_REL), STEAM_KGSL_SYNC, 0o755)?;
+    write_file(&fs_root.join(STEAM_APPINDICATOR_REL), STEAM_APPINDICATOR, 0o755)?;
     Ok(())
 }
 
@@ -710,6 +716,7 @@ pub fn sync_steam_integration(fs_root: &Path) {
         STEAM_TOUCHDRAG_REL,
         STEAM_EXECMOD_REL,
         STEAM_KGSL_SYNC_REL,
+        STEAM_APPINDICATOR_REL,
     ] {
         let path = fs_root.join(rel);
         let ours = match rel {
@@ -718,6 +725,9 @@ pub fn sync_steam_integration(fs_root: &Path) {
             STEAM_TOUCHDRAG_REL => fs::read(&path).is_ok_and(|bytes| bytes == STEAM_TOUCHDRAG),
             STEAM_EXECMOD_REL => fs::read(&path).is_ok_and(|bytes| bytes == STEAM_EXECMOD),
             STEAM_KGSL_SYNC_REL => fs::read(&path).is_ok_and(|bytes| bytes == STEAM_KGSL_SYNC),
+            STEAM_APPINDICATOR_REL => {
+                fs::read(&path).is_ok_and(|bytes| bytes == STEAM_APPINDICATOR)
+            }
             _ => fs::read_to_string(&path).is_ok_and(|text| {
                 text.contains("Managed by Portal")
                     || text.contains("X-Portal-Managed=true")

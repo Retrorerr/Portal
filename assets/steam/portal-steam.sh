@@ -89,6 +89,12 @@ glx=/usr/lib/aarch64-linux-gnu/libGLX.so.0
 if [ -e "$glx" ] && [ "$(readlink "$portal_lib/libGLX.so")" != "$glx" ]; then
     mkdir -p "$portal_lib" && ln -sfn "$glx" "$portal_lib/libGLX.so"
 fi
+# Steam's tray icon needs the GTK2 libappindicator.so.1, which Debian no
+# longer ships; Portal's stand-in draws it as a GTK2 tray icon instead.
+indicator=/usr/local/lib/portal/steam/portal-appindicator.so
+if [ -e "$indicator" ] && [ "$(readlink "$portal_lib/libappindicator.so.1")" != "$indicator" ]; then
+    mkdir -p "$portal_lib" && ln -sfn "$indicator" "$portal_lib/libappindicator.so.1"
+fi
 
 # Steam's title bar only drags once its draggable regions are cut out of
 # CEF's input shape, which this webhelper build never does; the preload turns
