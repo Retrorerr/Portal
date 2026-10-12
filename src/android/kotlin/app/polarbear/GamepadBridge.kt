@@ -148,7 +148,9 @@ object GamepadBridge {
             val amplitudes = intArrayOf(strong * 255 / 0xffff, weak * 255 / 0xffff)
             val length = durationMs.coerceIn(1, 0xffff).toLong()
             if (deviceId == TOUCH_PAD_ID) {
-                rumbleVibrator(ownVibrator(), amplitudes.max(), length)
+                // The game panel's Rumble switch; a stop always goes through.
+                val wanted = TouchControls.rumbleEnabled() || amplitudes.max() == 0
+                if (wanted) rumbleVibrator(ownVibrator(), amplitudes.max(), length)
                 return
             }
             val device = InputDevice.getDevice(deviceId) ?: return
