@@ -18,6 +18,24 @@
 #   PORTAL_VRAM_MB=6144 %command%             video memory games are told
 #                                             they have (default 4096)
 
+# Settings from Portal's game panel: this game's own file, else the shared
+# one (KEY=value lines). A variable already set, by the game's launch
+# options for one, wins.
+portal_settings=/usr/local/lib/portal/settings
+for portal_conf in "$portal_settings/app-${STEAM_COMPAT_APP_ID:-${SteamAppId:-0}}.conf" "$portal_settings/game.conf"; do
+    [ -r "$portal_conf" ] || continue
+    while IFS='=' read -r key value; do
+        case "$key" in
+            PORTAL_*|FEX_*) ;;
+            *) continue ;;
+        esac
+        case "$key" in *[!A-Za-z0-9_]*) continue ;; esac
+        eval "[ -n \"\${$key+set}\" ]" || export "$key=$value"
+    done < "$portal_conf"
+    break
+done
+unset portal_settings portal_conf key value
+
 verb="$1"
 [ "$#" -gt 0 ] && shift
 
@@ -100,6 +118,21 @@ export DXVK_CONFIG="dxgi.maxDeviceMemory = ${PORTAL_VRAM_MB:-4096}; dxgi.maxShar
 # FEX's JIT cache for translated x86 code.
 export MESA_SHADER_CACHE_MAX_SIZE="${MESA_SHADER_CACHE_MAX_SIZE:-4G}"
 export FEX_DISKCACHE="${FEX_DISKCACHE:-1}"
+
+# Frame-rate cap and FPS counter from Portal's game panel (or the
+# PORTAL_FPS_LIMIT=N / PORTAL_HUD=1 launch options). A cap already in the
+# game's own DXVK_CONFIG wins.
+case "${PORTAL_FPS_LIMIT:-0}" in
+    ''|0|*[!0-9]*) ;;
+    *)
+        case "$DXVK_CONFIG" in
+            *maxFrameRate*) ;;
+            *) export DXVK_CONFIG="$DXVK_CONFIG; dxgi.maxFrameRate = $PORTAL_FPS_LIMIT; d3d9.maxFrameRate = $PORTAL_FPS_LIMIT" ;;
+        esac
+        export VKD3D_FRAME_RATE="${VKD3D_FRAME_RATE:-$PORTAL_FPS_LIMIT}"
+        ;;
+esac
+[ "$PORTAL_HUD" = 1 ] && export DXVK_HUD="${DXVK_HUD:-fps}"
 
 if [ "$PORTAL_WOW64" = box64 ]; then
     if [ -f /opt/box64/wowbox64.dll ]; then

@@ -15,6 +15,24 @@ log="${TMPDIR:-/tmp}/portal-box64-${SteamAppId:-game}.log"
 exec >"$log" 2>&1 </dev/null
 echo "portal-box64: $*"
 
+# Settings from Portal's game panel: this game's own file, else the shared
+# one (KEY=value lines). A variable already set, by the game's launch
+# options for one, wins.
+portal_settings=/usr/local/lib/portal/settings
+for portal_conf in "$portal_settings/app-${STEAM_COMPAT_APP_ID:-${SteamAppId:-0}}.conf" "$portal_settings/game.conf"; do
+    [ -r "$portal_conf" ] || continue
+    while IFS='=' read -r key value; do
+        case "$key" in
+            PORTAL_*|FEX_*) ;;
+            *) continue ;;
+        esac
+        case "$key" in *[!A-Za-z0-9_]*) continue ;; esac
+        eval "[ -n \"\${$key+set}\" ]" || export "$key=$value"
+    done < "$portal_conf"
+    break
+done
+unset portal_settings portal_conf key value
+
 verb="$1"
 [ "$#" -gt 0 ] && shift
 [ "$1" = "--" ] && shift

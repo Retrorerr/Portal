@@ -124,7 +124,7 @@ open class PortalActivity : GameActivity() {
     // GameActivity forwards only touch input to native code; controller
     // keys and sticks go to the guest's evdev pads before the view tree.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
-        dispatchMouseSideButton(event) || GamepadBridge.dispatchKey(event) ||
+        dispatchMouseSideButton(event) || TouchControls.onBackKey(event) || GamepadBridge.dispatchKey(event) ||
             super.dispatchKeyEvent(event)
 
     /**
