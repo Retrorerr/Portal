@@ -159,8 +159,7 @@ jobs:
           set -eu
           test -f "portal/$LEAK_PATCH"
           cp "portal/$LEAK_PATCH" xwayland-src/debian/patches/0006-xwayland-kgsl-frame-callback-recovery-leak.patch
-          printf '%s
-' '0006-xwayland-kgsl-frame-callback-recovery-leak.patch' >> xwayland-src/debian/patches/series
+          printf '%s\n' '0006-xwayland-kgsl-frame-callback-recovery-leak.patch' >> xwayland-src/debian/patches/series
           sed -i '1s/xwayland (2:24.1.6-91)/xwayland (2:24.1.6-91portal2)/' xwayland-src/debian/changelog
           # 0006 builds on lfdevs 0003/0004 (KGSL recovery): prove it applies
           # on top of the full -91 series before the build does.
