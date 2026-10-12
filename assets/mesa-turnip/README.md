@@ -26,8 +26,12 @@ extra A732 ids, and drops `magic_regs` from lfdevs-only GPU entries
 that Turnip sets on KGSL: Mesa presents to Xwayland without waiting for the
 image's rendering and relies on dma-buf implicit fences, which KGSL never
 attaches, so Xwayland could copy an image mid-render and show its previous
-contents (games "jumping back" a frame). Verify with `vulkaninfo --summary`:
-driverInfo `Mesa 26.3.0-devel (git-52147cad1)`, apiVersion 1.4.363.
+contents (games "jumping back" a frame). Turnip also creates its KGSL
+contexts at priority 12 (`TU_KGSL_PRIORITY` overrides): freedreno GL never
+sets one, so KWin/Xwayland run at KGSL's default 8 and a busy game used to
+stall every compositor frame (Overview froze at ~1 fps behind Trackmania).
+Verify with `vulkaninfo --summary`: driverInfo
+`Mesa 26.3.0-devel (git-7ecf48bbd)`, apiVersion 1.4.363.
 
 Build (cross, Debian trixie amd64 -> arm64; the cross file also needs
 `nm = 'aarch64-linux-gnu-nm'`):

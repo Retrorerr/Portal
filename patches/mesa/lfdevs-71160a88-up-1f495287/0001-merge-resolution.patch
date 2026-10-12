@@ -52,10 +52,44 @@ index a73e16214..224803edf 100644
      ))
  
 diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
-index cffce48d3..0a5850a7b 100644
+index cffce48d3..cb80b09e7 100644
 --- a/src/freedreno/vulkan/tu_knl_kgsl.cc
 +++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
-@@ -80,11 +80,12 @@ static void kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo);
+@@ -47,13 +47,32 @@ safe_ioctl(int fd, unsigned long request, void *arg)
+    return ret;
+ }
+ 
++/* KGSL context priority for Vulkan queues (0 highest, 15 lowest; contexts
++ * created without one get KGSL's default, 8). freedreno's GL contexts
++ * (compositors, Xwayland, desktop shells) never pass a priority, so they
++ * run at 8 and Vulkan used to share their ring buffer: a game keeping the
++ * GPU busy delayed every compositor frame by hundreds of milliseconds.
++ * One level below the default lets KGSL preempt Vulkan work for them.
++ * TU_KGSL_PRIORITY overrides it.  */
++static uint32_t
++kgsl_queue_priority(void)
++{
++   static int priority = -1;
++   if (priority < 0) {
++      int value = debug_get_num_option("TU_KGSL_PRIORITY", 12);
++      priority = CLAMP(value, 0, 15);
++   }
++   return priority;
++}
++
+ static int
+ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+ {
+    struct kgsl_drawctxt_create req = {
+       .flags = KGSL_CONTEXT_SAVE_GMEM |
+               KGSL_CONTEXT_NO_GMEM_ALLOC |
+-              KGSL_CONTEXT_PREAMBLE,
++              KGSL_CONTEXT_PREAMBLE |
++              (kgsl_queue_priority() << KGSL_CONTEXT_PRIORITY_SHIFT),
+    };
+ 
+    int ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req);
+@@ -80,11 +99,12 @@ static void kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo);
  static VkResult
  kgsl_import_allocated_dmabuf(struct tu_device *dev,
                               struct tu_bo **out_bo,
@@ -70,7 +104,7 @@ index cffce48d3..0a5850a7b 100644
  
     close(fd);
     return result;
-@@ -92,7 +93,7 @@ kgsl_import_allocated_dmabuf(struct tu_device *dev,
+@@ -92,7 +112,7 @@ kgsl_import_allocated_dmabuf(struct tu_device *dev,
  
  static VkResult
  bo_init_new_ion_fd(struct tu_device *dev, struct tu_bo **out_bo,
@@ -79,7 +113,7 @@ index cffce48d3..0a5850a7b 100644
  {
     struct ion_new_allocation_data alloc = {
        .len = size,
-@@ -107,12 +108,12 @@ bo_init_new_ion_fd(struct tu_device *dev, struct tu_bo **out_bo,
+@@ -107,12 +127,12 @@ bo_init_new_ion_fd(struct tu_device *dev, struct tu_bo **out_bo,
                         "ION_IOC_NEW_ALLOC failed (%s)", strerror(errno));
     }
  
@@ -94,7 +128,7 @@ index cffce48d3..0a5850a7b 100644
  {
     struct ion_allocation_data alloc = {
        .len = size,
-@@ -135,6 +136,11 @@ bo_init_new_ion_legacy_fd(struct tu_device *dev, struct tu_bo **out_bo,
+@@ -135,6 +155,11 @@ bo_init_new_ion_legacy_fd(struct tu_device *dev, struct tu_bo **out_bo,
  
     ret = safe_ioctl(ion_fd, ION_IOC_SHARE, &share);
     if (ret) {
@@ -106,7 +140,7 @@ index cffce48d3..0a5850a7b 100644
        return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                         "ION_IOC_SHARE failed (%s)", strerror(errno));
     }
-@@ -149,12 +155,12 @@ bo_init_new_ion_legacy_fd(struct tu_device *dev, struct tu_bo **out_bo,
+@@ -149,12 +174,12 @@ bo_init_new_ion_legacy_fd(struct tu_device *dev, struct tu_bo **out_bo,
                         "ION_IOC_FREE failed (%s)", strerror(errno));
     }
  
@@ -121,7 +155,7 @@ index cffce48d3..0a5850a7b 100644
  {
     int ion_fd = open("/dev/ion", O_RDONLY);
     if (ion_fd < 0)
-@@ -164,8 +170,8 @@ bo_init_new_ion_fallback(struct tu_device *dev, struct tu_bo **out_bo,
+@@ -164,8 +189,8 @@ bo_init_new_ion_fallback(struct tu_device *dev, struct tu_bo **out_bo,
     bool legacy = safe_ioctl(ion_fd, ION_IOC_FREE, &free) >= 0 || errno != ENOTTY;
  
     VkResult result = legacy ?
@@ -132,7 +166,7 @@ index cffce48d3..0a5850a7b 100644
     close(ion_fd);
     return result;
  }
-@@ -185,7 +191,7 @@ bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
+@@ -185,7 +210,7 @@ bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
  
     if (ret) {
        int dmaheap_errno = errno;
@@ -141,7 +175,7 @@ index cffce48d3..0a5850a7b 100644
        if (fallback == VK_SUCCESS)
           return VK_SUCCESS;
  
-@@ -194,96 +200,23 @@ bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
+@@ -194,96 +219,23 @@ bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
                         "DMA_HEAP_IOCTL_ALLOC failed (%s)", strerror(errno));
     }
  
