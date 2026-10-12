@@ -19,8 +19,8 @@
  * Must precede drmshim.so in LD_PRELOAD: drmshim answers KGSL ioctls itself.
  *
  * Build (guest-native ARM64 glibc, no libc at link time):
- *   clang --target=aarch64-linux-gnu -shared -fPIC -nostdlib -O2 \
- *       -fuse-ld=lld -ffreestanding -fno-stack-protector \
+ *   aarch64-linux-gnu-gcc -shared -fPIC -nostdlib -O2 -ffreestanding \
+ *       -fno-stack-protector -Wl,-z,max-page-size=16384 -Wl,-s \
  *       -o portal-kgsl-sync.so portal-kgsl-sync.c
  */
 #include <stdarg.h>

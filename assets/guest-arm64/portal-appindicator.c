@@ -15,7 +15,7 @@
  * Build (guest-native ARM64 glibc, no libc at link time):
  *   aarch64-linux-gnu-gcc -shared -fPIC -nostdlib -O2 -ffreestanding \
  *       -fno-stack-protector -Wl,-soname,libappindicator.so.1 \
- *       -Wl,-z,max-page-size=4096 -Wl,-s \
+ *       -Wl,-z,max-page-size=16384 -Wl,-s \
  *       -o portal-appindicator.so portal-appindicator.c
  */
 #include <stddef.h>
