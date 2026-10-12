@@ -243,6 +243,20 @@ index cffce48d3..0a5850a7b 100644
  }
  
  static VkResult
+diff --git a/src/freedreno/vulkan/tu_wsi.cc b/src/freedreno/vulkan/tu_wsi.cc
+index 5d2604f10..fae837edc 100644
+--- a/src/freedreno/vulkan/tu_wsi.cc
++++ b/src/freedreno/vulkan/tu_wsi.cc
+@@ -64,6 +64,9 @@ tu_wsi_init(struct tu_physical_device *physical_device)
+       return result;
+ 
+    physical_device->wsi_device.supports_modifiers = true;
++   /* KGSL attaches no implicit fences to exported dma-bufs. */
++   physical_device->wsi_device.x11.xwayland_wait_for_fences =
++      tu_wsi_is_kgsl(physical_device);
+    physical_device->wsi_device.can_present_on_device =
+       tu_wsi_can_present_on_device;
+ 
 diff --git a/src/gallium/include/pipe/p_defines.h b/src/gallium/include/pipe/p_defines.h
 index 68b2debde..4a9aedbbf 100644
 --- a/src/gallium/include/pipe/p_defines.h
@@ -259,3 +273,33 @@ index 68b2debde..4a9aedbbf 100644
     /* The minification/magnification switch-over point, the constant c of the
      * GL and ES specs. Value 1 selects c = 0.5, value 0 selects c = 0.
      *
+diff --git a/src/vulkan/wsi/wsi_common.h b/src/vulkan/wsi/wsi_common.h
+index cfb921da3..6e67eb49d 100644
+--- a/src/vulkan/wsi/wsi_common.h
++++ b/src/vulkan/wsi/wsi_common.h
+@@ -133,6 +133,12 @@ struct wsi_device {
+       /* adds an extra minImageCount when running under xwayland */
+       bool extra_xwayland_image;
+ 
++      /* Wait for each image's rendering to finish before presenting it to
++       * Xwayland. For drivers whose dma-bufs carry no implicit fences
++       * (KGSL): otherwise Xwayland can copy an image the GPU is still
++       * rendering and show its previous contents for a frame. */
++      bool xwayland_wait_for_fences;
++
+       /* Never report VK_SUBOPTIMAL_KHR. Used to workaround
+        * games that cannot handle SUBOPTIMAL correctly. */
+       bool ignore_suboptimal;
+diff --git a/src/vulkan/wsi/wsi_common_x11.c b/src/vulkan/wsi/wsi_common_x11.c
+index 19e87320f..04548ed6d 100644
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -2014,7 +2014,7 @@ x11_needs_wait_for_fences(const struct wsi_device *wsi_device,
+                           VkPresentModeKHR present_mode)
+ {
+    if (wsi_conn->is_xwayland) {
+-      return false;
++      return wsi_device->x11.xwayland_wait_for_fences;
+    }
+ 
+    switch (present_mode) {

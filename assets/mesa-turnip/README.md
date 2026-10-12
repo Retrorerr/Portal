@@ -22,8 +22,12 @@ Source:
 The patch keeps lfdevs' KGSL dma-buf/ION fallback (adapted to upstream's
 new `tu_bo_init_dmabuf` signature), both new pipe context params, lfdevs'
 extra A732 ids, and drops `magic_regs` from lfdevs-only GPU entries
-(removed upstream). Verify with `vulkaninfo --summary`: driverInfo
-`Mesa 26.3.0-devel (git-70a14c293a)`, apiVersion 1.4.363.
+(removed upstream). It also adds a WSI flag, `x11.xwayland_wait_for_fences`,
+that Turnip sets on KGSL: Mesa presents to Xwayland without waiting for the
+image's rendering and relies on dma-buf implicit fences, which KGSL never
+attaches, so Xwayland could copy an image mid-render and show its previous
+contents (games "jumping back" a frame). Verify with `vulkaninfo --summary`:
+driverInfo `Mesa 26.3.0-devel (git-52147cad1)`, apiVersion 1.4.363.
 
 Build (cross, Debian trixie amd64 -> arm64; the cross file also needs
 `nm = 'aarch64-linux-gnu-nm'`):
