@@ -250,6 +250,9 @@ struct Coordinator {
     loaded: bool,
     snapshot: UpdateSnapshot,
     result: Option<UpdateResult>,
+    /// Runs started since launch: a check that saw this change found
+    /// updates the run may have installed since.
+    runs: u64,
 }
 
 fn coordinator() -> &'static Mutex<Coordinator> {
@@ -269,8 +272,13 @@ fn coordinator() -> &'static Mutex<Coordinator> {
                 steps: Vec::new(),
             },
             result: None,
+            runs: 0,
         })
     })
+}
+
+fn runs_started() -> u64 {
+    coordinator().lock().map(|coordinator| coordinator.runs).unwrap_or(0)
 }
 
 /// Serialises every apt run Portal starts (checks, updates, optional apps):
@@ -567,6 +575,7 @@ fn check_chatgpt(installed: &HashMap<String, String>) -> anyhow::Result<bool> {
 /// reported and the others still count. Returns an error listing the
 /// failed sources, so the caller retries sooner.
 fn run_check(android_app: &AndroidApp) -> anyhow::Result<()> {
+    let runs = runs_started();
     let metered = crate::android::utils::ndk::is_active_network_metered(android_app);
     let policy = refresh_policy();
     let fs_root = root();
@@ -616,6 +625,15 @@ fn run_check(android_app: &AndroidApp) -> anyhow::Result<()> {
             Ok(count) => log::info!("updates: {count} Debian updates available"),
             Err(error) => errors.push(format!("Debian: {error:#}")),
         }
+    }
+
+    // An update the user started meanwhile may have installed what this
+    // check found, and owns the downloaded APK until it is done: it records
+    // what is still pending itself, and the next check starts fresh.
+    if runs_started() != runs || update_in_progress() {
+        log::info!("updates: an update ran during this check; its findings are dropped");
+        anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
+        return Ok(());
     }
 
     if errors.is_empty() {
@@ -757,6 +775,7 @@ pub fn begin_update(include_app: bool) -> bool {
         if plan.driver.is_none() && !plan.debian && !plan.chatgpt && plan.app.is_none() {
             return false;
         }
+        coordinator.runs += 1;
         let snapshot = &mut coordinator.snapshot;
         snapshot.status = UpdateStatus::Running;
         snapshot.progress = 1;
