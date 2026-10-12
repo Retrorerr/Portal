@@ -4,7 +4,10 @@
 //! commands. Every shell fragment is fixed text chosen by the
 //! [`OptionalApp`] allowlist; nothing from the UI is interpolated.
 
-use crate::core::install_plan::{AppRequirement, OptionalApp};
+use crate::core::{
+    install_plan::{AppRequirement, OptionalApp},
+    update_sources::{CHATGPT_DEB_URL, CHATGPT_STAMP_REL},
+};
 use std::collections::HashSet;
 
 /// Guest log for every optional-app apt run.
@@ -62,17 +65,28 @@ pub fn prepare_apt_command() -> String {
 /// which the caller must have opened.
 pub fn install_command(app: OptionalApp) -> String {
     match app {
+        // OpenAI publishes no apt repository, only this unversioned build.
+        // The server's ETag and Last-Modified are kept as a stamp so the
+        // updater can tell when a newer build appears
+        // (`update_sources::deb_refresh_needed`).
         OptionalApp::Chatgpt => format!(
             r#"({APT_INSTALL} curl &&
             echo 'dlstatus:0:0:Downloading chatgpt_arm64.deb' >&3 &&
             curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                --dump-header /tmp/portal-chatgpt.headers \
                 --output /tmp/portal-chatgpt_arm64.deb.part \
-                https://persistent.oaistatic.com/codex-app-prod/linux/deb/latest/chatgpt_arm64.deb &&
+                {CHATGPT_DEB_URL} &&
             test "$(dpkg-deb --field /tmp/portal-chatgpt_arm64.deb.part Package)" = chatgpt &&
             test "$(dpkg-deb --field /tmp/portal-chatgpt_arm64.deb.part Architecture)" = arm64 &&
             mv -f /tmp/portal-chatgpt_arm64.deb.part /tmp/portal-chatgpt_arm64.deb &&
             {APT_INSTALL} /tmp/portal-chatgpt_arm64.deb git ripgrep python3-venv &&
-            rm -f /tmp/portal-chatgpt_arm64.deb)"#
+            rm -f /tmp/portal-chatgpt_arm64.deb &&
+            {{ {{ mkdir -p "$(dirname /{CHATGPT_STAMP_REL})" &&
+                {{ tr -d '\r' </tmp/portal-chatgpt.headers | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | tail -n 1 &&
+                  tr -d '\r' </tmp/portal-chatgpt.headers | sed -n 's/^[Ll]ast-[Mm]odified: *//p' | tail -n 1 ; }} \
+                  >/{CHATGPT_STAMP_REL}.part &&
+                mv -f /{CHATGPT_STAMP_REL}.part /{CHATGPT_STAMP_REL} ; }} || true ; }} ;
+            portal_status=$? ; rm -f /tmp/portal-chatgpt.headers ; exit $portal_status)"#
         ),
         // Anthropic's signed apt repository, as its Linux install guide
         // describes, so apt resolves the newest release now and delivers

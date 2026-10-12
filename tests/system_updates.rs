@@ -209,3 +209,57 @@ fn dpkg_actions_are_shortened_for_the_launch_screen() {
         "Preparing to configure libc6"
     );
 }
+
+#[test]
+fn policy_holds_join_the_pin_without_loosening_it() {
+    use localdesktop::core::system_updates::apt_pin_content_with_holds;
+    assert_eq!(apt_pin_content_with_holds(&[]), apt_pin_content());
+    let pin = apt_pin_content_with_holds(&[
+        "libqt6core6t64".to_owned(),
+        "kwin-wayland".to_owned(),
+        "bad name\nPin-Priority: 1000".to_owned(),
+        "libqt6core6t64".to_owned(),
+    ]);
+    let packages: Vec<&str> = pin
+        .lines()
+        .filter(|line| line.starts_with("Package: "))
+        .collect();
+    assert_eq!(packages.len(), 2);
+    assert_eq!(packages[1], "Package: libqt6core6t64");
+    assert_eq!(pin.matches("Pin-Priority: -1").count(), 2);
+    assert!(!pin.contains("1000"));
+}
+
+#[test]
+fn plans_that_remove_or_touch_the_platform_are_refused() {
+    use localdesktop::core::system_updates::plan_violations;
+    let safe =
+        "Inst libssl3t64 [3.5.1-1] (3.5.1-1+deb13u1 Debian-Security:13/stable-security [arm64])\n";
+    assert!(plan_violations(safe, &[]).is_empty());
+    let bad = "\
+Remv kwin-wayland [4:6.3.6-95]
+Inst xwayland:arm64 [2:24.1.6-1] (2:24.1.6-1+deb13u1 Debian:13.2/stable [arm64])
+Inst libqt6core6t64 [6.8.2+dfsg-9] (6.8.2+dfsg-9+deb13u1 Debian:13.2/stable [arm64])
+";
+    assert_eq!(
+        plan_violations(bad, &["libqt6core6t64".to_owned()]),
+        vec![
+            "would remove kwin-wayland".to_owned(),
+            "would change xwayland".to_owned(),
+            "would change libqt6core6t64".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn ldd_reports_unresolved_libraries_and_symbol_versions() {
+    use localdesktop::core::system_updates::missing_libraries;
+    let output = "\
+/usr/bin/kwin_wayland:
+\tlibkwin.so.6 => /usr/lib/aarch64-linux-gnu/libkwin.so.6 (0x0000)
+\tlibfoo.so.1 => not found
+/usr/lib/aarch64-linux-gnu/libkwin.so.6: /lib/aarch64-linux-gnu/libQt6Gui.so.6: version `Qt_6_PRIVATE_API' not found
+";
+    assert_eq!(missing_libraries(output).len(), 2);
+    assert!(missing_libraries("\tlibc.so.6 => /lib/libc.so.6 (0x1)\n").is_empty());
+}

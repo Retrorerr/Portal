@@ -162,6 +162,11 @@ pub fn launch() {
     if let Ok(mut failure) = launch_failure().lock() {
         *failure = None;
     }
+    // A refreshed graphics driver that keeps failing to draw a desktop is
+    // swapped back for the previous one before this session starts.
+    if crate::android::anland::is_anland_requested() {
+        crate::android::proot::mesa_layer::trial_before_launch();
+    }
 
     let runtime = crate::android::runtime::proot::PRootRuntime::active();
     let rootfs = runtime.rootfs_path();

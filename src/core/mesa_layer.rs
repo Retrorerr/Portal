@@ -19,13 +19,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// The layer's library directory.
+pub const LAYER_LIB_REL: &str = "usr/lib/aarch64-linux-gnu";
+
 /// Files that must exist as regular files inside a provisioned layer.
 /// Derived from `session_binds()` in `src/android/anland/mod.rs`: the DRI
-/// driver, gallium core, Vulkan driver, and the real-name EGL/GLX/GBM
-/// libraries. SONAME symlinks are validated separately.
+/// driver, Vulkan driver, and the real-name EGL/GLX/GBM libraries. The
+/// gallium core is versioned (`libgallium-<mesa>.so`) and found by
+/// [`gallium_library`]; SONAME symlinks are validated separately.
 pub const REQUIRED_REGULAR_FILES: &[&str] = &[
     "usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so",
-    "usr/lib/aarch64-linux-gnu/libgallium-26.3.0-devel.so",
     "usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so",
     "usr/lib/aarch64-linux-gnu/libEGL_mesa.so.0.0.0",
     "usr/lib/aarch64-linux-gnu/libGLX_mesa.so.0.0.0",
@@ -120,6 +123,7 @@ pub fn validate_structure(layer: &Path) -> anyhow::Result<()> {
     for rel in REQUIRED_REGULAR_FILES {
         require_file_or_in_layer_symlink(layer, rel)?;
     }
+    gallium_library(layer)?;
     for (link_rel, expected_target) in REQUIRED_SONAME_LINKS {
         let link_path = layer.join(link_rel);
         let meta = fs::symlink_metadata(&link_path)
@@ -221,6 +225,32 @@ pub fn validate_structure(layer: &Path) -> anyhow::Result<()> {
         "mesa layer Vulkan ICD has no freedreno reference"
     );
     Ok(())
+}
+
+/// File name of the layer's gallium core (`libgallium-26.3.0-devel.so`).
+/// The name carries the Mesa version and every driver of the same build
+/// links it by that name, so a layer must hold exactly one.
+pub fn gallium_library(layer: &Path) -> anyhow::Result<String> {
+    let lib = layer.join(LAYER_LIB_REL);
+    let mut found = Vec::new();
+    for entry in fs::read_dir(&lib)
+        .map_err(|e| anyhow::anyhow!("mesa layer cannot list {LAYER_LIB_REL}: {e}"))?
+    {
+        let entry = entry.map_err(|e| anyhow::anyhow!("mesa layer entry unreadable: {e}"))?;
+        if let Some(name) = entry.file_name().to_str() {
+            if name.starts_with("libgallium-") && name.ends_with(".so") {
+                found.push(name.to_owned());
+            }
+        }
+    }
+    anyhow::ensure!(
+        found.len() == 1,
+        "mesa layer must hold exactly one libgallium-*.so, found {}",
+        found.len()
+    );
+    let name = found.remove(0);
+    require_file_or_in_layer_symlink(layer, &format!("{LAYER_LIB_REL}/{name}"))?;
+    Ok(name)
 }
 
 /// Require `rel` to exist as a file, accepting an in-layer symlink.
@@ -704,6 +734,11 @@ mod tests {
             make_soname(&lp, target);
         }
         fs::write(
+            root.join("usr/lib/aarch64-linux-gnu/libgallium-26.3.0-devel.so"),
+            b"fake-so",
+        )
+        .unwrap();
+        fs::write(
             root.join("usr/lib/aarch64-linux-gnu/gbm/dri_gbm.so"),
             b"backend",
         )
@@ -775,6 +810,30 @@ mod tests {
         )
         .unwrap();
         assert!(validate_layer_dir(&t.path().join("mesa-kgsl-layer"), V, S).is_err());
+    }
+
+    #[test]
+    fn validation_needs_exactly_one_gallium_of_any_version() {
+        let t = tempfile::tempdir().unwrap();
+        valid_tree(t.path(), "mesa-kgsl-layer");
+        let layer = t.path().join("mesa-kgsl-layer");
+        let lib = layer.join(LAYER_LIB_REL);
+        assert_eq!(gallium_library(&layer).unwrap(), "libgallium-26.3.0-devel.so");
+
+        // A newer Mesa build names its core differently and still validates.
+        fs::rename(
+            lib.join("libgallium-26.3.0-devel.so"),
+            lib.join("libgallium-26.4.0-devel.so"),
+        )
+        .unwrap();
+        assert!(validate_layer_dir(&layer, V, S).is_ok());
+        assert_eq!(gallium_library(&layer).unwrap(), "libgallium-26.4.0-devel.so");
+
+        fs::write(lib.join("libgallium-26.3.0-devel.so"), b"fake-so").unwrap();
+        assert!(validate_layer_dir(&layer, V, S).is_err());
+        fs::remove_file(lib.join("libgallium-26.3.0-devel.so")).unwrap();
+        fs::remove_file(lib.join("libgallium-26.4.0-devel.so")).unwrap();
+        assert!(validate_layer_dir(&layer, V, S).is_err());
     }
 
     #[test]

@@ -166,6 +166,10 @@ open class PortalActivity : GameActivity() {
                 intent.getStringExtra(PortalPreview.EXTRA_INSTALL),
             )
         }
+        //   adb shell am start -n app.polarbear/.PortalActivity --activity-single-top --es portal_preview_updates full
+        if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            intent.getStringExtra(UpdatePreview.EXTRA)?.let(UpdatePreview::play)
+        }
     }
 
     override fun onStart() {
@@ -181,10 +185,12 @@ open class PortalActivity : GameActivity() {
     override fun onResume() {
         super.onResume()
         TouchControls.attach(this)
+        AppUpdateInstaller.onActivityResumed(this)
     }
 
     override fun onPause() {
         TouchControls.detach()
+        AppUpdateInstaller.onActivityPaused(this)
         super.onPause()
     }
 

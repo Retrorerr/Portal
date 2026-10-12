@@ -459,7 +459,7 @@ fn mesa_kgsl_layer_is_pinned_and_matches_session_binds() {
         "11648933",
         "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf",
         "mesa-kgsl-layer.complete",
-        "libgallium-26.3.0-devel.so",
+        "libgallium-",
         "libgbm.so.1",
         "libEGL_mesa.so.0",
         "is_provisioned",
@@ -470,7 +470,7 @@ fn mesa_kgsl_layer_is_pinned_and_matches_session_binds() {
         );
     }
     for path in [
-        "libgallium-26.3.0-devel.so",
+        "gallium_library",
         "libgbm.so.1",
         "libEGL_mesa.so.0",
         "libGLX_mesa.so.0",

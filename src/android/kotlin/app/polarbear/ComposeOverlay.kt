@@ -67,8 +67,13 @@ object ComposeOverlay {
     @JvmStatic external fun nativeRepairEnableAnland(): Boolean
     /** Return to the existing committed-runtime recovery page after a repair failure. */
     @JvmStatic external fun nativeRequestAnlandRepairRecovery(): Boolean
-    /** Install the Debian updates offered on the Return screen. */
-    @JvmStatic external fun nativeBeginSystemUpdate(): Boolean
+    /**
+     * Install the updates offered on the Return screen; [includeApp] is false
+     * when Portal may not install apps, so everything else still updates.
+     */
+    @JvmStatic external fun nativeBeginSystemUpdate(includeApp: Boolean): Boolean
+    /** AppUpdateInstaller's result: 0 installed, 1 cancelled, 2 needs permission, 3 failed. */
+    @JvmStatic external fun nativeOnAppInstallResult(code: Int, message: String)
     /** The optional-app catalog: one tab-separated line per app. */
     @JvmStatic external fun nativeOptionalAppCatalog(): String?
     /** Queue an install (true) or removal (false) of one allowlisted app. */
@@ -128,6 +133,18 @@ object ComposeOverlay {
 
     data class PendingPackage(val name: String, val security: Boolean)
 
+    /** A pending update outside Debian: `app`, `driver` or `chatgpt`. */
+    data class UpdateComponent(val kind: String, val title: String, val detail: String)
+
+    const val STEP_PENDING = 0
+    const val STEP_ACTIVE = 1
+    const val STEP_DONE = 2
+    const val STEP_FAILED = 3
+    const val STEP_SKIPPED = 4
+
+    /** One part of an update run: `driver`, `debian`, `chatgpt` or `app`. */
+    data class RunStep(val kind: String, val state: Int, val title: String, val note: String)
+
     data class SystemUpdateUiState(
         val status: Int,
         val progress: Int,
@@ -138,7 +155,15 @@ object ComposeOverlay {
         val interrupted: Boolean,
         /** Security fixes first; the Return screen previews the head of it. */
         val packages: List<PendingPackage>,
+        /** Portal itself, the graphics driver, ChatGPT. */
+        val components: List<UpdateComponent>,
+        /** The current or last run, in order. */
+        val steps: List<RunStep>,
     ) {
+        val app: UpdateComponent? get() = components.firstOrNull { it.kind == "app" }
+        /** Debian work: pending packages or an interrupted run to finish. */
+        val debian: Boolean get() = total > 0 || interrupted
+        val count: Int get() = total + components.size
         val available: Boolean get() = status == SYSTEM_UPDATE_AVAILABLE
         val running: Boolean get() = status == SYSTEM_UPDATE_RUNNING
         val failed: Boolean get() = status == SYSTEM_UPDATE_FAILED
@@ -173,6 +198,8 @@ object ComposeOverlay {
         security = 0,
         interrupted = false,
         packages = emptyList(),
+        components = emptyList(),
+        steps = emptyList(),
     )
     @Volatile private var systemUpdateStateSnapshot = defaultSystemUpdateState
     private val systemUpdateStateValue = mutableStateOf(defaultSystemUpdateState)
@@ -330,11 +357,15 @@ object ComposeOverlay {
         composeView?.post { anlandRepairStateValue.value = anlandRepairStateSnapshot }
     }
 
-    /** Subscribe to the Debian update state shown on the Return screen. */
+    /** Subscribe to the update state shown on the Return screen. */
     @Composable
     fun systemUpdateState(): State<SystemUpdateUiState> = systemUpdateStateValue
 
-    /** Native update bridge; `packages` holds one `name	security` line per update. */
+    /**
+     * Native update bridge; `packages` holds one `name	security` line per
+     * Debian update, `components` one `kind	title	detail` line per other,
+     * `steps` one `kind	state	title	note` line per part of the run.
+     */
     @JvmStatic fun updateSystemUpdateState(
         status: Int,
         progress: Int,
@@ -343,6 +374,24 @@ object ComposeOverlay {
         security: Int,
         interrupted: Boolean,
         packages: String,
+        components: String,
+        steps: String,
+    ) {
+        // Debug: a running UpdatePreview owns the panel until it is turned off.
+        if (previewBegin != null) return
+        applySystemUpdateState(status, progress, message, total, security, interrupted, packages, components, steps)
+    }
+
+    internal fun applySystemUpdateState(
+        status: Int,
+        progress: Int,
+        message: String,
+        total: Int,
+        security: Int,
+        interrupted: Boolean,
+        packages: String,
+        components: String,
+        steps: String,
     ) {
         val next = SystemUpdateUiState(
             status = status.coerceIn(SYSTEM_UPDATE_NONE, SYSTEM_UPDATE_COMPLETE),
@@ -356,6 +405,25 @@ object ComposeOverlay {
                 .map { line ->
                     val name = line.substringBefore('	')
                     PendingPackage(name, line.substringAfter('	', "0") == "1")
+                }
+                .toList(),
+            components = components.lineSequence()
+                .mapNotNull { line ->
+                    val fields = line.split('	', limit = 3)
+                    if (fields.size < 2 || fields[0].isBlank()) return@mapNotNull null
+                    UpdateComponent(fields[0], fields[1], fields.getOrElse(2) { "" })
+                }
+                .toList(),
+            steps = steps.lineSequence()
+                .mapNotNull { line ->
+                    val fields = line.split('	', limit = 4)
+                    if (fields.size < 3 || fields[0].isBlank()) return@mapNotNull null
+                    RunStep(
+                        kind = fields[0],
+                        state = fields[1].toIntOrNull()?.coerceIn(STEP_PENDING, STEP_SKIPPED) ?: STEP_PENDING,
+                        title = fields[2],
+                        note = fields.getOrElse(3) { "" },
+                    )
                 }
                 .toList(),
         )
@@ -396,9 +464,12 @@ object ComposeOverlay {
         false
     }
 
+    /** Debug builds: UpdatePreview's scripted run stands in for the coordinator. */
+    @Volatile internal var previewBegin: ((Boolean) -> Boolean)? = null
+
     /** Ask the native coordinator to stop Plasma and install updates. */
-    @JvmStatic fun beginSystemUpdate(): Boolean = try {
-        nativeBeginSystemUpdate()
+    @JvmStatic fun beginSystemUpdate(includeApp: Boolean): Boolean = try {
+        previewBegin?.invoke(includeApp) ?: nativeBeginSystemUpdate(includeApp)
     } catch (_: UnsatisfiedLinkError) {
         Log.e(TAG, "nativeBeginSystemUpdate unavailable")
         false
@@ -406,6 +477,21 @@ object ComposeOverlay {
         Log.e(TAG, "nativeBeginSystemUpdate failed", e)
         false
     }
+
+    /** Native update worker: hand a verified Portal APK to Android's installer. */
+    @JvmStatic fun installAppUpdate(path: String): Boolean {
+        val context = appContext ?: return false
+        return AppUpdateInstaller.install(context, path) { code, message ->
+            try {
+                nativeOnAppInstallResult(code, message)
+            } catch (e: Throwable) {
+                Log.e(TAG, "nativeOnAppInstallResult failed", e)
+            }
+        }
+    }
+
+    /** Whether Android lets Portal install its own update right now. */
+    fun canInstallAppUpdate(): Boolean = appContext?.let(AppUpdateInstaller::canInstall) ?: false
 
     /** Persist and start exactly the immutable first-run plan accepted by the user. */
     @JvmStatic fun beginInstall(plan: InstallPlan): Boolean = try {

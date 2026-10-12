@@ -154,6 +154,14 @@ fn root() -> &'static Path {
     Path::new(PRODUCTION_FS_ROOT)
 }
 
+/// Whether an install or removal owns apt right now (or is queued to).
+pub fn is_busy() -> bool {
+    coordinator()
+        .lock()
+        .map(|coordinator| coordinator.worker || !coordinator.queue.is_empty())
+        .unwrap_or(true)
+}
+
 /// What this device offers, for the catalog's availability column.
 pub fn device_capabilities() -> DeviceCapabilities {
     // SAFETY: sysconf has no preconditions.
@@ -332,6 +340,8 @@ fn run_queue() {
             entry.progress = 1;
             entry.message = "Preparing…".to_owned();
         });
+        // The update checker and the system updater use apt too.
+        let _apt = crate::android::proot::system_updates::apt_lock();
         let outcome = std::panic::catch_unwind(|| match action {
             Action::Install => install(app, entry_progress(app)),
             Action::Remove => remove(app),

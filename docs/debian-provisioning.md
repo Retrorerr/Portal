@@ -98,17 +98,61 @@ installs are updated in two layers.
   `qt6-base-private-abi (= 6.8.2)`), apt keeps that package back instead of
   removing KWin.
 
-Ninety seconds after the first desktop frame, at most every 12 hours and never
-on a metered network, Portal runs `apt-get update` and records what an
-upgrade would install in `/var/lib/localdesktop/system-updates.json`. The next
-Return-to-Plasma screen offers those updates in a capsule that expands into
-the package list. Choosing Update stops Plasma, runs `dpkg --configure -a`,
-`apt-get update` and the upgrade with apt's machine-readable progress, checks
-that no pinned package changed, and starts a fresh Plasma session on either
-outcome. `/var/lib/localdesktop/system-update-in-progress` survives an
-interrupted upgrade, so the next launch offers to finish it. The apt
-transcript is `/var/log/portal-updates.log`. The parsing and policy are in
-`src/core/system_updates.rs` and are covered by `tests/system_updates.rs`.
+Ninety seconds after the first desktop frame, and then whenever the last
+complete check is more than 6 hours old, Portal checks every source it
+updates. Failed checks retry after 15 minutes, doubling to 2 hours, and each
+source is checked independently:
+
+- **Portal itself:** the newest stable release of Retrorerr/Portal. Its
+  fixed-name `Portal.apk` is downloaded ahead of time on unmetered networks
+  and must match the SHA-256 GitHub recorded for it. `AppUpdateInstaller.kt`
+  then confirms the package name, a higher version code and a shared signing
+  certificate before Android's own installer. Portal Debug only updates from
+  a test feed written to `files/app-update-feed`.
+- **The Mesa KGSL layer:** lfdevs releases, but only versions the update
+  policy lists as vetted. A new layer is on trial with the previous one
+  parked beside it. If no hardware session draws a desktop on it within two
+  launches, it is put back by itself and that version is never offered
+  again.
+- **Debian:** `apt-get update` and a simulated upgrade, recorded in
+  `/var/lib/localdesktop/system-updates.json`. This is skipped on metered
+  networks.
+- **ChatGPT:** OpenAI's unversioned .deb, compared by ETag/Last-Modified
+  against a stamp written at install.
+
+The update policy, `assets/update-policy.json`, is fetched from the
+repository's main branch before every check. The APK's copy is used when it
+cannot be fetched. It can hold Debian packages (they join the -1 pin), block
+app or driver versions, and choose between vetted-only and latest drivers.
+
+The Return-to-Plasma screen offers what is pending in a capsule that expands
+into the list. Choosing Update stops Plasma, then installs in this order:
+
+1. the driver;
+2. Debian packages;
+3. ChatGPT;
+4. Portal last, because Android ends the process to replace the app.
+
+A checklist shows each step, and a failed run says which steps finished.
+Debian upgrades need 1.5 GB free, run `dpkg --configure -a`, refresh the
+lists (dropping corrupt ones), and repair dependencies with `--no-remove`.
+The simulated plan is then refused outright if it removes anything or
+touches a protected or held package. After the upgrade, Portal checks that
+no pinned package changed, and that `ldd` finds every library KWin,
+Xwayland and Plasma link that it found before. A fresh Plasma session starts
+on either outcome. `/var/lib/localdesktop/system-update-in-progress`
+survives an interrupted upgrade, so the next launch offers to finish it. The
+apt transcript is `/var/log/portal-updates.log`, trimmed to its last
+megabyte past 4 MB.
+
+The parsing and policy are covered by `tests/system_updates.rs`:
+
+- `src/core/system_updates.rs` for Debian;
+- `src/core/update_sources.rs` for everything else.
+
+Debug builds can review every state of the panel with
+`--es portal_preview_updates full|app|debian|fail|off` (see
+`UpdatePreview.kt`).
 
 ## Required Android integration
 

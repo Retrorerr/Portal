@@ -29,6 +29,7 @@ pub mod core {
     pub mod surface_geometry;
     pub mod system_updates;
     pub mod tablet_mode;
+    pub mod update_sources;
     pub mod wayland_protocol;
 }
 
@@ -36,6 +37,7 @@ pub mod core {
 pub mod android {
     pub mod accessibility;
     pub mod anland;
+    pub mod app_update;
     pub mod clipboard;
     pub mod clipboard_broker;
     pub mod diagnostics;
@@ -43,6 +45,7 @@ pub mod android {
     pub mod guest_procfs;
     pub mod ime;
     pub mod tablet_mode_manager;
+    pub mod update_net;
 
     pub mod main;
     pub mod app {

@@ -431,8 +431,11 @@ fn show_compose_overlay_with(android_app: &AndroidApp, method: &str) {
     }
 }
 
-/// Publish the Debian update state to the Return screen. `packages` carries
-/// one `name\tsecurity` line per pending update, security fixes first.
+/// Publish the update state to the Return screen. `packages` carries one
+/// `name\tsecurity` line per pending Debian update, security fixes first;
+/// `components` one `kind\ttitle\tdetail` line per other pending update
+/// (`app`, `driver`, `chatgpt`), and `steps` one `kind\tstate\ttitle\tnote`
+/// line per part of the current or last run.
 pub fn publish_system_update_state(
     android_app: &AndroidApp,
     snapshot: &crate::android::proot::system_updates::UpdateSnapshot,
@@ -449,6 +452,8 @@ pub fn publish_system_update_state(
         .map(|update| format!("{}\t{}", update.package, u8::from(update.security)))
         .collect::<Vec<_>>()
         .join("\n");
+    let components = snapshot.component_lines();
+    let steps = snapshot.step_lines();
     super::ndk::run_in_jvm(
         move |env, app| {
             let activity = activity_object(app);
@@ -460,8 +465,12 @@ pub fn publish_system_update_state(
                     return;
                 }
             };
-            let (Ok(message), Ok(packages)) = (env.new_string(message), env.new_string(packages))
-            else {
+            let (Ok(message), Ok(packages), Ok(components), Ok(steps)) = (
+                env.new_string(message),
+                env.new_string(packages),
+                env.new_string(components),
+                env.new_string(steps),
+            ) else {
                 log::error!("Failed to allocate system update strings");
                 clear_exception(env, "allocate system update strings");
                 return;
@@ -469,7 +478,7 @@ pub fn publish_system_update_state(
             if let Err(error) = env.call_static_method(
                 class,
                 "updateSystemUpdateState",
-                "(IILjava/lang/String;IIZLjava/lang/String;)V",
+                "(IILjava/lang/String;IIZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
                 &[
                     JValue::Int(status),
                     JValue::Int(progress),
@@ -478,6 +487,8 @@ pub fn publish_system_update_state(
                     JValue::Int(security),
                     JValue::Bool(u8::from(interrupted)),
                     JValue::Object(&packages),
+                    JValue::Object(&components),
+                    JValue::Object(&steps),
                 ],
             ) {
                 log::error!("Compose overlay updateSystemUpdateState failed: {error}");
@@ -486,6 +497,46 @@ pub fn publish_system_update_state(
         },
         android_app.clone(),
     );
+}
+
+/// Hand a verified Portal APK to `AppUpdateInstaller` through the overlay
+/// object. The result comes back through `nativeOnAppInstallResult`.
+pub fn request_app_install(android_app: &AndroidApp, apk: &std::path::Path) -> bool {
+    let path = apk.to_string_lossy().into_owned();
+    super::ndk::run_in_jvm(
+        move |env, app| {
+            let activity = activity_object(app);
+            let class = match overlay_class(env, &activity) {
+                Ok(class) => class,
+                Err(error) => {
+                    log::error!("Compose overlay class is unavailable: {error}");
+                    clear_exception(env, "find ComposeOverlay for app install");
+                    return false;
+                }
+            };
+            let Ok(path) = env.new_string(path) else {
+                clear_exception(env, "allocate app update path");
+                return false;
+            };
+            match env
+                .call_static_method(
+                    class,
+                    "installAppUpdate",
+                    "(Ljava/lang/String;)Z",
+                    &[JValue::Object(&path)],
+                )
+                .and_then(|value| value.z())
+            {
+                Ok(started) => started,
+                Err(error) => {
+                    log::error!("Compose overlay installAppUpdate failed: {error}");
+                    clear_exception(env, "installAppUpdate");
+                    false
+                }
+            }
+        },
+        android_app.clone(),
+    )
 }
 
 /// Publish the app manager's per-app state: one `id	state	progress	message`
@@ -612,6 +663,9 @@ pub fn notify_desktop_ready(android_app: &AndroidApp) {
     log::info!("compose-spike: native desktop ready latched; overlay remains fully visible");
     crate::android::diagnostics::host_event("compose-spike", "desktop-ready overlay-retained");
     publish_desktop_ready(android_app, true);
+    if crate::android::anland::is_anland_requested() {
+        crate::android::proot::mesa_layer::trial_after_desktop_ready();
+    }
     crate::android::proot::system_updates::schedule_background_check(android_app);
 }
 
@@ -730,16 +784,31 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRetryInstall(
 
 /// JNI bridge for the Return screen's Update action. The native coordinator
 /// owns the worker; the event loop restarts Plasma when it finishes.
+/// `include_app` is false when the user declined Android's install
+/// permission, so everything else still updates.
 #[no_mangle]
 pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeBeginSystemUpdate(
     _env: JNIEnv,
     _class: JObject,
+    include_app: jni::sys::jboolean,
 ) -> jni::sys::jboolean {
-    if crate::android::proot::system_updates::begin_update() {
-        1
-    } else {
-        0
-    }
+    u8::from(crate::android::proot::system_updates::begin_update(include_app != 0))
+}
+
+/// JNI callback from `AppUpdateInstaller` when an install session ends:
+/// 0 installed, 1 cancelled, 2 needs permission, 3 failed.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnAppInstallResult(
+    mut env: JNIEnv,
+    _class: JObject,
+    code: jni::sys::jint,
+    message: JString,
+) {
+    let message = env
+        .get_string(&message)
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    crate::android::app_update::report_install_result(code, message);
 }
 
 /// JNI source of the optional-app catalog both pickers show: one

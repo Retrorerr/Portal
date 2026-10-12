@@ -81,6 +81,7 @@ android:
       - name: android.permission.READ_EXTERNAL_STORAGE
       - name: android.permission.WRITE_EXTERNAL_STORAGE
         max_sdk_version: 28
+      - name: android.permission.REQUEST_INSTALL_PACKAGES
     uses_feature:
       - name: android.hardware.type.pc
         required: false

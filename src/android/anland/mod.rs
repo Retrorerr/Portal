@@ -275,10 +275,17 @@ pub fn validate_launch_contract() -> anyhow::Result<()> {
     }
 
     let binds = session_binds();
+    anyhow::ensure!(
+        binds.iter().any(|bind| {
+            bind.guest_path
+                .to_str()
+                .is_some_and(|path| path.starts_with("/usr/lib/aarch64-linux-gnu/libgallium-"))
+        }),
+        "Anland Mesa bind is missing for the gallium core"
+    );
     for guest_path in [
         "/usr/lib/aarch64-linux-gnu/dri",
         "/usr/lib/aarch64-linux-gnu/gbm",
-        "/usr/lib/aarch64-linux-gnu/libgallium-26.3.0-devel.so",
         "/usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so",
         "/usr/lib/aarch64-linux-gnu/libEGL_mesa.so.0.0.0",
         "/usr/lib/aarch64-linux-gnu/libEGL_mesa.so.0",
@@ -380,18 +387,20 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
     let files = std::path::Path::new(crate::core::config::APP_FILES_ROOT);
     let mesa = files.join("mesa-kgsl-layer");
     let mut binds = vec![BindMount::new(files.join("anland"), "/tmp/anland")];
-    // Mesa overlay: lfdevs Mesa 26.3 (kgsl winsys) over stock paths. Each
-    // entry is skipped when the layer file is absent so QPainter sessions
-    // and layer-less installs are unaffected (KWin then cannot do GPU and
-    // the session fails closed instead of silently falling back).
+    // Mesa overlay: lfdevs Mesa (kgsl winsys) over stock paths. Each entry
+    // is skipped when the layer file is absent so QPainter sessions and
+    // layer-less installs are unaffected (KWin then cannot do GPU and the
+    // session fails closed instead of silently falling back).
     let lib = mesa.join("usr/lib/aarch64-linux-gnu");
     let share = mesa.join("usr/share");
+    // The gallium core is named after its Mesa version, which changes when
+    // Portal refreshes the layer; its drivers link it by that name.
+    let gallium = crate::core::mesa_layer::gallium_library(&mesa)
+        .unwrap_or_else(|_| "libgallium-26.3.0-devel.so".to_owned());
+    let gallium_guest = format!("/usr/lib/aarch64-linux-gnu/{gallium}");
     let pairs = [
         (lib.join("dri"), "/usr/lib/aarch64-linux-gnu/dri"),
-        (
-            lib.join("libgallium-26.3.0-devel.so"),
-            "/usr/lib/aarch64-linux-gnu/libgallium-26.3.0-devel.so",
-        ),
+        (lib.join(&gallium), gallium_guest.as_str()),
         (
             lib.join("libvulkan_freedreno.so"),
             "/usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so",

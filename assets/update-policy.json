@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "comment": "Portal's update gate. Installed copies fetch this file from the main branch before every update check (this copy ships in the APK as the fallback). debian_hold: Debian packages Portal must not upgrade until a known problem is fixed. mesa_layer.mode: \"vetted\" installs only the lfdevs Mesa builds listed in mesa_layer.vetted; \"latest\" takes any newer build (still on trial with automatic rollback). mesa_layer.blocked and app_blocked are never offered.",
+  "debian_hold": [],
+  "mesa_layer": {
+    "mode": "vetted",
+    "vetted": ["26.3.0-20260824"],
+    "blocked": []
+  },
+  "app_blocked": []
+}

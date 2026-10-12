@@ -13,6 +13,17 @@
 //!   on (for example Qt's private ABI), apt keeps that library back instead
 //!   of removing KWin.
 //!
+//! Three more guards keep an update from breaking the desktop:
+//!
+//! * The maintainer's update policy (`update_sources::UpdatePolicy`) can
+//!   hold any Debian package at its installed version; the holds join the
+//!   pin above.
+//! * Before installing, the exact plan is simulated and refused if it would
+//!   remove anything or touch a protected or held package
+//!   ([`plan_violations`]).
+//! * After installing, KWin, Xwayland and Plasma must still resolve every
+//!   library they link ([`missing_libraries`]).
+//!
 //! The Android wrapper (`src/android/proot/system_updates.rs`) runs apt and
 //! owns the UI state; this module only parses and decides.
 
@@ -39,12 +50,39 @@ pub const INTERRUPTED_REL: &str = "var/lib/localdesktop/system-update-in-progres
 /// Guest path of the apt transcript for checks and upgrades.
 pub const LOG_GUEST_PATH: &str = "/var/log/portal-updates.log";
 /// Minimum time between background `apt-get update` runs.
-pub const CHECK_INTERVAL_SECS: u64 = 12 * 60 * 60;
+pub const CHECK_INTERVAL_SECS: u64 = crate::core::update_sources::CHECK_INTERVAL_SECS;
+
+/// Network and lock behaviour for every apt run Portal starts: retry flaky
+/// mirrors, give up on dead connections instead of hanging, wait for a dpkg
+/// lock held by the user's own apt instead of failing, and accept Debian's
+/// point-release metadata changes (Suite and Version) but never a Codename
+/// change, which would be a release upgrade.
+pub const APT_OPTIONS: &str = "-o Acquire::Retries=3 \
+    -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+    -o DPkg::Lock::Timeout=120 \
+    -o Acquire::AllowReleaseInfoChange::Suite=true \
+    -o Acquire::AllowReleaseInfoChange::Version=true";
+
+/// Binaries the desktop cannot start without. After an upgrade each must
+/// still resolve every library it links.
+pub const CRITICAL_BINARIES: &[&str] = &[
+    "/usr/bin/kwin_wayland",
+    "/usr/bin/Xwayland",
+    "/usr/bin/plasmashell",
+    "/usr/bin/startplasma-wayland",
+];
 
 /// The pin file. `o=Debian` matches the main, updates and security
 /// archives alike; the installed lfdevs version stays the only candidate.
 pub fn apt_pin_content() -> String {
-    format!(
+    apt_pin_content_with_holds(&[])
+}
+
+/// The pin file plus the update policy's holds, which keep those packages
+/// at their installed version the same way. Names that are not Debian
+/// package names, or are already protected, are left out.
+pub fn apt_pin_content_with_holds(holds: &[String]) -> String {
+    let mut content = format!(
         "# Managed by Portal and rewritten on every launch.\n\
          # Portal ships these packages from its Anland build. Debian's builds\n\
          # have no Anland backend and would leave the desktop black.\n\
@@ -52,7 +90,56 @@ pub fn apt_pin_content() -> String {
          Pin: release o=Debian\n\
          Pin-Priority: -1\n",
         PROTECTED_PACKAGES.join(" ")
-    )
+    );
+    let mut held: Vec<&str> = holds
+        .iter()
+        .map(String::as_str)
+        .filter(|name| crate::core::update_sources::is_debian_package_name(name))
+        .filter(|name| !PROTECTED_PACKAGES.contains(name))
+        .collect();
+    held.sort_unstable();
+    held.dedup();
+    if !held.is_empty() {
+        content.push_str(&format!(
+            "\n# Held by Portal's update policy until a known problem is fixed.\n\
+             Package: {}\n\
+             Pin: release o=Debian\n\
+             Pin-Priority: -1\n",
+            held.join(" ")
+        ));
+    }
+    content
+}
+
+/// Reasons to refuse an `apt-get -s upgrade --with-new-pkgs` plan: any
+/// removal, and any change to a protected or held package. The pin should
+/// make these impossible; this is the second lock on the same door.
+pub fn plan_violations(stdout: &str, holds: &[String]) -> Vec<String> {
+    let mut violations = Vec::new();
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("Remv ") {
+            let package = strip_arch(rest.split_whitespace().next().unwrap_or(rest));
+            violations.push(format!("would remove {package}"));
+        } else if let Some(rest) = line.strip_prefix("Inst ") {
+            let package = strip_arch(rest.split_whitespace().next().unwrap_or(rest));
+            if PROTECTED_PACKAGES.contains(&package) || holds.iter().any(|held| held == package) {
+                violations.push(format!("would change {package}"));
+            }
+        }
+    }
+    violations
+}
+
+/// `ldd` lines that report a library or symbol version that no longer
+/// resolves (`libfoo.so.1 => not found`, ``version `Qt_6_PRIVATE_API' not
+/// found``).
+pub fn missing_libraries(ldd_output: &str) -> Vec<String> {
+    ldd_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("not found"))
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

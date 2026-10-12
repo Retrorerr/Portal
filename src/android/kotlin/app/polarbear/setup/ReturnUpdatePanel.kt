@@ -1,20 +1,27 @@
 package app.polarbear.setup
 
-// Debian updates on the Return-to-Plasma screen. One surface carries the
-// whole flow: a quiet capsule under "Restoring your desktop" says updates
-// are waiting; tapping it grows the same surface into a card with the
-// package list; Update keeps that card and turns it into live progress; the
-// result folds back into a capsule. Nothing appears when there is nothing to
-// install. Native state (ComposeOverlay.systemUpdateState) is the only
-// source of truth; the only local state is whether the card is open.
+// Updates on the Return-to-Plasma screen: Portal itself, the graphics
+// driver, ChatGPT and Debian packages. One surface carries the whole flow: a
+// quiet capsule under "Restoring your desktop" says updates are waiting;
+// tapping it grows the same surface into a card with the list; Update keeps
+// that card and turns it into live progress; the result folds back into a
+// capsule. Nothing appears when there is nothing to install. Native state
+// (ComposeOverlay.systemUpdateState) is the only source of truth; local
+// state is only whether the card is open and the install-permission detour.
 
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -32,6 +39,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -51,8 +59,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -65,33 +75,64 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import app.polarbear.AppUpdateInstaller
 import app.polarbear.ComposeOverlay
 import app.polarbear.setup.components.PortalEmphasized
 import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
 import app.polarbear.setup.components.dissolveBlur
+import app.polarbear.setup.components.rememberAppIcons
 import kotlinx.coroutines.delay
 
 /** Let the launch mark land before anything else asks for attention. */
 private const val UPDATE_ENTRANCE_DELAY_MS = 650L
 private const val PREVIEW_ROWS = 5
+/** With other updates listed above, Debian previews fewer packages. */
+private const val PREVIEW_ROWS_WITH_COMPONENTS = 3
+/** Below this, unplugged, an install that dies midway is too likely. */
+private const val MIN_BATTERY_PERCENT = 20
 private val CardWidth = 320.dp
+private val IconTile = 30.dp
+private val StepIconTile = 26.dp
+/** Text beside an icon starts here, so rows under it line up. */
+private val IconGap = 12.dp
 private val CapsuleCorner = 18.dp
 private val CardCorner = 24.dp
 
-private enum class UpdatePanelPhase { Hidden, Offer, Details, Running, Complete, Failed }
+private enum class UpdatePanelPhase { Hidden, Offer, Details, Permission, Running, Complete, Failed }
+
+/** Whether the battery is too low, unplugged, to start a system update. */
+private fun batteryTooLow(context: Context): Boolean {
+    val battery = try {
+        context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    } catch (_: Exception) {
+        null
+    } ?: return false
+    val level = battery.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+    val scale = battery.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+    val plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+    if (level < 0 || scale <= 0) return false
+    return !plugged && level * 100 / scale < MIN_BATTERY_PERCENT
+}
 
 @Composable
 internal fun ReturnUpdatePanel(
@@ -101,12 +142,30 @@ internal fun ReturnUpdatePanel(
     onBlockedChanged: (Boolean) -> Unit,
 ) {
     val state by ComposeOverlay.systemUpdateState()
+    val context = LocalContext.current
+    val icons by rememberAppIcons(listOf("chatgpt"))
     var expanded by rememberSaveable { mutableStateOf(false) }
     var dismissed by rememberSaveable { mutableStateOf(false) }
+    // Portal needs Android's "Install unknown apps" before it can update
+    // itself; the card detours through Settings and resumes on return.
+    var askPermission by rememberSaveable { mutableStateOf(false) }
+    var visitedSettings by rememberSaveable { mutableStateOf(false) }
     // Bridges the tap to the first native Running snapshot.
     var requested by remember { mutableStateOf(false) }
+    var includedApp by rememberSaveable { mutableStateOf(false) }
     var entered by remember { mutableStateOf(false) }
+    var lowBattery by remember { mutableStateOf(false) }
     val currentBlocked by rememberUpdatedState(onBlockedChanged)
+
+    var resumes by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumes++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(state.status) {
         if (state.status != ComposeOverlay.SYSTEM_UPDATE_AVAILABLE) requested = false
@@ -116,6 +175,7 @@ internal fun ReturnUpdatePanel(
         suppressed -> UpdatePanelPhase.Hidden
         state.running || requested -> UpdatePanelPhase.Running
         state.complete -> UpdatePanelPhase.Complete
+        (state.failed || state.available) && !dismissed && askPermission -> UpdatePanelPhase.Permission
         state.failed && !dismissed -> UpdatePanelPhase.Failed
         state.available && !dismissed ->
             if (expanded) UpdatePanelPhase.Details else UpdatePanelPhase.Offer
@@ -126,14 +186,40 @@ internal fun ReturnUpdatePanel(
         delay(UPDATE_ENTRANCE_DELAY_MS)
         entered = true
     }
-    val begin = {
-        if (ComposeOverlay.beginSystemUpdate()) {
-            requested = true
-            expanded = false
+    // Only Debian and the driver risk a half-finished system; Android swaps
+    // the app in one step.
+    val risky = state.debian || state.components.any { it.kind != "app" }
+    LaunchedEffect(phase, resumes, risky) {
+        while (phase == UpdatePanelPhase.Details || phase == UpdatePanelPhase.Failed) {
+            lowBattery = risky && batteryTooLow(context)
+            delay(15_000)
         }
+    }
+    val start = { includeApp: Boolean ->
+        if (ComposeOverlay.beginSystemUpdate(includeApp)) {
+            requested = true
+            includedApp = includeApp && state.app != null
+            expanded = false
+            askPermission = false
+            visitedSettings = false
+        }
+    }
+    val begin = {
+        if (risky && batteryTooLow(context)) {
+            lowBattery = true
+        } else if (state.app != null && !AppUpdateInstaller.canInstall(context)) {
+            askPermission = true
+        } else {
+            start(true)
+        }
+    }
+    // Back from Settings with the permission granted: carry on by itself.
+    LaunchedEffect(resumes) {
+        if (askPermission && visitedSettings && AppUpdateInstaller.canInstall(context)) start(true)
     }
 
     val isCard = phase == UpdatePanelPhase.Details ||
+        phase == UpdatePanelPhase.Permission ||
         phase == UpdatePanelPhase.Running ||
         phase == UpdatePanelPhase.Failed
     val corner by animateDpAsState(
@@ -190,10 +276,38 @@ internal fun ReturnUpdatePanel(
                     UpdatePanelPhase.Details -> UpdateDetails(
                         state = state,
                         palette = palette,
+                        icons = icons,
+                        lowBattery = lowBattery,
                         onLater = { expanded = false },
                         onUpdate = begin,
                     )
-                    UpdatePanelPhase.Running -> UpdateRunning(state = state, palette = palette)
+                    UpdatePanelPhase.Permission -> UpdatePermission(
+                        state = state,
+                        palette = palette,
+                        visitedSettings = visitedSettings,
+                        onSkip = {
+                            if (state.count > 1 || state.debian) {
+                                start(false)
+                            } else {
+                                askPermission = false
+                                visitedSettings = false
+                                expanded = false
+                            }
+                        },
+                        onAllow = {
+                            if (AppUpdateInstaller.canInstall(context)) {
+                                start(true)
+                            } else if (AppUpdateInstaller.openInstallPermissionSettings(context)) {
+                                visitedSettings = true
+                            }
+                        },
+                    )
+                    UpdatePanelPhase.Running -> UpdateRunning(
+                        state = state,
+                        palette = palette,
+                        icons = icons,
+                        includedApp = includedApp,
+                    )
                     UpdatePanelPhase.Complete -> UpdateComplete(
                         desktopReady = desktopReady,
                         palette = palette,
@@ -201,6 +315,8 @@ internal fun ReturnUpdatePanel(
                     UpdatePanelPhase.Failed -> UpdateFailed(
                         state = state,
                         palette = palette,
+                        icons = icons,
+                        lowBattery = lowBattery,
                         onDismiss = { dismissed = true },
                         onRetry = begin,
                     )
@@ -211,10 +327,24 @@ internal fun ReturnUpdatePanel(
     }
 }
 
-private fun updateCountText(state: ComposeOverlay.SystemUpdateUiState): String = when {
-    state.total == 0 && state.interrupted -> "Finish the last update"
-    state.total == 1 -> "1 update available"
-    else -> "${state.total} updates available"
+private fun updateCountText(state: ComposeOverlay.SystemUpdateUiState): String {
+    val app = state.app
+    return when {
+        state.count == 0 && state.interrupted -> "Finish the last update"
+        state.count == 1 && app != null -> "${app.title} available"
+        state.count == 1 -> "1 update available"
+        else -> "${state.count} updates available"
+    }
+}
+
+private fun debianSummary(state: ComposeOverlay.SystemUpdateUiState): String {
+    val other = state.total - state.security
+    return when {
+        state.total == 0 -> "An earlier update stopped before it finished."
+        state.security == 0 -> "${state.total} ${if (state.total == 1) "package" else "packages"} from Debian 13"
+        other == 0 -> "${state.security} security ${if (state.security == 1) "fix" else "fixes"}"
+        else -> "${state.security} security ${if (state.security == 1) "fix" else "fixes"} · $other other"
+    }
 }
 
 @Composable
@@ -324,6 +454,8 @@ private fun UpdateArrow(palette: PortalPalette, lifting: Boolean) {
 private fun UpdateDetails(
     state: ComposeOverlay.SystemUpdateUiState,
     palette: PortalPalette,
+    icons: Map<String, ImageBitmap>,
+    lowBattery: Boolean,
     onLater: () -> Unit,
     onUpdate: () -> Unit,
 ) {
@@ -333,49 +465,56 @@ private fun UpdateDetails(
             .fillMaxWidth()
             .padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 14.dp),
     ) {
+        val onlyDebian = state.components.isEmpty()
         Text(
-            text = if (state.total == 0) "Finish the last update" else "Debian updates",
+            text = when {
+                state.count == 0 -> "Finish the last update"
+                onlyDebian -> "Debian updates"
+                state.count == 1 -> "Update available"
+                else -> "Updates"
+            },
             fontSize = 15.sp,
             fontWeight = FontWeight.SemiBold,
             color = palette.textPrimary,
         )
-        Spacer(Modifier.height(4.dp))
-        val other = state.total - state.security
-        Text(
-            text = when {
-                state.total == 0 -> "An earlier update stopped before it finished."
-                state.security == 0 -> "${state.total} ${if (state.total == 1) "package" else "packages"} from Debian 13"
-                other == 0 -> "${state.security} security ${if (state.security == 1) "fix" else "fixes"}"
-                else -> "${state.security} security ${if (state.security == 1) "fix" else "fixes"} · $other other"
-            },
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            color = palette.textMuted,
-        )
-        if (state.packages.isNotEmpty()) {
-            Spacer(Modifier.height(14.dp))
-            state.packages.take(PREVIEW_ROWS).forEachIndexed { index, pending ->
-                StaggeredRow(index) { PackageRow(pending, palette) }
+        var row = 0
+        if (onlyDebian) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = debianSummary(state),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.textMuted,
+            )
+            if (state.packages.isNotEmpty()) Spacer(Modifier.height(14.dp))
+            PackagePreview(state, palette, rows = PREVIEW_ROWS, firstIndex = row)
+        } else {
+            Spacer(Modifier.height(12.dp))
+            state.components.forEach { component ->
+                StaggeredRow(row++) {
+                    SourceRow(component.kind, component.title, component.detail, palette, icons)
+                }
             }
-            val more = state.total - PREVIEW_ROWS
-            if (more > 0) {
-                StaggeredRow(PREVIEW_ROWS) {
-                    Text(
-                        text = "+ $more more",
-                        modifier = Modifier.padding(top = 4.dp),
-                        fontSize = 12.sp,
-                        color = palette.textMuted,
-                    )
+            if (state.debian) {
+                StaggeredRow(row++) {
+                    SourceRow("debian", "Debian packages", debianSummary(state), palette, icons)
+                }
+                Column(Modifier.padding(start = IconTile + IconGap)) {
+                    PackagePreview(state, palette, rows = PREVIEW_ROWS_WITH_COMPONENTS, firstIndex = row)
                 }
             }
         }
         Spacer(Modifier.height(14.dp))
         Text(
-            text = "Plasma closes while these install, then opens again.",
+            text = detailsFootnote(state),
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
             color = palette.textMuted.copy(alpha = 0.8f),
         )
+        if (lowBattery) {
+            Spacer(Modifier.height(8.dp))
+            LowBatteryNote(palette)
+        }
         Spacer(Modifier.height(14.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -385,11 +524,250 @@ private fun UpdateDetails(
             PanelButton(text = "Not now", primary = false, palette = palette, onClick = onLater)
             Spacer(Modifier.width(6.dp))
             PanelButton(
-                text = if (state.total == 0) "Finish" else "Update",
+                text = if (state.count == 0) "Finish" else "Update",
                 primary = true,
+                enabled = !lowBattery,
                 palette = palette,
                 onClick = onUpdate,
             )
+        }
+    }
+}
+
+/** What happens to the desktop (and to Portal) while the updates install. */
+private fun detailsFootnote(state: ComposeOverlay.SystemUpdateUiState): String = when {
+    state.app != null && state.count == 1 ->
+        "Plasma closes, then Android asks to install the update and closes Portal to finish. Open Portal again afterwards."
+    state.app != null ->
+        "Plasma closes while these install, then opens again. Portal updates last; Android closes it to finish."
+    state.count <= 1 -> "Plasma closes while this installs, then opens again."
+    else -> "Plasma closes while these install, then opens again."
+}
+
+/** The head of the pending Debian list, security fixes first. */
+@Composable
+private fun PackagePreview(
+    state: ComposeOverlay.SystemUpdateUiState,
+    palette: PortalPalette,
+    rows: Int,
+    firstIndex: Int,
+) {
+    state.packages.take(rows).forEachIndexed { index, pending ->
+        StaggeredRow(firstIndex + index) { PackageRow(pending, palette) }
+    }
+    val more = state.total - rows
+    if (more > 0) {
+        StaggeredRow(firstIndex + rows) {
+            Text(
+                text = "+ $more more",
+                modifier = Modifier.padding(top = 4.dp),
+                fontSize = 12.sp,
+                color = palette.textMuted,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LowBatteryNote(palette: PortalPalette) {
+    Text(
+        text = "Plug in or charge to $MIN_BATTERY_PERCENT% first. An install cut off midway can leave Plasma unable to start.",
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Medium,
+        color = palette.accent,
+    )
+}
+
+/** One thing that updates: its icon, its name and a line about it. */
+@Composable
+private fun SourceRow(
+    kind: String,
+    title: String,
+    detail: String,
+    palette: PortalPalette,
+    icons: Map<String, ImageBitmap>,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        UpdateIcon(kind, palette, icons, IconTile)
+        Spacer(Modifier.width(IconGap))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.textPrimary.copy(alpha = 0.92f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (detail.isNotBlank()) {
+                Text(
+                    text = detail,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.textMuted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+/** A small tile per source: Portal's mark, ChatGPT's icon, drawn glyphs otherwise. */
+@Composable
+private fun UpdateIcon(
+    kind: String,
+    palette: PortalPalette,
+    icons: Map<String, ImageBitmap>,
+    tile: Dp,
+) {
+    val shape = RoundedCornerShape(tile * 0.3f)
+    Box(
+        modifier = Modifier
+            .size(tile)
+            .clip(shape)
+            .background(palette.textPrimary.copy(alpha = 0.06f))
+            .border(1.dp, palette.surfaceBorder, shape),
+        contentAlignment = Alignment.Center,
+    ) {
+        val chatgpt = icons["chatgpt"]
+        when {
+            kind == "app" -> Image(
+                painter = portalMarkPainter(main = palette.logoMain, threshold = palette.logoThreshold),
+                contentDescription = null,
+                modifier = Modifier.size(width = tile * 0.4f, height = tile * 0.6f),
+            )
+            kind == "chatgpt" && chatgpt != null -> Image(
+                bitmap = chatgpt,
+                contentDescription = null,
+                modifier = Modifier.size(tile * 0.66f),
+            )
+            kind == "driver" -> ChipGlyph(palette, tile * 0.6f)
+            else -> PackageGlyph(palette, tile * 0.6f)
+        }
+    }
+}
+
+/** A chip with pins: the graphics driver. */
+@Composable
+private fun ChipGlyph(palette: PortalPalette, size: Dp) {
+    Canvas(Modifier.size(size)) {
+        val stroke = 1.4.dp.toPx()
+        val w = this.size.width
+        val body = w * 0.25f
+        drawRoundRect(
+            color = palette.textSecondary,
+            topLeft = Offset(body, body),
+            size = Size(w - 2 * body, w - 2 * body),
+            cornerRadius = CornerRadius(w * 0.08f, w * 0.08f),
+            style = Stroke(width = stroke),
+        )
+        drawRoundRect(
+            color = palette.accent,
+            topLeft = Offset(w * 0.4f, w * 0.4f),
+            size = Size(w * 0.2f, w * 0.2f),
+            cornerRadius = CornerRadius(w * 0.04f, w * 0.04f),
+        )
+        for (at in listOf(0.38f, 0.62f)) {
+            val p = w * at
+            drawLine(palette.textSecondary, Offset(p, w * 0.08f), Offset(p, body), stroke, StrokeCap.Round)
+            drawLine(palette.textSecondary, Offset(p, w - body), Offset(p, w * 0.92f), stroke, StrokeCap.Round)
+            drawLine(palette.textSecondary, Offset(w * 0.08f, p), Offset(body, p), stroke, StrokeCap.Round)
+            drawLine(palette.textSecondary, Offset(w - body, p), Offset(w * 0.92f, p), stroke, StrokeCap.Round)
+        }
+    }
+}
+
+/** A parcel: Debian's packages. */
+@Composable
+private fun PackageGlyph(palette: PortalPalette, size: Dp) {
+    Canvas(Modifier.size(size)) {
+        val stroke = Stroke(width = 1.4.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val w = this.size.width
+        fun at(x: Float, y: Float) = Offset(w * x, w * y)
+        val outline = Path().apply {
+            moveTo(w * 0.5f, w * 0.1f)
+            lineTo(w * 0.88f, w * 0.3f)
+            lineTo(w * 0.88f, w * 0.7f)
+            lineTo(w * 0.5f, w * 0.9f)
+            lineTo(w * 0.12f, w * 0.7f)
+            lineTo(w * 0.12f, w * 0.3f)
+            close()
+        }
+        drawPath(outline, palette.textSecondary, style = stroke)
+        drawPath(
+            Path().apply {
+                moveTo(w * 0.12f, w * 0.3f)
+                lineTo(w * 0.5f, w * 0.5f)
+                lineTo(w * 0.88f, w * 0.3f)
+                moveTo(w * 0.5f, w * 0.5f)
+                lineTo(w * 0.5f, w * 0.9f)
+            },
+            palette.textSecondary,
+            style = stroke,
+        )
+        drawLine(palette.accent, at(0.31f, 0.2f), at(0.69f, 0.4f), stroke.width, StrokeCap.Round)
+    }
+}
+
+/** Android's install permission, asked for only when Portal would update itself. */
+@Composable
+private fun UpdatePermission(
+    state: ComposeOverlay.SystemUpdateUiState,
+    palette: PortalPalette,
+    visitedSettings: Boolean,
+    onSkip: () -> Unit,
+    onAllow: () -> Unit,
+) {
+    val others = state.count > 1 || state.debian
+    Column(
+        modifier = Modifier
+            .widthIn(max = CardWidth)
+            .fillMaxWidth()
+            .padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 14.dp),
+    ) {
+        Text(
+            text = "Let Portal update itself",
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = palette.textPrimary,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "Android asks before an app installs updates. Turn on \u201cAllow from this source\u201d " +
+                "for Portal, then come back and the update carries on.",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = palette.textMuted,
+        )
+        if (visitedSettings) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "It's still off, so Portal can't install its update yet.",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.accent,
+            )
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PanelButton(
+                text = if (others) "Update the rest" else "Not now",
+                primary = false,
+                palette = palette,
+                onClick = onSkip,
+            )
+            Spacer(Modifier.width(6.dp))
+            PanelButton(text = "Open settings", primary = true, palette = palette, onClick = onAllow)
         }
     }
 }
@@ -445,6 +823,7 @@ internal fun PanelButton(
     text: String,
     primary: Boolean,
     palette: PortalPalette,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val tap = remember { MutableInteractionSource() }
@@ -460,12 +839,14 @@ internal fun PanelButton(
             .graphicsLayer {
                 scaleX = pressScale
                 scaleY = pressScale
+                alpha = if (enabled) 1f else 0.4f
             }
             .clip(shape)
             .then(if (primary) Modifier.background(palette.accent) else Modifier)
             .clickable(
                 interactionSource = tap,
                 indication = null,
+                enabled = enabled,
                 role = Role.Button,
                 onClick = onClick,
             )
@@ -482,7 +863,12 @@ internal fun PanelButton(
 }
 
 @Composable
-private fun UpdateRunning(state: ComposeOverlay.SystemUpdateUiState, palette: PortalPalette) {
+private fun UpdateRunning(
+    state: ComposeOverlay.SystemUpdateUiState,
+    palette: PortalPalette,
+    icons: Map<String, ImageBitmap>,
+    includedApp: Boolean,
+) {
     Column(
         modifier = Modifier
             .widthIn(max = CardWidth)
@@ -507,23 +893,188 @@ private fun UpdateRunning(state: ComposeOverlay.SystemUpdateUiState, palette: Po
         }
         Spacer(Modifier.height(14.dp))
         UpdateProgressBar(progress = state.progress, palette = palette)
-        Spacer(Modifier.height(10.dp))
+        val message = state.message.ifBlank { "Preparing…" }
+        // One thing updating needs no checklist: the line under the bar says it.
+        if (state.steps.size >= 2) {
+            Spacer(Modifier.height(10.dp))
+            state.steps.forEach { step ->
+                StepRow(
+                    step = step,
+                    palette = palette,
+                    icons = icons,
+                    detail = when (step.state) {
+                        ComposeOverlay.STEP_ACTIVE -> message
+                        ComposeOverlay.STEP_FAILED, ComposeOverlay.STEP_SKIPPED -> step.note
+                        else -> ""
+                    },
+                )
+            }
+            if (state.steps.none { it.state == ComposeOverlay.STEP_ACTIVE }) {
+                Spacer(Modifier.height(6.dp))
+                RunningMessage(message, palette)
+            }
+        } else {
+            Spacer(Modifier.height(10.dp))
+            RunningMessage(message, palette)
+        }
+        Spacer(Modifier.height(12.dp))
         Text(
-            text = state.message.ifBlank { "Preparing…" },
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = FontFamily.Monospace,
-            color = palette.textMuted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = "Keep Portal open. Plasma returns when this finishes.",
+            text = when {
+                !includedApp -> "Keep Portal open. Plasma returns when this finishes."
+                state.steps.size <= 1 -> "Android asks to install the update, then closes Portal to finish it."
+                else -> "Keep Portal open. Android asks to update Portal at the end, then closes it to finish."
+            },
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
             color = palette.textMuted.copy(alpha = 0.8f),
         )
+    }
+}
+
+@Composable
+private fun RunningMessage(message: String, palette: PortalPalette) {
+    Text(
+        text = message,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Medium,
+        fontFamily = FontFamily.Monospace,
+        color = palette.textMuted,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+/** One part of a run: what it is, where it stands, and the line about it. */
+@Composable
+private fun StepRow(
+    step: ComposeOverlay.RunStep,
+    palette: PortalPalette,
+    icons: Map<String, ImageBitmap>,
+    detail: String,
+) {
+    val active = step.state == ComposeOverlay.STEP_ACTIVE
+    val titleColor by animateColorAsState(
+        targetValue = when (step.state) {
+            ComposeOverlay.STEP_PENDING -> palette.textMuted
+            ComposeOverlay.STEP_ACTIVE -> palette.textPrimary
+            else -> palette.textSecondary
+        },
+        animationSpec = tween(320),
+        label = "step title",
+    )
+    val tileAlpha by animateFloatAsState(
+        targetValue = if (step.state == ComposeOverlay.STEP_PENDING) 0.55f else 1f,
+        animationSpec = tween(320),
+        label = "step icon",
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.graphicsLayer { alpha = tileAlpha }) {
+            UpdateIcon(step.kind, palette, icons, StepIconTile)
+        }
+        Spacer(Modifier.width(IconGap))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = step.title,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                color = titleColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            AnimatedVisibility(
+                visible = detail.isNotBlank(),
+                enter = fadeIn(tween(220)) + expandVertically(tween(260, easing = PortalEmphasized)),
+                exit = fadeOut(tween(160)) + shrinkVertically(tween(220, easing = PortalEmphasized)),
+            ) {
+                Text(
+                    text = detail,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = if (active) FontFamily.Monospace else FontFamily.Default,
+                    color = palette.textMuted,
+                    maxLines = if (active) 1 else 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        StepIndicator(step.state, palette)
+    }
+}
+
+/** Pending ring, working arc, done check, failed cross, skipped dash. */
+@Composable
+private fun StepIndicator(state: Int, palette: PortalPalette) {
+    val spin = if (state == ComposeOverlay.STEP_ACTIVE) {
+        rememberInfiniteTransition(label = "step spinner").animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
+            label = "step spinner turn",
+        )
+    } else {
+        null
+    }
+    AnimatedContent(
+        targetState = state,
+        transitionSpec = {
+            (fadeIn(tween(220, delayMillis = 60)) + scaleIn(tween(320, easing = PortalEmphasized), initialScale = 0.6f))
+                .togetherWith(fadeOut(tween(120)))
+        },
+        label = "step indicator",
+    ) { shown ->
+        Canvas(Modifier.size(14.dp)) {
+            val stroke = Stroke(width = 1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            val w = size.width
+            when (shown) {
+                ComposeOverlay.STEP_PENDING -> drawCircle(
+                    color = palette.textMuted.copy(alpha = 0.45f),
+                    radius = w * 0.38f,
+                    style = Stroke(width = 1.2.dp.toPx()),
+                )
+                ComposeOverlay.STEP_ACTIVE -> rotate(spin?.value ?: 0f) {
+                    drawCircle(
+                        color = palette.accent.copy(alpha = 0.18f),
+                        radius = w * 0.4f,
+                        style = Stroke(width = stroke.width),
+                    )
+                    drawArc(
+                        color = palette.accent,
+                        startAngle = -90f,
+                        sweepAngle = 100f,
+                        useCenter = false,
+                        topLeft = Offset(w * 0.1f, w * 0.1f),
+                        size = Size(w * 0.8f, w * 0.8f),
+                        style = stroke,
+                    )
+                }
+                ComposeOverlay.STEP_DONE -> drawPath(
+                    path = Path().apply {
+                        moveTo(w * 0.14f, w * 0.54f)
+                        lineTo(w * 0.42f, w * 0.80f)
+                        lineTo(w * 0.88f, w * 0.24f)
+                    },
+                    color = palette.accent,
+                    style = stroke,
+                )
+                ComposeOverlay.STEP_FAILED -> {
+                    drawLine(palette.accent, Offset(w * 0.22f, w * 0.22f), Offset(w * 0.78f, w * 0.78f), stroke.width, StrokeCap.Round)
+                    drawLine(palette.accent, Offset(w * 0.78f, w * 0.22f), Offset(w * 0.22f, w * 0.78f), stroke.width, StrokeCap.Round)
+                }
+                else -> drawLine(
+                    palette.textMuted,
+                    Offset(w * 0.24f, w * 0.5f),
+                    Offset(w * 0.76f, w * 0.5f),
+                    stroke.width,
+                    StrokeCap.Round,
+                )
+            }
+        }
     }
 }
 
@@ -614,9 +1165,14 @@ private fun UpdateComplete(desktopReady: Boolean, palette: PortalPalette) {
 private fun UpdateFailed(
     state: ComposeOverlay.SystemUpdateUiState,
     palette: PortalPalette,
+    icons: Map<String, ImageBitmap>,
+    lowBattery: Boolean,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
 ) {
+    // With the run's steps known, each says how it went; otherwise (Plasma
+    // would not stop) the error stands on its own.
+    val steps = state.steps.takeIf { list -> list.any { it.state != ComposeOverlay.STEP_PENDING } }
     Column(
         modifier = Modifier
             .widthIn(max = CardWidth)
@@ -631,22 +1187,40 @@ private fun UpdateFailed(
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            text = "Plasma is back with the updates that did install. Portal's graphics stack was not touched.",
+            text = "Plasma is back. Whatever finished stays installed; the rest was left as it was.",
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
             color = palette.textMuted,
         )
-        if (state.message.isNotBlank()) {
+        if (steps != null) {
+            Spacer(Modifier.height(10.dp))
+            steps.forEach { step ->
+                StepRow(
+                    step = step,
+                    palette = palette,
+                    icons = icons,
+                    detail = when (step.state) {
+                        ComposeOverlay.STEP_PENDING -> "Not started"
+                        ComposeOverlay.STEP_DONE -> "Installed"
+                        else -> step.note
+                    },
+                )
+            }
+        } else if (state.message.isNotBlank()) {
             Spacer(Modifier.height(10.dp))
             Text(
                 text = state.message,
                 fontSize = 11.sp,
                 fontFamily = FontFamily.Monospace,
                 color = palette.textMuted.copy(alpha = 0.85f),
-                maxLines = 3,
+                maxLines = 4,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Start,
             )
+        }
+        if (lowBattery) {
+            Spacer(Modifier.height(8.dp))
+            LowBatteryNote(palette)
         }
         Spacer(Modifier.height(14.dp))
         Row(
@@ -656,7 +1230,13 @@ private fun UpdateFailed(
         ) {
             PanelButton(text = "Dismiss", primary = false, palette = palette, onClick = onDismiss)
             Spacer(Modifier.width(6.dp))
-            PanelButton(text = "Try again", primary = true, palette = palette, onClick = onRetry)
+            PanelButton(
+                text = "Try again",
+                primary = true,
+                enabled = !lowBattery,
+                palette = palette,
+                onClick = onRetry,
+            )
         }
     }
 }

@@ -59,6 +59,11 @@ fn build_tree_with_identity(root: &Path, version: &str, sha: &str) {
             fs::write(&lp, fs::read(&sibling).unwrap()).unwrap();
         }
     }
+    fs::write(
+        root.join("usr/lib/aarch64-linux-gnu/libgallium-26.3.0-devel.so"),
+        b"fake-so",
+    )
+    .unwrap();
     fs::create_dir_all(root.join("usr/lib/aarch64-linux-gnu/gbm")).unwrap();
     fs::write(
         root.join("usr/lib/aarch64-linux-gnu/gbm/dri_gbm.so"),
@@ -444,7 +449,7 @@ fn validation_covers_session_binds_runtime_chain() {
     // mounts, or the layer silently stops engaging.
     let binds = include_str!("../src/android/anland/mod.rs");
     for required in [
-        "libgallium-26.3.0-devel.so",
+        "gallium_library",
         "libvulkan_freedreno.so",
         "libEGL_mesa.so.0",
         "libGLX_mesa.so.0",
@@ -456,7 +461,7 @@ fn validation_covers_session_binds_runtime_chain() {
     let core_src = include_str!("../src/core/mesa_layer.rs");
     for required in [
         "kgsl_dri.so",
-        "libgallium-26.3.0-devel.so",
+        "libgallium-",
         "libvulkan_freedreno.so",
         "libEGL_mesa.so.0",
         "libGLX_mesa.so.0",
