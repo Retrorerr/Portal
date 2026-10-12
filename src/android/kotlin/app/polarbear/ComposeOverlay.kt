@@ -467,9 +467,17 @@ object ComposeOverlay {
     /** Debug builds: UpdatePreview's scripted run stands in for the coordinator. */
     @Volatile internal var previewBegin: ((Boolean) -> Boolean)? = null
 
-    /** Ask the native coordinator to stop Plasma and install updates. */
+    /**
+     * Ask the native coordinator to stop Plasma and install updates. Main
+     * thread only. The coordinator publishes the run before it returns; the
+     * panel takes that state now rather than from the posted update, which
+     * a run failing at once would overtake (Failed, then Failed again, with
+     * no Running in between for the panel to see).
+     */
     @JvmStatic fun beginSystemUpdate(includeApp: Boolean): Boolean = try {
-        previewBegin?.invoke(includeApp) ?: nativeBeginSystemUpdate(includeApp)
+        val started = previewBegin?.invoke(includeApp) ?: nativeBeginSystemUpdate(includeApp)
+        if (started) systemUpdateStateValue.value = systemUpdateStateSnapshot
+        started
     } catch (_: UnsatisfiedLinkError) {
         Log.e(TAG, "nativeBeginSystemUpdate unavailable")
         false

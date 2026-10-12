@@ -142,6 +142,8 @@ object UpdatePreview {
             for (percent in 90..94 step 2) at(percent, "Downloading Portal 2.5.0…")
             at(96, "Installing Portal 2.5.0…")
         }
+        // Like the coordinator, report the run before returning.
+        publish(ComposeOverlay.SYSTEM_UPDATE_RUNNING, 1, "Closing Plasma…", scenario)
         script.forEachIndexed { index, (progress, message, change) ->
             main.postDelayed({
                 change()

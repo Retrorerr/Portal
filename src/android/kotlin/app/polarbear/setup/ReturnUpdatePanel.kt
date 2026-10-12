@@ -150,8 +150,6 @@ internal fun ReturnUpdatePanel(
     // itself; the card detours through Settings and resumes on return.
     var askPermission by rememberSaveable { mutableStateOf(false) }
     var visitedSettings by rememberSaveable { mutableStateOf(false) }
-    // Bridges the tap to the first native Running snapshot.
-    var requested by remember { mutableStateOf(false) }
     var includedApp by rememberSaveable { mutableStateOf(false) }
     var entered by remember { mutableStateOf(false) }
     var lowBattery by remember { mutableStateOf(false) }
@@ -168,12 +166,11 @@ internal fun ReturnUpdatePanel(
     }
 
     LaunchedEffect(state.status) {
-        if (state.status != ComposeOverlay.SYSTEM_UPDATE_AVAILABLE) requested = false
         if (state.running) dismissed = false
     }
     val phase = when {
         suppressed -> UpdatePanelPhase.Hidden
-        state.running || requested -> UpdatePanelPhase.Running
+        state.running -> UpdatePanelPhase.Running
         state.complete -> UpdatePanelPhase.Complete
         (state.failed || state.available) && !dismissed && askPermission -> UpdatePanelPhase.Permission
         state.failed && !dismissed -> UpdatePanelPhase.Failed
@@ -196,9 +193,9 @@ internal fun ReturnUpdatePanel(
         }
     }
     val start = { includeApp: Boolean ->
+        val offersApp = state.app != null
         if (ComposeOverlay.beginSystemUpdate(includeApp)) {
-            requested = true
-            includedApp = includeApp && state.app != null
+            includedApp = includeApp && offersApp
             expanded = false
             askPermission = false
             visitedSettings = false
