@@ -51,7 +51,7 @@ fi
 # swallows Portal's drmshim.so (the GPU render-node shim). Split the glued
 # entries and keep only libraries that exist.
 repair_preload() {
-    preload=$(printf '%s' "$LD_PRELOAD" | sed 's#\.so/#.so:/#g' | tr ' :' '\n\n' |
+    preload=$(printf '%s\n' "$LD_PRELOAD" | sed 's#\.so/#.so:/#g' | tr ' :' '\n\n' |
         while IFS= read -r lib; do [ -n "$lib" ] && [ -f "$lib" ] && echo "$lib"; done | paste -sd: -)
     [ -n "$preload" ] && export LD_PRELOAD="$preload" || unset LD_PRELOAD
 }

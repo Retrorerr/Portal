@@ -13,6 +13,8 @@
 #   PORTAL_PROTON=/path/to/proton %command%   use a specific Proton build
 #   PORTAL_WOW64=box64 %command%              32-bit games through Box64's
 #                                             WoW64 backend instead of FEX
+#   PORTAL_VRAM_MB=6144 %command%             video memory games are told
+#                                             they have (default 4096)
 
 verb="$1"
 [ "$#" -gt 0 ] && shift
@@ -58,15 +60,27 @@ fi
 # swallows Portal's drmshim.so (the GPU render-node shim). Split the glued
 # entries and keep only libraries that exist.
 repair_preload() {
-    preload=$(printf '%s' "$LD_PRELOAD" | sed 's#\.so/#.so:/#g' | tr ' :' '\n\n' |
+    preload=$(printf '%s\n' "$LD_PRELOAD" | sed 's#\.so/#.so:/#g' | tr ' :' '\n\n' |
         while IFS= read -r lib; do [ -n "$lib" ] && [ -f "$lib" ] && echo "$lib"; done | paste -sd: -)
     [ -n "$preload" ] && export LD_PRELOAD="$preload" || unset LD_PRELOAD
 }
 repair_preload
 
+# Wine relocates DLL pages in a private file mapping and then makes them
+# executable, which needs SELinux execmod; Android denies it to apps. This
+# preload moves such pages to anonymous memory first (portal-execmod.c).
+execmod=/usr/local/lib/portal/steam/portal-execmod.so
+[ -f "$execmod" ] && export LD_PRELOAD="$execmod${LD_PRELOAD:+:$LD_PRELOAD}"
+
 # Wine's esync fallback needs many descriptors; fsync (futex_waitv) is
 # available on Portal's Android kernels and is Proton's default.
 ulimit -n "$(ulimit -Hn)" 2>/dev/null
+
+# Turnip reports most of the shared system RAM as device-local memory, so
+# DXVK tells games they have ~11 GB of VRAM and they fill it with texture
+# caches (Trackmania: 6 GB), which swaps the whole tablet. Report a 4 GB
+# GPU instead; a game's own DXVK_CONFIG launch option still wins.
+export DXVK_CONFIG="dxgi.maxDeviceMemory = ${PORTAL_VRAM_MB:-4096}; dxgi.maxSharedMemory = ${PORTAL_VRAM_MB:-4096}${DXVK_CONFIG:+; $DXVK_CONFIG}"
 
 # Keep compiled shaders between runs: Mesa's cache for Turnip pipelines and
 # FEX's JIT cache for translated x86 code.
