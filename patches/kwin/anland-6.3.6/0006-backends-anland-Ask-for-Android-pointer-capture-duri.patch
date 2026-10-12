@@ -9,12 +9,13 @@ emulating an X11 pointer warp), send OUTPUT_TYPE_SET_CONSUMER_VAR with
 CONSUMER_VAR_CAPTURE_MOUSE = 1, as upstream Anland's consumer expects,
 and 0 when it ends. The consumer then takes Android pointer capture, so
 the host cursor hides and relative motion no longer stops at the screen
-edges. The value is resent after a consumer reconnect.
+edges. The value is resent after a consumer reconnect, and withdrawn
+when a lock goes away with the client that held it.
 ---
- src/backends/anland/anland_backend.cpp | 50 ++++++++++++++++++++++++++
+ src/backends/anland/anland_backend.cpp | 54 ++++++++++++++++++++++++++++
  src/backends/anland/anland_backend.h   |  7 ++++
  src/backends/anland/protocol.h         | 13 +++++++
- 3 files changed, 70 insertions(+)
+ 3 files changed, 74 insertions(+)
 
 diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
 index 706ec40..d713df2 100644
@@ -43,7 +44,7 @@ index 706ec40..d713df2 100644
      return true;
  }
  
-@@ -286,6 +293,45 @@ void AnlandBackend::onInputReadable()
+@@ -286,6 +293,49 @@ void AnlandBackend::onInputReadable()
      }
  }
  
@@ -54,12 +55,16 @@ index 706ec40..d713df2 100644
 + * consumer takes Android pointer capture: the system cursor hides and raw
 + * relative motion arrives instead. KWin locks and unlocks a surface's pointer
 + * as focus and the lock request change, and both show up as lockedChanged.
++ * A client that dies holding a lock can lose its surface first, which drops
++ * the surface's own report of the lock ending, so the lock's destruction is
++ * watched as well.
 + */
 +void AnlandBackend::watchPointerConstraints(SurfaceInterface *surface)
 +{
 +    connect(surface, &SurfaceInterface::pointerConstraintsChanged, this, [this, surface]() {
 +        if (LockedPointerV1Interface *lock = surface->lockedPointer()) {
 +            connect(lock, &LockedPointerV1Interface::lockedChanged, this, &AnlandBackend::updatePointerCapture, Qt::UniqueConnection);
++            connect(lock, &QObject::destroyed, this, &AnlandBackend::updatePointerCapture, Qt::UniqueConnection);
 +        }
 +        updatePointerCapture();
 +    });
@@ -89,7 +94,7 @@ index 706ec40..d713df2 100644
  QPointF AnlandBackend::mapInputToLogical(const QPointF &devicePoint) const
  {
      AnlandOutput *output = m_outputs[0];
-@@ -509,6 +555,8 @@ void AnlandBackend::enterFallback()
+@@ -509,6 +559,8 @@ void AnlandBackend::enterFallback()
  
      m_consumerReady = false;
      m_inFallback = true;
@@ -98,7 +103,7 @@ index 706ec40..d713df2 100644
  
      // Detach the audio socket before the transport closes the borrowed fd. The streams
      // keep running (capture drops its PCM, the mic Source feeds silence), so PipeWire
-@@ -559,6 +607,8 @@ void AnlandBackend::onReconnectTimer()
+@@ -559,6 +611,8 @@ void AnlandBackend::onReconnectTimer()
      }
      setupNotifiers();
      qCDebug(KWIN_ANLAND) << "reconnect: notifiers installed";
