@@ -749,6 +749,8 @@ fn xwayland_variant_selection_policy() {
         assert!(XWAYLAND_PORTAL_SHA256SUMS_SOURCE.contains(pinned));
     }
     assert!(ANLAND_ENV_SOURCE.contains(".unwrap_or(XwaylandVariant::Portal)"));
+    // 2c. Borderless fullscreen games: the KWin script is synced every launch.
+    assert!(ANDROID_SETUP_SOURCE.contains("usr/share/kwin/scripts/portal-borderless-fullscreen"));
     // 3. files/xwayland-variant reaches the guest as an explicit env var.
     assert!(ANLAND_ENV_SOURCE.contains("LOCALDESKTOP_XWAYLAND_VARIANT"));
     assert!(ANLAND_ENV_SOURCE.contains("xwayland-variant"));

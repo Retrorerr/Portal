@@ -1,0 +1,17 @@
+{
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Portal"
+            }
+        ],
+        "Description": "Shows undecorated X11 windows that cover the whole screen (borderless fullscreen games) as fullscreen, above the panel.",
+        "EnabledByDefault": true,
+        "Id": "portal-borderless-fullscreen",
+        "License": "GPL-3.0-or-later",
+        "Name": "Borderless fullscreen games"
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}

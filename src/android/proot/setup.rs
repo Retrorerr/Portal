@@ -74,6 +74,21 @@ pub struct SetupOptions {
 pub type SetupCompletionCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 const KWIN_WRAPPER: &str = include_str!("../../../assets/localdesktop-kwin-wrapper-v2.sh");
+/// KWin script: undecorated X11 windows covering their output (borderless
+/// fullscreen games) become fullscreen, above the panel. Enabled by default;
+/// System Settings > Window Management > KWin Scripts can turn it off.
+const KWIN_SCRIPT_BORDERLESS_FULLSCREEN: [(&str, &str); 2] = [
+    (
+        "metadata.json",
+        include_str!("../../../assets/kwin-scripts/portal-borderless-fullscreen/metadata.json"),
+    ),
+    (
+        "contents/code/main.js",
+        include_str!(
+            "../../../assets/kwin-scripts/portal-borderless-fullscreen/contents/code/main.js"
+        ),
+    ),
+];
 /// Opt-in helper deriving user desktop entries for Chromium/Electron apps
 /// (see `setup_chromium_no_sandbox`). PRoot emulates the user and PID
 /// namespaces their sandbox needs; `--no-sandbox` is only added where that
@@ -1346,6 +1361,19 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
             .expect("Failed to install Plasma shell autostart supervision");
     }
     write_executable(&fs_root.join("usr/local/bin/kwin_wayland"), KWIN_WRAPPER);
+    let kwin_script = fs_root.join("usr/share/kwin/scripts/portal-borderless-fullscreen");
+    for (name, contents) in KWIN_SCRIPT_BORDERLESS_FULLSCREEN {
+        let path = kwin_script.join(name);
+        let current = fs::read_to_string(&path).map(|old| old == contents).unwrap_or(false);
+        if !current {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(error) = fs::write(&path, contents) {
+                log::warn!("KWin script {} not installed: {error}", path.display());
+            }
+        }
+    }
     let recovery_launcher = RECOVERY_LAUNCHER.replace("@UI_SCALE@", &ui_scale.to_string());
     write_executable(
         &fs_root.join("usr/local/bin/start-localdesktop-recovery"),
