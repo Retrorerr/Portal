@@ -599,7 +599,7 @@ impl<T: 'static> EventLoop<T> {
                 MainEvent::WindowResized { .. } => resized = true,
                 MainEvent::RedrawNeeded { .. } => pending_redraw = true,
                 MainEvent::ContentRectChanged { .. } => {
-                    warn!("TODO: find a way to notify application of content rect change");
+                    debug!("TODO: find a way to notify application of content rect change");
                 },
                 MainEvent::GainedFocus => {
                     HAS_FOCUS.store(true, Ordering::Relaxed);
@@ -647,7 +647,7 @@ impl<T: 'static> EventLoop<T> {
                 },
                 MainEvent::Start => {
                     // XXX: how to forward this state to applications?
-                    warn!("TODO: forward onStart notification to application");
+                    debug!("TODO: forward onStart notification to application");
                 },
                 MainEvent::Resume { .. } => {
                     debug!("App Resumed - is running");
@@ -674,7 +674,7 @@ impl<T: 'static> EventLoop<T> {
                 },
                 MainEvent::InsetsChanged { .. } => {
                     // XXX: how to forward this state to applications?
-                    warn!("TODO: handle Android InsetsChanged notification");
+                    debug!("TODO: handle Android InsetsChanged notification");
                 },
                 unknown => {
                     trace!("Unknown MainEvent {unknown:?} (ignored)");
