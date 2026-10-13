@@ -1651,7 +1651,11 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
             Err(error)
                 if matches!(
                     error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        // Thawing from Android's cached-app freezer: a recv
+                        // with SO_RCVTIMEO is never restarted.
+                        | std::io::ErrorKind::Interrupted
                 ) =>
             {
                 continue;
