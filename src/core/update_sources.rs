@@ -43,9 +43,14 @@ pub const CHATGPT_DEB_URL: &str =
 /// ETag on the first line, its Last-Modified on the second.
 pub const CHATGPT_STAMP_REL: &str = "var/lib/localdesktop/chatgpt-deb.stamp";
 
-/// Minimum time between checks of every feed. Checks are small (one API
-/// call per feed, apt's package lists), so they can run often.
+/// Minimum time between refreshes of apt's package lists, which are tens of
+/// megabytes.
 pub const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
+/// Minimum time between checks of the small feeds: the update policy, the
+/// Portal and Mesa releases (one GitHub API call each) and ChatGPT's HEAD.
+/// Short, so a build vetted or blocked in the policy reaches running
+/// installs within about half an hour.
+pub const SOURCE_CHECK_INTERVAL_SECS: u64 = 30 * 60;
 
 /// The maintainer's update gate, fetched before every check so a broken
 /// upstream build can be stopped on every install without a new APK.

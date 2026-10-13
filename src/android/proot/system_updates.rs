@@ -50,7 +50,7 @@ use crate::{
             compare_mesa_versions, deb_refresh_needed, mesa_update, parse_http_date, parse_semver,
             release_summary,
             AppRelease, DebStamp, GithubRelease, MesaRelease, UpdatePolicy, CHATGPT_DEB_URL,
-            CHATGPT_STAMP_REL, CHECK_INTERVAL_SECS, MESA_RELEASES_API, POLICY_URL,
+            CHATGPT_STAMP_REL, SOURCE_CHECK_INTERVAL_SECS, MESA_RELEASES_API, POLICY_URL,
         },
     },
 };
@@ -689,7 +689,9 @@ fn check_is_due() -> bool {
     let now = now_secs();
     match read_host_cache() {
         None => true,
-        Some(cache) => cache.checked_at > now || now - cache.checked_at >= CHECK_INTERVAL_SECS,
+        Some(cache) => {
+            cache.checked_at > now || now - cache.checked_at >= SOURCE_CHECK_INTERVAL_SECS
+        }
     }
 }
 
@@ -700,8 +702,9 @@ fn retry_delay(failures: u32) -> Duration {
 
 /// Check for updates while Portal runs: first a while after the desktop
 /// appears, then whenever the last complete check is older than
-/// [`CHECK_INTERVAL_SECS`], retrying failures with a growing delay. Results
-/// show on the Return-to-Plasma screen.
+/// [`SOURCE_CHECK_INTERVAL_SECS`] (apt's lists only every six hours),
+/// retrying failures with a growing delay. Results show on the
+/// Return-to-Plasma screen.
 pub fn schedule_background_check(android_app: &AndroidApp) {
     static SCHEDULED: AtomicBool = AtomicBool::new(false);
     if SCHEDULED.swap(true, AtomicOrdering::AcqRel) {
