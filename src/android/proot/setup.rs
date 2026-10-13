@@ -194,6 +194,18 @@ const INITIAL_APPEARANCE_HELPER: &str =
     include_str!("../../../assets/localdesktop-apply-initial-appearance.py");
 const INITIAL_APPEARANCE_AUTOSTART: &str =
     include_str!("../../../assets/localdesktop-initial-appearance.desktop");
+/// Per-screen Plasma scale for foldables (cover vs inner screen), driven by
+/// the `/tmp/localdesktop-output` file Portal rewrites on every resize.
+const OUTPUT_SCALE_HELPER: &str = include_str!("../../../assets/localdesktop-output-scale.py");
+const OUTPUT_SCALE_AUTOSTART: &str = concat!(
+    "[Desktop Entry]\n",
+    "Type=Application\n",
+    "Name=Portal Output Scale\n",
+    "Exec=/usr/local/bin/localdesktop-output-scale\n",
+    "OnlyShowIn=KDE;\n",
+    "X-KDE-autostart-after=panel\n",
+    "NoDisplay=true\n",
+);
 const CLIPBOARD_SYNC: &str = include_str!("../../../assets/localdesktop-clipboard-sync.sh");
 const CLIPBOARD_PUSH: &str = include_str!("../../../assets/localdesktop-clipboard-push.sh");
 const WL_COPY_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-copy");
@@ -1419,6 +1431,20 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/localdesktop-clipboard-push"),
         CLIPBOARD_PUSH,
     );
+    write_executable(
+        &fs_root.join("usr/local/bin/localdesktop-output-scale"),
+        OUTPUT_SCALE_HELPER,
+    );
+    // Started by Plasma's session so it inherits the session bus and KWin's
+    // Wayland socket, which kscreen-doctor needs.
+    let output_scale_autostart =
+        fs_root.join("etc/xdg/autostart/localdesktop-output-scale.desktop");
+    if let Some(parent) = output_scale_autostart.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Err(error) = fs::write(&output_scale_autostart, OUTPUT_SCALE_AUTOSTART) {
+        log::warn!("Output scale autostart not installed: {error}");
+    }
     // Debian Trixie's locked runtime still carries wl-clipboard 2.2.1,
     // which predates KWin's ext-data-control support. Bundle the matching
     // ARM64 2.3 clients into /usr/local/bin so the helper is authoritative

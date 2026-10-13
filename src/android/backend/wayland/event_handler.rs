@@ -850,7 +850,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             }
 
             let guest_scale = guest_scale_factor.round().max(1.0) as i32;
-            write_guest_output_state(size.w, size.h, guest_scale);
+            write_guest_output_state(size.w, size.h, guest_scale, density_dpi);
 
             let configure_size = backend
                 .compositor

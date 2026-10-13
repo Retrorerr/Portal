@@ -1,22 +1,29 @@
 use crate::core::runtime::LinuxRuntime;
 
-/// Persist host window geometry for guest-side labwc autostart (`localdesktop-wlroots-output`).
+/// Persist host window geometry for guest-side scripts: the recovery
+/// session's output mode and `localdesktop-output-scale`, which gives each
+/// screen size (a foldable's cover and inner screens) its own Plasma scale.
 ///
-/// The file lives in the proot-visible `/tmp` directory so scripts running inside the
-/// Xfce/labwc session can align wlroots output mode/scale with the Android winit window.
-pub fn write_guest_output_state(width: i32, height: i32, scale: i32) {
-    if width <= 0 || height <= 0 || scale <= 0 {
+/// The file lives in the proot-visible `/tmp` directory and is replaced
+/// atomically, so a reader woken by inotify never sees half of it.
+pub fn write_guest_output_state(width: i32, height: i32, scale: i32, density_dpi: i32) {
+    if width <= 0 || height <= 0 || scale <= 0 || density_dpi <= 0 {
         return;
     }
 
     let runtime = crate::android::runtime::proot::PRootRuntime::active();
     let path = runtime.rootfs_path().join("tmp/localdesktop-output");
-    let content =
-        format!("LOCALDESKTOP_OUTPUT_MODE={width}x{height}\nLOCALDESKTOP_OUTPUT_SCALE={scale}\n");
+    let content = format!(
+        "LOCALDESKTOP_OUTPUT_MODE={width}x{height}\nLOCALDESKTOP_OUTPUT_SCALE={scale}\n\
+         LOCALDESKTOP_OUTPUT_DENSITY={density_dpi}\n"
+    );
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(error) = std::fs::write(&path, content) {
+    let temporary = path.with_extension("new");
+    let result =
+        std::fs::write(&temporary, content).and_then(|()| std::fs::rename(&temporary, &path));
+    if let Err(error) = result {
         log::warn!(
             "Failed to write guest output state to {}: {error}",
             path.display()

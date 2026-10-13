@@ -151,7 +151,7 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
         Some((0, 0).into()),
     );
     let guest_scale = display_state.baseline_density_scale().round().max(1.0) as i32;
-    write_guest_output_state(window_size.w, window_size.h, guest_scale);
+    write_guest_output_state(window_size.w, window_size.h, guest_scale, density_dpi);
 
     let configure_size = display_state.configure_size();
     for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
