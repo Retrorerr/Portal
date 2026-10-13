@@ -125,7 +125,8 @@ pub fn ensure_renderer_mode() -> anyhow::Result<RendererKind> {
 /// Explicit repair action: select Anland even when an existing Portal install
 /// previously chose (or implicitly fell back to) QPainter. Normal startup
 /// must continue through [`ensure_renderer_mode`]; only the user-requested
-/// graphics repair is allowed to intentionally change an existing choice.
+/// graphics repair, and first setup undoing its own compatibility retry,
+/// may intentionally change an existing choice.
 pub fn force_anland_renderer() -> anyhow::Result<RendererKind> {
     anyhow::ensure!(kgsl_available(), "this device has no KGSL GPU for Anland");
     let selection = crate::core::renderer_policy::set_renderer_mode(
@@ -137,6 +138,22 @@ pub fn force_anland_renderer() -> anyhow::Result<RendererKind> {
         "explicit Anland renderer selection did not persist"
     );
     Ok(RendererKind::Anland)
+}
+
+/// First setup only: the accelerated first session failed on this device,
+/// so setup retries it on the QPainter renderer, which needs nothing from
+/// the GPU stack. The Return screen offers the Anland repair afterwards.
+pub fn select_compatibility_renderer() -> anyhow::Result<()> {
+    let selection = crate::core::renderer_policy::set_renderer_mode(
+        &mode_flag_path(),
+        crate::core::renderer_policy::RendererSelection::QPainter,
+    )?;
+    anyhow::ensure!(
+        selection == crate::core::renderer_policy::RendererSelection::QPainter,
+        "compatibility renderer selection did not persist"
+    );
+    log::warn!("anland.renderer=smithay-qpainter selected by first setup after a failed accelerated session");
+    Ok(())
 }
 
 pub fn is_anland_requested() -> bool {

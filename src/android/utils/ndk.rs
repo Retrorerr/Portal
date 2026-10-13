@@ -63,6 +63,19 @@ pub fn close_after_logout(android_app: &AndroidApp) {
     );
 }
 
+/// Ask PortalActivity to replace its native surface (see `recycleNativeSurface`).
+pub fn recycle_native_surface(android_app: &AndroidApp) {
+    run_in_jvm(
+        |env, app| {
+            let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            if let Err(error) = env.call_method(activity, "recycleNativeSurface", "()V", &[]) {
+                log::error!("Failed to recycle the native surface: {error}");
+            }
+        },
+        android_app.clone(),
+    );
+}
+
 /// Current Android display refresh rate expressed in Wayland mode units (millihertz).
 ///
 /// This is the legacy `Display.getRefreshRate()` reading. New code should prefer

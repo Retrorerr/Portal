@@ -133,6 +133,46 @@ fn first_run_panel_shortcuts_are_attempt_proven_before_runtime_commit() {
 }
 
 #[test]
+fn first_session_retries_on_compatibility_graphics_before_setup_pauses() {
+    let handoff = ANDROID_SETUP_SOURCE
+        .split("fn apply_initial_preferences_before_commit(")
+        .nth(1)
+        .and_then(|source| source.split("fn run_installation(").next())
+        .expect("initial setup handoff must exist");
+    // One automatic retry on QPainter, only after an accelerated session was
+    // started and has been stopped, with the accepted plan re-armed.
+    assert!(handoff.contains("prepare_compatibility_renderer_retry(registration, plan, &error)"));
+    assert!(handoff.contains("recycle_native_surface(&android_app)"));
+    assert!(handoff
+        .contains("InitialPreferencesHandoff::Launched(_) | InitialPreferencesHandoff::Failed(_)"));
+    assert!(handoff.contains("RendererKind::Anland"));
+    assert!(handoff.contains("retire_provisional_session("));
+    assert!(handoff.contains("crate::android::proot::launch::is_running()"));
+    assert!(handoff.contains("select_compatibility_renderer()"));
+    assert!(handoff.contains("persist_install_plan_state(plan, InstallPlanState::InProgress)"));
+    // A retry that fails too gives acceleration back for the next try.
+    assert!(handoff.contains("restore_accelerated_renderer()"));
+    assert!(ANLAND_ENV_SOURCE.contains("pub fn select_compatibility_renderer"));
+
+    // An app setup handed to the app manager has no launcher to pin at 99%.
+    let launchers = ANDROID_SETUP_SOURCE
+        .split("fn initial_launcher_apps(")
+        .nth(1)
+        .and_then(|source| source.split("fn prepare_initial_preferences_handoff(").next())
+        .expect("first-run launcher selection must exist");
+    assert!(launchers.contains("deferred_optional_app_ids()"));
+    assert!(launchers.contains("desktop_file_id()"));
+    let prepare = ANDROID_SETUP_SOURCE
+        .split("fn prepare_initial_preferences_handoff(")
+        .nth(1)
+        .and_then(|source| source.split("fn read_appearance_proof(").next())
+        .expect("initial preferences payload must exist");
+    assert!(prepare.contains("initial_launcher_apps(root, plan)"));
+    assert!(!prepare.contains("plan
+        .selected_apps()"));
+}
+
+#[test]
 fn nominal_output_refresh_is_independent_of_physical_vrr() {
     // Fallback constants stay sane when mode enumeration is unavailable.
     assert_eq!(NOMINAL_OUTPUT_REFRESH_MILLIHZ, 120_000);

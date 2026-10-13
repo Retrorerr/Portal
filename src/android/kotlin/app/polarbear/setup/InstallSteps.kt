@@ -76,10 +76,12 @@ fun installStep(progress: Int, message: String): InstallStep {
                 "Setting up KDE Plasma"
             }
         }
-        else -> if (message.contains("appearance", ignoreCase = true)) {
-            "Applying your appearance and size"
-        } else {
-            "Starting Plasma"
+        else -> when {
+            // GPU acceleration did not start; setup retries without it.
+            message.contains("compatibility graphics", ignoreCase = true) ->
+                "Starting with compatibility graphics"
+            message.contains("appearance", ignoreCase = true) -> "Applying your appearance and size"
+            else -> "Starting Plasma"
         }
     }
     return InstallStep(index, label)

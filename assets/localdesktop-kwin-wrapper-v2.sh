@@ -420,8 +420,12 @@ run_real_kwin() {
                 ;;
         esac
     fi
-    /usr/bin/kwin_wayland --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" 2>&1 | tee -a "$log_file"
-    return "${PIPESTATUS[0]}"
+    # Process substitution, not a pipeline: KWin's children (the input
+    # method bridge, Xwayland, session helpers) inherit its stdout, and a
+    # pipeline waits until all of them close it. A crashed KWin then went
+    # unreported until the host gave up on the session.
+    /usr/bin/kwin_wayland --no-lockscreen --inputmethod /usr/local/bin/portal-ime-bridge "$@" > >(tee -a "$log_file") 2>&1
+    return $?
 }
 
 status=0

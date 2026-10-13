@@ -46,6 +46,11 @@ FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}\Z")
 ATTEMPT_RE = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 MAX_WAIT_SECONDS = 60
 MAX_PANEL_WAIT_SECONDS = 20
+# The host waits 240 s for the proof after Plasma launches. A cold first
+# session (slow storage, first shader and icon caches) can miss one bounded
+# pass, so the whole idempotent apply is retried until this deadline.
+MAX_APPLY_SECONDS = 180
+APPLY_RETRY_PAUSE_SECONDS = 5
 
 # Native OptionalApp IDs map to the desktop-entry IDs shipped by Debian
 # Trixie (Steam's is Portal's own). tests/test_initial_setup_helper.py keeps
@@ -670,12 +675,23 @@ def apply():
 
 
 def main():
-    try:
-        apply()
-    except (ApplyError, BlockingIOError, OSError) as error:
-        log(f"apply-failed error={str(error)[:300]}")
-        return 1
-    return 0
+    deadline = time.monotonic() + MAX_APPLY_SECONDS
+    attempt = 1
+    while True:
+        try:
+            apply()
+            return 0
+        except BlockingIOError as error:
+            # Another helper instance holds the lock and owns this attempt.
+            log(f"apply-failed error={str(error)[:300]}")
+            return 1
+        except (ApplyError, OSError) as error:
+            if time.monotonic() + APPLY_RETRY_PAUSE_SECONDS >= deadline:
+                log(f"apply-failed attempts={attempt} error={str(error)[:300]}")
+                return 1
+            log(f"apply-retry attempt={attempt} error={str(error)[:300]}")
+        time.sleep(APPLY_RETRY_PAUSE_SECONDS)
+        attempt += 1
 
 
 if __name__ == "__main__":

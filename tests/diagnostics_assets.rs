@@ -11,6 +11,12 @@ const DIAGNOSTICS_DOC: &str = include_str!("../docs/diagnostics-integration.md")
 const GIT_ATTRIBUTES: &str = include_str!("../.gitattributes");
 const RECOVERY_SCREEN: &str = include_str!("../src/android/kotlin/app/polarbear/RecoveryScreen.kt");
 const RECOVERY_BRIDGE: &str = include_str!("../src/android/utils/recovery_screen.rs");
+const COMPOSE_OVERLAY: &str = include_str!("../src/android/kotlin/app/polarbear/ComposeOverlay.kt");
+const COMPOSE_BRIDGE: &str = include_str!("../src/android/utils/compose_overlay.rs");
+const SETUP_SCREEN: &str =
+    include_str!("../src/android/kotlin/app/polarbear/setup/PortalSetupScreen.kt");
+const SETUP_STATUS_PANEL: &str =
+    include_str!("../src/android/kotlin/app/polarbear/setup/components/InstallStatusPanel.kt");
 const ANDROID_MAIN: &str = include_str!("../src/android/main.rs");
 const DRMSHIM_SOURCE: &str = include_str!("../assets/guest-arm64/drmshim.c");
 const DRMSHIM_BINARY: &[u8] = include_bytes!("../assets/guest-arm64/drmshim.so");
@@ -64,6 +70,9 @@ fn kwin_wrapper_does_not_make_gdb_a_release_requirement() {
     assert!(KWIN_WRAPPER.contains("LOCALDESKTOP_CRASH_LOG"));
     assert!(KWIN_WRAPPER.contains("during startup program exited"));
     assert!(KWIN_WRAPPER.contains("tee -a \"$log_file\""));
+    // Waiting on the tee pipeline would wait for every child KWin left behind.
+    assert!(KWIN_WRAPPER.contains("> >(tee -a \"$log_file\") 2>&1"));
+    assert!(!KWIN_WRAPPER.contains("PIPESTATUS"));
 }
 
 #[test]
@@ -265,7 +274,30 @@ fn recovery_screen_offers_one_tap_export() {
     assert!(RECOVERY_SCREEN.contains("Export diagnostics"));
     assert!(RECOVERY_SCREEN.contains("nativeExportDiagnostics()"));
     assert!(RECOVERY_BRIDGE.contains("Java_app_polarbear_RecoveryScreen_nativeExportDiagnostics"));
-    assert!(RECOVERY_BRIDGE.contains("diagnostics::export_and_share(&app)"));
+    assert!(RECOVERY_BRIDGE.contains("diagnostics::export_and_share_in_background("));
+    let background = DIAGNOSTICS
+        .split_once("pub fn export_and_share_in_background(")
+        .map(|(_, body)| body)
+        .expect("one shared background export");
+    assert!(background.contains("export_and_share(&android_app)"));
+    assert!(background.contains("EXPORT_RUNNING.swap(true"));
+}
+
+#[test]
+fn paused_setup_offers_the_same_export() {
+    // A first install that stops before Plasma ever ran has no recovery
+    // screen, so the paused setup card exports the same archive.
+    assert!(SETUP_STATUS_PANEL.contains("Export diagnostics →"));
+    assert!(SETUP_SCREEN.contains("ComposeOverlay::exportDiagnostics"));
+    assert!(COMPOSE_OVERLAY.contains("nativeExportDiagnostics()"));
+    assert!(COMPOSE_OVERLAY.contains("fun onDiagnosticsExportResult("));
+    assert!(COMPOSE_BRIDGE.contains("Java_app_polarbear_ComposeOverlay_nativeExportDiagnostics"));
+    assert!(COMPOSE_BRIDGE.contains("diagnostics::export_and_share_in_background("));
+    assert!(COMPOSE_BRIDGE.contains("\"onDiagnosticsExportResult\""));
+    // The archive says what the device is and carries the 99% helper's log.
+    assert!(DIAGNOSTICS.contains("\"device.txt\""));
+    assert!(DIAGNOSTICS.contains("KGSL_PROP_DEVICE_INFO"));
+    assert!(DIAGNOSTICS.contains("\"guest/initial-appearance.log\""));
 }
 
 #[test]

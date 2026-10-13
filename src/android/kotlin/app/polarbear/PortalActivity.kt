@@ -223,6 +223,29 @@ open class PortalActivity : GameActivity() {
     }
 
     /**
+     * Native (any thread): give the desktop a fresh Android surface. Anland
+     * connects the window to the CPU buffer API and Android has no public
+     * call that disconnects it, so an EGL renderer cannot use that surface
+     * afterwards. Hiding the SurfaceView releases its surface and showing it
+     * again creates a new one through the usual native window callbacks; the
+     * view itself is never detached or recreated.
+     */
+    fun recycleNativeSurface() {
+        runOnUiThread {
+            val host = overlayHost()
+            val surface = (0 until host.childCount)
+                .map(host::getChildAt)
+                .firstOrNull { it is android.view.SurfaceView }
+            if (surface == null) {
+                Log.w(TAG, "No native SurfaceView to recycle")
+                return@runOnUiThread
+            }
+            surface.visibility = android.view.View.GONE
+            surface.postDelayed({ surface.visibility = android.view.View.VISIBLE }, 300)
+        }
+    }
+
+    /**
      * Native (any thread): a guest client took (or released) a pointer lock,
      * see src/android/utils/pointer_capture.rs. While it is held, Android
      * pointer capture hides the system cursor and turns the mouse into raw

@@ -517,13 +517,21 @@ impl InstallPlan {
 /// Validate the guest-side readback which is allowed to close a first-run
 /// install. `output_id` and `observed_scale` are returned for diagnostics; all
 /// other fields must exactly match the immutable native plan and this Plasma
-/// launch attempt.
+/// launch attempt. `launcher_apps` are the selected apps this attempt pins:
+/// an app setup handed to the app manager has no launcher to pin yet.
 pub fn validate_initial_setup_proof(
     contents: &str,
     plan: &InstallPlan,
+    launcher_apps: &[OptionalApp],
     appearance: AppliedAppearance,
     attempt_id: &str,
 ) -> anyhow::Result<(u32, f64)> {
+    anyhow::ensure!(
+        launcher_apps
+            .iter()
+            .all(|app| plan.selected_apps().contains(app)),
+        "Initial setup launchers include an app the plan did not select"
+    );
     anyhow::ensure!(contents.is_ascii(), "Initial setup proof is not ASCII");
     let allowed = [
         "version",
@@ -581,8 +589,7 @@ pub fn validate_initial_setup_proof(
         fields["scale"] == plan.initial_output_scale_string(),
         "Initial setup proof does not match the accepted output scale"
     );
-    let expected_app_ids = plan
-        .selected_apps()
+    let expected_app_ids = launcher_apps
         .iter()
         .map(|app| app.id())
         .collect::<Vec<_>>()
@@ -591,8 +598,7 @@ pub fn validate_initial_setup_proof(
         fields["app_ids"] == expected_app_ids,
         "Initial setup proof does not match the selected applications"
     );
-    let expected_launcher_urls = plan
-        .selected_apps()
+    let expected_launcher_urls = launcher_apps
         .iter()
         .copied()
         .map(OptionalApp::plasma_launcher_url)
@@ -1169,14 +1175,21 @@ mod tests {
     }
 
     fn valid_setup_proof(plan: &InstallPlan, attempt_id: &str, widget_ids: &str) -> String {
-        let app_ids = plan
-            .selected_apps()
+        setup_proof_for(plan, plan.selected_apps(), attempt_id, widget_ids)
+    }
+
+    fn setup_proof_for(
+        plan: &InstallPlan,
+        launcher_apps: &[OptionalApp],
+        attempt_id: &str,
+        widget_ids: &str,
+    ) -> String {
+        let app_ids = launcher_apps
             .iter()
             .map(|app| app.id())
             .collect::<Vec<_>>()
             .join(",");
-        let launchers = plan
-            .selected_apps()
+        let launchers = launcher_apps
             .iter()
             .copied()
             .map(OptionalApp::plasma_launcher_url)
@@ -1194,8 +1207,14 @@ mod tests {
         let plan = InstallPlan::from_json(VALID_PLAN).unwrap();
         let proof = valid_setup_proof(&plan, "12-34", "3,4");
         assert_eq!(
-            validate_initial_setup_proof(&proof, &plan, AppliedAppearance::Dark, "12-34")
-                .unwrap(),
+            validate_initial_setup_proof(
+                &proof,
+                &plan,
+                plan.selected_apps(),
+                AppliedAppearance::Dark,
+                "12-34"
+            )
+            .unwrap(),
             (1, 2.0)
         );
 
@@ -1223,6 +1242,7 @@ mod tests {
                 validate_initial_setup_proof(
                     &rejected,
                     &plan,
+                    plan.selected_apps(),
                     AppliedAppearance::Dark,
                     "12-34"
                 )
@@ -1240,17 +1260,62 @@ mod tests {
         );
         let plan = InstallPlan::from_json(&plan_json).unwrap();
         let proof = valid_setup_proof(&plan, "55-66", "3");
-        assert!(validate_initial_setup_proof(&proof, &plan, AppliedAppearance::Dark, "55-66").is_ok());
+        assert!(validate_initial_setup_proof(
+            &proof,
+            &plan,
+            plan.selected_apps(),
+            AppliedAppearance::Dark,
+            "55-66"
+        )
+        .is_ok());
         let missing_widget = proof.replace("widget_ids=3\n", "widget_ids=\n");
         assert!(
             validate_initial_setup_proof(
                 &missing_widget,
                 &plan,
+                plan.selected_apps(),
                 AppliedAppearance::Dark,
                 "55-66"
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn initial_setup_proof_pins_only_the_apps_this_attempt_could_install() {
+        // Setup handed LibreOffice to the app manager after its install
+        // failed: the first session pins the other two and still closes.
+        let plan = InstallPlan::from_json(VALID_PLAN).unwrap();
+        let installed = [OptionalApp::Gimp, OptionalApp::Vlc];
+        let proof = setup_proof_for(&plan, &installed, "77-88", "3");
+        assert!(validate_initial_setup_proof(
+            &proof,
+            &plan,
+            &installed,
+            AppliedAppearance::Dark,
+            "77-88"
+        )
+        .is_ok());
+        // The proof must match this attempt's launcher list exactly.
+        assert!(validate_initial_setup_proof(
+            &proof,
+            &plan,
+            plan.selected_apps(),
+            AppliedAppearance::Dark,
+            "77-88"
+        )
+        .is_err());
+        // An app the user never selected can never be pinned.
+        let unselected = [OptionalApp::Gimp, OptionalApp::Thunderbird];
+        let proof = setup_proof_for(&plan, &unselected, "77-88", "3");
+        assert!(validate_initial_setup_proof(
+            &proof,
+            &plan,
+            &unselected,
+            AppliedAppearance::Dark,
+            "77-88"
+        )
+        .is_err());
     }
 
     #[test]

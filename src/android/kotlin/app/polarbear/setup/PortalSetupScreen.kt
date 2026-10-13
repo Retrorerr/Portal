@@ -224,6 +224,7 @@ fun PortalSetupScreen(
     var optionalAppIds by remember { mutableStateOf(DEFAULT_OPTIONAL_APP_IDS) }
     var lastPress by remember { mutableStateOf(Offset.Unspecified) }
     val realInstallState by ComposeOverlay.installState()
+    val diagnosticsExport by ComposeOverlay.diagnosticsExportState()
     var scriptedInstall by remember { mutableStateOf<ComposeOverlay.InstallUiState?>(null) }
     var scriptedRun by remember { mutableIntStateOf(0) }
     var scriptedDesktopReady by remember { mutableStateOf(false) }
@@ -700,6 +701,9 @@ fun PortalSetupScreen(
                                             modifier = Modifier
                                                 .padding(horizontal = if (twoColumn) 12.dp else 0.dp)
                                                 .padding(top = 6.dp, bottom = panelBottom),
+                                            onExportDiagnostics = if (previewOnly) null else ComposeOverlay::exportDiagnostics,
+                                            exportStatus = diagnosticsExport?.message,
+                                            exportRunning = diagnosticsExport?.running == true,
                                         )
                                     }
                                     }

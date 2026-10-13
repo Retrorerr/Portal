@@ -926,8 +926,8 @@ pub(crate) fn validate_optional_app_apt_setup(fs_root: &Path) -> anyhow::Result<
 
 /// Install only the fixed native allowlist selected in the durable plan.
 /// Debian apt/dpkg preparation has already run in `plasma-wayland`; retry
-/// checks package state and installs only missing selections. A requested
-/// package that cannot be installed fails setup before Portal's marker.
+/// checks package state and installs only missing selections. An app that
+/// still cannot be installed is handed to the app manager; setup goes on.
 fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
     if !options.install_optional_apps {
         return None;
@@ -973,6 +973,10 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
         .copied()
         .filter(|app| app.is_electron())
         .collect::<Vec<_>>();
+    if missing.is_empty() {
+        // An app an earlier attempt deferred has been installed since.
+        clear_deferred_optional_apps();
+    }
     if missing.is_empty() && electron_apps.is_empty() {
         provision_ibus_packages(fs_root);
         return None;
@@ -1005,7 +1009,10 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
         match installed {
             // This is a one-time first-run application to the selected
             // user's desktop entry. A later cold start must not regenerate it.
-            Ok(()) => super::optional_apps::prepare_electron_launchers_for_setup(&electron_apps)?,
+            Ok(()) => {
+                clear_deferred_optional_apps();
+                super::optional_apps::prepare_electron_launchers_for_setup(&electron_apps)?
+            }
             // An extra app must never stand between the user and the
             // desktop: the app manager installs it once Plasma is up.
             Err(error) => {
@@ -1030,6 +1037,23 @@ fn defer_optional_apps(apps: &[OptionalApp]) -> anyhow::Result<()> {
         .join("\n");
     fs::write(Path::new(APP_FILES_ROOT).join(DEFERRED_OPTIONAL_APPS), ids)
         .context("could not record the optional apps left for later")
+}
+
+fn clear_deferred_optional_apps() {
+    let _ = fs::remove_file(Path::new(APP_FILES_ROOT).join(DEFERRED_OPTIONAL_APPS));
+}
+
+/// IDs the latest optional-apps run left for the app manager.
+fn deferred_optional_app_ids() -> Vec<String> {
+    fs::read_to_string(Path::new(APP_FILES_ROOT).join(DEFERRED_OPTIONAL_APPS))
+        .map(|ids| {
+            ids.lines()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Hand apps setup deferred to the app manager. Runs once the runtime is
@@ -4453,11 +4477,36 @@ fn initial_appearance_proof_path(root: &Path) -> PathBuf {
     chroot_home_dir(root, &username).join(INITIAL_APPEARANCE_PROOF)
 }
 
+/// The selected apps the first session pins to the panel. One setup handed
+/// to the app manager, or one without its desktop entry, has no launcher to
+/// pin yet and must not hold up the handoff.
+fn initial_launcher_apps(root: &Path, plan: &InstallPlan) -> Vec<OptionalApp> {
+    let deferred = deferred_optional_app_ids();
+    let applications = root.join("usr/share/applications");
+    plan.selected_apps()
+        .iter()
+        .copied()
+        .filter(|app| {
+            let skipped = if deferred.iter().any(|id| id == app.id()) {
+                Some("deferred to the app manager")
+            } else if fs::symlink_metadata(applications.join(app.desktop_file_id())).is_err() {
+                Some("desktop entry missing")
+            } else {
+                None
+            };
+            if let Some(reason) = skipped {
+                log::warn!("First-run panel launchers skip {}: {reason}", app.id());
+            }
+            skipped.is_none()
+        })
+        .collect()
+}
+
 fn prepare_initial_preferences_handoff(
     root: &Path,
     android_app: &AndroidApp,
     plan: &InstallPlan,
-) -> anyhow::Result<(AppliedAppearance, String)> {
+) -> anyhow::Result<(AppliedAppearance, String, Vec<OptionalApp>)> {
     let appearance = resolve_initial_appearance(android_app, plan)?;
     let fingerprint = plan.fingerprint()?;
     let scale = plan.initial_output_scale_string();
@@ -4474,8 +4523,8 @@ fn prepare_initial_preferences_handoff(
     let attempt_id = format!("{}-{nonce}", process::id());
     let proof_path = initial_appearance_proof_path(root);
     remove_guest_file(&proof_path, false)?;
-    let app_ids = plan
-        .selected_apps()
+    let launcher_apps = initial_launcher_apps(root, plan);
+    let app_ids = launcher_apps
         .iter()
         .map(|app| app.id())
         .collect::<Vec<_>>()
@@ -4488,7 +4537,7 @@ fn prepare_initial_preferences_handoff(
         }
     );
     atomic_write_guest_file(&root.join(INITIAL_APPEARANCE_PLAN), payload.as_bytes())?;
-    Ok((appearance, attempt_id))
+    Ok((appearance, attempt_id, launcher_apps))
 }
 
 fn read_appearance_proof(path: &Path) -> anyhow::Result<Option<String>> {
@@ -4517,19 +4566,21 @@ fn read_appearance_proof(path: &Path) -> anyhow::Result<Option<String>> {
 fn verify_initial_preferences_proof(
     root: &Path,
     plan: &InstallPlan,
+    launcher_apps: &[OptionalApp],
     appearance: AppliedAppearance,
     attempt_id: &str,
 ) -> anyhow::Result<bool> {
     let Some(contents) = read_appearance_proof(&initial_appearance_proof_path(root))? else {
         return Ok(false);
     };
-    validate_initial_setup_proof(&contents, plan, appearance, attempt_id)?;
+    validate_initial_setup_proof(&contents, plan, launcher_apps, appearance, attempt_id)?;
     Ok(true)
 }
 
 fn wait_for_initial_preferences_proof(
     root: &Path,
     plan: &InstallPlan,
+    launcher_apps: &[OptionalApp],
     appearance: AppliedAppearance,
     attempt_id: &str,
 ) -> anyhow::Result<()> {
@@ -4553,7 +4604,7 @@ fn wait_for_initial_preferences_proof(
             _ => anyhow::bail!("Initial-preferences handoff ended before proof was accepted"),
         }
         if matches!(&handoff, InitialPreferencesHandoff::Launched(_))
-            && verify_initial_preferences_proof(root, plan, appearance, attempt_id)?
+            && verify_initial_preferences_proof(root, plan, launcher_apps, appearance, attempt_id)?
         {
             let mut coordinator = setup_coordinator()
                 .lock()
@@ -4585,62 +4636,178 @@ fn apply_initial_preferences_before_commit(
     android_app: &AndroidApp,
     plan: &InstallPlan,
 ) -> Result<(), SetupFailure> {
-    let root = Path::new(PRODUCTION_FS_ROOT);
-    stage_initial_appearance_helper(root).map_err(|error| {
+    let failure = |error: anyhow::Error| {
         SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}"))
-    })?;
-    let prepared =
-        prepare_initial_preferences_handoff(root, android_app, plan).map_err(|error| {
-            SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}"))
-        })?;
-    let (appearance, attempt_id) = prepared;
-    {
-        let mut coordinator = setup_coordinator().lock().map_err(|_| {
-            SetupFailure::from_detail(
-                12,
-                "initial-preferences",
-                "setup coordinator lock is poisoned",
-            )
-        })?;
-        if coordinator.state != InstallOperationState::Running
-            || coordinator.install_plan.as_ref() != Some(plan)
-        {
-            return Err(SetupFailure::from_detail(
-                12,
-                "initial-preferences",
-                "Accepted install plan changed before provisional Plasma handoff",
-            ));
+    };
+    let root = Path::new(PRODUCTION_FS_ROOT);
+    stage_initial_appearance_helper(root).map_err(failure)?;
+    if let Err(error) = run_provisional_handoff(
+        registration,
+        android_app,
+        plan,
+        "Applying the selected appearance, display size, and panel shortcuts…",
+    ) {
+        // The accelerated renderer is the part of the first session that
+        // depends on this device's GPU and drivers. When it was in use, the
+        // session gets one more try on the QPainter compatibility renderer,
+        // which runs on any device, before setup asks the user for help.
+        if !prepare_compatibility_renderer_retry(registration, plan, &error) {
+            return Err(failure(error));
         }
+        if let Err(retry_error) = run_provisional_handoff(
+            registration,
+            android_app,
+            plan,
+            "Starting Plasma with compatibility graphics…",
+        ) {
+            // The renderer was not what stopped setup, so the next try
+            // starts accelerated again.
+            if retire_provisional_session(&format!("{retry_error:#}")) {
+                restore_accelerated_renderer();
+            }
+            return Err(failure(retry_error));
+        }
+        diagnostics::host_event(
+            "setup-renderer-fallback",
+            "first session proven on the QPainter compatibility renderer",
+        );
+    }
+    // The helper remains installed but has nothing to apply after this point.
+    // Remove both staged files before the durable runtime marker is written.
+    remove_guest_file(&root.join(INITIAL_APPEARANCE_PLAN), true)
+        .and_then(|()| remove_guest_file(&initial_appearance_proof_path(root), true))
+        .map_err(failure)?;
+    Ok(())
+}
+
+/// One provisional Plasma session: stage this attempt's plan for the guest
+/// helper, hand the window to Plasma and wait for the helper's proof.
+fn run_provisional_handoff(
+    registration: &SetupRegistration,
+    android_app: &AndroidApp,
+    plan: &InstallPlan,
+    message: &str,
+) -> anyhow::Result<()> {
+    let root = Path::new(PRODUCTION_FS_ROOT);
+    let (appearance, attempt_id, launcher_apps) =
+        prepare_initial_preferences_handoff(root, android_app, plan)?;
+    {
+        let mut coordinator = setup_coordinator()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("setup coordinator lock is poisoned"))?;
+        anyhow::ensure!(
+            coordinator.state == InstallOperationState::Running
+                && coordinator.install_plan.as_ref() == Some(plan),
+            "Accepted install plan changed before provisional Plasma handoff"
+        );
         coordinator.initial_preferences_handoff = InitialPreferencesHandoff::Pending(plan.clone());
         coordinator.pending_initial_preferences_failure = None;
     }
     publish_snapshot(
         registration,
-        ProvisioningSnapshot::update(
-            ProvisioningPhase::Finalising,
-            99,
-            "Applying the selected appearance, display size, and panel shortcuts…",
-        ),
+        ProvisioningSnapshot::update(ProvisioningPhase::Finalising, 99, message),
     );
-    let Some(android_app) = registration.android_app() else {
-        return Err(SetupFailure::from_detail(
-            12,
-            "initial-preferences",
-            "Android activity binding is unavailable",
-        ));
-    };
+    let android_app = registration
+        .android_app()
+        .context("Android activity binding is unavailable")?;
     crate::android::utils::webview_handoff::request_initial_preferences_handoff(android_app);
-    wait_for_initial_preferences_proof(root, plan, appearance, &attempt_id).map_err(|error| {
-        SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}"))
-    })?;
-    // The helper remains installed but has nothing to apply after this point.
-    // Remove both staged files before the durable runtime marker is written.
-    remove_guest_file(&root.join(INITIAL_APPEARANCE_PLAN), true)
-        .and_then(|()| remove_guest_file(&initial_appearance_proof_path(root), true))
-        .map_err(|error| {
-            SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}"))
-        })?;
-    Ok(())
+    wait_for_initial_preferences_proof(root, plan, &launcher_apps, appearance, &attempt_id)
+}
+
+/// How long the event loop gets to stop a failed provisional session.
+const PROVISIONAL_RETIRE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// After a failed accelerated first session: stop it, select QPainter and
+/// re-arm the accepted plan for one more try. False when that does not
+/// apply: no session was started, it already ran on QPainter, or the failed
+/// one would not stop. The Return screen offers acceleration again later,
+/// so the fallback is never silent.
+fn prepare_compatibility_renderer_retry(
+    registration: &SetupRegistration,
+    plan: &InstallPlan,
+    error: &anyhow::Error,
+) -> bool {
+    let started = setup_coordinator().lock().is_ok_and(|coordinator| {
+        matches!(
+            coordinator.initial_preferences_handoff,
+            InitialPreferencesHandoff::Launched(_) | InitialPreferencesHandoff::Failed(_)
+        )
+    });
+    if !started
+        || crate::android::anland::active_renderer() != crate::android::anland::RendererKind::Anland
+    {
+        return false;
+    }
+    log::warn!("Accelerated first session failed; retrying with compatibility graphics: {error:#}");
+    diagnostics::host_event("setup-renderer-fallback", &format!("{error:#}"));
+    if !retire_provisional_session(&format!("{error:#}")) {
+        log::error!("The failed accelerated session did not stop; not retrying it");
+        return false;
+    }
+    if let Err(error) = crate::android::anland::select_compatibility_renderer() {
+        log::error!("Could not select the compatibility renderer: {error:#}");
+        return false;
+    }
+    match registration.android_app() {
+        Some(android_app) if recycle_native_surface(&android_app) => {}
+        _ => log::warn!("The native surface was not replaced; the compatibility retry may not get a window"),
+    }
+    if let Err(error) = persist_install_plan_state(plan, InstallPlanState::InProgress) {
+        log::error!("Could not re-arm the accepted plan for the compatibility retry: {error:#}");
+        restore_accelerated_renderer();
+        return false;
+    }
+    true
+}
+
+/// How long Android gets to take the old surface away.
+const SURFACE_RECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Anland connects Portal's window to the CPU buffer API and Android has no
+/// public call that disconnects it, so QPainter's EGL surface cannot be made
+/// on it. Ask the activity for a fresh surface and wait until the old one is
+/// released and, unless Portal went to the background meanwhile, the new one
+/// is attached. A surface that comes back later is fresh either way.
+fn recycle_native_surface(android_app: &AndroidApp) -> bool {
+    crate::android::utils::ndk::recycle_native_surface(android_app);
+    let deadline = Instant::now() + SURFACE_RECYCLE_TIMEOUT;
+    let mut released = false;
+    while Instant::now() < deadline {
+        match android_app.native_window() {
+            None => released = true,
+            Some(_) if released => return true,
+            Some(_) => {}
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    released
+}
+
+/// Stop a failed provisional session the way a failed launch is stopped,
+/// then wait for the event loop to put the setup screen back. A failed
+/// launch has already been reported; a proof that never came has not, and
+/// its session is still running.
+fn retire_provisional_session(reason: &str) -> bool {
+    fail_initial_preferences_handoff(reason);
+    let deadline = Instant::now() + PROVISIONAL_RETIRE_TIMEOUT;
+    loop {
+        let consumed = setup_coordinator()
+            .lock()
+            .is_ok_and(|coordinator| coordinator.pending_initial_preferences_failure.is_none());
+        if consumed && !crate::android::proot::launch::is_running() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(INITIAL_APPEARANCE_POLL_INTERVAL);
+    }
+}
+
+fn restore_accelerated_renderer() {
+    if let Err(error) = crate::android::anland::force_anland_renderer() {
+        log::error!("Could not select the accelerated renderer again: {error:#}");
+    }
 }
 
 /// Whether a failed attempt may be re-run in place, with no user action:

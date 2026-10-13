@@ -865,6 +865,58 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRepairEnableAnlan
     }
 }
 
+/// JNI: Export diagnostics from the setup screen, as the recovery screen
+/// does. The outcome comes back through
+/// `ComposeOverlay.onDiagnosticsExportResult`.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeExportDiagnostics(
+    _env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jboolean {
+    let Some(app) = cached_app().lock().ok().and_then(|app| app.clone()) else {
+        log::warn!("Setup screen: diagnostics export requested before an activity attached");
+        return 0;
+    };
+    let result_app = app.clone();
+    u8::from(crate::android::diagnostics::export_and_share_in_background(
+        app,
+        move |ok, message| publish_diagnostics_export_result(&result_app, ok, message),
+    ))
+}
+
+fn publish_diagnostics_export_result(android_app: &AndroidApp, ok: bool, message: String) {
+    super::ndk::run_in_jvm(
+        move |env, app| {
+            let activity = activity_object(app);
+            let class = match overlay_class(env, &activity) {
+                Ok(class) => class,
+                Err(error) => {
+                    log::error!("Compose overlay class is unavailable: {error}");
+                    clear_exception(env, "find ComposeOverlay for diagnostics export");
+                    return;
+                }
+            };
+            let message = match env.new_string(message) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::error!("Failed to allocate diagnostics export message: {error}");
+                    return;
+                }
+            };
+            if let Err(error) = env.call_static_method(
+                class,
+                "onDiagnosticsExportResult",
+                "(ZLjava/lang/String;)V",
+                &[JValue::Bool(ok.into()), JValue::Object(&message)],
+            ) {
+                log::error!("Compose overlay onDiagnosticsExportResult failed: {error}");
+                clear_exception(env, "onDiagnosticsExportResult");
+            }
+        },
+        android_app.clone(),
+    );
+}
+
 /// JNI bridge for the existing committed-runtime recovery page after an
 /// explicit repair failure. The actual backend transition stays on the
 /// winit event-loop thread.

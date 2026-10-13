@@ -30,6 +30,8 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -72,6 +74,7 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -113,6 +116,11 @@ internal fun InstallStatusPanel(
     palette: PortalPalette,
     onTryAgain: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Export diagnostics from a paused setup; null where nothing can be exported (previews). */
+    onExportDiagnostics: (() -> Unit)? = null,
+    /** The export's latest line, and whether it is still going. */
+    exportStatus: String? = null,
+    exportRunning: Boolean = false,
 ) {
     val failed = phase == SetupPhase.Failed
     val ready = phase == SetupPhase.Ready
@@ -220,7 +228,14 @@ internal fun InstallStatusPanel(
         ) { showFailure ->
             if (showFailure) {
                 Box(Modifier.padding(top = 16.dp)) {
-                    FailureFooter(errorMessage = errorMessage, palette = palette, onTryAgain = onTryAgain)
+                    FailureFooter(
+                        errorMessage = errorMessage,
+                        palette = palette,
+                        onTryAgain = onTryAgain,
+                        onExportDiagnostics = onExportDiagnostics,
+                        exportStatus = exportStatus,
+                        exportRunning = exportRunning,
+                    )
                 }
             } else {
                 Column(Modifier.fillMaxWidth()) {
@@ -374,7 +389,14 @@ private fun FooterText(text: String, color: Color, modifier: Modifier = Modifier
  * instead of reserving a tall empty block around it.
  */
 @Composable
-private fun FailureFooter(errorMessage: String?, palette: PortalPalette, onTryAgain: () -> Unit) {
+private fun FailureFooter(
+    errorMessage: String?,
+    palette: PortalPalette,
+    onTryAgain: () -> Unit,
+    onExportDiagnostics: (() -> Unit)?,
+    exportStatus: String?,
+    exportRunning: Boolean,
+) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val sideBySide = maxWidth >= SideBySideFooter
         val explanation: @Composable (Modifier) -> Unit = { textModifier ->
@@ -388,6 +410,28 @@ private fun FailureFooter(errorMessage: String?, palette: PortalPalette, onTryAg
                 )
                 Spacer(Modifier.height(3.dp))
                 FooterText("Your choices and everything already downloaded are kept.", palette.textMuted)
+                if (onExportDiagnostics != null) {
+                    // For a bug report: the same archive the recovery screen exports.
+                    Text(
+                        text = "Export diagnostics →",
+                        modifier = Modifier
+                            .padding(top = 8.dp)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                enabled = !exportRunning,
+                                role = Role.Button,
+                                onClick = onExportDiagnostics,
+                            ),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.textMuted.copy(alpha = if (exportRunning) 0.45f else 0.9f),
+                    )
+                    if (exportStatus != null) {
+                        FooterText(exportStatus, palette.textMuted, Modifier.padding(top = 2.dp))
+                    }
+                }
             }
         }
         val button: @Composable () -> Unit = {

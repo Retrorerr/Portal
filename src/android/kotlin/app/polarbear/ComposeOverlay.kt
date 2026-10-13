@@ -78,6 +78,8 @@ object ComposeOverlay {
     @JvmStatic external fun nativeOptionalAppCatalog(): String?
     /** Queue an install (true) or removal (false) of one allowlisted app. */
     @JvmStatic external fun nativeRequestOptionalApp(appId: String, install: Boolean): Boolean
+    /** Build the diagnostics archive and open the share sheet; false while one is running. */
+    @JvmStatic external fun nativeExportDiagnostics(): Boolean
 
     init {
         // The pickers read the catalog through SetupModels, which stays free
@@ -339,6 +341,36 @@ object ComposeOverlay {
     /** Subscribe to the process-lifetime explicit Anland repair state. */
     @Composable
     fun anlandRepairState(): State<AnlandRepairUiState> = anlandRepairStateValue
+
+    /** The setup screen's diagnostics export: the line to show, and whether it is still going. */
+    data class DiagnosticsExportUiState(val running: Boolean, val message: String)
+    private val diagnosticsExportValue = mutableStateOf<DiagnosticsExportUiState?>(null)
+
+    @Composable
+    fun diagnosticsExportState(): State<DiagnosticsExportUiState?> = diagnosticsExportValue
+
+    /** Export diagnostics from the setup screen, as the recovery screen does. Main thread. */
+    @JvmStatic fun exportDiagnostics() {
+        if (diagnosticsExportValue.value?.running == true) return
+        diagnosticsExportValue.value = DiagnosticsExportUiState(running = true, message = "Preparing diagnostics…")
+        val started = try {
+            nativeExportDiagnostics()
+        } catch (_: UnsatisfiedLinkError) {
+            Log.e(TAG, "nativeExportDiagnostics unavailable")
+            false
+        }
+        if (!started) {
+            diagnosticsExportValue.value =
+                DiagnosticsExportUiState(running = false, message = "Export is unavailable right now")
+        }
+    }
+
+    /** Native: the export finished (share sheet opened, or failed). */
+    @JvmStatic fun onDiagnosticsExportResult(ok: Boolean, message: String) {
+        if (!ok) Log.w(TAG, "diagnostics export failed: $message")
+        val next = DiagnosticsExportUiState(running = false, message = message)
+        composeView?.post { diagnosticsExportValue.value = next } ?: run { diagnosticsExportValue.value = next }
+    }
 
     /** Publish native repair availability/progress without coupling it to install completion. */
     @JvmStatic fun updateAnlandRepairState(

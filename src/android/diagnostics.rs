@@ -20,7 +20,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use winit::platform::android::activity::AndroidApp;
@@ -434,6 +437,120 @@ fn add_tree(
     Ok(())
 }
 
+fn system_property(name: &str) -> String {
+    let Ok(key) = std::ffi::CString::new(name) else {
+        return String::new();
+    };
+    // PROP_VALUE_MAX
+    let mut value = [0 as libc::c_char; 92];
+    let length = unsafe { libc::__system_property_get(key.as_ptr(), value.as_mut_ptr()) };
+    if length <= 0 {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(value.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The Adreno GPU behind KGSL, asked the way Mesa's kgsl winsys asks it
+/// (KGSL_PROP_DEVICE_INFO); chip 0x43051401 is an Adreno 750, for one.
+fn kgsl_device_info() -> String {
+    #[repr(C)]
+    #[derive(Default)]
+    struct DevInfo {
+        device_id: libc::c_uint,
+        chip_id: libc::c_uint,
+        mmu_enabled: libc::c_uint,
+        gmem_gpubaseaddr: libc::c_ulong,
+        gpu_id: libc::c_uint,
+        gmem_sizebytes: libc::size_t,
+    }
+    #[repr(C)]
+    struct GetProperty {
+        kind: libc::c_uint,
+        value: *mut libc::c_void,
+        sizebytes: libc::size_t,
+    }
+    const KGSL_PROP_DEVICE_INFO: libc::c_uint = 1;
+    // _IOWR(KGSL_IOC_TYPE, 0x2, struct kgsl_device_getproperty)
+    let request = (3u32 << 30)
+        | ((std::mem::size_of::<GetProperty>() as u32) << 16)
+        | (0x09 << 8)
+        | 0x02;
+    let fd = unsafe {
+        libc::open(
+            c"/dev/kgsl-3d0".as_ptr(),
+            libc::O_RDWR | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return format!("unavailable ({})", io::Error::last_os_error());
+    }
+    let mut info = DevInfo::default();
+    let mut property = GetProperty {
+        kind: KGSL_PROP_DEVICE_INFO,
+        value: (&mut info as *mut DevInfo).cast(),
+        sizebytes: std::mem::size_of::<DevInfo>(),
+    };
+    let result = unsafe { libc::ioctl(fd, request as _, &mut property) };
+    let error = io::Error::last_os_error();
+    unsafe { libc::close(fd) };
+    if result != 0 {
+        return format!("device info failed ({error})");
+    }
+    format!(
+        "chip_id=0x{:08x} gpu_id={} device_id={} gmem_bytes={}",
+        info.chip_id, info.gpu_id, info.device_id, info.gmem_sizebytes
+    )
+}
+
+/// What the device is, so a report from hardware Portal was never tried on
+/// says so: Android build, SoC, kernel, GPU and the renderer in use.
+fn device_report() -> String {
+    let mut report = String::new();
+    for name in [
+        "ro.product.manufacturer",
+        "ro.product.model",
+        "ro.product.device",
+        "ro.soc.manufacturer",
+        "ro.soc.model",
+        "ro.board.platform",
+        "ro.hardware",
+        "ro.build.display.id",
+        "ro.build.version.release",
+        "ro.build.version.sdk",
+    ] {
+        report.push_str(&format!("{name}={}\n", system_property(name)));
+    }
+    let mut name: libc::utsname = unsafe { std::mem::zeroed() };
+    if unsafe { libc::uname(&mut name) } == 0 {
+        let field = |value: &[libc::c_char]| {
+            unsafe { std::ffi::CStr::from_ptr(value.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        report.push_str(&format!(
+            "kernel={} {}\n",
+            field(&name.release),
+            field(&name.version)
+        ));
+    }
+    report.push_str(&format!("page_size={}\n", unsafe {
+        libc::sysconf(libc::_SC_PAGESIZE)
+    }));
+    report.push_str(&format!("kgsl={}\n", kgsl_device_info()));
+    let renderer_mode = fs::read_to_string(crate::android::anland::mode_flag_path())
+        .map(|mode| mode.trim().to_owned())
+        .unwrap_or_else(|_| "unset".to_owned());
+    report.push_str(&format!("renderer_mode={renderer_mode}\n"));
+    report.push_str(&format!(
+        "mesa_layer={} provisioned={}\n",
+        crate::android::proot::mesa_layer::active_pin().version,
+        crate::android::proot::mesa_layer::is_provisioned()
+    ));
+    report
+}
+
 /// Build one bounded, shareable diagnostics archive.  Only app diagnostics
 /// and the guest's Portal state directory are included; unrelated user
 /// files in the guest are never traversed.
@@ -494,6 +611,31 @@ pub fn export_archive() -> Result<PathBuf, String> {
         &mut total,
     )
     .map_err(|error| error.to_string())?;
+    // The first-run helper that applies appearance, scale and panel
+    // launchers at 99% logs into the desktop user's home.
+    let username = get_application_context().local_config.user.username;
+    let home = if username == "root" {
+        Path::new(PRODUCTION_FS_ROOT).join("root")
+    } else {
+        Path::new(PRODUCTION_FS_ROOT).join(format!("home/{username}"))
+    };
+    let helper_log = home.join(".local/state/localdesktop/initial-appearance.log");
+    // Like the state tree, never follow a guest symlink out of it.
+    if fs::symlink_metadata(&helper_log).is_ok_and(|metadata| metadata.is_file()) {
+        add_file(
+            &mut writer,
+            &helper_log,
+            "guest/initial-appearance.log",
+            &mut total,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    writer
+        .start_file("device.txt", FileOptions::default())
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_all(device_report().as_bytes())
+        .map_err(|error| error.to_string())?;
 
     let metadata = format!(
         "Portal diagnostics\nversion={VERSION}\ntimestamp_ms={}\narch={}\nrootfs={}\nguest_state={guest_state_status}\nbytes={}\n",
@@ -531,6 +673,34 @@ pub fn export_and_share(android_app: &AndroidApp) -> Result<PathBuf, String> {
         android_app.clone(),
     )?;
     Ok(archive)
+}
+
+static EXPORT_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// [`export_and_share`] on a worker thread, one export at a time for every
+/// screen that offers it. `done` gets whether the share sheet opened and a
+/// line for the user. False, without calling `done`, while another export
+/// is running.
+pub fn export_and_share_in_background(
+    android_app: AndroidApp,
+    done: impl FnOnce(bool, String) + Send + 'static,
+) -> bool {
+    if EXPORT_RUNNING.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    std::thread::spawn(move || {
+        let (ok, message) = match export_and_share(&android_app) {
+            // The share sheet is open; the archive was also published to Downloads.
+            Ok(_) => (true, "Saved to Download/Portal".to_string()),
+            Err(error) => {
+                log::warn!("Failed to export diagnostics: {error}");
+                (false, format!("Export failed: {error}"))
+            }
+        };
+        EXPORT_RUNNING.store(false, Ordering::Release);
+        done(ok, message);
+    });
+    true
 }
 
 fn copy_archive_to_content_uri<'local>(

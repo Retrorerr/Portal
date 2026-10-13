@@ -176,6 +176,40 @@ class LauncherPlanTests(unittest.TestCase):
                 self.assertTrue(helper.runtime_is_committed())
                 self.assertEqual(helper.apply(), None)
 
+    def test_main_retries_a_failed_apply_until_its_deadline(self):
+        clock = [0.0]
+        calls = []
+
+        def flaky_apply():
+            calls.append(clock[0])
+            if len(calls) < 3:
+                raise helper.ApplyError("Plasma did not validate the selected taskbar launchers")
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with mock.patch.object(helper, "apply", side_effect=flaky_apply), mock.patch.object(
+            helper.time, "monotonic", side_effect=lambda: clock[0]
+        ), mock.patch.object(helper.time, "sleep", side_effect=sleep), mock.patch.object(helper, "log"):
+            self.assertEqual(helper.main(), 0)
+        self.assertEqual(len(calls), 3)
+
+        clock[0] = 0.0
+        calls.clear()
+        with mock.patch.object(
+            helper, "apply", side_effect=lambda: calls.append(1) or (_ for _ in ()).throw(helper.ApplyError("x"))
+        ), mock.patch.object(helper.time, "monotonic", side_effect=lambda: clock[0]), mock.patch.object(
+            helper.time, "sleep", side_effect=sleep
+        ), mock.patch.object(helper, "log"):
+            self.assertEqual(helper.main(), 1)
+        self.assertLess(clock[0], helper.MAX_APPLY_SECONDS)
+        self.assertGreater(len(calls), 1)
+
+        with mock.patch.object(helper, "apply", side_effect=BlockingIOError("locked")), mock.patch.object(
+            helper.time, "sleep", side_effect=AssertionError("a held lock must not retry")
+        ), mock.patch.object(helper, "log"):
+            self.assertEqual(helper.main(), 1)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed to execute the Plasma script mock")
     def test_generated_plasma_script_updates_only_task_managers_and_retries_cleanly(self):
         plan = {"fingerprint": "b" * 64, "attempt_id": "1-2", "app_ids": "gimp,vlc"}

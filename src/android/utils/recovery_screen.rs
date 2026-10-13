@@ -11,10 +11,7 @@ use jni::{
     sys::_jobject,
     JNIEnv,
 };
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Mutex, OnceLock,
-};
+use std::sync::{Mutex, OnceLock};
 use winit::platform::android::activity::AndroidApp;
 
 const RECOVERY_DOTTED_CLASS: &str = "app.polarbear.RecoveryScreen";
@@ -30,7 +27,6 @@ pub enum RecoveryKind {
 
 /// Activity used by the diagnostics export, which runs off the event loop.
 static APP: OnceLock<Mutex<Option<AndroidApp>>> = OnceLock::new();
-static EXPORT_RUNNING: AtomicBool = AtomicBool::new(false);
 
 fn app_slot() -> &'static Mutex<Option<AndroidApp>> {
     APP.get_or_init(|| Mutex::new(None))
@@ -154,19 +150,22 @@ pub extern "system" fn Java_app_polarbear_RecoveryScreen_nativeExportDiagnostics
         log::warn!("Recovery screen: diagnostics export requested before an activity attached");
         return;
     };
-    if EXPORT_RUNNING.swap(true, Ordering::AcqRel) {
-        return;
+    let result_app = app.clone();
+    let started = crate::android::diagnostics::export_and_share_in_background(
+        app.clone(),
+        move |ok, message| {
+            call_static(&result_app, "onExportResult", CallArgs::ExportResult { ok, message });
+        },
+    );
+    if !started {
+        // The setup screen's export is still running.
+        call_static(
+            &app,
+            "onExportResult",
+            CallArgs::ExportResult {
+                ok: false,
+                message: "An export is already running".to_string(),
+            },
+        );
     }
-    std::thread::spawn(move || {
-        let (ok, message) = match crate::android::diagnostics::export_and_share(&app) {
-            // The share sheet is open; the archive was also published to Downloads.
-            Ok(_) => (true, "Saved to Download/Portal".to_string()),
-            Err(error) => {
-                log::warn!("Failed to export diagnostics: {error}");
-                (false, format!("Export failed: {error}"))
-            }
-        };
-        EXPORT_RUNNING.store(false, Ordering::Release);
-        call_static(&app, "onExportResult", CallArgs::ExportResult { ok, message });
-    });
 }
