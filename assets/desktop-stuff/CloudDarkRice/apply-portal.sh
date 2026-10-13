@@ -355,8 +355,10 @@ step_apps() {
   qdbus6 org.kde.KWin /KWin reconfigure
   # Portal has no Baloo index, so the file-tags KIO worker fails on every shell start and plasmashell
   # pops up "Could not enter folder tags:/". Divert it out of the plugin path (undo: restore step)
+  # with the shell down: a running shell keeps tags: as known and fails with "Can not find a KIO
+  # worker for protocol 'tags'" when the launcher lists places.
   dpkg-divert --list "$tags_so" | grep -q . \
-    || sudo -n dpkg-divert --local --rename --divert "$tags_off" --add "$tags_so"
+    || with_shell_down sudo -n dpkg-divert --local --rename --divert "$tags_off" --add "$tags_so"
 }
 
 step_terminal() {
