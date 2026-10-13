@@ -105,16 +105,6 @@ case ":$LD_PRELOAD:" in
     *) [ -f "$touchdrag" ] && export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$touchdrag" ;;
 esac
 
-# KGSL buffers carry no implicit fences, so steamwebhelper's GPU and browser
-# processes read each other's frames mid-render and parts of the window blink
-# out. The preload finishes each webhelper GPU submission before returning;
-# it goes first because drmshim.so answers KGSL ioctls itself.
-kgslsync=/usr/local/lib/portal/steam/portal-kgsl-sync.so
-case ":$LD_PRELOAD:" in
-    *":$kgslsync:"*) ;;
-    *) [ -f "$kgslsync" ] && export LD_PRELOAD="$kgslsync${LD_PRELOAD:+:$LD_PRELOAD}" ;;
-esac
-
 export STEAM_RUNTIME_ROOT="$STEAM_ROOT/steamrtarm64"
 export LD_LIBRARY_PATH="$STEAM_ROOT/steamrtarm64:$STEAM_ROOT/steamrtarm64/libs:$portal_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # Wine esync wants many descriptors; Android caps the hard limit at 32768.
