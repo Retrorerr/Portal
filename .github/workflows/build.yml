@@ -38,7 +38,7 @@ jobs:
     steps:
       - name: Classify PR
         id: classify
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             if (context.eventName !== "pull_request") {
@@ -85,10 +85,10 @@ jobs:
       contents: write # Create GitHub Release (tag builds)
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Gradle 8.14.3
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: "8.14.3"
 
@@ -102,7 +102,7 @@ jobs:
       - name: Extract release notes
         if: github.ref_type == 'tag'
         id: release_notes
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require("fs");
@@ -235,7 +235,7 @@ jobs:
 
       - name: Create GitHub Release
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           token: ${{ github.token }}
           name: Portal v${{ steps.extract_version.outputs.version }}

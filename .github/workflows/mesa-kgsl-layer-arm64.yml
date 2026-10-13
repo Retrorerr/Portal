@@ -58,14 +58,14 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: portal
 
       - name: Build
         run: portal/patches/mesa/kgsl-layer-26.3.0/build.sh portal out "${{ github.event.inputs.variant || 'portal' }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mesa-kgsl-layer-26.3.0-${{ github.event.inputs.variant || 'portal' }}
           path: out/

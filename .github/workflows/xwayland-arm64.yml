@@ -70,7 +70,7 @@ jobs:
       variants: ${{ steps.pick.outputs.variants }}
     steps:
       - id: pick
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const input = context.eventName === 'workflow_dispatch'
@@ -111,13 +111,13 @@ jobs:
           git --version
 
       - name: Check out Portal (patch + pins source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: portal
           ref: ${{ github.sha }}
 
       - name: Check out pinned lfdevs xwayland source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: lfdevs/xwayland
           ref: ${{ env.LFDEVS_XWAYLAND_SHA }}
@@ -253,7 +253,7 @@ jobs:
           } | tee "/tmp/compare-${{ matrix.variant }}.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload build outputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: xwayland-${{ matrix.variant }}-arm64
           retention-days: 14
