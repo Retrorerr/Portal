@@ -1,9 +1,9 @@
-//! Pinned lfdevs Mesa KGSL layer (`mesa-kgsl-layer` in app files).
+//! Pinned Mesa KGSL layer (`mesa-kgsl-layer` in app files).
 //!
 //! Stock Debian Mesa has no kgsl winsys at all (its freedreno winsys
 //! backends are `[drm]` only), so without this layer no GBM device can ever
 //! be created in the sandbox and KWin's Anland backend exits. The layer
-//! (lfdevs Mesa 26.3 with the kgsl winsys) is overlaid onto the guest by
+//! (lfdevs Mesa 26.3 with the kgsl winsys, plus Portal's patches) is overlaid onto the guest by
 //! `session_binds`, which skips absent files — so this provisioning is what
 //! makes hardware sessions possible. Downloaded once (marker-gated),
 //! verified (size + SHA-256, fail closed), subset-extracted with symlinks
@@ -32,7 +32,7 @@
 //! current pin.
 //!
 //! Refreshes: the pins below are the build this APK ships with. Portal's
-//! updater may install a newer lfdevs release (see
+//! updater may install a newer Portal Mesa release (see
 //! `core::update_sources::mesa_update`); its pin is stored beside the layer
 //! and wins while it is newer than the built-in one. A refreshed layer is
 //! on trial until a hardware Plasma session reaches its first frame: the
@@ -51,12 +51,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Built-in upstream release (lfdevs mesa-for-android-container). Every
+/// Built-in release: lfdevs mesa-for-android-container's tag rebuilt with
+/// `patches/mesa/kgsl-layer-26.3.0` (KGSL implicit sync) by
+/// `.github/workflows/mesa-kgsl-layer-arm64.yml`. Every
 /// byte is hard-pinned; any mismatch fails closed and retries later.
 pub const LAYER_VERSION: &str = "26.3.0-20260824";
-pub const LAYER_URL: &str = "https://github.com/lfdevs/mesa-for-android-container/releases/download/mesa-26.3.0-devel-20260824/mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz";
-pub const LAYER_COMPRESSED_BYTES: u64 = 11648933;
-pub const LAYER_SHA256: &str = "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf";
+pub const LAYER_URL: &str = "https://github.com/Retrorerr/Portal/releases/download/mesa-26.3.0-devel-portal-20260824/mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz";
+pub const LAYER_COMPRESSED_BYTES: u64 = 11654070;
+pub const LAYER_SHA256: &str = "d402f3c7fe0c0dcda374d1ff2f5d1622a41ad30c029ab69e31020fff2a35f44a";
 /// Completion marker beside the layer (version + sha, exact match required).
 pub const LAYER_MARKER: &str = "mesa-kgsl-layer.complete";
 /// A refreshed pin (JSON [`LayerPin`]); absent means the built-in one.
@@ -498,7 +500,7 @@ pub fn apply_refresh(
     };
     anyhow::ensure!(
         next.plausible(),
-        "the graphics driver release is not a usable lfdevs build"
+        "the graphics driver release is not a usable Portal Mesa build"
     );
     if compare_mesa_versions(&next.version, &current.version) != Some(Ordering::Greater) {
         return Ok(());

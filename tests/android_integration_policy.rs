@@ -489,15 +489,15 @@ fn anland_hardware_acceleration_is_default_with_explicit_software_fallback() {
 
 #[test]
 fn mesa_kgsl_layer_is_pinned_and_matches_session_binds() {
-    // The kgsl winsys lives only in the lfdevs Mesa layer (stock Mesa has
+    // The kgsl winsys lives only in the Mesa layer (stock Mesa has
     // no kgsl winsys at all), so the layer is downloaded once, verified
     // (size + SHA-256, fail closed), and subset-extracted. The extraction
     // set must stay identical to what session_binds mounts, or the layer
     // silently stops engaging.
     for pin in [
         "mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz",
-        "11648933",
-        "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf",
+        "11654070",
+        "d402f3c7fe0c0dcda374d1ff2f5d1622a41ad30c029ab69e31020fff2a35f44a",
         "mesa-kgsl-layer.complete",
         "libgallium-",
         "libgbm.so.1",

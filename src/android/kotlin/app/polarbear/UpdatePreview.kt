@@ -37,7 +37,7 @@ object UpdatePreview {
         "curl" to false,
     )
     private const val APP = "app\tPortal 2.5.0\tSmoother on-screen controller and faster Proton starts"
-    private const val DRIVER = "driver\tGraphics driver\tMesa 26.3.0-20261010 from lfdevs"
+    private const val DRIVER = "driver\tGraphics driver\tMesa 26.3.0-20261010"
     private const val CHATGPT = "chatgpt\tChatGPT\tA newer build from OpenAI"
 
     private data class Scenario(val packages: List<Pair<String, Boolean>>, val components: List<String>)

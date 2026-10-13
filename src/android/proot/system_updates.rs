@@ -1,5 +1,5 @@
-//! Portal's updates for an installed runtime: the app itself, the lfdevs
-//! Mesa layer KWin renders with, Debian packages (including Firefox and
+//! Portal's updates for an installed runtime: the app itself, the Mesa
+//! layer KWin renders with, Debian packages (including Firefox and
 //! Claude from their vendors' apt repositories) and the ChatGPT .deb.
 //!
 //! Policy and parsing live in `crate::core::system_updates` (Debian) and
@@ -199,7 +199,7 @@ impl UpdateSnapshot {
         }
         if let Some(driver) = &self.driver {
             lines.push(format!(
-                "driver\tGraphics driver\tMesa {} from lfdevs",
+                "driver\tGraphics driver\tMesa {}",
                 clean(&driver.version)
             ));
         }

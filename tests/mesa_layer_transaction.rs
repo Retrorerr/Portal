@@ -12,7 +12,7 @@ use localdesktop::core::mesa_layer::{
 use std::{fs, path::Path};
 
 const VERSION: &str = "26.3.0-20260824";
-const SHA: &str = "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf";
+const SHA: &str = "d402f3c7fe0c0dcda374d1ff2f5d1622a41ad30c029ab69e31020fff2a35f44a";
 // A hypothetical future pin: structurally identical trees carrying this
 // identity must never validate as the current pin.
 const NEXT_VERSION: &str = "99.9.9-20990101";
@@ -478,8 +478,8 @@ fn validation_covers_session_binds_runtime_chain() {
     let android_src = include_str!("../src/android/proot/mesa_layer.rs");
     for pin in [
         "26.3.0-20260824",
-        "11648933",
-        "c014cf66bdbff96417ee30d34f006cf51df64ae04893d599711b0b6b73b52ccf",
+        "11654070",
+        "d402f3c7fe0c0dcda374d1ff2f5d1622a41ad30c029ab69e31020fff2a35f44a",
         "mesa-kgsl-layer.complete",
         ".portal-mesa-identity",
         "write_identity",

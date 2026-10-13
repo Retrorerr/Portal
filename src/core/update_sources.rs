@@ -2,8 +2,9 @@
 //!
 //! * The app: the newest stable release of Retrorerr/Portal on GitHub, whose
 //!   fixed-name `Portal.apk` asset is the signed release build.
-//! * The Mesa KGSL layer: the newest `mesa-*` release of
-//!   lfdevs/mesa-for-android-container (the GL driver KWin renders with).
+//! * The Mesa KGSL layer: the newest `mesa-*` release of Retrorerr/Portal,
+//!   lfdevs' mesa-for-android-container rebuilt with Portal's patches
+//!   (`patches/mesa/`; the GL driver KWin and every app render with).
 //! * The ChatGPT desktop app: OpenAI publishes one unversioned `latest` .deb
 //!   and no apt repository, so apt never sees its updates.
 //!
@@ -25,11 +26,12 @@ pub const APP_DOWNLOAD_PREFIX: &str = "https://github.com/Retrorerr/Portal/relea
 /// every release; the README's download button relies on it too).
 pub const APP_ASSET: &str = "Portal.apk";
 
-/// Recent lfdevs releases; Mesa and Turnip releases alternate in one feed.
+/// Recent Portal releases; the Mesa layer builds (published with
+/// `--latest=false`, so the app feed never sees them) sit among the app's.
+/// Not lfdevs' own feed: its builds lack Portal's KGSL implicit sync.
 pub const MESA_RELEASES_API: &str =
-    "https://api.github.com/repos/lfdevs/mesa-for-android-container/releases?per_page=30";
-pub const MESA_DOWNLOAD_PREFIX: &str =
-    "https://github.com/lfdevs/mesa-for-android-container/releases/download/";
+    "https://api.github.com/repos/Retrorerr/Portal/releases?per_page=100";
+pub const MESA_DOWNLOAD_PREFIX: &str = "https://github.com/Retrorerr/Portal/releases/download/";
 const MESA_TAG_PREFIX: &str = "mesa-";
 const MESA_ASSET_PREFIX: &str = "mesa-for-android-container_";
 const MESA_ASSET_SUFFIX: &str = "_debian_trixie_arm64.tar.gz";
@@ -307,8 +309,8 @@ pub fn app_update(
     }))
 }
 
-/// `mesa-26.3.0-devel-20260824` becomes `26.3.0-20260824`, the layer pin's
-/// version shape.
+/// `mesa-26.3.0-devel-20260824` (or Portal's `mesa-26.3.0-devel-portal-20260824`)
+/// becomes `26.3.0-20260824`, the layer pin's version shape.
 pub fn mesa_version_from_tag(tag: &str) -> Option<String> {
     let rest = tag.strip_prefix(MESA_TAG_PREFIX)?;
     let (base, date) = rest.rsplit_once('-')?;
@@ -333,7 +335,7 @@ pub fn compare_mesa_versions(a: &str, b: &str) -> Option<Ordering> {
     Some(mesa_key(a)?.cmp(&mesa_key(b)?))
 }
 
-/// The newest lfdevs Mesa layer newer than `installed` that the policy
+/// The newest Mesa layer newer than `installed` that the policy
 /// allows, skipping releases without a trixie arm64 build or a checksum,
 /// and any version in `denied` (a build that failed to start Plasma here).
 pub fn mesa_update(
@@ -606,7 +608,12 @@ mod tests {
             mesa_version_from_tag("mesa-26.3.0-devel-20260824").as_deref(),
             Some("26.3.0-20260824")
         );
+        assert_eq!(
+            mesa_version_from_tag("mesa-26.3.0-devel-portal-20260824").as_deref(),
+            Some("26.3.0-20260824")
+        );
         assert_eq!(mesa_version_from_tag("mesa-26.4.1-20261101").as_deref(), Some("26.4.1-20261101"));
+        assert_eq!(mesa_version_from_tag("v2.4.0"), None);
         assert_eq!(mesa_version_from_tag("turnip-26.3.0-devel-20260824"), None);
         assert_eq!(mesa_version_from_tag("mesa-26.3.0-devel"), None);
         assert_eq!(
