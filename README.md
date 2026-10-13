@@ -70,12 +70,15 @@ No root, no PC and no unlocked bootloader needed.
 
 If setup gets interrupted, just open Portal again. It picks up where it left off.
 
+The [user guide](docs/user-guide.md) covers updates, games, Firefox and troubleshooting in more detail.
+
 ## Using Portal
 
 - **Coming back:** leaving Portal keeps the desktop running in the background. Open it again and swipe up to jump back in, with your windows right where you left them. Swiping Portal away from recents closes the desktop.
 - **Logging out** (or shutting down or restarting from Plasma) closes the desktop and Portal with it. Open Portal again to start a fresh session.
 - **The Stuff folder:** your desktop starts with stock KDE Plasma and a folder called **Stuff**. Inside there's a link to this repo, a short welcome note, and **CloudDarkRice**, an optional dark theme with a top bar, a dock, a nicer power menu and a bunch of shortcuts. Open the folder, run **Apply Cloud Dark rice** and log out once it's done. It downloads about 25 MB the first time. Don't like it? `apply-portal.sh restore` puts everything back (the README in that folder has the details).
 - **Managing apps:** leave the desktop and come back to Portal's start screen to add or remove the optional apps whenever you like.
+- **Updates:** the same screen shows updates for Portal, its graphics driver layer, ChatGPT and Debian packages. Tap the capsule, then **Update**. Portal updates itself from 2.5.0 on; on 2.4.x, install the latest version once with the Download Portal button.
 - **Keyboard and mouse:** plug them in (USB or Bluetooth) and Plasma switches from tablet mode to desktop mode by itself. Trackpad scrolling works too.
 
 ## What you get
@@ -99,8 +102,9 @@ Pick Steam during setup and you get the ARM64 Steam client running natively.
 
 - Native ARM64 Linux games run directly.
 - x86 Linux games run through Box64 (Kerbal Space Program works, for example).
-- Windows games through Proton and FEX are early days, so expect hit and miss.
-- Controllers connected to Android show up in Steam as Xbox controllers. There are also on-screen touch controls, and their toggle only shows up while a game is running.
+- Windows games through Proton and FEX are early days, so expect hit and miss. Portal prefers Proton Experimental (ARM64) when it's installed.
+- Controllers connected to Android show up in Steam as Xbox controllers.
+- While Steam runs, a small handle at the top of the screen shows the on-screen controller (while a game is running) and opens the game panel, where you can edit the controller layout and set a frame-rate cap, per game if you like.
 
 ## Good to know
 
@@ -109,7 +113,7 @@ Pick Steam during setup and you get the ARM64 Steam client running natively.
 - **Tablet or desktop:** with no keyboard or mouse plugged in, Plasma switches to tablet mode and the Android keyboard pops up when you tap a text field. Plug in a keyboard and mouse and it goes back to desktop mode.
 - **Sound** goes through Android, and pausing and resuming Portal doesn't break it. You might notice a "Portal Audio (standby)" device in the volume list. That's what keeps apps connected while Portal is in the background, so leave it be.
 - **Your Android files:** grant **All files access** if you want to open shared storage (Downloads, Pictures and so on) from Linux. Debian itself lives in Portal's private storage.
-- **Browsers:** Firefox, Chromium and Electron apps run with their normal sandboxes on, no `--no-sandbox` needed. If you'd rather use Mozilla's own Firefox build than Debian's, add Mozilla's APT repo and `sudo apt install firefox`, and Portal sets it up automatically.
+- **Browsers:** Firefox, Chromium and Electron apps run with their normal sandboxes on, no `--no-sandbox` needed. The Firefox you get is Mozilla's own build from Mozilla's APT repo, and Portal sets up any Firefox you install automatically.
 - **Uninstalling Portal deletes the whole Linux install**, so copy out anything you care about first.
 
 ## Known limitations

@@ -11,9 +11,20 @@ Portal runs a Debian 13 desktop directly on a supported ARM64 Android device. It
 
 ## First launch
 
-Keep Portal open while it prepares the Debian runtime. The setup screen reports each stage and can export diagnostics if provisioning fails. Closing Android's activity during extraction or package installation can delay completion, but setup stages are designed to resume safely.
+Keep Portal open while it prepares the Debian runtime. The setup screen reports each stage and can export diagnostics if provisioning fails. Portal asks for notification permission so it can tell you when it has to stay open to finish. Closing Android's activity during extraction or package installation can delay completion, but setup stages are designed to resume safely.
+
+Setup lets you pick a light or dark desktop theme and which optional apps to install.
 
 When setup completes, Portal starts KDE Plasma 6 on its native Wayland compositor. If Plasma fails during early startup, Portal records the failure and opens a recovery session instead of silently switching the normal desktop to X11.
+
+## Updates and optional apps
+
+When you switch back to Portal from another Android app, the screen that restores your desktop also shows what is waiting:
+
+- **Updates** covers Portal itself, its graphics driver layer, ChatGPT and Debian packages. Tap the capsule to see the list, then **Update**. The first time Portal updates itself, Android asks you to let Portal install apps; after that, Android asks to install the new version and closes Portal to finish. Nothing appears when everything is current.
+- **Apps** lists the optional apps from setup, such as Steam. Add or remove any of them at any time; installs carry on beside the running desktop.
+
+Portal 2.4.x predates the updater, so install 2.5.0 once by hand from the [latest release](https://github.com/Retrorerr/Portal/releases/latest). Later versions arrive in the app.
 
 ## Installing software
 
@@ -32,7 +43,7 @@ Portal keeps its own KWin and Xwayland builds pinned so a package upgrade cannot
 
 ### Firefox
 
-Firefox ESR from Debian is installed. To use Mozilla's own build instead (`firefox`, or the `firefox-beta`, `firefox-devedition` and `firefox-nightly` channels), add Mozilla's APT repository as their instructions describe and `sudo apt install firefox`. Portal applies the settings it needs for Android (GPU compositing on) to every Firefox under `/usr/lib`, at each launch and again after every `apt`/`dpkg` run, so a new install or upgrade needs nothing extra. The default browser is Mozilla's `firefox` when installed, otherwise Firefox ESR; **System Settings → Default Applications** overrides it.
+Setup installs Mozilla's own Firefox from Mozilla's APT repository, so the launcher shows a single Firefox. Debian's Firefox ESR stays installed, hidden from the menu, as a fallback; the `firefox-beta`, `firefox-devedition` and `firefox-nightly` channels install from the same repository. Portal applies the settings it needs for Android (GPU compositing on) to every Firefox under `/usr/lib`, at each launch and again after every `apt`/`dpkg` run, so a new install or upgrade needs nothing extra. **System Settings → Default Applications** chooses the default browser.
 
 Android's kernel has no user or PID namespaces, so PRoot emulates the parts browser sandboxes rely on. Chrome, Chromium, Electron apps and Firefox run with their own sandboxes on, as on a desktop Linux install, without `--no-sandbox`.
 
@@ -43,6 +54,17 @@ Display size, refresh rate, rotation, and density come from Android. Plasma rece
 Android may intercept desktop shortcuts before they reach Linux. If keys such as `Ctrl+C`, `Ctrl+V`, or `Alt+Tab` do not arrive in Plasma, enable Portal under **Android Settings → Accessibility → Downloaded apps**. The service forwards physical key events and does not inspect window content.
 
 When no external keyboard, mouse, or touchpad is connected, Portal can present Plasma in tablet mode and allow Android's software keyboard. Attaching desktop input switches the session back to desktop behaviour.
+
+## Games
+
+Pick Steam during setup or add it later from **Apps** (see above). Windows games run through Proton; Portal prefers **Proton Experimental (ARM64)** when it is installed.
+
+While Steam runs, a small handle sits at the top of the screen. One side shows or hides the on-screen controller while a game is running; the other opens the game panel:
+
+- **On-screen controller**: show it, set its opacity and size, and edit the layout. A layout can be shared by every game or kept for one game. The controller steps aside while a physical controller is connected unless you ask for it.
+- **Game settings**: the video memory Windows games are told the GPU has and a **Frame-rate cap** for steadier pacing and less heat. These can also be kept per game, and apply the next time the game starts.
+
+Games and browser pages that lock the mouse pointer get Android pointer capture, so mouse look works with a physical mouse. On OnePlus, OPPO and realme devices, add Portal to the **Games** app so the screen is not held at a lower refresh rate.
 
 ## Android storage
 

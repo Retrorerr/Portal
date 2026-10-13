@@ -211,27 +211,6 @@ jobs:
         run: |
           mv target/x/release/android/gradle/app/build/outputs/bundle/debug/app-debug.aab target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.aab
           mv target/x/release/android/gradle/app/build/outputs/bundle/release/app-release.aab target/x/Portal-${{ steps.extract_version.outputs.version }}.aab
-      - name: Build User Manual PDFs
-        if: github.ref_type == 'tag'
-        run: |
-          # All-Rust: Typst renders the PDF, the image crate handles webp — no
-          # pandoc/LaTeX/Python, no apt packages needed. Six variants: every
-          # size (desktop/fold/phone) × theme (light/dark).
-          V="${{ steps.extract_version.outputs.version }}"
-          for size in desktop fold phone; do
-            for theme in light dark; do
-              cargo run --release --bin build_docs -- user "$size" "$theme"
-            done
-          done
-          # Rename build_docs' display names to versioned, dot-free release names
-          # (GitHub turns spaces into dots in asset download URLs).
-          cd manuals
-          mv "Portal - User Manual.pdf"               "Portal-v$V-User-Manual.pdf"
-          mv "Portal - User Manual (Dark).pdf"        "Portal-v$V-User-Manual-Dark.pdf"
-          mv "Portal - User Manual (Fold).pdf"        "Portal-v$V-User-Manual-Fold.pdf"
-          mv "Portal - User Manual (Fold, Dark).pdf"  "Portal-v$V-User-Manual-Fold-Dark.pdf"
-          mv "Portal - User Manual (Phone).pdf"       "Portal-v$V-User-Manual-Phone.pdf"
-          mv "Portal - User Manual (Phone, Dark).pdf" "Portal-v$V-User-Manual-Phone-Dark.pdf"
 
       - name: Create GitHub Release
         if: github.ref_type == 'tag'
@@ -247,9 +226,3 @@ jobs:
             target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
             target/x/Portal-${{ steps.extract_version.outputs.version }}.aab
             target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.aab
-            manuals/Portal-v${{ steps.extract_version.outputs.version }}-User-Manual.pdf
-            manuals/Portal-v${{ steps.extract_version.outputs.version }}-User-Manual-Dark.pdf
-            manuals/Portal-v${{ steps.extract_version.outputs.version }}-User-Manual-Fold.pdf
-            manuals/Portal-v${{ steps.extract_version.outputs.version }}-User-Manual-Fold-Dark.pdf
-            manuals/Portal-v${{ steps.extract_version.outputs.version }}-User-Manual-Phone.pdf
-            manuals/Portal-v${{ steps.extract_version.outputs.version }}-User-Manual-Phone-Dark.pdf
