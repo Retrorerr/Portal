@@ -222,6 +222,15 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         // Naming the node turns DMABUF on: fullscreen WebGL used ~35% less CPU
         // (Pad 3, 2026-09-29). Gecko-only, so Thunderbird gets it too.
         ("MOZ_DRM_DEVICE".into(), "/dev/dri/renderD128".into()),
+        // Gecko shared memory: the parent tests memfd by reopening one
+        // read-only through /proc/self/fd, which Android's SELinux denies
+        // on some devices (Galaxy Z Fold5, kernel 5.15). The parent then
+        // falls back to unsealed POSIX shm while content processes, which
+        // skip that test, still demand F_SEAL_SHRINK on every handle; each
+        // rejects the parent's ("not safe to map") and every tab crashes.
+        // Without seals both sides agree; the seal only guards against a
+        // SIGBUS from a shrunk file. Gecko-only, so Thunderbird too.
+        ("MOZ_SHM_NO_SEALS".into(), "1".into()),
         // SDL2 prefers X11 even under Wayland. Through Xwayland a
         // SuperTuxKart race cost ~17% of a core in Xwayland alone; natively
         // it runs at the same full-panel resolution and frame rate without
