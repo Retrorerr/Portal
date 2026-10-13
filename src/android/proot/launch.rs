@@ -292,7 +292,9 @@ pub fn launch() {
         );
         let status = output.status.code();
         diagnostics::desktop_exit(status, started.elapsed().as_millis());
-        log::warn!(
+        let planned = output.status.success() || thread_cancel.load(Ordering::Acquire);
+        log::log!(
+            if planned { log::Level::Info } else { log::Level::Warn },
             "Desktop session exited after {:?} with status {:?}",
             started.elapsed(),
             status
@@ -349,7 +351,8 @@ fn join_bounded(handle: Option<JoinHandle<()>>, label: &str) {
         thread::sleep(Duration::from_millis(10));
     }
     if !handle.is_finished() {
-        log::warn!(
+        // Expected while PRoot's TERM->KILL grace runs; the worker still exits.
+        log::info!(
             "{label} did not stop within {:?}; detached worker remains cancellation-scoped",
             STOP_JOIN_BUDGET
         );

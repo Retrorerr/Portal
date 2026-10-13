@@ -656,7 +656,7 @@ impl<T: 'static> EventLoop<T> {
                 MainEvent::SaveState { .. } => {
                     // XXX: how to forward this state to applications?
                     // XXX: also how do we expose state restoration to apps?
-                    warn!("TODO: forward saveState notification to application");
+                    debug!("TODO: forward saveState notification to application");
                 },
                 MainEvent::Pause => {
                     self.cancel_touchpad_input(callback);
@@ -665,12 +665,12 @@ impl<T: 'static> EventLoop<T> {
                 },
                 MainEvent::Stop => {
                     // XXX: how to forward this state to applications?
-                    warn!("TODO: forward onStop notification to application");
+                    debug!("TODO: forward onStop notification to application");
                 },
                 MainEvent::Destroy => {
                     // XXX: maybe exit mainloop to drop things before being
                     // killed by the OS?
-                    warn!("TODO: forward onDestroy notification to application");
+                    debug!("TODO: forward onDestroy notification to application");
                 },
                 MainEvent::InsetsChanged { .. } => {
                     // XXX: how to forward this state to applications?

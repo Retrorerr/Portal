@@ -1443,6 +1443,13 @@ fn teardown_generation(inner: &Arc<Inner>) {
 }
 
 /// Drop to fallback and immediately re-deposit (reference `enter_fallback`).
+/// Whether KWin should be producing frames. After a planned stop (a system
+/// update, Retry Plasma) or a crash the producer is gone; the stop is logged
+/// by `launch`, so the stall it causes here is no warning of its own.
+fn producer_expected() -> bool {
+    crate::android::proot::launch::is_running()
+}
+
 fn enter_fallback(inner: &Arc<Inner>, expected: u64, reason: &str) {
     let _transition = inner.transition_lock.lock().unwrap();
     if inner.rebind_active.load(Ordering::Acquire) {
@@ -1455,7 +1462,11 @@ fn enter_fallback(inner: &Arc<Inner>, expected: u64, reason: &str) {
         return; // An old failed operation cannot tear down its replacement.
     }
     inner.fallback_count.fetch_add(1, Ordering::Relaxed);
-    log::warn!("anland.fallback reason={reason}");
+    if producer_expected() {
+        log::warn!("anland.fallback reason={reason}");
+    } else {
+        log::info!("anland.fallback reason={reason} (no desktop session)");
+    }
     teardown_generation(inner);
     if inner.running.load(Ordering::Acquire) && inner.window_live.load(Ordering::Acquire) {
         if let Err(e) = deposit_generation(inner) {
@@ -2011,9 +2022,13 @@ fn render_loop(inner: Arc<Inner>) {
             cur_gen,
         );
         if rfence == FENCE_LOST {
-            log::warn!(
-                "anland.render fence lost (generation died); buffer cancelled, not presented"
-            );
+            if producer_expected() {
+                log::warn!(
+                    "anland.render fence lost (generation died); buffer cancelled, not presented"
+                );
+            } else {
+                log::info!("anland.render fence lost with no desktop session; buffer cancelled");
+            }
             unsafe { inner.anw.cancel(window, anb, -1) };
             continue;
         }
