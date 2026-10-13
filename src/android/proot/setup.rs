@@ -3169,7 +3169,72 @@ pub fn spawn_background_installs() {
     });
 }
 
+/// Mozilla's Firefox before the first desktop, so the first Firefox the
+/// user opens is it rather than the image's ESR fallback. Not fatal: offline,
+/// `spawn_background_installs` retries on a later launch.
+fn setup_mozilla_firefox(_: &SetupOptions) -> StageOutput {
+    Some(thread::spawn(|| {
+        let root = Path::new(PRODUCTION_FS_ROOT);
+        // The image's apt state has unmet dependencies until this repair.
+        repair_package_dependencies(root);
+        if sync_firefox_esr_diversion(root) {
+            install_mozilla_firefox(root);
+        }
+        Ok(())
+    }))
+}
+
+/// Shadows Debian's ESR menu entry while Mozilla's Firefox is installed, so
+/// the menu and taskbar offer one Firefox. ESR itself stays installed as what
+/// `/usr/bin/firefox` falls back to; removing Mozilla's build brings its entry
+/// back on the next launch. The override is ESR's own entry plus `NoDisplay`:
+/// KDE skips a `Hidden=true` override and falls back to `/usr/share`'s copy.
+const FIREFOX_ESR_MENU_OVERRIDE: &str = "usr/local/share/applications/firefox-esr.desktop";
+const FIREFOX_ESR_MENU_ENTRY: &str = "usr/share/applications/firefox-esr.desktop";
+
+fn firefox_esr_menu_override(esr_entry: &str) -> String {
+    let mut text = String::from(
+        "# Managed by Portal: Mozilla's Firefox is installed; ESR stays as its fallback.\n",
+    );
+    for line in esr_entry.lines().filter(|line| !line.starts_with("NoDisplay=")) {
+        text.push_str(line);
+        text.push('\n');
+        if line == "[Desktop Entry]" {
+            text.push_str("NoDisplay=true\n");
+        }
+    }
+    text
+}
+
+fn sync_firefox_esr_menu_entry(root: &Path) {
+    let path = root.join(FIREFOX_ESR_MENU_OVERRIDE);
+    let current = fs::read_to_string(&path).ok();
+    let esr_entry = fs::read_to_string(root.join(FIREFOX_ESR_MENU_ENTRY)).ok();
+    let result = if let (true, Some(esr_entry)) =
+        (root.join("usr/lib/firefox/firefox").is_file(), esr_entry)
+    {
+        let wanted = firefox_esr_menu_override(&esr_entry);
+        if current.as_deref() == Some(wanted.as_str()) {
+            return;
+        }
+        fs::create_dir_all(path.parent().expect("override path has a parent"))
+            .and_then(|()| fs::write(&path, wanted))
+    } else if current.is_some_and(|text| text.contains("Managed by Portal")) {
+        fs::remove_file(&path)
+    } else {
+        return;
+    };
+    if let Err(error) = result {
+        log::warn!("Firefox ESR menu entry could not be synced: {error}");
+    }
+}
+
 fn install_mozilla_firefox(root: &Path) {
+    install_mozilla_firefox_package(root);
+    sync_firefox_esr_menu_entry(root);
+}
+
+fn install_mozilla_firefox_package(root: &Path) {
     let marker = root.join("var/lib/localdesktop/mozilla-firefox-v1");
     if marker.is_file() {
         return;
@@ -4292,6 +4357,7 @@ fn stage_weight(name: &str, options: &SetupOptions) -> usize {
         options.install_plan.as_ref(),
     ) {
         ("optional-apps", true, Some(plan)) => 1 + 2 * plan.selected_apps().len(),
+        ("mozilla-firefox", _, _) => 2,
         _ => 1,
     }
 }
@@ -4340,6 +4406,7 @@ fn stages() -> Vec<NamedSetupStage> {
         ("mesa-kgsl-layer", Box::new(setup_mesa_layer)),
         ("plasma-wayland", Box::new(setup_plasma_wayland)),
         ("desktop-login", Box::new(setup_desktop_login)),
+        ("mozilla-firefox", Box::new(setup_mozilla_firefox)),
         ("optional-apps", Box::new(setup_optional_apps)),
         ("xkb-symlink", Box::new(fix_xkb_symlink)),
     ]
