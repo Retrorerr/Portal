@@ -1,0 +1,38 @@
+From 239e3c746b66eeaceebd04043f9af0000dfbfdf9 Mon Sep 17 00:00:00 2001
+From: Retrorerr <masobazee@gmail.com>
+Date: Tue, 13 Oct 2026 17:17:11 +0100
+Subject: [PATCH] freedreno/kgsl: keep merged submits' bos alive until the
+ submit
+
+flush_submit_list() deleted each deferred submit merged into the last one before the GPU_COMMAND ioctl, dropping its bo references. msm moves those bos over to the last submit first; the KGSL port did not. A bo whose only remaining reference was that submit's and that has no bo cache bucket (over 112 MiB) was destroyed right there: kgsl_bo_destroy() waited on a fence whose kfence was not set yet, so it returned at once, and GPUMEM_FREE_ID freed the memory before the GPU ran the commands that read it. A glTexSubImage of more than 112 MiB into a tiled texture uploads through such a linear staging texture, so the texture came out transparent black with no GL error; Plasma's cropped wallpaper hit this at fractional portrait scales. Append the deferred submit's bos to the last submit, as msm does.
+---
+ src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+index 769eb07..52021f2 100644
+--- a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
++++ b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+@@ -230,6 +230,19 @@ flush_submit_list(struct list_head *submit_list)
+             break;
+         }
+ 
++        /* Move the deferred submit's bos over to the last submit, as msm
++         * does, so they stay referenced until that submit is destroyed after
++         * the GPU_COMMAND ioctl. KGSL takes no bo list and frees memory
++         * immediately on GPUMEM_FREE_ID, and kgsl_bo_destroy() can only wait
++         * on a fence whose kfence is set. Dropped here instead, a bo with no
++         * other reference and no bo cache bucket (over 112 MiB, like the
++         * linear staging texture of a large glTexSubImage) is freed before
++         * the GPU runs the commands that read it.
++         */
++        struct fd_submit_sp *fd_deferred_submit = to_fd_submit_sp(submit);
++        for (unsigned i = 0; i < fd_deferred_submit->nr_bos; i++)
++            fd_submit_append_bo(fd_submit, fd_deferred_submit->bos[i]);
++
+         list_del(&submit->node);
+         fd_submit_del(submit);
+     }
+-- 
+2.54.0.windows.1
+
