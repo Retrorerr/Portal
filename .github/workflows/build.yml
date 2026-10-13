@@ -166,7 +166,6 @@ jobs:
 
       - name: Rename APK
         run: |
-          mv target/x/release/android/gradle/app/build/outputs/apk/debug/app-debug.apk target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
           mv target/x/release/android/gradle/app/build/outputs/apk/release/app-release.apk target/x/Portal-${{ steps.extract_version.outputs.version }}.apk
           # Fixed name so releases/latest/download/Portal.apk always points at the newest build
           cp target/x/Portal-${{ steps.extract_version.outputs.version }}.apk target/x/Portal.apk
@@ -209,8 +208,48 @@ jobs:
       - name: Rename AAB
         if: github.event_name != 'pull_request'
         run: |
-          mv target/x/release/android/gradle/app/build/outputs/bundle/debug/app-debug.aab target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.aab
           mv target/x/release/android/gradle/app/build/outputs/bundle/release/app-release.aab target/x/Portal-${{ steps.extract_version.outputs.version }}.aab
+
+      # Portal Debug is a separate app (app.polarbear, "Portal Debug", blue-dot
+      # icon, portal-debug feature), built from manifest.debug.yaml like
+      # scripts/build_android_variants.ps1 does. Gradle signs debug builds with
+      # ~/.android/debug.keystore; this is the maintainer's, so GitHub and local
+      # Debug builds update each other.
+      - name: Setup debug keystore
+        if: github.event_name != 'pull_request'
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p ~/.android
+          printf '%s\n' "$DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+          keytool -list -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey
+
+      - name: Build Portal Debug APK
+        if: github.event_name != 'pull_request'
+        run: |
+          cp manifest.debug.yaml manifest.yaml
+          x build --debug --features portal-debug --platform=android --arch=arm64 --format=apk
+          git checkout -- manifest.yaml
+
+      - name: Verify and rename Portal Debug APK
+        if: github.event_name != 'pull_request'
+        run: |
+          apk=target/x/debug/android/gradle/app/build/outputs/apk/debug/app-debug.apk
+          tools="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          badging=$("$tools/aapt" dump badging "$apk")
+          grep -q "^package: name='app.polarbear' " <<<"$badging"
+          grep -q "^application-label:'Portal Debug'$" <<<"$badging"
+          grep -q "^application-debuggable$" <<<"$badging"
+          "$tools/apksigner" verify --print-certs "$apk" | grep -q "certificate SHA-256 digest: a512a376e17078bc9f8f4167457bc6c7be221a59d2e159c6d5750750266d748a"
+          mv "$apk" target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
+
+      - name: Upload Portal Debug APK
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          path: target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
+          if-no-files-found: error
+          archive: false
 
       - name: Create GitHub Release
         if: github.ref_type == 'tag'
@@ -225,4 +264,3 @@ jobs:
             target/x/Portal.apk
             target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
             target/x/Portal-${{ steps.extract_version.outputs.version }}.aab
-            target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.aab
