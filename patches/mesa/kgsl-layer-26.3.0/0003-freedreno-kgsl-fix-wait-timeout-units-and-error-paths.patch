@@ -1,0 +1,134 @@
+From 7021156c4c8a0d33e7419dbef43f475582092f46 Mon Sep 17 00:00:00 2001
+From: Retrorerr <masobazee@gmail.com>
+Date: Tue, 13 Oct 2026 23:37:32 +0100
+Subject: [PATCH] freedreno/kgsl: fix wait timeout units and error paths
+
+kgsl_pipe_wait() passed freedreno's timeout, which is in ns, straight on as the ms timeout of IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID, a 32-bit field, so a finite glClientWaitSync/eglClientWaitSync waited about 10^6 times too long, or a wrapped amount. Convert to ms, rounding up because KGSL takes 0 as wait forever, and clamp to UINT32_MAX, which KGSL takes as infinite like the ~0 it already got for infinite waits.
+
+flush_submit_list() skipped closing the submit's in-fence fd when GPU_COMMAND or timestamp_to_fd failed, leaking it, and returned 0 when timestamp_to_fd failed. Close it on every path, as msm does, and return -1 for that failure; the only caller ignores the result.
+
+kgsl_bo_new() and kgsl_bo_from_dmabuf() dereferenced the bo before checking it for NULL, and leaked the KGSL object when wrapping it failed: the common import code releases a failed handle with GEM_CLOSE, which KGSL does not implement. Check first and free the object with GPUMEM_FREE_ID.
+---
+ src/freedreno/drm/kgsl/kgsl_bo.c            | 32 +++++++++++++++------
+ src/freedreno/drm/kgsl/kgsl_pipe.c          |  9 +++++-
+ src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c |  8 ++++--
+ 3 files changed, 37 insertions(+), 12 deletions(-)
+
+diff --git a/src/freedreno/drm/kgsl/kgsl_bo.c b/src/freedreno/drm/kgsl/kgsl_bo.c
+index 7f4785b..afdc040 100644
+--- a/src/freedreno/drm/kgsl/kgsl_bo.c
++++ b/src/freedreno/drm/kgsl/kgsl_bo.c
+@@ -61,6 +61,16 @@ kgsl_bo_cpu_prep(struct fd_bo *bo, struct fd_pipe *pipe, uint32_t op)
+     return ret == 0 ? -EBUSY : 0;
+ }
+ 
++static void
++kgsl_free_id(struct fd_device *dev, uint32_t id)
++{
++    struct kgsl_gpumem_free_id req = {
++        .id = id
++    };
++
++    kgsl_pipe_safe_ioctl(dev->fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req);
++}
++
+ void
+ kgsl_bo_close_handle(struct fd_bo *bo)
+ {
+@@ -69,11 +79,7 @@ kgsl_bo_close_handle(struct fd_bo *bo)
+        close(kgsl_bo->import_fd);
+     }
+ 
+-    struct kgsl_gpumem_free_id req = {
+-        .id = bo->handle
+-    };
+-
+-    kgsl_pipe_safe_ioctl(bo->dev->fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req);
++    kgsl_free_id(bo->dev, bo->handle);
+ }
+ 
+ static void
+@@ -206,6 +212,15 @@ kgsl_bo_from_dmabuf(struct fd_device *dev, int fd)
+ 
+     bo = fd_bo_from_handle(dev, req.id, 0);
+ 
++    /* The common code closes a failed import with GEM_CLOSE, which means
++     * nothing to KGSL: free the object here.
++     */
++    if (!bo) {
++        ERROR_MSG("Failed to import dma-buf object");
++        kgsl_free_id(dev, req.id);
++        return NULL;
++    }
++
+     struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
+     kgsl_bo->bo_type = KGSL_BO_IMPORT;
+     kgsl_bo->import_fd = os_dupfd_cloexec(fd);
+@@ -307,13 +322,14 @@ kgsl_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
+ 
+     bo = kgsl_bo_from_handle(dev, size, req.id);
+ 
+-    struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
+-    kgsl_bo->bo_type = KGSL_BO_NATIVE;
+-
+     if (!bo) {
+         ERROR_MSG("Failed to allocate buffer object");
++        kgsl_free_id(dev, req.id);
+         return NULL;
+     }
+ 
++    struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
++    kgsl_bo->bo_type = KGSL_BO_NATIVE;
++
+     return bo;
+ }
+diff --git a/src/freedreno/drm/kgsl/kgsl_pipe.c b/src/freedreno/drm/kgsl/kgsl_pipe.c
+index 4760212..46bcaff 100644
+--- a/src/freedreno/drm/kgsl/kgsl_pipe.c
++++ b/src/freedreno/drm/kgsl/kgsl_pipe.c
+@@ -122,7 +122,14 @@ static int
+ kgsl_pipe_wait(struct fd_pipe *pipe, const struct fd_fence *fence, uint64_t timeout)
+ {
+     struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
+-    return wait_timestamp_safe(pipe->dev->fd, kgsl_pipe->queue_id, fence->kfence, timeout);
++    /* timeout is in ns, KGSL's is a 32-bit count of ms where 0 waits
++     * forever. Round up so a sub-ms wait isn't infinite, and clamp so a
++     * long one doesn't wrap; KGSL takes anything over INT_MAX ms as
++     * infinite, so ~0 still waits forever.
++     */
++    uint64_t timeout_ms = timeout / 1000000 + (timeout % 1000000 != 0);
++    return wait_timestamp_safe(pipe->dev->fd, kgsl_pipe->queue_id, fence->kfence,
++                               MIN2(timeout_ms, UINT32_MAX));
+ }
+ 
+ static void
+diff --git a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+index 52021f2..8a68c2a 100644
+--- a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
++++ b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+@@ -282,6 +282,7 @@ flush_submit_list(struct list_head *submit_list)
+         int fd = timestamp_to_fd(pipe, req.timestamp);
+         if (fd < 0) {
+             ERROR_MSG("Failed to create sync file for timestamp (%s)", strerror(errno));
++            ret = -1;
+             goto fail;
+         }
+ 
+@@ -301,10 +302,11 @@ flush_submit_list(struct list_head *submit_list)
+         }
+     }
+ 
+-    if (fd_submit->in_fence_fd != -1)
+-        close(fd_submit->in_fence_fd);
+-
+ fail:
++    if (fd_submit->in_fence_fd != -1) {
++        close(fd_submit->in_fence_fd);
++        fd_submit->in_fence_fd = -1;
++    }
+     if (implicit_fence_fd != -1)
+         close(implicit_fence_fd);
+     util_dynarray_foreach (&dmabuf_bos, struct fd_bo *, b)
+-- 
+2.54.0.windows.1
+
