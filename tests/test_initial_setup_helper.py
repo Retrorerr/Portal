@@ -210,6 +210,18 @@ class LauncherPlanTests(unittest.TestCase):
         ), mock.patch.object(helper, "log"):
             self.assertEqual(helper.main(), 1)
 
+    def test_appearance_readback_treats_absent_kdeglobals_keys_as_plasma_defaults(self):
+        # Applying Breeze/BreezeLight on a fresh home stores nothing, since
+        # KConfig drops values equal to the default; Light setup must still prove.
+        def kreadconfig(arguments, timeout=10):
+            self.assertIn("--default", arguments)
+            return arguments[arguments.index("--default") + 1] + "\n"
+
+        with mock.patch.object(helper, "run_checked", side_effect=kreadconfig):
+            self.assertEqual(helper.read_lookandfeel_package(), "org.kde.breeze.desktop")
+            self.assertEqual(helper.read_color_scheme(), "BreezeLight")
+            helper.wait_for_appearance("org.kde.breeze.desktop", "BreezeLight")
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed to execute the Plasma script mock")
     def test_generated_plasma_script_updates_only_task_managers_and_retries_cleanly(self):
         plan = {"fingerprint": "b" * 64, "attempt_id": "1-2", "app_ids": "gimp,vlc"}

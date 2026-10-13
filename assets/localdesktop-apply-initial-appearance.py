@@ -82,6 +82,11 @@ TASK_MANAGER_DEFAULT_LAUNCHERS = (
     "preferred://browser",
 )
 KONSOLE_LAUNCHER = "applications:org.kde.konsole.desktop"
+# KConfig never stores a value equal to its default, so applying the light
+# theme on a fresh home leaves both kdeglobals keys absent. Read absence as
+# Plasma's default, or a Light (or light-Android System) setup never proves.
+PLASMA_DEFAULT_LOOKANDFEEL = "org.kde.breeze.desktop"
+PLASMA_DEFAULT_COLOR_SCHEME = "BreezeLight"
 
 
 class ApplyError(RuntimeError):
@@ -405,6 +410,8 @@ def read_color_scheme():
                 "General",
                 "--key",
                 "ColorScheme",
+                "--default",
+                PLASMA_DEFAULT_COLOR_SCHEME,
             ],
             timeout=5,
         ).strip()
@@ -423,6 +430,8 @@ def read_lookandfeel_package():
                 "KDE",
                 "--key",
                 "LookAndFeelPackage",
+                "--default",
+                PLASMA_DEFAULT_LOOKANDFEEL,
             ],
             timeout=5,
         ).strip()
