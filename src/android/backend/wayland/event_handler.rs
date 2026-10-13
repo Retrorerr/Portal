@@ -972,10 +972,7 @@ fn complete_kwin_android_presentation(
     }
 }
 
-fn complete_kwin_presentation_without_android_timestamp(
-    backend: &mut WaylandBackend,
-    generation: u64,
-) {
+fn complete_kwin_presentation_without_android_timestamp(backend: &mut WaylandBackend) {
     if backend.pending_kwin_presentation.is_some() {
         return;
     }
@@ -1784,8 +1781,8 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                 // If the device does not expose the Android timestamp
                 // extension, retain the best protocol-level proof but make it
                 // explicit that this is not a hardware scanout measurement.
-                (None, Some(generation), AndroidFrameTimestampSupport::Unsupported) => {
-                    complete_kwin_presentation_without_android_timestamp(backend, generation);
+                (None, Some(_), AndroidFrameTimestampSupport::Unsupported) => {
+                    complete_kwin_presentation_without_android_timestamp(backend);
                 }
                 (_, None, _) => {
                     // A disconnected or superseded KWin surface cannot make

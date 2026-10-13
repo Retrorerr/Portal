@@ -38,23 +38,33 @@ use crate::utils::{Buffer as BufferCoord, Logical, Point, Rectangle, Size, Trans
 /// Why a frame must fall back to a full upload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShmDamageFallback {
+    /// The buffer or damage geometry is empty or out of range.
     InvalidGeometry,
+    /// The surface's buffer scale is not usable.
     InvalidScale,
+    /// The viewport source or destination is not usable.
     InvalidViewport,
 }
 
 /// Per-frame upload diagnostics for profiling (debug-level logging only).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShmUploadStats {
+    /// Pixels covered by the uploaded rectangles.
     pub damaged_pixels: i64,
+    /// Pixels in the whole buffer.
     pub total_pixels: i64,
+    /// `damaged_pixels` as a percentage of `total_pixels`.
     pub percent: f64,
+    /// Number of uploaded rectangles.
     pub num_rects: usize,
+    /// Bytes copied to the GPU.
     pub bytes_uploaded: i64,
+    /// The whole buffer was uploaded instead of its damage.
     pub is_full_fallback: bool,
 }
 
 impl ShmUploadStats {
+    /// Stats for uploading `rects` of a `buffer`-sized SHM buffer.
     pub fn for_rects(
         rects: &[Rectangle<i32, BufferCoord>],
         buffer: Size<i32, BufferCoord>,
@@ -274,6 +284,7 @@ pub fn merge_rects(mut rects: Vec<Rectangle<i32, BufferCoord>>) -> Vec<Rectangle
 pub struct SyncFingerprint {
     /// Physical SHM buffer dimensions.
     pub buffer_w: i32,
+    /// Physical SHM buffer height.
     pub buffer_h: i32,
     /// Integer `wl_surface.set_buffer_scale`.
     pub buffer_scale: i32,
@@ -307,6 +318,7 @@ pub struct CommitSyncEvent {
     /// the Wayland surface's previous committed content, and complete surface
     /// damage advances that content across a client's normal buffer rotation.
     pub new_object: bool,
+    /// Geometry of this commit's buffer.
     pub fingerprint: SyncFingerprint,
     /// This generation's damage was completely recorded (converted,
     /// non-empty, unambiguous). `false` forces a full resync.
@@ -319,7 +331,10 @@ pub struct CommitSyncEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncDecision {
     /// Perform one full upload, then resume gated partials.
-    Full { reason: &'static str },
+    Full {
+        /// Why the partial chain was broken.
+        reason: &'static str,
+    },
     /// The proven chain covers every generation since the last upload:
     /// partial upload of the accumulated damage is cache-correct.
     Partial,
@@ -356,6 +371,7 @@ pub struct ShmSyncTracker {
 }
 
 impl ShmSyncTracker {
+    /// A tracker with no committed or uploaded generation yet.
     pub fn new() -> Self {
         Self {
             committed: 0,
@@ -407,6 +423,7 @@ impl ShmSyncTracker {
         }
     }
 
+    /// Whether the next import may upload partially or must upload in full.
     pub fn decide(&self) -> SyncDecision {
         let Some(uploaded) = self.uploaded else {
             return SyncDecision::Full {
@@ -445,10 +462,12 @@ impl ShmSyncTracker {
         self.gap_reason = None;
     }
 
+    /// The latest committed content generation.
     pub fn committed(&self) -> u64 {
         self.committed
     }
 
+    /// The generation the cached texture holds, if any.
     pub fn uploaded(&self) -> Option<u64> {
         self.uploaded
     }

@@ -1,4 +1,5 @@
 #[path = "../src/core/startup.rs"]
+#[allow(dead_code)]
 mod startup;
 
 use startup::{is_kwin_wayland_title, StartupReadiness};

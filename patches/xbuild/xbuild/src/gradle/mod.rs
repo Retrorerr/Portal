@@ -161,6 +161,9 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
     manifest.platform_build_version_code = None;
     manifest.platform_build_version_name = None;
     manifest.application.debuggable = None;
+    // AGP rejects extractNativeLibs in a source manifest; useLegacyPackaging
+    // writes it into the merged one.
+    let legacy_packaging = manifest.application.extract_native_libs.take().unwrap_or(true);
     if !manifest.application.services.is_empty()
         || has_android_source(env.cargo().package_root(), "java", "java")
         || has_android_source(env.cargo().package_root(), "kotlin", "kotlin")
@@ -182,54 +185,54 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
                 id 'org.jetbrains.kotlin.plugin.compose'
             }}
             android {{
-                namespace '{package}'
-                compileSdk {target_sdk}
+                namespace = '{package}'
+                compileSdk = {target_sdk}
                 defaultConfig {{
-                    applicationId '{package}'
-                    minSdk {min_sdk}
-                    targetSdk {target_sdk}
-                    versionCode {version_code}
-                    versionName '{version_name}'
+                    applicationId = '{package}'
+                    minSdk = {min_sdk}
+                    targetSdk = {target_sdk}
+                    versionCode = {version_code}
+                    versionName = '{version_name}'
                     // Portal's UI is English; drop AndroidX's translations.
                     resourceConfigurations += ['en']
                 }}
                 // SPIKE-ONLY (branch compose-setup-spike): enable @Composable
                 // compilation for the overlay in src/android/kotlin.
                 buildFeatures {{
-                    compose true
+                    compose = true
                 }}
                 compileOptions {{
-                    sourceCompatibility JavaVersion.VERSION_1_8
-                    targetCompatibility JavaVersion.VERSION_1_8
+                    sourceCompatibility = JavaVersion.VERSION_1_8
+                    targetCompatibility = JavaVersion.VERSION_1_8
                 }}
                 kotlinOptions {{
                     jvmTarget = '1.8'
                 }}
                 packagingOptions {{
                     jniLibs {{
-                        useLegacyPackaging true
+                        useLegacyPackaging = {legacy_packaging}
                     }}
                 }}
                 def keystoreFile = file("release-key.jks")
                 if (keystoreFile.exists()) {{
                     signingConfigs {{
                         release {{
-                            storeFile keystoreFile
-                            storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                            keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                            keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+                            storeFile = keystoreFile
+                            storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                            keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                            keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
                         }}
                     }}
                 }}
                 buildTypes {{
                     release {{
                         if (keystoreFile.exists()) {{
-                            signingConfig signingConfigs.release
+                            signingConfig = signingConfigs.release
                         }}
-                        minifyEnabled true
+                        minifyEnabled = true
                         // Unused AndroidX resources; res/raw/portal_keep.xml
                         // keeps what Kotlin loads by name.
-                        shrinkResources true
+                        shrinkResources = true
                         proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
                     }}
                 }}
@@ -243,6 +246,7 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
         min_sdk = min_sdk,
         version_code = version_code,
         version_name = version_name,
+        legacy_packaging = legacy_packaging,
         dependencies = dependencies,
     );
 

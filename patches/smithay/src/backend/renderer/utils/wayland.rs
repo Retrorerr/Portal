@@ -574,16 +574,6 @@ impl SurfaceView {
         rect.upscale(scale)
     }
 
-    pub(crate) fn rect_to_local<N>(&self, rect: Rectangle<N, Logical>) -> Rectangle<f64, Logical>
-    where
-        N: Coordinate,
-    {
-        let scale = self.scale();
-        let mut rect = rect.to_f64().downscale(scale);
-        rect.loc += self.src.loc;
-        rect
-    }
-
     fn scale(&self) -> Scale<f64> {
         Scale::from((
             self.dst.w as f64 / self.src.size.w,

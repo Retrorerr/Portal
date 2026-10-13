@@ -482,7 +482,7 @@ fn pump_thread_choreo(
             // r: LOOPER_POLL_WAKE=-1, CALLBACK=1, TIMEOUT=0, ERROR=-2..-4.
             let now = now_ns();
             if now.wrapping_sub(last_log_ns) >= 5_000_000_000 {
-                let total = unsafe { (*(holder_ptr as *mut TickHolder)).count };
+                let total = (*(holder_ptr as *mut TickHolder)).count;
                 log::info!(
                     "anland.vsync alive callbacks_5s={} poll_last={r}",
                     total.wrapping_sub(last_count)

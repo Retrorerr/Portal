@@ -1,6 +1,8 @@
 #[path = "../src/core/provisioning.rs"]
+#[allow(dead_code)]
 mod provisioning;
 #[path = "../src/core/runtime.rs"]
+#[allow(dead_code)]
 mod runtime;
 use provisioning::{
     begin_installation, InstallOperationState, InstallStart, ProvisioningPhase,

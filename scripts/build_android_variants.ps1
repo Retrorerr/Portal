@@ -122,7 +122,7 @@ function Assert-GeneratedVariant {
     }
 
     $gradleText = [System.IO.File]::ReadAllText($gradlePath)
-    $applicationId = [regex]::Match($gradleText, "(?m)^\s*applicationId\s+'([^']+)'\s*$").Groups[1].Value
+    $applicationId = [regex]::Match($gradleText, "(?m)^\s*applicationId\s*=\s*'([^']+)'\s*$").Groups[1].Value
     if ($applicationId -ne $Variant.Package) {
         throw "$($Variant.Name) generated Gradle applicationId is '$applicationId', expected '$($Variant.Package)'."
     }

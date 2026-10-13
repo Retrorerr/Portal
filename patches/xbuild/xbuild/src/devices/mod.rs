@@ -119,7 +119,7 @@ impl Device {
         Ok(())
     }
 
-    pub fn test(&self, env: &BuildEnv, path: &Path) -> Result<()> {
+    pub fn test(&self, _env: &BuildEnv, path: &Path) -> Result<()> {
         match &self.backend {
             Backend::Adb(adb) => adb.test(&self.id, path),
             _ => anyhow::bail!("unsupported device for testing"),

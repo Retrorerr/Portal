@@ -1,6 +1,7 @@
 //! Host-side tests for the inner Plasma <-> Android clipboard broker.
 
 #[path = "../src/core/clipboard_broker.rs"]
+#[allow(dead_code)]
 mod broker;
 
 use std::io::Cursor;

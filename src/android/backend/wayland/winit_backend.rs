@@ -25,10 +25,10 @@ use smithay::{
             context::{GlAttributes, PixelFormatRequirements},
             display::EGLDisplay,
             native::EGLNativeSurface,
-            EGLContext, EGLSurface, Error as EGLError,
+            EGLContext, EGLSurface,
         },
         renderer::{
-            gles::{GlesError, GlesRenderer},
+            gles::GlesRenderer,
             Bind,
         },
         SwapBuffersError,
@@ -578,23 +578,6 @@ pub fn bind(event_loop: &ActiveEventLoop) -> Result<WinitGraphicsBackend<GlesRen
             (!address.is_null()).then(|| unsafe { std::mem::transmute(address) })
         },
     })
-}
-
-/// Errors thrown by the `winit` backends
-#[derive(Debug)]
-pub enum Error {
-    /// Failed to initialize an event loop.
-    EventLoopCreation(winit::error::EventLoopError),
-    /// Failed to initialize a window.
-    WindowCreation(winit::error::OsError),
-    /// Surface creation error.
-    Surface(Box<dyn std::error::Error>),
-    /// Context creation is not supported on the current window system
-    NotSupported,
-    /// EGL error.
-    Egl(EGLError),
-    /// Renderer initialization failed.
-    RendererCreationError(GlesError),
 }
 
 /// Window with an active EGL Context created by `winit`.

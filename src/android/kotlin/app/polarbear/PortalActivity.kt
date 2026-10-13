@@ -135,7 +135,9 @@ open class PortalActivity : GameActivity() {
      */
     private fun dispatchMouseSideButton(event: KeyEvent): Boolean {
         if (!KeyboardAccessibilityService.isMouseSideButton(event)) return false
-        if (event.repeatCount == 0 && event.action != KeyEvent.ACTION_MULTIPLE) {
+        if (event.repeatCount == 0 &&
+            (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP)
+        ) {
             val code = if (event.keyCode == KeyEvent.KEYCODE_BACK) 0x113 else 0x114
             nativeCapturedButton(code, event.action == KeyEvent.ACTION_DOWN)
         }

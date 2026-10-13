@@ -218,7 +218,7 @@ impl Table {
         }
     }
 
-    fn lookup_package(&self, id: u8) -> Result<Package> {
+    fn lookup_package(&self, id: u8) -> Result<Package<'_>> {
         for package in &self.packages {
             if let Chunk::TablePackage(header, chunks) = package {
                 if header.id == id as u32 {
@@ -229,7 +229,7 @@ impl Table {
         anyhow::bail!("failed to locate package {}", id);
     }
 
-    pub fn entry_by_ref(&self, r: Ref) -> Result<Entry> {
+    pub fn entry_by_ref(&self, r: Ref) -> Result<Entry<'_>> {
         let id = self.lookup_package_id(r.package)?;
         let package = self.lookup_package(id)?;
         let id = package.lookup_type_id(r.ty)?;

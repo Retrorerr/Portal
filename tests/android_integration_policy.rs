@@ -5,6 +5,7 @@
 //! not attached.
 
 #[path = "../src/core/android_input.rs"]
+#[allow(dead_code)]
 mod android_input;
 #[path = "../src/core/android_integration.rs"]
 mod android_integration;
@@ -770,13 +771,12 @@ fn xwayland_variant_selection_policy() {
     // (never /usr/bin, never the loader path) on every launch.
     assert!(ANDROID_SETUP_SOURCE.contains("usr/local/lib/portal-xwayland"));
     assert!(ANDROID_SETUP_SOURCE.contains("sync_xwayland_candidate_overlay"));
-    // 2. The staged candidate SHA is pinned identically in setup.rs, the
-    // guest-side selection gate, and the asset manifest (transcription
-    // slips fail closed here, not on the tablet).
+    // 2. The staged candidate SHA is pinned identically in the guest-side
+    // selection gate (the only check that enforces it) and the asset
+    // manifest (transcription slips fail closed here, not on the tablet).
     for pinned in [
         "b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d",
     ] {
-        assert!(ANDROID_SETUP_SOURCE.contains(pinned));
         assert!(KWIN_WRAPPER_SOURCE.contains(pinned));
         assert!(XWAYLAND_SHA256SUMS_SOURCE.contains(pinned));
     }

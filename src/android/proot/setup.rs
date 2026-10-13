@@ -215,10 +215,6 @@ const KWIN_ANLAND_LIBRARY: &[u8] =
 /// any staging problem. Pins: `assets/xwayland-candidate/SHA256SUMS`.
 const XWAYLAND_CANDIDATE_BINARY: &[u8] =
     include_bytes!("../../../assets/xwayland-candidate/Xwayland");
-/// Expected SHA-256 of the staged candidate Xwayland (guest-side selection
-/// gate refuses anything else; mirrors SHA256SUMS).
-const XWAYLAND_CANDIDATE_SHA256: &str =
-    "b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d";
 /// Portal's default XWayland: pinned lfdevs 461772ae (2:24.1.6-91) plus
 /// Portal 0006 (package 2:24.1.6-91portal2), which stops the KGSL stale
 /// frame-callback recovery leaking a window-sized buffer each time it fires

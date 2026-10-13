@@ -20,6 +20,7 @@ android:
     - "androidx.compose.material:material-icons-core:1.7.6"
     - "androidx.compose.material:material-ripple:1.7.6"
     - "androidx.lifecycle:lifecycle-runtime:2.8.7"
+    - "androidx.lifecycle:lifecycle-runtime-compose:2.8.7"
     - "androidx.lifecycle:lifecycle-viewmodel:2.8.7"
     - "androidx.savedstate:savedstate:1.2.1"
     - "androidx.core:core:1.13.1"

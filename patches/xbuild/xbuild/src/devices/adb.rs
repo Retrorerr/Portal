@@ -374,6 +374,7 @@ impl Adb {
             .shell(device, None)
             .arg(format!("/data/local/tmp/{}", file_name))
             .status()?;
+        anyhow::ensure!(status.success(), "{} failed: {}", file_name, status);
 
         Ok(())
     }

@@ -72,10 +72,15 @@ pub mod ffi {
 /// asynchronous GPU/DMA completion can surface later in render or swap time.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ShmUploadMetrics {
+    /// SHM imports.
     pub calls: u64,
+    /// Imports that uploaded the whole buffer.
     pub full_uploads: u64,
+    /// Imports that uploaded only damage.
     pub partial_uploads: u64,
+    /// Bytes copied to the GPU.
     pub bytes: u64,
+    /// CPU wall time spent importing.
     pub cpu_time_ns: u64,
 }
 

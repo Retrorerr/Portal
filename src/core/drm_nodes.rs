@@ -28,7 +28,9 @@
 //! alone. Opening the node still needs the `drmshim.so` preload, which
 //! answers the DRM version query Mesa uses to pick its kgsl winsys.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Host path of the kgsl device whose number the fake node reports.
 pub const KGSL_DEVICE: &str = "/dev/kgsl-3d0";

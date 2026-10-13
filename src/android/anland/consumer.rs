@@ -1695,7 +1695,6 @@ fn render_loop(inner: Arc<Inner>) {
     // Per-generation dups owned by this thread (immune to teardown close).
     let mut cur_gen: u64 = 0;
     let mut cur_fence: Option<OwnedFd> = None;
-    let mut pending: Option<u64> = None; // generation a select was issued on
     let mut idle_logged = false;
     // Thread-local dups of the pacing fds (same immunity rationale).
     let (tick, wake, vsync_gate) = {
@@ -1775,7 +1774,6 @@ fn render_loop(inner: Arc<Inner>) {
         if gen_id != cur_gen {
             cur_gen = gen_id;
             cur_fence = fence_dup;
-            pending = None;
             idle_logged = false;
         }
         // Demand gate: select on every display-vsync tick while the user is
@@ -1994,7 +1992,6 @@ fn render_loop(inner: Arc<Inner>) {
                         unsafe { inner.anw.cancel(window, anb, -1) };
                         continue;
                     }
-                    pending = Some(cur_gen);
                 }
                 _ => {
                     let now = sys::now_ns();
@@ -2011,10 +2008,9 @@ fn render_loop(inner: Arc<Inner>) {
         let rfence = refresh_done(
             &inner,
             cur_fence.as_ref(),
-            pending == Some(cur_gen),
             cur_gen,
         );
-        if pending == Some(cur_gen) && rfence == FENCE_LOST {
+        if rfence == FENCE_LOST {
             log::warn!(
                 "anland.render fence lost (generation died); buffer cancelled, not presented"
             );
@@ -2028,7 +2024,6 @@ fn render_loop(inner: Arc<Inner>) {
             unsafe { inner.anw.cancel(window, anb, rfence) };
             break;
         }
-        pending = None;
         selects += 1;
         // Generation fence: a rotation that landed after this frame's
         // dequeue must cancel, never present, a buffer produced for the old
@@ -2202,12 +2197,8 @@ const FENCE_LOST: i32 = -2;
 fn refresh_done(
     inner: &Arc<Inner>,
     fence: Option<&OwnedFd>,
-    selected: bool,
     generation: u64,
 ) -> i32 {
-    if !selected {
-        return -1;
-    }
     let Some(fence) = fence else { return -1 };
     // Emergency software fallback only: cold sessions (nothing ever queued)
     // get a long interruptible budget, because tearing down the generation

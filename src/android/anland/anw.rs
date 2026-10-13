@@ -16,7 +16,6 @@ pub const FORMAT_RGBA_8888: c_int = 1; // == AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNO
 
 const ANW_API_CONNECT: c_int = 13;
 const ANW_API_DISCONNECT: c_int = 14;
-const ANW_API_CPU: c_int = 2;
 
 #[repr(C)]
 pub struct NativeHandle {
