@@ -236,12 +236,22 @@ jobs:
         run: |
           apk=target/x/debug/android/gradle/app/build/outputs/apk/debug/app-debug.apk
           tools="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          echo "build-tools: $tools"
           badging=$("$tools/aapt" dump badging "$apk")
-          grep -q "^package: name='app.polarbear' " <<<"$badging"
-          grep -q "^application-label:'Portal Debug'$" <<<"$badging"
-          grep -q "^application-debuggable$" <<<"$badging"
-          "$tools/apksigner" verify --print-certs "$apk" | grep -q "certificate SHA-256 digest: a512a376e17078bc9f8f4167457bc6c7be221a59d2e159c6d5750750266d748a"
-          mv "$apk" target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
+          grep -E "^(package|application-label|application-debuggable)" <<<"$badging"
+          fail() { echo "::error::Portal Debug APK $1"; exit 1; }
+          grep -q "^package: name='app.polarbear' " <<<"$badging" || fail "has the wrong package"
+          grep -q "^application-label:'Portal Debug'$" <<<"$badging" || fail "has the wrong label"
+          grep -q "^application-debuggable$" <<<"$badging" || fail "is not debuggable"
+          # Sign with the maintainer's debug key explicitly instead of
+          # trusting where Gradle looks for its default debug keystore.
+          out=target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
+          "$tools/apksigner" sign --ks ~/.android/debug.keystore --ks-pass pass:android \
+            --ks-key-alias androiddebugkey --key-pass pass:android --out "$out" "$apk"
+          certs=$("$tools/apksigner" verify --print-certs "$out")
+          echo "$certs"
+          grep -q "certificate SHA-256 digest: a512a376e17078bc9f8f4167457bc6c7be221a59d2e159c6d5750750266d748a" <<<"$certs" \
+            || fail "is not signed with the maintainer's debug key"
 
       - name: Upload Portal Debug APK
         if: github.event_name == 'workflow_dispatch'
