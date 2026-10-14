@@ -380,7 +380,8 @@ fn android_logging_is_local_and_warn_in_release() {
 fn logout_ends_the_session_and_is_not_a_kwin_crash() {
     // ksmserver gone => the launcher reaps the hung session and exits 0, which
     // closes Portal; KWin's exit during that teardown is no crash.
-    assert!(PLASMA_LAUNCHER.contains("pgrep -x ksmserver"));
+    assert!(PLASMA_LAUNCHER.contains("pgrep -o -x ksmserver"));
+    assert!(PLASMA_LAUNCHER.contains("tail -s 2 --pid=\"$ksmserver_pid\" -f /dev/null"));
     assert!(PLASMA_LAUNCHER.contains("date +%s > \"$logout_marker\""));
     let marker = PLASMA_LAUNCHER
         .find("if [ -s \"$logout_marker\" ]; then")

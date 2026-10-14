@@ -274,23 +274,25 @@ fi
 # Portal can close instead of showing a frozen desktop.
 logout_marker="$state_dir/plasma-logout"
 rm -f "$logout_marker"
+# Spawning pgrep and sleep every second for the whole session costs two
+# execs a second under PRoot, so wait on ksmserver's PID with tail instead,
+# which only wakes in-process, and look again once it is gone.
 (
     seen=0
-    gone=0
     while kill -0 "$session_pid" 2>/dev/null; do
-        if pgrep -x ksmserver >/dev/null 2>&1; then
+        ksmserver_pid=$(pgrep -o -x ksmserver 2>/dev/null)
+        if [ -n "$ksmserver_pid" ]; then
             seen=1
-            gone=0
+            tail -s 2 --pid="$ksmserver_pid" -f /dev/null 2>/dev/null || sleep 2
+            sleep 1
         elif [ "$seen" -eq 1 ]; then
-            gone=$((gone + 1))
-            if [ "$gone" -ge 2 ]; then
-                printf 'stage=logout timestamp=%s\n' "$(date +%s)" >> "$session_log"
-                date +%s > "$logout_marker"
-                reap_session
-                break
-            fi
+            printf 'stage=logout timestamp=%s\n' "$(date +%s)" >> "$session_log"
+            date +%s > "$logout_marker"
+            reap_session
+            break
+        else
+            sleep 2
         fi
-        sleep 1
     done
 ) &
 logout_watch_pid=$!
