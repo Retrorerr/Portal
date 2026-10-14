@@ -59,6 +59,9 @@ extern void translate_syscall_exit(Tracee *tracee);
 extern bool is_voided_syscall(const Tracee *tracee, RegVersion version);
 
 extern void handle_netlink_reply_exit(Tracee *tracee, word_t syscall_number);
+#ifdef __ANDROID__
+extern void release_high_fd(const Tracee *tracee, int fd);
+#endif
 
 extern void apply_emulated_mount(Tracee *tracee);
 extern void apply_emulated_pivot_root(Tracee *tracee);

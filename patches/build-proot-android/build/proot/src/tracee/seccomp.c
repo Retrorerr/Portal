@@ -125,26 +125,23 @@ void sigsys_action_execve(Tracee *tracee)
 
 /**
  * Unblock SIGSYS in @tracee, a new thread or process which hasn't run
- * any code yet, if it has a handler for it.  glibc starts threads
- * with every signal blocked and calls set_robust_list(2) first, which
- * Android's filter traps: SIGSYS then gets through without resetting
- * the handler (see above), which the other threads of the process may
- * need before PRoot could reinstall it.  glibc sets the mask of the
- * thread right after.
+ * any code yet.  glibc starts threads with every signal blocked and
+ * calls set_robust_list(2) first, which Android's filter traps: SIGSYS
+ * then gets through without resetting the handler (see above), which
+ * the other threads of the process may need before PRoot could
+ * reinstall it.  glibc sets the mask of the thread right after.
+ *
+ * This is done even while the process has no handler yet: one may be
+ * installed before the new thread gets to run.  Firefox's content
+ * processes install the sandbox's handler and read it back right
+ * away, so a thread started just before saw the handler reset in
+ * between and the tab crashed on the null handler; with
+ * no handler, PRoot absorbs Android's SIGSYS all the same.
  */
 void sigsys_unblock_new_tracee(Tracee *tracee)
 {
-	const struct sigsys_action *action = tracee->sigsys_action;
 	const uint64_t sigsys_bit = UINT64_C(1) << (SIGSYS - 1);
 	uint64_t mask;
-	word_t handler;
-
-	if (action == NULL || !action->valid)
-		return;
-
-	memcpy(&handler, action->act, sizeof(handler));
-	if (handler == (word_t) SIG_DFL)
-		return;
 
 	if (ptrace(PTRACE_GETSIGMASK, tracee->pid, sizeof(mask), &mask) < 0
 	    || (mask & sigsys_bit) == 0)

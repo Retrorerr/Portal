@@ -2986,6 +2986,9 @@ int translate_syscall_enter(Tracee *tracee)
 		 * we'd keep intercepting sendto/recvfrom on it.  */
 		unmark_fake_netlink_fd(tracee, closed_fd);
 		unmark_netlink_route_fd(tracee, closed_fd);
+#ifdef __ANDROID__
+		release_high_fd(tracee, closed_fd);
+#endif
 
 		/* Keep a shadow read end so child writers don't get
 		 * EPIPE when the parent closes its copy first (ptrace

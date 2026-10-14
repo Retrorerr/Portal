@@ -102,6 +102,43 @@ static int soft_nofile(pid_t pid)
 	return limit;
 }
 
+/* Numbers move_fd_high() handed out, per thread group.  The dup3(2)
+ * that takes one runs only once its thread resumes, so until then
+ * /proc still shows it free: two threads creating netlink sockets at
+ * once (Firefox's NetlinkService next to glibc's getaddrinfo) were
+ * both given the same number, the second dup3 silently closed the
+ * first socket, and glibc aborted on the EBADF.  An entry goes once
+ * the number shows up taken or is closed; overwriting the oldest
+ * bounds the ones whose thread died before its dup3.  */
+#define NB_HIGH_FD_RESERVATIONS 64
+static struct {
+	pid_t tgid;
+	int fd;
+} high_fd_reserved[NB_HIGH_FD_RESERVATIONS];
+static size_t high_fd_reserved_next;
+
+static int find_high_fd_reservation(pid_t tgid, int fd)
+{
+	size_t i;
+
+	for (i = 0; i < NB_HIGH_FD_RESERVATIONS; i++)
+		if (high_fd_reserved[i].tgid == tgid && high_fd_reserved[i].fd == fd)
+			return (int) i;
+	return -1;
+}
+
+/* Forget that @fd of @tracee's thread group is about to be taken.  */
+void release_high_fd(const Tracee *tracee, int fd)
+{
+	int i;
+
+	if (fd < PROOT_TRACED_FD_BASE)
+		return;
+	i = find_high_fd_reservation(fakens_tgid(tracee), fd);
+	if (i >= 0)
+		high_fd_reserved[i].tgid = 0;
+}
+
 /**
  * Move @tracee's new descriptor @fd to a free number of at least
  * PROOT_TRACED_FD_BASE, the only ones whose send, receive and close
@@ -113,21 +150,42 @@ static int soft_nofile(pid_t pid)
 static int move_fd_high(Tracee *tracee, int fd, bool cloexec)
 {
 	int limit = soft_nofile(tracee->pid);
+	pid_t tgid = fakens_tgid(tracee);
 	char path[64];
 	struct stat st;
 	int target;
+	int reserved;
 
 	for (target = PROOT_TRACED_FD_BASE; target < PROOT_TRACED_FD_BASE + 64 && target < limit; target++) {
+		reserved = find_high_fd_reservation(tgid, target);
 		snprintf(path, sizeof(path), "/proc/%d/fd/%d", tracee->pid, target);
-		if (lstat(path, &st) == 0 || errno != ENOENT)
+		if (lstat(path, &st) == 0 || errno != ENOENT) {
+			/* Taken: a pending move, if any, is done.  */
+			if (reserved >= 0)
+				high_fd_reserved[reserved].tgid = 0;
+			continue;
+		}
+
+		/* A sibling thread's move to @target is still pending.  */
+		if (reserved >= 0)
 			continue;
 
-		/* A sibling thread could take @target meanwhile, but
-		 * only one holding this many descriptors.  */
 		if (register_chained_syscall(tracee, PR_dup3, fd, target, cloexec ? O_CLOEXEC : 0, 0, 0, 0) < 0
 		    || register_chained_syscall(tracee, PR_close, fd, 0, 0, 0, 0, 0) < 0)
 			return -1;
 		force_chain_final_result(tracee, target);
+
+		/* A free slot, else the oldest: a busy device can keep a
+		 * thread from its dup3 while dozens of others go by.  */
+		for (reserved = 0; reserved < NB_HIGH_FD_RESERVATIONS; reserved++)
+			if (high_fd_reserved[reserved].tgid == 0)
+				break;
+		if (reserved == NB_HIGH_FD_RESERVATIONS) {
+			reserved = (int) high_fd_reserved_next;
+			high_fd_reserved_next = (high_fd_reserved_next + 1) % NB_HIGH_FD_RESERVATIONS;
+		}
+		high_fd_reserved[reserved].tgid = tgid;
+		high_fd_reserved[reserved].fd = target;
 		return target;
 	}
 
