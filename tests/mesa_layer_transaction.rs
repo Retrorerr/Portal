@@ -477,9 +477,9 @@ fn validation_covers_session_binds_runtime_chain() {
     // Pinned identity must not drift.
     let android_src = include_str!("../src/android/proot/mesa_layer.rs");
     for pin in [
-        "26.3.0-20261014",
-        "11653677",
-        "c083164b0470c59f56dfabb488d13579d8eebf336ab1d1ad0c6d17dd0e6c8230",
+        "26.3.0-20261015",
+        "11653498",
+        "aa82c6716367ac67143c727ea391e14ee736ee2f620b3488733f9d6785348826",
         "mesa-kgsl-layer.complete",
         ".portal-mesa-identity",
         "write_identity",
