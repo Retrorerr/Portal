@@ -1,0 +1,38 @@
+From e7835c0b79e698a10f2a4cc08301adaa7914a7fc Mon Sep 17 00:00:00 2001
+From: Retrorerr <masobazee@gmail.com>
+Date: Thu, 15 Oct 2026 07:36:39 +0100
+Subject: [PATCH] freedreno: save the blitter scissor with exclusive max bounds
+
+fd_set_scissor_states() stores ctx->scissor with inclusive max bounds, and fd_blitter_pipe_begin() handed that to util_blitter_save_scissor(). The blitter restores the saved scissor through set_scissor_states(), which subtracts 1 from the max bounds again, so every u_blitter blit shrank the bound scissor by a pixel in each axis. The state tracker does not resend a scissor it believes is unchanged, so the loss accumulated frame after frame: a compositor repainting a window through the same scissor rect while something else blitted saw the window eaten away from its bottom-right corner until the rect changed.
+
+Save the scissor in the exclusive form set_scissor_states() expects.
+---
+ src/gallium/drivers/freedreno/freedreno_blitter.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/freedreno_blitter.c b/src/gallium/drivers/freedreno/freedreno_blitter.c
+index cf66d33..6c1faca 100644
+--- a/src/gallium/drivers/freedreno/freedreno_blitter.c
++++ b/src/gallium/drivers/freedreno/freedreno_blitter.c
+@@ -80,7 +80,17 @@ fd_blitter_pipe_begin(struct fd_context *ctx, bool render_cond) assert_dt
+                                 ctx->streamout.targets, MESA_PRIM_UNKNOWN);
+    util_blitter_save_rasterizer(ctx->blitter, ctx->rasterizer);
+    util_blitter_save_viewport(ctx->blitter, &ctx->viewport[0]);
+-   util_blitter_save_scissor(ctx->blitter, &ctx->scissor[0]);
++   /* ctx->scissor holds inclusive max bounds, but the blitter restores the
++    * saved scissor through set_scissor_states(), which takes exclusive ones
++    * and subtracts 1 again.  Save it in the exclusive form so a blit does
++    * not shrink the scissor that the state tracker believes is still bound.
++    */
++   struct pipe_scissor_state scissor = ctx->scissor[0];
++   if (scissor.minx <= scissor.maxx && scissor.miny <= scissor.maxy) {
++      scissor.maxx++;
++      scissor.maxy++;
++   }
++   util_blitter_save_scissor(ctx->blitter, &scissor);
+    util_blitter_save_fragment_shader(ctx->blitter, ctx->prog.fs);
+    util_blitter_save_blend(ctx->blitter, ctx->blend);
+    util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->zsa);
+-- 
+2.54.0.windows.1
+
