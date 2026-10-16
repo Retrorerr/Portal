@@ -330,11 +330,18 @@ def main():
                     if opcode == 0:  # activate(new_id<zwp_input_method_context_v1>)
                         context_id = struct.unpack("<I", msg_body[:4])[0]
                         active_context_id = context_id
+                        # A preedit of the previous field (whose deactivate may
+                        # come later and is then skipped) must not land here.
+                        current_preedit = ""
                         log(f">>> KWIN EVENT: ACTIVATE context_id={context_id} <<<")
                         notify_portal(True)
                     elif opcode == 1:  # deactivate(object<zwp_input_method_context_v1>)
                         context_id = struct.unpack("<I", msg_body[:4])[0]
                         log(f">>> KWIN EVENT: DEACTIVATE context_id={context_id} <<<")
+                        if active_context_id is not None and context_id != active_context_id:
+                            # A late deactivate of a replaced context must not
+                            # drop the field that has focus now.
+                            continue
                         active_context_id = None
                         # KWin commits a pending preedit itself on focus changes.
                         current_preedit = ""

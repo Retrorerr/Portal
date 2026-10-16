@@ -26,6 +26,7 @@ attached hardware keyboard keeps working and IBus never swallows typing.
 """
 import base64
 import os
+import signal
 import sys
 import threading
 import time
@@ -91,7 +92,15 @@ def main():
             # is impossible, '' = warmup) that must not steal focus state or
             # summon the keyboard: only a real client context arms commits.
             if client in ('fake', ''):
-                log(f"FocusIn probe ignored (client={client!r})")
+                # With IBus's shared engine a real context losing focus
+                # arrives as this FocusIn, not FocusOut (Chromium/Steam blur
+                # the editable on every click elsewhere). Keeping the old
+                # focus made every tap summon the keyboard.
+                if self.focused:
+                    log(f"FocusIn probe (client={client!r}) ends editable focus")
+                    self.do_focus_out()
+                else:
+                    log(f"FocusIn probe ignored (client={client!r})")
                 return
             log(f"FocusIn (editable focused, client={client})")
             self.focused = True
@@ -114,7 +123,10 @@ def main():
 
         def do_disable(self):
             log("Disable")
-            self.focused = False
+            # Portal must hear it too, or a stale ACTIVATE:ibus re-shows the
+            # keyboard on every tap.
+            if self.focused:
+                self.do_focus_out()
 
         def do_reset(self):
             log("Reset")
@@ -253,6 +265,29 @@ def main():
     if not bus.is_connected():
         log("FATAL: cannot connect to IBus daemon")
         sys.exit(1)
+
+    # Outliving the daemon (session ended) left an engine that still read the
+    # shared command FIFO and swallowed every other line meant for the next
+    # session's engine.
+    def on_disconnected(_bus):
+        log("IBus daemon connection lost; exiting")
+        notify_portal(False)
+        os._exit(0)
+
+    bus.connect("disconnected", on_disconnected)
+
+    # An engine that died with a field focused never sent DEACTIVATE, which
+    # left Portal summoning the keyboard for a field nobody has. A new engine
+    # has no focus; one being stopped gives its focus up.
+    # GLib's handler, not signal.signal: Python runs those only between
+    # bytecodes, and the main loop below blocks inside GLib.
+    def on_term():
+        log("Terminated; exiting")
+        notify_portal(False)
+        os._exit(0)
+
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, on_term)
+    notify_portal(False)
 
     exec_by_ibus = "--ibus" in sys.argv
     factory = PortalFactory(bus)

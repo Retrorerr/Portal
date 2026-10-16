@@ -1,8 +1,15 @@
 package app.polarbear;
 
 import android.app.Activity;
+import android.content.ComponentCallbacks;
 import android.content.Context;
+import android.content.res.Configuration;
+import android.database.ContentObserver;
 import android.graphics.Color;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.Selection;
@@ -10,6 +17,7 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.CompletionInfo;
 import android.view.inputmethod.CorrectionInfo;
@@ -36,6 +44,8 @@ public final class SoftKeyboardBridge {
     // Chunks stay under the native queue's 64 KiB per-commit byte cap at any UTF-8 width.
     private static final int MAX_COMMIT_CHARS = 16 * 1024;
     private static final int MAX_MIRROR_CHARS = 4096;
+    private static final long RESHOW_DELAY_MS = 150;
+    private static final String OPLUS_HARD_KEYBOARD_AVAILABLE = "hard_keyboard_available";
     // Suggestions on: keyboards then compose the current word (shown in the guest as preedit)
     // and autocorrect it on commit instead of rewriting already committed text.
     private static final int INPUT_TYPE =
@@ -44,6 +54,7 @@ public final class SoftKeyboardBridge {
     private static Activity editorActivity;
     private static InputManager monitoredInputManager;
     private static InputManager.InputDeviceListener inputDeviceListener;
+    private static Context configContext;
 
     static {
         System.loadLibrary("localdesktop");
@@ -65,21 +76,63 @@ public final class SoftKeyboardBridge {
                     nativeOnInputDevicesChanged(false, false);
                     return;
                 }
+                Context app = activity.getApplicationContext();
+                if (configContext == null && app != null) {
+                    configContext = app;
+                    watchKeyboardFolding(app);
+                }
                 if (monitoredInputManager != manager || inputDeviceListener == null) {
                     if (monitoredInputManager != null && inputDeviceListener != null) {
                         monitoredInputManager.unregisterInputDeviceListener(inputDeviceListener);
                     }
-                    inputDeviceListener = new InputManager.InputDeviceListener() {
-                        @Override public void onInputDeviceAdded(int deviceId) { publishKeyboardState(); }
-                        @Override public void onInputDeviceRemoved(int deviceId) { publishKeyboardState(); }
-                        @Override public void onInputDeviceChanged(int deviceId) { publishKeyboardState(); }
-                    };
+                    inputDeviceListener = newInputDeviceListener();
                     monitoredInputManager = manager;
                     manager.registerInputDeviceListener(inputDeviceListener, null);
                 }
                 publishKeyboardState();
             }
         });
+    }
+
+    // The listeners below outlive the Activity that registered them, so they are made in static
+    // context: an anonymous class made inside the Runnable above would keep that Runnable, and
+    // through it the first Activity, alive for the life of the process.
+
+    private static InputManager.InputDeviceListener newInputDeviceListener() {
+        return new InputManager.InputDeviceListener() {
+            @Override public void onInputDeviceAdded(int deviceId) { publishKeyboardState(); }
+            @Override public void onInputDeviceRemoved(int deviceId) { publishKeyboardState(); }
+            @Override public void onInputDeviceChanged(int deviceId) { publishKeyboardState(); }
+        };
+    }
+
+    /**
+     * Folding a folio keyboard away does not remove the device: Android marks the hard keyboard
+     * hidden in the configuration, OxygenOS only in a global setting.
+     */
+    private static void watchKeyboardFolding(Context app) {
+        app.registerComponentCallbacks(new ComponentCallbacks() {
+            @Override
+            public void onConfigurationChanged(Configuration newConfig) {
+                publishKeyboardState();
+            }
+
+            @Override
+            public void onLowMemory() {}
+        });
+        try {
+            app.getContentResolver().registerContentObserver(
+                Settings.Global.getUriFor(OPLUS_HARD_KEYBOARD_AVAILABLE),
+                false,
+                new ContentObserver(new Handler(Looper.getMainLooper())) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        publishKeyboardState();
+                    }
+                });
+        } catch (Throwable error) {
+            Log.w(TAG, "Cannot watch " + OPLUS_HARD_KEYBOARD_AVAILABLE, error);
+        }
     }
 
     private static void publishKeyboardState() {
@@ -91,12 +144,12 @@ public final class SoftKeyboardBridge {
 
     private static boolean hasPhysicalKeyboard() {
         InputManager manager = monitoredInputManager;
-        if (manager == null) {
+        if (manager == null || isHardKeyboardHidden()) {
             return false;
         }
         for (int id : manager.getInputDeviceIds()) {
             InputDevice device = manager.getInputDevice(id);
-            if (device == null || device.isVirtual() || !device.isExternal()) {
+            if (!isUsableExternal(device)) {
                 continue;
             }
             boolean keyboardSource =
@@ -108,18 +161,63 @@ public final class SoftKeyboardBridge {
         return false;
     }
 
+    /**
+     * External, real and enabled. Android disables (rather than removes) some accessory
+     * keyboards and touchpads while they are folded away; those cannot type.
+     */
+    private static boolean isUsableExternal(InputDevice device) {
+        if (device == null || device.isVirtual() || !device.isExternal()) {
+            return false;
+        }
+        if (Build.VERSION.SDK_INT >= 27) {
+            try {
+                return device.isEnabled();
+            } catch (Throwable ignored) {
+                // Hidden on some releases; treat the device as enabled.
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Android's own verdict that no hardware keyboard can be used (none attached, or a lid or
+     * folio keyboard closed away); it then shows soft input itself, and so must Portal.
+     */
+    private static boolean isHardKeyboardHidden() {
+        Context context = configContext;
+        if (context == null) {
+            return false;
+        }
+        Configuration config = context.getResources().getConfiguration();
+        if (config != null && config.hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_YES) {
+            return true;
+        }
+        // OnePlus Pad folio folded behind the tablet (verified on the Pad 3, OxygenOS 16): the
+        // keyboard stays connected, enabled and in the configuration; only this OEM setting
+        // drops to 0 (1 while it is in typing position). Absent on other devices.
+        try {
+            String available = Settings.Global.getString(
+                context.getContentResolver(), OPLUS_HARD_KEYBOARD_AVAILABLE);
+            return "0".equals(available);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static boolean hasDesktopInput() {
         InputManager manager = monitoredInputManager;
         if (manager == null) {
             return false;
         }
+        boolean keyboardHidden = isHardKeyboardHidden();
         for (int id : manager.getInputDeviceIds()) {
             InputDevice device = manager.getInputDevice(id);
-            if (device == null || device.isVirtual() || !device.isExternal()) {
+            if (!isUsableExternal(device)) {
                 continue;
             }
             int sources = device.getSources();
-            boolean isAlphaKeyb = (sources & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD
+            boolean isAlphaKeyb = !keyboardHidden
+                && (sources & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD
                 && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC;
             boolean isPointer = (sources & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE
                 || (sources & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD;
@@ -232,6 +330,44 @@ public final class SoftKeyboardBridge {
         });
     }
 
+    /**
+     * The user tapped the desktop while a guest text field had focus. Tapping a focused field
+     * brings back a keyboard the user dismissed (Back, the keyboard's own hide key), as on
+     * Android, but the guest reports nothing new for a field that kept focus. The text context
+     * is unchanged, so unlike show() the mirror and preedit stay.
+     */
+    public static void reshow(final Activity activity) {
+        if (activity == null) {
+            return;
+        }
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                final BridgeEditText input = editor;
+                if (input == null || editorActivity != activity || activity.isFinishing()) {
+                    return;
+                }
+                // Let a tap that moved guest focus off the field report that first, so the
+                // keyboard does not flash up over a button.
+                input.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (editor != input || !nativeWantsSoftKeyboard() || hasPhysicalKeyboard()
+                            || input.isImeShown()) {
+                            return;
+                        }
+                        Log.i(TAG, "Tap on the desktop with a focused guest field; showing soft input");
+                        input.setVisibility(View.VISIBLE);
+                        input.setFocusableInTouchMode(true);
+                        input.requestFocus();
+                        input.pendingShow = true;
+                        input.showSoftInputIfPending();
+                    }
+                }, RESHOW_DELAY_MS);
+            }
+        });
+    }
+
     private static BridgeEditText ensureEditor(Activity activity) {
         if (editor != null && editorActivity == activity && editor.getParent() != null) {
             return editor;
@@ -338,8 +474,22 @@ public final class SoftKeyboardBridge {
         public void onWindowFocusChanged(boolean hasWindowFocus) {
             super.onWindowFocusChanged(hasWindowFocus);
             if (hasWindowFocus) {
+                // GameActivity hands view focus to its SurfaceView on every window focus gain,
+                // which has no InputConnection; an engaged editor takes it back.
+                if (getVisibility() == View.VISIBLE && !isFocused()) {
+                    requestFocus();
+                }
                 showSoftInputIfPending();
             }
+        }
+
+        /** Whether the IME is on screen; false where Android cannot tell (before API 30). */
+        boolean isImeShown() {
+            if (Build.VERSION.SDK_INT < 30 || getVisibility() != View.VISIBLE || !isFocused()) {
+                return false;
+            }
+            WindowInsets insets = getRootWindowInsets();
+            return insets != null && insets.isVisible(WindowInsets.Type.ime());
         }
 
         /** Commit the preedit shown in the guest, for resets the guest does not see itself. */
@@ -668,6 +818,7 @@ public final class SoftKeyboardBridge {
     private static native void nativeOnPreedit(String text);
     private static native void nativeOnPreeditFlush();
     private static native boolean nativeIsPreeditSupported();
+    private static native boolean nativeWantsSoftKeyboard();
     private static native void nativeOnInputDevicesChanged(boolean hasPhysicalKeyboard, boolean hasDesktopInput);
     private static native void nativeOnHardwareKeyboardChanged(boolean present);
 }

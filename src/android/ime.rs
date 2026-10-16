@@ -21,9 +21,10 @@ use winit::{
 };
 
 use crate::android::{accessibility::AppUserEvent, utils::ndk::run_in_jvm};
-use crate::core::ime_policy::CommitQueue;
+use crate::core::ime_policy::{CommitQueue, TapDetector};
 
 static COMMITS: OnceLock<Mutex<CommitQueue>> = OnceLock::new();
+static TAPS: Mutex<TapDetector> = Mutex::new(TapDetector::new());
 static EVENT_LOOP_PROXY: OnceLock<Mutex<Option<EventLoopProxy<AppUserEvent>>>> = OnceLock::new();
 static WAYLAND_TEXT_INPUT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static HARDWARE_KEYBOARD_PRESENT: AtomicBool = AtomicBool::new(false);
@@ -264,6 +265,10 @@ pub fn dispatch_committed_text(text: String) -> bool {
 static FIFO_LISTENER_STARTED: AtomicBool = AtomicBool::new(false);
 
 pub fn start_ime_fifo_listener(rootfs_path: &std::path::Path) {
+    // A new guest session starts with no focused field. Bridges of the previous one that died
+    // with a field focused never sent DEACTIVATE, and a stale flag would route commits into
+    // channels nobody reads instead of the key fallback.
+    set_source_active(GUEST_IM_SOURCES, false);
     #[cfg(target_os = "android")]
     {
         let events_fifo_path = rootfs_path.join("tmp/portal-ime-events.fifo");
@@ -476,7 +481,7 @@ pub fn hide(android_app: &AndroidApp) -> Result<(), String> {
 /// back. Drop the Android editor's mirrored text so autocorrect and deletes cannot edit text
 /// that is no longer before the caret. No-op while no text field is focused.
 pub fn reset_text_context(android_app: &AndroidApp) {
-    if !is_wayland_text_input_active() || is_hardware_keyboard_present() {
+    if !wants_soft_keyboard() {
         return;
     }
     if let Err(error) = call_bridge(android_app, "resetContext") {
@@ -484,10 +489,71 @@ pub fn reset_text_context(android_app: &AndroidApp) {
     }
 }
 
+/// Feed a desktop pointer event to the tap recognizer: `Some(true)` down, `Some(false)` up,
+/// `None` moved.
+pub fn note_pointer(android_app: &AndroidApp, id: u64, pressed: Option<bool>, x: f64, y: f64) {
+    let now = std::time::Instant::now();
+    let tapped = {
+        let Ok(mut taps) = TAPS.lock() else {
+            return;
+        };
+        match pressed {
+            Some(true) => {
+                taps.down(id, x, y, now);
+                false
+            }
+            Some(false) => taps.up(id, now),
+            None => {
+                taps.moved(id, x, y);
+                false
+            }
+        }
+    };
+    if tapped && wants_soft_keyboard() {
+        // Java waits briefly and checks again, so a tap that moved focus away shows nothing.
+        if let Err(error) = call_bridge(android_app, "reshow") {
+            log::debug!("Software keyboard could not be re-shown: {error}");
+        }
+    }
+}
+
+/// Mouse and touchpad buttons carry no position: the cursor's last motion stands in for it, so
+/// a quick click-drag (text selection) moves past the slop and is not taken for a tap.
+const MOUSE_POINTER: u64 = u64::MAX;
+static CURSOR: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
+
+pub fn note_cursor(x: f64, y: f64) {
+    if let Ok(mut cursor) = CURSOR.lock() {
+        *cursor = (x, y);
+    }
+    if let Ok(mut taps) = TAPS.lock() {
+        taps.moved(MOUSE_POINTER, x, y);
+    }
+}
+
+pub fn note_mouse_button(android_app: &AndroidApp, pressed: bool) {
+    let (x, y) = CURSOR.lock().map(|cursor| *cursor).unwrap_or_default();
+    note_pointer(android_app, MOUSE_POINTER, Some(pressed), x, y);
+}
+
+/// A desktop touch ended without completing (Android cancelled the gesture).
+pub fn cancel_pointer(id: u64) {
+    if let Ok(mut taps) = TAPS.lock() {
+        taps.cancel(id);
+    }
+}
+
+fn wants_soft_keyboard() -> bool {
+    is_wayland_text_input_active() && !is_hardware_keyboard_present()
+}
+
 /// Clear any queued commits after a surface loss or focus transition.
 pub fn reset() {
     if let Ok(mut queue) = commits().lock() {
         queue.clear();
+    }
+    if let Ok(mut taps) = TAPS.lock() {
+        taps.clear();
     }
     VISIBILITY_REQUEST.store(0, Ordering::Release);
 }
@@ -576,6 +642,16 @@ pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeIsPreeditSupp
     _bridge: JObject,
 ) -> jni::sys::jboolean {
     is_ime_context_active() as jni::sys::jboolean
+}
+
+/// JNI query: should the soft keyboard be up (a guest field focused, no usable hardware
+/// keyboard)? Read again by the delayed re-show after a tap.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeWantsSoftKeyboard(
+    _env: JNIEnv,
+    _bridge: JObject,
+) -> jni::sys::jboolean {
+    wants_soft_keyboard() as jni::sys::jboolean
 }
 
 /// JNI callback from Android's InputDeviceListener. Device classification is

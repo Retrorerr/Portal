@@ -1,10 +1,12 @@
-//! Host-testable policy for bounding Android software-keyboard commits.
+//! Host-testable policy for bounding Android software-keyboard commits and for recognizing the
+//! desktop taps that bring a dismissed keyboard back.
 //!
 //! The JNI callback runs on an Android-attached thread while the compositor drains commits from
 //! the winit event loop.  Keeping the queue policy independent of Android makes its memory and
 //! UTF-8 guarantees testable in the normal host suite as well.
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 /// Maximum number of pending commits retained while the event loop is suspended.
 pub const MAX_PENDING_COMMITS: usize = 128;
@@ -77,9 +79,133 @@ impl CommitQueue {
     }
 }
 
+/// Longest press still treated as a tap on a text field.
+pub const TAP_MAX_DURATION: Duration = Duration::from_millis(500);
+/// Farthest a tapping finger may wander, in physical pixels.
+pub const TAP_SLOP_PX: f64 = 48.0;
+/// Pointers without an end event for this long are taken as lost.
+const STALE_POINTER: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy)]
+struct TapCandidate {
+    id: u64,
+    x: f64,
+    y: f64,
+    started: Instant,
+}
+
+/// Recognizes single-pointer taps (not drags, scrolls, long presses or multi-finger gestures),
+/// after which a keyboard the user dismissed over a focused guest field comes back.
+#[derive(Debug)]
+pub struct TapDetector {
+    down: Vec<(u64, Instant)>,
+    candidate: Option<TapCandidate>,
+}
+
+impl Default for TapDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TapDetector {
+    pub const fn new() -> Self {
+        Self {
+            down: Vec::new(),
+            candidate: None,
+        }
+    }
+
+    pub fn down(&mut self, id: u64, x: f64, y: f64, now: Instant) {
+        // A lost end event must not block taps for the rest of the session.
+        self.down
+            .retain(|&(down_id, at)| down_id != id && now.duration_since(at) < STALE_POINTER);
+        self.down.push((id, now));
+        self.candidate = (self.down.len() == 1).then_some(TapCandidate {
+            id,
+            x,
+            y,
+            started: now,
+        });
+    }
+
+    pub fn moved(&mut self, id: u64, x: f64, y: f64) {
+        if let Some(candidate) = self.candidate {
+            if candidate.id == id && (x - candidate.x).hypot(y - candidate.y) > TAP_SLOP_PX {
+                self.candidate = None;
+            }
+        }
+    }
+
+    /// The pointer lifted; true when this completed a tap.
+    pub fn up(&mut self, id: u64, now: Instant) -> bool {
+        self.down.retain(|&(down_id, _)| down_id != id);
+        match self.candidate {
+            Some(candidate) if candidate.id == id => {
+                self.candidate = None;
+                now.duration_since(candidate.started) <= TAP_MAX_DURATION
+            }
+            _ => false,
+        }
+    }
+
+    pub fn cancel(&mut self, id: u64) {
+        self.down.retain(|&(down_id, _)| down_id != id);
+        if self.candidate.is_some_and(|candidate| candidate.id == id) {
+            self.candidate = None;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.down.clear();
+        self.candidate = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_still_press_is_a_tap() {
+        let t0 = Instant::now();
+        let mut taps = TapDetector::new();
+        taps.down(0, 100.0, 100.0, t0);
+        taps.moved(0, 110.0, 95.0);
+        assert!(taps.up(0, t0 + Duration::from_millis(120)));
+    }
+
+    #[test]
+    fn drag_long_press_and_two_fingers_are_not_taps() {
+        let t0 = Instant::now();
+        let mut taps = TapDetector::new();
+        taps.down(0, 100.0, 100.0, t0);
+        taps.moved(0, 100.0, 100.0 + TAP_SLOP_PX + 1.0);
+        assert!(!taps.up(0, t0 + Duration::from_millis(100)));
+
+        taps.down(0, 100.0, 100.0, t0);
+        assert!(!taps.up(0, t0 + TAP_MAX_DURATION + Duration::from_millis(1)));
+
+        taps.down(0, 100.0, 100.0, t0);
+        taps.down(1, 300.0, 100.0, t0);
+        assert!(!taps.up(1, t0 + Duration::from_millis(80)));
+        assert!(!taps.up(0, t0 + Duration::from_millis(90)));
+    }
+
+    #[test]
+    fn lost_end_event_does_not_block_later_taps() {
+        let t0 = Instant::now();
+        let mut taps = TapDetector::new();
+        taps.down(5, 0.0, 0.0, t0);
+        let later = t0 + STALE_POINTER;
+        taps.down(0, 10.0, 10.0, later);
+        assert!(taps.up(0, later + Duration::from_millis(50)));
+
+        // A cancelled gesture is not a tap either.
+        taps.down(0, 10.0, 10.0, later);
+        taps.cancel(0);
+        assert!(!taps.up(0, later + Duration::from_millis(60)));
+    }
 
     #[test]
     fn queue_evicts_old_entries_at_entry_limit() {

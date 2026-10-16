@@ -21,7 +21,9 @@
         sleep 1
     done
     command -v ibus-daemon >/dev/null 2>&1 || exit 0
-    ibus-daemon -s -d >>/tmp/portal-ibus-daemon.log 2>&1 || exit 0
+    # --replace: a daemon left over from an earlier session would otherwise
+    # keep serving this one's clients with its stale engine.
+    ibus-daemon -r -s -d >>/tmp/portal-ibus-daemon.log 2>&1 || exit 0
     # The daemon needs a moment to own org.freedesktop.IBus; poll with a
     # bound so a fast daemon selects the engine immediately and a broken
     # one can never stall startup.
