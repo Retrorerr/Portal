@@ -10,7 +10,7 @@
 #define SYSVIPC_MAX_SEMS 512
 #define SYSVIPC_MAX_NSEMS 512
 #define SYSVIPC_MAX_NSOPS 512
-#define SYSVIPC_MAX_SEMVAL 0x7000
+#define SYSVIPC_MAX_SEMVAL 32767 /* SEMVMX */
 
 int sysvipc_semget(Tracee *tracee, struct SysVIpcConfig *config) {
 	word_t semaphore_id = peek_reg(tracee, CURRENT, SYSARG_1);
@@ -119,6 +119,28 @@ static int sysvipc_sem_check(struct SysVIpcConfig *config, struct SysVIpcSemapho
 	return 0;
 }
 
+/**
+ * Let every other tracee waiting in semop() on @semaphore retry, after its
+ * values changed.
+ */
+static void sysvipc_sem_wake_waiters(struct SysVIpcConfig *config, size_t semaphore_index, struct SysVIpcSemaphore *semaphore)
+{
+	Tracee *other_tracee;
+	struct SysVIpcConfig *other_config;
+	SYSVIPC_FOREACH_TRACEE(other_tracee, other_config, config->ipc_namespace) {
+		if (
+				other_config != config &&
+				other_config->wait_reason == WR_WAIT_SEMOP &&
+				other_config->waiting_object_index == semaphore_index) {
+			int other_semop_status = sysvipc_sem_check(other_config, semaphore, NULL);
+			if (other_semop_status != 1) {
+				TALLOC_FREE(other_config->semop_sops);
+				sysvipc_wake_tracee(other_tracee, other_config, other_semop_status);
+			}
+		}
+	}
+}
+
 int sysvipc_semop(Tracee *tracee, struct SysVIpcConfig *config)
 {
 	/** Lookup semaphore */
@@ -157,21 +179,7 @@ int sysvipc_semop(Tracee *tracee, struct SysVIpcConfig *config)
 	config->semop_sops = sops;
 	int this_semop_status = sysvipc_sem_check(config, semaphore, NULL);
 
-	Tracee *other_tracee;
-	struct SysVIpcConfig *other_config;
-	SYSVIPC_FOREACH_TRACEE(other_tracee, other_config, config->ipc_namespace) {
-		if (
-				other_config != config &&
-				other_config->wait_reason == WR_WAIT_SEMOP &&
-				other_config->waiting_object_index == semaphore_index) {
-			int other_semop_status = sysvipc_sem_check(other_config, semaphore, NULL);
-			if (other_semop_status != 1) {
-				TALLOC_FREE(other_config->semop_sops);
-				sysvipc_wake_tracee(other_tracee, other_config, other_semop_status);
-			}
-		}
-	}
-
+	sysvipc_sem_wake_waiters(config, semaphore_index, semaphore);
 
 	if (this_semop_status == 1) {
 		assert(config->wait_reason == WR_WAIT_SEMOP);
@@ -208,9 +216,25 @@ int sysvipc_semctl(Tracee *tracee, struct SysVIpcConfig *config) {
 	}
 	case SYSVIPC_SETVAL:
 	{
-		if (cmdarg > SYSVIPC_MAX_SEMVAL) return -ERANGE;
+		/* The kernel takes semun.val, an int: callers passing an
+		 * int through semctl()'s varargs (Qt's QSystemSemaphore)
+		 * leave the upper half of the register undefined.  */
+		int val = (int) cmdarg;
 		if (semnum < 0 || semnum >= semaphore->nsems) return -EINVAL;
-		semaphore->sems[semnum] = cmdarg;
+		if (val < 0 || val > SYSVIPC_MAX_SEMVAL) return -ERANGE;
+		semaphore->sems[semnum] = val;
+		sysvipc_sem_wake_waiters(config, semaphore_index, semaphore);
+		return 0;
+	}
+	case SYSVIPC_SETALL:
+	{
+		uint16_t values[semaphore->nsems];
+		int status = read_data(tracee, values, cmdarg, semaphore->nsems * sizeof(uint16_t));
+		if (status < 0) return status;
+		for (int i = 0; i < semaphore->nsems; i++)
+			if (values[i] > SYSVIPC_MAX_SEMVAL) return -ERANGE;
+		memcpy(semaphore->sems, values, semaphore->nsems * sizeof(uint16_t));
+		sysvipc_sem_wake_waiters(config, semaphore_index, semaphore);
 		return 0;
 	}
 	case SYSVIPC_GETALL:

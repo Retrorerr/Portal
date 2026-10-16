@@ -60,6 +60,7 @@
 #include "tracee/abi.h"
 #include "extension/extension.h"
 #include "extension/fake_id0/config.h"
+#include "path/temp.h"
 #include "arch.h"
 
 #ifndef CLONE_NEWUSER
@@ -96,6 +97,34 @@ static void enter_userns(Tracee *tracee)
 }
 
 /**
+ * Called when @tracee writes /proc/sys/user/max_user_namespaces, the
+ * write itself being discarded.  Only bubblewrap's "--disable-userns"
+ * does that, writing 1 in the sandbox's namespace: one more user
+ * namespace may be created below it, and none below that one.
+ */
+void fakens_limit_userns(Tracee *tracee)
+{
+	if (!tracee->userns)
+		return;
+	tracee->userns_limited = true;
+	tracee->userns_room = 1;
+}
+
+/**
+ * Account for a new user namespace made by @tracee.  This function
+ * returns -ENOSPC past the limit set above, otherwise 0.
+ */
+static int count_new_userns(Tracee *tracee)
+{
+	if (!tracee->userns_limited)
+		return 0;
+	if (tracee->userns_room == 0)
+		return -ENOSPC;
+	tracee->userns_room--;
+	return 0;
+}
+
+/**
  * Make @child, just created by @parent with @clone_flags (namespace
  * flags already stripped), inherit the emulated namespaces.
  */
@@ -107,6 +136,8 @@ void fakens_new_child(Tracee *parent, Tracee *child, word_t clone_flags)
 	child->pidns_filter = parent->pidns_filter;
 
 	child->userns = parent->userns;
+	child->userns_limited = parent->userns_limited;
+	child->userns_room = parent->userns_room;
 	child->cap_effective = parent->cap_effective;
 	child->cap_permitted = parent->cap_permitted;
 	child->cap_inheritable = parent->cap_inheritable;
@@ -275,8 +306,12 @@ int fakens_enter_clone(Tracee *tracee, word_t flags)
 {
 	int status;
 
-	if ((flags & CLONE_NEWUSER) != 0)
+	if ((flags & CLONE_NEWUSER) != 0) {
+		status = count_new_userns(tracee);
+		if (status < 0)
+			return status;
 		tracee->clone_stripped_newuser = true;
+	}
 
 	if ((flags & CLONE_NEWPID) == 0)
 		return 0;
@@ -296,8 +331,12 @@ int fakens_enter_clone(Tracee *tracee, word_t flags)
  */
 int fakens_enter_unshare(Tracee *tracee, word_t flags)
 {
-	if ((flags & CLONE_NEWUSER) != 0)
+	if ((flags & CLONE_NEWUSER) != 0) {
+		int status = count_new_userns(tracee);
+		if (status < 0)
+			return status;
 		enter_userns(tracee);
+	}
 
 	if ((flags & CLONE_NEWPID) == 0)
 		return 0;
@@ -606,6 +645,11 @@ void fakens_exit(Tracee *tracee, Sysnum sysnum)
 		Extension *extension;
 		const Config *config;
 
+		/* A new program sets up no more mounts: stop
+		 * remembering where its descriptors are opened.  */
+		if ((int) result >= 0)
+			tracee->mountns = false;
+
 		if (!tracee->userns || (int) result < 0)
 			break;
 
@@ -634,20 +678,46 @@ void fakens_exit(Tracee *tracee, Sysnum sysnum)
  * have: /proc/self/ns/user exists for sandboxes to find (see the top
  * of this file).
  */
-void fakens_fix_ns_path(const Tracee *tracee, char path[PATH_MAX])
+/**
+ * Host path of an empty read-only file standing in for the namespace
+ * file @name (made once per PRoot run), or NULL.
+ */
+static const char *ns_stand_in(const char *name)
+{
+	static struct {
+		char name[32];
+		const char *path;
+	} stand_ins[16];
+	const char *path;
+	size_t i;
+
+	for (i = 0; i < sizeof(stand_ins) / sizeof(stand_ins[0]); i++) {
+		if (stand_ins[i].path == NULL)
+			break;
+		if (strcmp(stand_ins[i].name, name) == 0)
+			return stand_ins[i].path;
+	}
+	if (i == sizeof(stand_ins) / sizeof(stand_ins[0]) || strlen(name) >= sizeof(stand_ins[i].name))
+		return NULL;
+
+	path = create_temp_file(talloc_autofree_context(), "proot-ns");
+	if (path == NULL)
+		return NULL;
+	(void) chmod(path, 0444);
+
+	strcpy(stand_ins[i].name, name);
+	stand_ins[i].path = path;
+	return path;
+}
+
+void fakens_fix_ns_path(const Tracee *tracee, char path[PATH_MAX], bool deref_final)
 {
 	static const char *const emulated[] = { "user", "pid", "pid_for_children", "ipc", NULL };
 	struct stat statl;
 	char *name;
 	size_t i;
 
-	/* The emulation relies on the PID namespace filter, see
-	 * install_pidns_filter(): without it, keep reporting that
-	 * these namespaces are not supported at all.  */
-	if (tracee == NULL || tracee->seccomp != ENABLED)
-		return;
-
-	if (strncmp(path, "/proc/", 6) != 0)
+	if (tracee == NULL || strncmp(path, "/proc/", 6) != 0)
 		return;
 
 	name = strrchr(path, '/');
@@ -655,15 +725,31 @@ void fakens_fix_ns_path(const Tracee *tracee, char path[PATH_MAX])
 		return;
 	name++;
 
-	for (i = 0; emulated[i] != NULL; i++) {
-		if (strcmp(name, emulated[i]) == 0)
-			break;
+	/* The emulation relies on the PID namespace filter, see
+	 * install_pidns_filter(): without it, keep reporting that
+	 * these namespaces are not supported at all.  */
+	if (tracee->seccomp == ENABLED) {
+		for (i = 0; emulated[i] != NULL; i++) {
+			if (strcmp(name, emulated[i]) == 0)
+				break;
+		}
+		if (   emulated[i] != NULL
+		    && lstat(path, &statl) != 0 && errno == ENOENT)
+			strcpy(name, "uts");
 	}
-	if (emulated[i] == NULL)
+
+	/* Android lets apps read namespace links but not follow them
+	 * (EACCES), so the files themselves cannot be stat'ed, opened
+	 * or bound.  Flatpak binds /proc/self/ns/user into every
+	 * sandbox ("Can't get type of source"): follow the link to a
+	 * file of the namespace's type instead.  setns(2) on it is
+	 * emulated anyway.  */
+	if (!deref_final || stat(path, &statl) == 0 || errno != EACCES)
 		return;
 
-	if (lstat(path, &statl) == 0 || errno != ENOENT)
-		return;
-
-	strcpy(name, "uts");
+	{
+		const char *stand_in = ns_stand_in(name);
+		if (stand_in != NULL && strlen(stand_in) < PATH_MAX)
+			strcpy(path, stand_in);
+	}
 }

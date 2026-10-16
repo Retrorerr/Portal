@@ -416,6 +416,11 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		set_sysnum(tracee, PR_openat);
 		poke_reg(tracee, SYSARG_3, how.flags);
 		poke_reg(tracee, SYSARG_4, how.mode);
+		ret = openat2_resolve_in_root(tracee, how.resolve);
+		if (ret < 0) {
+			set_result_after_seccomp(tracee, ret);
+			break;
+		}
 		restart_syscall_after_seccomp(tracee);
 		break;
 	}
@@ -453,6 +458,13 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		break;
 
 	case PR_unshare:
+		if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNET) != 0)
+			tracee->fake_netns = true;
+		if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNS) != 0)
+			(void) unshare_mount_namespace(tracee);
+		set_result_after_seccomp(tracee, 0);
+		break;
+
 	case PR_setns:
 		set_result_after_seccomp(tracee, 0);
 		break;

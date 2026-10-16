@@ -312,6 +312,36 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 				 * emulate some of them.  */
 				status = readlink_proc(tracee, scratch_path,
 						       proc_base, component, comparison);
+
+				/* readlink_proc() answers with paths under
+				 * "/proc", but when reached through an alias
+				 * (/oldroot/proc after bubblewrap's
+				 * pivot_root) the guest's /proc lives under
+				 * the alias prefix.  Put the answer there, or
+				 * it is resolved in the new root, which has
+				 * no /proc.  */
+				if (proc_base == alias_base
+				    && (status == CANONICALIZE || status == DONT_CANONICALIZE)) {
+					size_t guest_len = strlen(guest_path);
+					size_t suffix = strlen(alias_base) - strlen("/proc");
+					size_t prefix = guest_len >= suffix ? guest_len - suffix : 0;
+					char rebased[PATH_MAX];
+
+					/* Only for an alias of "/proc" itself
+					 * ("/oldroot/proc/..." -> "/proc/..."),
+					 * not of a path below it ("/dev/fd" ->
+					 * "/proc/self/fd"), whose guest path
+					 * has no "/proc" to rebase.  */
+					if (   guest_len >= suffix
+					    && strcmp(guest_path + prefix, alias_base + strlen("/proc")) == 0
+					    && strncmp(scratch_path, "/proc", 5) == 0
+					    && prefix + strlen(scratch_path) - 5 < PATH_MAX) {
+						memcpy(rebased, guest_path, prefix);
+						strcpy(rebased + prefix, scratch_path + 5);
+						strcpy(scratch_path, rebased);
+					}
+				}
+
 				switch (status) {
 				case CANONICALIZE:
 					/* The symlink is already dereferenced,
@@ -350,6 +380,21 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 						(intptr_t) host_path, (intptr_t) scratch_path);
 			if (status < 0)
 				return status;
+
+			/* A faked hard link (link2symlink) is a regular
+			 * file to the tracee: its referee is a host path
+			 * into the l2s directory, resolved on the host
+			 * once the path is translated.  Mapped back into
+			 * the guest, it is missing from any root the
+			 * tracee made itself -- Flatpak runs OSTree
+			 * checkouts, all hard links, in bubblewrap.  */
+			if (status > 0 && IS_FINAL(finality)) {
+				strcpy(scratch_path, guest_path);
+				status = join_paths(2, guest_path, scratch_path, component);
+				if (status < 0)
+					return status;
+				continue;
+			}
 		}
 
 		/* Remove the leading "root" part if needed, it's
@@ -374,8 +419,8 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 			return status;
 
 		/* Here, 'guest_path' shouldn't be a symlink anymore,
-		 * unless it is a named file descriptor.  */
-		assert(status != 1 || sscanf(guest_path, "/proc/%*d/fd/%d", &status) == 1);
+		 * unless it is a named file descriptor or a faked hard
+		 * link, which stays a symlink on the host (see above).  */
 	}
 
 	/* At the exit stage of the first level of recursion,

@@ -97,10 +97,8 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 	else 
 		status = read_sysarg_path(tracee, path, SYSARG_1, MODIFIED);
 
-	if(status < 0) 
+	if(status < 0)
 		return status;
-	if(status == 1) 
-		return 0;
 
 	/* Get the address of the 'stat' structure.  */
 	if (sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
@@ -109,10 +107,13 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 		sysarg = SYSARG_2;
 
 	/** If the meta file exists, read the data from it and replace it the
-	 *  relevant data in the stat structure.
+	 *  relevant data in the stat structure.  A path outside the guest
+	 *  rootfs (status 1: a bwrap sandbox root, tmpfs or bind source) has
+	 *  no meta file but still gets the uid/gid mapping below, as statx()
+	 *  does; otherwise GLib sees the bus socket as foreign.
 	 */
-	
-	status = get_meta_path(path, meta_path);
+
+	status = status == 1 ? -1 : get_meta_path(path, meta_path);
 	if(status == 0) {
 		status = path_exists(meta_path);
 		if(status == 0) {

@@ -618,6 +618,80 @@ void resolve_pending_child(Tracee *parent)
 }
 
 /**
+ * Fill @fs, the file-system name-space of @tracee, with its own copy
+ * of the bindings of @from: emulated mount(2) calls in either then
+ * stay invisible to the other, as in separate mount namespaces.  This
+ * function returns -errno if an error occured, otherwise 0.
+ */
+static int copy_bindings(Tracee *tracee, FileSystemNameSpace *fs, const FileSystemNameSpace *from)
+{
+	Binding *iter;
+
+	fs->bindings.guest = talloc_zero(fs, Bindings);
+	fs->bindings.host  = talloc_zero(fs, Bindings);
+	if (fs->bindings.guest == NULL || fs->bindings.host == NULL)
+		return -ENOMEM;
+	CIRCLEQ_INIT(fs->bindings.guest);
+	CIRCLEQ_INIT(fs->bindings.host);
+
+	for (iter = CIRCLEQ_FIRST(from->bindings.guest);
+	     iter != (void *) from->bindings.guest;
+	     iter = CIRCLEQ_NEXT(iter, link.guest))
+		(void) insort_binding3(tracee, fs, iter->host.path, iter->guest.path);
+
+	/* The host directories of emulated tmpfs mounts belong to the
+	 * list they were mounted in (see emulate_mount): keep it, and
+	 * them, alive as long as this copy refers to them.  */
+	(void) talloc_reference(fs->bindings.guest, from->bindings.guest);
+
+	return 0;
+}
+
+/**
+ * Emulate unshare(CLONE_NEWNS) for @tracee: like a child cloned with
+ * that flag, it gets a private file-system name-space (CLONE_NEWNS
+ * implies CLONE_FS) with its own copy of the bindings.  Without this,
+ * the mounts of a sandbox that unshares rather than clones (bwrap
+ * --unshare-user-try, unshare -m, flatpak helpers) would land in the
+ * bindings every other tracee shares.  This function returns -errno
+ * if an error occured, otherwise 0.
+ */
+int unshare_mount_namespace(Tracee *tracee)
+{
+	FileSystemNameSpace *fs;
+	FileSystemNameSpace *old;
+
+	if (tracee->fs == NULL || tracee->fs->bindings.guest == NULL)
+		return 0;
+
+	fs = talloc_zero(tracee, FileSystemNameSpace);
+	if (fs == NULL)
+		return -ENOMEM;
+
+	fs->cwd = talloc_strdup(fs, tracee->fs->cwd);
+	if (fs->cwd == NULL) {
+		talloc_free(fs);
+		return -ENOMEM;
+	}
+	talloc_set_name_const(fs->cwd, "$cwd");
+	fs->chrooted = tracee->fs->chrooted;
+
+	/* insort_binding3() fills the lists of tracee->fs.  */
+	old = tracee->fs;
+	tracee->fs = fs;
+	if (copy_bindings(tracee, fs, old) < 0) {
+		tracee->fs = old;
+		talloc_free(fs);
+		return -ENOMEM;
+	}
+
+	(void) talloc_unlink(tracee, old);
+	fd_path_enter_mountns(tracee);
+	tracee->private_mountns = true;
+	return 0;
+}
+
+/**
  * Make new @parent's child inherit from it.  Depending on
  * @clone_flags, some information are copied or shared.  This function
  * returns -errno if an error occured, otherwise 0.
@@ -672,6 +746,7 @@ int new_child(Tracee *parent, word_t clone_flags)
  */
 static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 {
+	bool newns = false;
 	int ptrace_options;
 	Tracee *child;
 
@@ -812,22 +887,9 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 			 * silently stripped).  Give the child its own
 			 * copy of the binding tree so emulated mount(2)
 			 * calls don't propagate back to the parent.  */
-			Binding *iter;
-
-			child->fs->bindings.guest = talloc_zero(child->fs, Bindings);
-			child->fs->bindings.host  = talloc_zero(child->fs, Bindings);
-			if (   child->fs->bindings.guest == NULL
-			    || child->fs->bindings.host  == NULL)
+			if (copy_bindings(child, child->fs, parent->fs) < 0)
 				return -ENOMEM;
-			CIRCLEQ_INIT(child->fs->bindings.guest);
-			CIRCLEQ_INIT(child->fs->bindings.host);
-
-			for (iter = CIRCLEQ_FIRST(parent->fs->bindings.guest);
-			     iter != (void *) parent->fs->bindings.guest;
-			     iter = CIRCLEQ_NEXT(iter, link.guest))
-				(void) insort_binding3(child, child->fs,
-						       iter->host.path,
-						       iter->guest.path);
+			newns = true;
 		}
 		else {
 			/* Bindings are shared across file-system name-spaces since a
@@ -856,6 +918,14 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 
 	/* Same for the user and PID namespaces.  */
 	fakens_new_child(parent, child, clone_flags);
+
+	/* Descriptors are inherited, and so is the knowledge of
+	 * where they were opened.  */
+	if (fd_path_inherit(parent, child) < 0)
+		return -ENOMEM;
+	child->private_mountns = parent->private_mountns || newns;
+	if (newns)
+		fd_path_enter_mountns(child);
 	sigsys_action_new_child(parent, child, clone_flags);
 
 	/* Threads share their fd table, hence the netlink sockets opened

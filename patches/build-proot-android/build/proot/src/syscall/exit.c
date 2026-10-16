@@ -252,9 +252,13 @@ void translate_syscall_exit(Tracee *tracee)
 			break;
 		}
 
-		/* Ensure cwd still exists.  */
+		/* Ensure cwd still exists.  A mount on top of it, or of
+		 * one of its parents, hides it from the translation but
+		 * not from the kernel, where the cwd stays the directory
+		 * it was: bubblewrap mounts its scratch tmpfs on "/tmp"
+		 * before it reads the cwd of a caller in /tmp/...  */
 		status = translate_path(tracee, path, AT_FDCWD, ".", false);
-		if (status < 0)
+		if (status < 0 && !(status == -ENOENT && tracee->private_mountns))
 			break;
 
 		new_size = strlen(tracee->fs->cwd) + 1;
@@ -596,6 +600,18 @@ void translate_syscall_exit(Tracee *tracee)
 		if (status < 0)
 			break;
 
+		/* A descriptor opened in an emulated mount namespace is
+		 * reported where it was opened (see fd_path_lookup).  */
+		if (proc_fd.fd >= 0 && proc_fd.pid > 0) {
+			char guest[PATH_MAX];
+
+			if (fd_path_lookup(get_tracee(tracee, proc_fd.pid, false),
+					   proc_fd.pid, proc_fd.fd, guest)) {
+				strcpy(referee, guest);
+				status = strlen(referee) + 1;
+			}
+		}
+
 		/* The original path doesn't require any transformation, i.e
 		 * it is a symetric binding.  */
 		if (status == 0) {
@@ -681,6 +697,12 @@ void translate_syscall_exit(Tracee *tracee)
 	case PR_openat2:
 	case PR_openat:
 	case PR_open: {
+		if (tracee->fd_path_pending) {
+			tracee->fd_path_pending = false;
+			if ((int) syscall_result >= 0)
+				fd_path_record(tracee, (int) syscall_result);
+		}
+
 		/* Track /proc/self/auxv opens so read() results can be patched.
 		 * Needed on kernels < 6.4 where prctl(PR_GET_AUXV) is absent and
 		 * rustix falls back to reading /proc/self/auxv directly. */

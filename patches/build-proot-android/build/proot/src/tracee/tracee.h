@@ -138,9 +138,32 @@ typedef struct tracee {
 	bool pidns_filter;
 	pid_t tgid;
 	bool userns;
+	/* Set once the tracee limits the user namespaces below its own
+	 * (/proc/sys/user/max_user_namespaces): "userns_room" more may
+	 * be created, then ENOSPC.  */
+	bool userns_limited;
+	unsigned int userns_room;
 	uint64_t cap_effective;
 	uint64_t cap_permitted;
 	uint64_t cap_inheritable;
+
+	/* Emulated mount namespaces, see the fd_path_* functions in
+	 * path/path.c: once a tracee entered one ("mountns", until its
+	 * next execve), the guest path of each directory or O_PATH
+	 * descriptor it opens is kept in "fd_paths", since the host
+	 * path of a descriptor no longer tells where it was opened
+	 * when the same host directory is bound at several places
+	 * (bubblewrap's /oldroot and /newroot).  "last_guest_path" is
+	 * the canonical guest path of the last translation.  */
+	bool mountns;
+	/* Set in an emulated mount namespace of the tracee's own (or
+	 * of an ancestor's), unlike "mountns" kept across execve(2):
+	 * the namespace outlives the program that made it.  */
+	bool private_mountns;
+	bool fd_path_pending;
+	struct fd_paths *fd_paths;
+	char *last_guest_path;
+	bool last_guest_valid;
 
 	/* The fork-like syscall to restart once the seccomp filter of
 	 * an emulated PID namespace is installed in its place.  */
@@ -467,6 +490,7 @@ extern Tracee *get_stopped_ptracee(const Tracee *ptracer, pid_t pid,
 				bool only_with_pevent, word_t wait_options);
 extern bool has_ptracees(const Tracee *ptracer, pid_t pid, word_t wait_options);
 extern int new_child(Tracee *parent, word_t clone_flags);
+extern int unshare_mount_namespace(Tracee *tracee);
 extern void resolve_pending_child(Tracee *parent);
 extern void adopt_held_children(void);
 extern Tracee *new_dummy_tracee(TALLOC_CTX *context);

@@ -44,6 +44,158 @@
 
 #include "compat.h"
 
+#include <talloc.h>  /* talloc_*, */
+
+/* Guest paths of the descriptors opened in an emulated mount
+ * namespace, see the "mountns" field of Tracee.  */
+#define FD_PATHS_MAX 64
+
+struct fd_paths {
+	struct {
+		int fd;
+		dev_t dev;
+		ino_t ino;
+		char *path;
+	} entries[FD_PATHS_MAX];
+	size_t next;
+};
+
+static bool stat_proc_fd(pid_t pid, int fd, struct stat *statl)
+{
+	char link[64];
+
+	if (snprintf(link, sizeof(link), "/proc/%d/fd/%d", pid, fd) >= (int) sizeof(link))
+		return false;
+	return stat(link, statl) == 0;
+}
+
+/**
+ * Start remembering the guest path of the descriptors @tracee opens:
+ * it just entered an emulated mount namespace.
+ */
+void fd_path_enter_mountns(Tracee *tracee)
+{
+	if (tracee->last_guest_path == NULL)
+		tracee->last_guest_path = talloc_size(tracee, PATH_MAX);
+	if (tracee->fd_paths == NULL)
+		tracee->fd_paths = talloc_zero(tracee, struct fd_paths);
+	tracee->mountns = (tracee->last_guest_path != NULL && tracee->fd_paths != NULL);
+}
+
+/**
+ * Remember @guest_path, just canonicalized for @tracee, in case the
+ * syscall being translated opens a descriptor.
+ */
+static void fd_path_note_guest(Tracee *tracee, const char guest_path[PATH_MAX])
+{
+	if (tracee == NULL || !tracee->mountns)
+		return;
+
+	strcpy(tracee->last_guest_path, guest_path);
+	chop_finality(tracee->last_guest_path);
+	tracee->last_guest_valid = true;
+}
+
+/**
+ * Record that @fd, just opened by @tracee, names the guest path of the
+ * last translation.
+ */
+void fd_path_record(Tracee *tracee, int fd)
+{
+	struct fd_paths *table = tracee->fd_paths;
+	struct stat statl;
+	size_t slot;
+	size_t i;
+
+	if (table == NULL || !tracee->last_guest_valid || fd < 0)
+		return;
+
+	if (!stat_proc_fd(tracee->pid, fd, &statl))
+		return;
+
+	slot = FD_PATHS_MAX;
+	for (i = 0; i < FD_PATHS_MAX; i++) {
+		if (table->entries[i].path != NULL && table->entries[i].fd == fd) {
+			slot = i;
+			break;
+		}
+	}
+	if (slot == FD_PATHS_MAX) {
+		slot = table->next;
+		table->next = (table->next + 1) % FD_PATHS_MAX;
+	}
+
+	TALLOC_FREE(table->entries[slot].path);
+	table->entries[slot].path = talloc_strdup(table, tracee->last_guest_path);
+	table->entries[slot].fd  = fd;
+	table->entries[slot].dev = statl.st_dev;
+	table->entries[slot].ino = statl.st_ino;
+}
+
+/**
+ * Put in @path the guest path @tracee (whose PID is @pid) opened its
+ * descriptor @fd at, if known and @fd still names the same file.
+ * This function returns whether @path was set.
+ */
+bool fd_path_lookup(const Tracee *tracee, pid_t pid, int fd, char path[PATH_MAX])
+{
+	const struct fd_paths *table;
+	struct stat statl;
+	size_t i;
+
+	if (tracee == NULL || tracee->fd_paths == NULL || fd < 0)
+		return false;
+
+	table = tracee->fd_paths;
+	for (i = 0; i < FD_PATHS_MAX; i++) {
+		if (table->entries[i].path == NULL || table->entries[i].fd != fd)
+			continue;
+
+		if (!stat_proc_fd(pid, fd, &statl)
+		    || statl.st_dev != table->entries[i].dev
+		    || statl.st_ino != table->entries[i].ino)
+			return false;
+
+		strcpy(path, table->entries[i].path);
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * Give @child, just created by @parent, the guest paths of the
+ * descriptors it inherits.  This function returns -errno if an error
+ * occured, otherwise 0.
+ */
+int fd_path_inherit(const Tracee *parent, Tracee *child)
+{
+	size_t i;
+
+	child->mountns = false;
+	child->fd_path_pending = false;
+	child->last_guest_valid = false;
+
+	if (parent->fd_paths == NULL)
+		return 0;
+
+	fd_path_enter_mountns(child);
+	if (child->fd_paths == NULL)
+		return -ENOMEM;
+	child->mountns = parent->mountns;
+
+	for (i = 0; i < FD_PATHS_MAX; i++) {
+		if (parent->fd_paths->entries[i].path == NULL)
+			continue;
+		child->fd_paths->entries[i] = parent->fd_paths->entries[i];
+		child->fd_paths->entries[i].path =
+			talloc_strdup(child->fd_paths, parent->fd_paths->entries[i].path);
+	}
+	child->fd_paths->next = parent->fd_paths->next;
+
+	return 0;
+}
+
 /**
  * Copy in @result the concatenation of several paths (@number_paths)
  * and adds a path separator ('/') in between when needed. This
@@ -351,9 +503,18 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 	char guest_path[PATH_MAX];
 	int status;
 
+	if (tracee != NULL)
+		tracee->last_guest_valid = false;
+
 	/* Use "/" as the base if it is an absolute guest path. */
 	if (user_path[0] == '/') {
 		strcpy(result, "/");
+	}
+	/* A descriptor opened in an emulated mount namespace: start
+	 * where it was opened, its host path may be bound at several
+	 * guest places.  */
+	else if (dir_fd != AT_FDCWD && fd_path_lookup(tracee, tracee->pid, dir_fd, result)) {
+		/* Nothing else to do.  */
 	}
 	/* It is relative to a directory referred by a descriptor, see
 	 * openat(2) for details. */
@@ -371,9 +532,10 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 
 		/* A directory opened before chroot(2) still leads
 		 * outside the new root, as with the kernel: resolve
-		 * from it on the host.  */
-		if (tracee->fs->chrooted
-		    && !belongs_to_guestfs(tracee, result)
+		 * from it on the host.  So does one outside the guest
+		 * altogether, as another tracee's root opened through
+		 * "/proc/<pid>/root" (see substitute_proc_root()).  */
+		if (   !belongs_to_guestfs(tracee, result)
 		    && get_path_binding(tracee, HOST, result) == NULL) {
 			status = join_paths(2, guest_path, result, user_path);
 			if (status < 0)
@@ -417,6 +579,8 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 	if (status < 0)
 		return status;
 
+	fd_path_note_guest(tracee, result);
+
 	/* Final binding substitution to convert "result" into a host
 	 * path, since canonicalize() works from the guest
 	 * point-of-view.  */
@@ -424,7 +588,7 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 	if (status < 0)
 		return status;
 
-	fakens_fix_ns_path(tracee, result);
+	fakens_fix_ns_path(tracee, result, deref_final);
 
 skip:
 	VERBOSE(tracee, 2, "vpid %" PRIu64 ":          -> \"%s\"",

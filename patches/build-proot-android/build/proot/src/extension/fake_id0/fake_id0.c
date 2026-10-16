@@ -50,6 +50,7 @@
 #include "path/binding.h"
 #include "path/f2fs-bug.h"
 #include "path/path.h"
+#include "path/temp.h"
 #include "arch.h"
 
 #include "extension/fake_id0/chown.h"
@@ -587,6 +588,9 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 	sysnum = get_sysnum(tracee, ORIGINAL);
 	switch (sysnum) {
 
+	case PR_getsockopt:
+		return handle_getsockopt_enter_end(tracee, config);
+
 #ifdef USERLAND
 	/* handle_open(tracee, fd_sysarg, path_sysarg, flags_sysarg, mode_sysarg, config) */
 	/* int openat(int dirfd, const char *pathname, int flags, mode_t mode) */
@@ -628,10 +632,14 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 	/* handle_rename(tracee, oldfd_sysarg, oldpath_sysarg, newfd_sysarg, newpath_sysarg, config) */
 	/* int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) */
 	case PR_renameat:
-		return handle_rename_enter_end(tracee, SYSARG_1, SYSARG_2, SYSARG_3, SYSARG_4, config);
+		return handle_rename_enter_end(tracee, SYSARG_1, SYSARG_2, SYSARG_3, SYSARG_4, 0, config);
+	/* int renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags) */
+	case PR_renameat2:
+		return handle_rename_enter_end(tracee, SYSARG_1, SYSARG_2, SYSARG_3, SYSARG_4,
+			peek_reg(tracee, ORIGINAL, SYSARG_5), config);
 	/* int rename(const char *oldpath, const char *newpath) */
 	case PR_rename:
-		return handle_rename_enter_end(tracee, IGNORE_SYSARG, SYSARG_1, IGNORE_SYSARG, SYSARG_2, config);
+		return handle_rename_enter_end(tracee, IGNORE_SYSARG, SYSARG_1, IGNORE_SYSARG, SYSARG_2, 0, config);
 
 	/* handle_chmod(tracee, path_sysarg, mode_sysarg, fd_sysarg, dirfd_sysarg, config) */
 	/* int chmod(const char *pathname, mode_t mode) */
@@ -732,9 +740,6 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 	case PR_setfsuid32:
 	case PR_setfsgid:
 	case PR_setfsgid32:
-#ifdef USERLAND
- 	case PR_umask:
-#endif
 		/* These syscalls are fully emulated.  */
 		set_sysnum(tracee, PR_void);
 		return 0;
@@ -850,6 +855,66 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
  * Adjust current @tracee's syscall result according to @config.  This
  * function returns -errno if an error occured, otherwise 0.
  */
+#ifdef USERLAND
+/**
+ * Emulate setgroups/getgroups (voided at entry) with the list kept in
+ * @config: the kernel's is Android's, and initgroups() as a guest user
+ * (runuser, sudo, login) must leave that user's groups, for `id`,
+ * sudo's group rules and polkit (through SO_PEERGROUPS).  Lists longer
+ * than FAKE_ID0_NGROUPS are cut short.  Assumes 32-bit gid_t lists,
+ * which is what arm64 and x86_64 use for both syscall variants.
+ */
+static word_t emulate_groups(Tracee *tracee, Config *config, word_t sysnum,
+			     word_t size, word_t list)
+{
+	gid_t groups[FAKE_ID0_NGROUPS];
+	word_t result;
+
+	if (sysnum == PR_setgroups || sysnum == PR_setgroups32) {
+		if (config->euid != 0 && !config->caps_active)
+			result = (word_t) -EPERM;
+		else if ((int) size < 0 || size > 65536)
+			result = (word_t) -EINVAL;
+		else {
+			if (size > FAKE_ID0_NGROUPS)
+				size = FAKE_ID0_NGROUPS;
+			if (size > 0 && read_data(tracee, groups, list, size * sizeof(gid_t)) < 0)
+				result = (word_t) -EFAULT;
+			else {
+				memcpy(config->groups, groups, size * sizeof(gid_t));
+				config->ngroups = (int) size;
+				result = 0;
+			}
+		}
+	}
+	else {
+		if ((int) size < 0)
+			result = (word_t) -EINVAL;
+		else if (size == 0)
+			result = config->ngroups;
+		else if (size < (word_t) config->ngroups)
+			result = (word_t) -EINVAL;
+		else if (config->ngroups > 0
+			 && write_data(tracee, list, config->groups,
+				       config->ngroups * sizeof(gid_t)) < 0)
+			result = (word_t) -EFAULT;
+		else
+			result = config->ngroups;
+	}
+
+	return result;
+}
+
+static int handle_groups_exit_end(Tracee *tracee, Config *config, word_t sysnum)
+{
+	poke_reg(tracee, SYSARG_RESULT,
+		 emulate_groups(tracee, config, sysnum,
+				peek_reg(tracee, ORIGINAL, SYSARG_1),
+				peek_reg(tracee, ORIGINAL, SYSARG_2)));
+	return 0;
+}
+#endif
+
 static int handle_sysexit_end(Tracee *tracee, Config *config)
 {
 	word_t sysnum;
@@ -1018,10 +1083,24 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		 * directly and needs no intercept). */
 		int op = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
 		int result = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
-		if (result == 0 && op == PR_SET_KEEPCAPS) {
-			word_t arg = peek_reg(tracee, ORIGINAL, SYSARG_2);
+		word_t arg = peek_reg(tracee, ORIGINAL, SYSARG_2);
+
+		/* Android locks the securebits of apps, so the kernel
+		 * refuses PR_SET_KEEPCAPS, and dropping from a bounding
+		 * set needs a real CAP_SETPCAP.  Privilege-dropping
+		 * daemons (dbus-daemon, polkitd, ping) give up when
+		 * either fails, so answer them as the kernel would
+		 * answer root: these calls only shed privileges the
+		 * tracee never really had.  */
+		if (op == PR_SET_KEEPCAPS && (result == 0 || (result == -EPERM && arg <= 1))) {
 			config->keep_caps = (arg != 0);
+			poke_reg(tracee, SYSARG_RESULT, 0);
 		}
+		else if (op == PR_GET_KEEPCAPS && result >= 0)
+			poke_reg(tracee, SYSARG_RESULT, config->keep_caps ? 1 : 0);
+		else if ((op == PR_CAPBSET_DROP || op == PR_SET_SECUREBITS)
+			 && result == -EPERM && (config->euid == 0 || config->caps_active))
+			poke_reg(tracee, SYSARG_RESULT, 0);
 		return 0;
 	}
 
@@ -1054,18 +1133,19 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		return handle_getresgid_exit_end(tracee, config);
 
 #ifdef USERLAND
+	/* umask(2) runs for real too, so files the kernel creates
+	 * without a meta file (O_TMPFILE ones, as ostree writes its
+	 * objects) get the emulated umask rather than Android's 077.  */
 	case PR_umask:
 		poke_reg(tracee, SYSARG_RESULT, config->umask);
-		config->umask = (mode_t) peek_reg(tracee, MODIFIED, SYSARG_1); 
+		config->umask = (mode_t) peek_reg(tracee, MODIFIED, SYSARG_1) & 0777; 
 		return 0;
 
 	case PR_setgroups:
 	case PR_setgroups32:
 	case PR_getgroups:
 	case PR_getgroups32:
-		/*TODO: need to really emulate*/
-		poke_reg(tracee, SYSARG_RESULT, 0);
-		return 0;
+		return handle_groups_exit_end(tracee, config, sysnum);
 #endif
 
 	case PR_setdomainname:
@@ -1126,7 +1206,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		return handle_chroot_exit_end(tracee, config, false);
 
 	case PR_getsockopt:
-		return handle_getsockopt_exit_end(tracee);
+		return handle_getsockopt_exit_end(tracee, config);
 
 #ifdef USERLAND
 /** Check to see if a meta was created for a file that no longer exists.
@@ -1248,6 +1328,90 @@ static int handle_sysexit_start(Tracee *tracee, Config *config) {
 }
 
 /**
+ * When @path (a translated host path being opened) is the status file of
+ * a process under fake_id0, "/proc/<pid>/status" or
+ * "/proc/<pid>/task/<tid>/status", point it at a copy whose Uid, Gid and
+ * Groups lines carry that process's fake credentials.  The kernel's are
+ * the Android app's (u0_a123 and its inet, sdcard_rw, ... groups):
+ * polkit and Flatpak's system helper look callers up by them ("User 10532
+ * does not exist"), as do ps, top and psutil.
+ */
+static void fake_proc_status(Tracee *tracee, char path[PATH_MAX])
+{
+	size_t length = strlen(path);
+	const char *cursor;
+	char *end;
+	long pid;
+	Tracee *target;
+	Extension *extension;
+	Config *config;
+	const char *copy_path;
+	FILE *real;
+	FILE *copy;
+	char *line = NULL;
+	size_t line_size = 0;
+	ssize_t line_length;
+	int i;
+
+	if (   length <= strlen("/proc//status")
+	    || strncmp(path, "/proc/", 6) != 0
+	    || strcmp(path + length - 7, "/status") != 0)
+		return;
+
+	pid = strtol(path + 6, &end, 10);
+	if (end == path + 6 || pid <= 0)
+		return;
+	cursor = end;
+	if (strncmp(cursor, "/task/", 6) == 0) {
+		pid = strtol(cursor + 6, &end, 10);
+		if (end == cursor + 6 || pid <= 0)
+			return;
+		cursor = end;
+	}
+	if (strcmp(cursor, "/status") != 0)
+		return;
+
+	target = get_tracee(tracee, (pid_t) pid, false);
+	if (target == NULL)
+		return;
+	extension = get_extension(target, fake_id0_callback);
+	if (extension == NULL)
+		return;
+	config = talloc_get_type_abort(extension->config, Config);
+
+	real = fopen(path, "r");
+	if (real == NULL)
+		return;
+	copy_path = create_temp_file(tracee->ctx, "status");
+	copy = copy_path != NULL ? fopen(copy_path, "w") : NULL;
+	if (copy == NULL) {
+		fclose(real);
+		return;
+	}
+
+	while ((line_length = getline(&line, &line_size, real)) > 0) {
+		if (strncmp(line, "Uid:", 4) == 0)
+			fprintf(copy, "Uid:\t%u\t%u\t%u\t%u\n", config->ruid,
+				config->euid, config->suid, config->fsuid);
+		else if (strncmp(line, "Gid:", 4) == 0)
+			fprintf(copy, "Gid:\t%u\t%u\t%u\t%u\n", config->rgid,
+				config->egid, config->sgid, config->fsgid);
+		else if (strncmp(line, "Groups:", 7) == 0) {
+			fputs("Groups:\t", copy);
+			for (i = 0; i < config->ngroups; i++)
+				fprintf(copy, "%u ", config->groups[i]);
+			fputs("\n", copy);
+		}
+		else
+			fwrite(line, line_length, 1, copy);
+	}
+	free(line);
+	fclose(real);
+	if (fclose(copy) == 0)
+		strncpy(path, copy_path, PATH_MAX - 1);
+}
+
+/**
  * Handler for this @extension.  It is triggered each time an @event
  * occurred.  See ExtensionEvent for the meaning of @data1 and @data2.
  */
@@ -1292,8 +1456,16 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		config->fsgid = gid;
 		config->caps_active = (uid == 0);
 		config->keep_caps = false;
-			/* Set the umask to the typical linux value. */
+		config->ngroups = 0;
+		config->peercred_fd = -1;
+		config->peercred_pid = 0;
+		config->peercred_inode = 0;
+		config->peergroups_room = 0;
+			/* Set the umask to the typical linux value, for the
+			 * kernel as well: tracees inherit PRoot's, and an
+			 * Android app's is 077.  */
 			config->umask = 022;
+			umask(config->umask);
 
 		extension->filtered_sysnums = filtered_sysnums;
 		return 0;
@@ -1321,6 +1493,15 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 			return -1;
 
 		memcpy(extension->config, parent->config, sizeof(Config));
+		return 0;
+	}
+
+	case TRANSLATED_PATH: {
+		Tracee *tracee = TRACEE(extension);
+		Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
+
+		if (sysnum == PR_open || sysnum == PR_openat || sysnum == PR_openat2)
+			fake_proc_status(tracee, (char *) data1);
 		return 0;
 	}
 
@@ -1427,6 +1608,19 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 			if (status < 0)
 				return status;
 			break;
+
+#ifdef USERLAND
+		/* Android's app filter traps it, so it never reaches
+		 * the enter stage that voids it.  */
+		case PR_setgroups:
+		case PR_setgroups32:
+			status = (int) emulate_groups(tracee, config, sysnum,
+						      peek_reg(tracee, CURRENT, SYSARG_1),
+						      peek_reg(tracee, CURRENT, SYSARG_2));
+			if (status < 0)
+				return status;
+			break;
+#endif
 
 		default:
 			return 0;

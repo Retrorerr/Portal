@@ -3,6 +3,9 @@
 
 #include <stdbool.h>     /* bool */
 #include <sys/types.h>   /* uid_t, gid_t */
+#include <sys/socket.h>  /* socklen_t */
+
+#define FAKE_ID0_NGROUPS 64
 
 typedef struct {
 	uid_t ruid;
@@ -31,6 +34,18 @@ typedef struct {
 	 * a follow-up capset() lets a process retain CAP_SETUID/CAP_SETGID
 	 * across setresuid().  Cleared by execve, per Linux semantics. */
 	bool keep_caps;
+
+	/* Supplementary groups, as set by setgroups(2).  The kernel's are
+	 * Android's (inet, sdcard_rw, ...), unknown to the guest.  */
+	int ngroups;
+	gid_t groups[FAKE_ID0_NGROUPS];
+
+	/* The peer of the last SO_PEERCRED query, for SO_PEERGROUPS, which
+	 * names no process; and the room given to SO_PEERGROUPS.  */
+	int peercred_fd;
+	pid_t peercred_pid;
+	unsigned long peercred_inode;
+	socklen_t peergroups_room;
 } Config;
 
 #endif /* FAKE_ID0_CONFIG_H */

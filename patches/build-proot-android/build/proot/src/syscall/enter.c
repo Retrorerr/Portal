@@ -36,6 +36,7 @@
 #include <sys/socket.h>  /* AF_NETLINK, AF_UNIX, SOCK_DGRAM, SOCK_CLOEXEC */
 #include <sched.h>       /* CLONE_NEW*, */
 #include <termios.h>     /* TCSETS, TCSANOW */
+#include <stddef.h>      /* offsetof, */
 #include <linux/netlink.h> /* struct nlmsghdr, NLMSG_ERROR, struct nlmsgerr */
 #include <linux/rtnetlink.h> /* RTM_*, struct ifinfomsg, struct rtattr, RTA_* */
 #include <linux/if_addr.h> /* struct ifaddrmsg, IFA_*, IFA_F_PERMANENT */
@@ -46,6 +47,7 @@
 #include <netpacket/packet.h> /* struct sockaddr_ll (AF_PACKET) */
 #include <sys/ioctl.h>   /* ioctl(2): SIOCGIFMTU / SIOCGIFHWADDR */
 #include <sys/time.h>    /* struct timeval, for SO_RCVTIMEO */
+#include <sys/stat.h>    /* stat(2), S_ISDIR */
 #include "syscall/pipe_shadow.h"
 
 /* ABI-stable rtnetlink constants we synthesise for the loopback reply.
@@ -150,6 +152,35 @@ static int translate_path2(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg 
 }
 
 /**
+ * Is @leaf, in the directory @tracee just translated to
+ * @translated_parent, itself the guest path of a binding?  The kernel
+ * sees the mount point there (mkdir fails with EEXIST), while the host
+ * directory below may lack the name or deny creating it: bubblewrap
+ * makes "--tmpfs /dev/shm" this way after "--dev-bind /dev /dev", and
+ * Android's /dev has no "shm".
+ */
+static bool leaf_is_binding(Tracee *tracee, const char translated_parent[PATH_MAX], const char *leaf)
+{
+	char parent[PATH_MAX];
+	char guest[PATH_MAX];
+	Binding *binding;
+
+	if (tracee->mountns && tracee->last_guest_valid)
+		strcpy(parent, tracee->last_guest_path);
+	else {
+		strcpy(parent, translated_parent);
+		if (detranslate_path(tracee, parent, NULL) < 0)
+			return false;
+	}
+	chop_finality(parent);
+	if (parent[0] != '/' || join_paths(2, guest, parent, leaf) < 0)
+		return false;
+
+	binding = get_binding(tracee, GUEST, guest);
+	return binding != NULL && strcmp(binding->guest.path, guest) == 0;
+}
+
+/**
  * Translate @path without touching its final component.  This is needed for
  * creation-style destination arguments such as link(2)'s newpath: the final
  * name must be looked up by the kernel as part of the operation, and probing
@@ -198,6 +229,9 @@ static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX
 	status = translate_path(tracee, translated_parent, dir_fd, parent, true);
 	if (status < 0)
 		return status;
+
+	if (leaf_is_binding(tracee, translated_parent, leaf))
+		return translate_path2(tracee, dir_fd, path, reg, SYMLINK);
 
 	status = join_paths(2, translated_path, translated_parent, leaf);
 	if (status < 0)
@@ -250,6 +284,232 @@ static int guest_canonicalize(Tracee *tracee, const char *user_path,
 }
 
 /**
+ * In an emulated mount namespace, ask for the exit stage of an open of
+ * a directory or an O_PATH descriptor, the ones *at() syscalls and
+ * mounts are done through, to remember where it was opened.
+ */
+static void note_fd_path_open(Tracee *tracee, word_t flags)
+{
+	if (!tracee->mountns || (flags & (O_PATH | O_DIRECTORY)) == 0)
+		return;
+
+	tracee->fd_path_pending = true;
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
+}
+
+/**
+ * Android denies apps reading some directories they may still look up
+ * and create in through a bind ("/dev", "/proc/<PID>/ns", ...).  An
+ * O_DIRECTORY open of one, from a tracee that wants it as the @dirfd
+ * of *at() calls, is made with O_PATH instead: bubblewrap creates the
+ * mount points below "--dev-bind /dev /dev" this way.  Listing the
+ * directory still fails, with EBADF instead of EACCES: hence only in
+ * an emulated mount namespace, where sandbox helpers set up mounts.
+ */
+static void open_unreadable_dir_as_path(Tracee *tracee, Reg sysarg_path, Reg sysarg_flags)
+{
+	char host_path[PATH_MAX];
+	struct stat statl;
+	word_t flags;
+
+	if (!tracee->private_mountns)
+		return;
+
+	flags = peek_reg(tracee, CURRENT, sysarg_flags);
+	if (   (flags & O_DIRECTORY) == 0
+	    || (flags & (O_PATH | O_CREAT | O_ACCMODE)) != 0)
+		return;
+
+	if (get_sysarg_path(tracee, host_path, sysarg_path) < 0)
+		return;
+	if (access(host_path, R_OK) == 0 || errno != EACCES)
+		return;
+	if (stat(host_path, &statl) < 0 || !S_ISDIR(statl.st_mode))
+		return;
+
+	poke_reg(tracee, sysarg_flags, O_PATH | O_DIRECTORY | (flags & (O_CLOEXEC | O_NOFOLLOW)));
+}
+
+/**
+ * If @host_path is a "/proc/<PID>/fd/<FD>" link, replace it with the
+ * host path that descriptor names.  bubblewrap mounts onto (and from)
+ * "/proc/self/fd/N" of an O_PATH descriptor rather than a path, so a
+ * symlink swapped in meanwhile can't redirect the mount; a binding on
+ * the link itself would hide the very file it names.  This function
+ * returns true if @host_path was such a link and could be resolved.
+ */
+static bool resolve_fd_link(char host_path[PATH_MAX])
+{
+	char target[PATH_MAX];
+	int pid, fd, end = 0;
+
+	if (sscanf(host_path, "/proc/%d/fd/%d%n", &pid, &fd, &end) != 2
+	    || host_path[end] != '\0')
+		return false;
+
+	if (readlink_proc_pid_fd(pid, fd, target) < 0 || target[0] != '/')
+		return false;
+
+	strcpy(host_path, target);
+	return true;
+}
+
+/**
+ * Canonicalize @target_user like guest_canonicalize(), then follow it
+ * if it is a descriptor link (see resolve_fd_link).
+ */
+static int canonicalize_mount_target(Tracee *tracee, const char *target_user,
+				     char guest_path[PATH_MAX])
+{
+	char host_path[PATH_MAX];
+	int status;
+
+	status = guest_canonicalize(tracee, target_user, guest_path);
+	if (status < 0)
+		return status;
+
+	/* Where the descriptor was opened, if known.  */
+	{
+		int pid, fd, end = 0;
+
+		if (sscanf(guest_path, "/proc/%d/fd/%d%n", &pid, &fd, &end) == 2
+		    && guest_path[end] == '\0'
+		    && fd_path_lookup(get_tracee(tracee, pid, false), pid, fd, host_path)) {
+			strcpy(guest_path, host_path);
+			return 0;
+		}
+	}
+
+	strcpy(host_path, guest_path);
+	if (substitute_binding(tracee, GUEST, host_path) < 0 || !resolve_fd_link(host_path))
+		return 0;
+
+	if (detranslate_path(tracee, host_path, NULL) < 0)
+		return 0;
+
+	strcpy(guest_path, host_path);
+	return 0;
+}
+
+/**
+ * A recursive bind mount carries the mounts below its source along, as
+ * with the kernel: re-expose under @target_guest the bindings below the
+ * guest path of @src_user ("/dev/shm" and "/dev/input" for bubblewrap's
+ * "--dev-bind /dev /dev", which Flatpak then covers with a tmpfs).
+ * Bindings already at or under the target are left out, so that
+ * binding a tree into itself does not recurse.
+ */
+static void replicate_sub_bindings(Tracee *tracee, const char *src_user,
+				   const char *target_guest)
+{
+	char src_guest[PATH_MAX];
+	char guest[PATH_MAX];
+	const char *prefix;
+	Binding **snapshot;
+	Binding *iter;
+	size_t src_len;
+	size_t target_len;
+	size_t count = 0;
+	size_t i;
+
+	if (canonicalize_mount_target(tracee, src_user, src_guest) < 0)
+		return;
+	if (strcmp(src_guest, target_guest) == 0)
+		return;
+
+	src_len = strcmp(src_guest, "/") == 0 ? 0 : strlen(src_guest);
+	target_len = strlen(target_guest);
+	prefix = strcmp(target_guest, "/") == 0 ? "" : target_guest;
+
+	for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+	     iter != (void *) tracee->fs->bindings.guest;
+	     iter = CIRCLEQ_NEXT(iter, link.guest))
+		count++;
+	if (count == 0)
+		return;
+
+	snapshot = talloc_array(tracee->ctx, Binding *, count);
+	if (snapshot == NULL)
+		return;
+	i = 0;
+	for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+	     iter != (void *) tracee->fs->bindings.guest && i < count;
+	     iter = CIRCLEQ_NEXT(iter, link.guest))
+		snapshot[i++] = iter;
+	count = i;
+
+	for (i = 0; i < count; i++) {
+		const char *path = snapshot[i]->guest.path;
+
+		if (src_len == 0) {
+			if (strcmp(path, "/") == 0)
+				continue;
+		}
+		else if (strncmp(path, src_guest, src_len) != 0 || path[src_len] != '/')
+			continue;
+
+		if (   strncmp(path, target_guest, target_len) == 0
+		    && (path[target_len] == '\0' || path[target_len] == '/'
+			|| target_len == 1))
+			continue;
+
+		if ((size_t) snprintf(guest, sizeof(guest), "%s%s", prefix, path + src_len)
+		    >= sizeof(guest))
+			continue;
+
+		(void) insort_binding3(tracee, tracee->fs, snapshot[i]->host.path, guest);
+	}
+}
+
+/**
+ * A mount hides whatever was mounted below its target, as with the
+ * kernel: drop the bindings under @target_guest.  Bubblewrap's
+ * "--ro-bind / /" carries "/dev/fd" and the like along (see
+ * replicate_sub_bindings()), then "--dev /dev" mounts a fresh tmpfs
+ * there and fails to create its own "/dev/fd" over the stale one.
+ * Only in a mount namespace of the tracee's own, so a mount in the
+ * main guest never hides PRoot's own bindings.
+ */
+static void cover_sub_bindings(Tracee *tracee, const char *target_guest)
+{
+	Binding **snapshot;
+	Binding *iter;
+	size_t target_len;
+	size_t count = 0;
+	size_t i;
+
+	if (!tracee->private_mountns || strcmp(target_guest, "/") == 0)
+		return;
+	target_len = strlen(target_guest);
+
+	for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+	     iter != (void *) tracee->fs->bindings.guest;
+	     iter = CIRCLEQ_NEXT(iter, link.guest))
+		count++;
+	if (count == 0)
+		return;
+
+	snapshot = talloc_array(tracee->ctx, Binding *, count);
+	if (snapshot == NULL)
+		return;
+	i = 0;
+	for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+	     iter != (void *) tracee->fs->bindings.guest && i < count;
+	     iter = CIRCLEQ_NEXT(iter, link.guest))
+		snapshot[i++] = iter;
+	count = i;
+
+	for (i = 0; i < count; i++) {
+		const char *path = snapshot[i]->guest.path;
+
+		if (   strncmp(path, target_guest, target_len) == 0
+		    && path[target_len] == '/')
+			remove_binding_from_all_lists(tracee, snapshot[i]);
+	}
+}
+
+/**
  * Emulate mount(@src_user, @target_user, @fstype, @flags) by adding a
  * PRoot binding from a host directory to the canonicalized target.
  * Bind mounts use the translated source; "proc"/"sysfs" use the
@@ -271,6 +531,7 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 	if ((flags & MS_BIND) != 0) {
 		if (translate_path(tracee, host_path, AT_FDCWD, src_user, true) < 0)
 			return;
+		(void) resolve_fd_link(host_path);
 	}
 	else if (strcmp(fstype, "proc") == 0)
 		strcpy(host_path, "/proc");
@@ -281,7 +542,10 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 	else if (strcmp(fstype, "devpts") == 0)
 		strcpy(host_path, "/dev/pts");
 	else if (strcmp(fstype, "tmpfs") == 0) {
-		tmpdir = create_temp_directory(tracee->fs, "proot-tmpfs-");
+		/* Owned by the binding list, shared by every process
+		 * of the name-space, not by this one: mount(8) exits
+		 * right after.  */
+		tmpdir = create_temp_directory(tracee->fs->bindings.guest, "proot-tmpfs-");
 		if (tmpdir == NULL)
 			return;
 		strncpy(host_path, tmpdir, PATH_MAX - 1);
@@ -292,10 +556,14 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 
 	chop_finality(host_path);
 
-	if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+	if (canonicalize_mount_target(tracee, target_user, guest_path) < 0)
 		return;
 
+	cover_sub_bindings(tracee, guest_path);
 	(void) insort_binding3(tracee, tracee->fs, host_path, guest_path);
+
+	if ((flags & (MS_BIND | MS_REC)) == (MS_BIND | MS_REC))
+		replicate_sub_bindings(tracee, src_user, guest_path);
 }
 
 /**
@@ -305,6 +573,55 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
  * sandbox helpers like bubblewrap can keep accessing the prior
  * file-system through the agreed "oldroot" path.
  */
+/**
+ * Keep openat2(2)'s RESOLVE_IN_ROOT once it is rewritten into
+ * openat(2), as the enter stage and the SIGSYS handler (Android's app
+ * filter traps openat2) both do: it makes the dirfd the root of the
+ * lookup, an absolute path starting there and not at "/".  bubblewrap
+ * opens its sources under "/oldroot" this way; dropped, the flag turned
+ * them into paths of the sandbox's own, still empty, root.  Make the
+ * path relative to the dirfd instead, and drop the ".." components that
+ * would climb above it, which the kernel clamps at that root.
+ */
+int openat2_resolve_in_root(Tracee *tracee, uint64_t resolve)
+{
+	char path[PATH_MAX];
+	char clamped[PATH_MAX];
+	const char *component;
+	size_t length = 0;
+	int depth = 0;
+	int status;
+
+#ifndef RESOLVE_IN_ROOT
+#define RESOLVE_IN_ROOT 0x10
+#endif
+	if ((resolve & RESOLVE_IN_ROOT) == 0)
+		return 0;
+
+	status = get_sysarg_path(tracee, path, SYSARG_2);
+	if (status < 0)
+		return status;
+	if (path[0] != '/' && strstr(path, "..") == NULL)
+		return 0;
+
+	clamped[0] = '\0';
+	for (component = strtok(path, "/"); component != NULL; component = strtok(NULL, "/")) {
+		if (strcmp(component, "..") == 0) {
+			if (depth == 0)
+				continue;
+			depth--;
+		}
+		else if (strcmp(component, ".") != 0)
+			depth++;
+		status = snprintf(clamped + length, sizeof(clamped) - length, "%s%s",
+				  length != 0 ? "/" : "", component);
+		if (status < 0 || (size_t) status >= sizeof(clamped) - length)
+			return -ENAMETOOLONG;
+		length += status;
+	}
+	return set_sysarg_path(tracee, length != 0 ? clamped : ".", SYSARG_2);
+}
+
 static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 			       const char *put_old_user)
 {
@@ -337,6 +654,8 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 		strcpy(put_old_guest, new_root_guest);
 	if (canonicalize(tracee, put_old_user, true, put_old_guest, 0) < 0)
 		return;
+	/* "." is "/newroot/." here: compare it as "/newroot".  */
+	chop_finality(put_old_guest);
 
 	root_binding = get_binding(tracee, GUEST, "/");
 	if (root_binding == NULL)
@@ -397,6 +716,17 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 
 		blen = strlen(b->guest.path);
 
+		/* The new root's own mount leaves its old place, as with
+		 * the kernel: bubblewrap pivots into the tmpfs it mounted
+		 * on "/tmp", and "/oldroot/tmp" is the real /tmp again
+		 * (Flatpak binds the PulseAudio socket from there).  */
+		if (   new_root_len > 0
+		    && blen == new_root_len
+		    && strcmp(b->guest.path, new_root_guest) == 0) {
+			remove_binding_from_all_lists(tracee, b);
+			continue;
+		}
+
 		/* Bindings that live under the new root move *with* the pivot:
 		 * "/newroot/usr" becomes "/usr".  Without this, the tracee's
 		 * own bind mounts (e.g. bubblewrap's "--ro-bind /usr /usr"
@@ -416,9 +746,15 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 			continue;
 		}
 
-		/* Everything else belonged to the previous root tree;
-		 * re-expose it under put_old (skipping what already sits
-		 * there) and keep the original in place. */
+		/* Everything else belonged to the previous root tree,
+		 * which is now reachable under put_old only, as with
+		 * the kernel: re-expose it there (skipping what already
+		 * sits there).  Left in place too, bubblewrap's scratch
+		 * tmpfs would show up as the sandbox's /tmp, and the
+		 * host's mounts in every sandbox.  With no put_old
+		 * (pivot_root(".", ".")), the old tree is stacked on
+		 * the new root until the caller detaches it, which
+		 * bubblewrap does right away: drop it now.  */
 		if (have_put_old) {
 			char aliased[PATH_MAX];
 
@@ -429,12 +765,11 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 
 			if ((size_t) snprintf(aliased, sizeof(aliased), "%s%s",
 					      put_old_after, b->guest.path)
-			    >= sizeof(aliased))
-				continue;
-
-			(void) insort_binding3(tracee, tracee->fs,
-					       b->host.path, aliased);
+			    < sizeof(aliased))
+				(void) insort_binding3(tracee, tracee->fs,
+						       b->host.path, aliased);
 		}
+		remove_binding_from_all_lists(tracee, b);
 	}
 
 	talloc_free(snapshot);
@@ -453,7 +788,7 @@ static void emulate_umount(Tracee *tracee, const char *target_user)
 	char guest_path[PATH_MAX];
 	Binding *binding;
 
-	if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+	if (canonicalize_mount_target(tracee, target_user, guest_path) < 0)
 		return;
 
 	/* Never drop the root binding.  */
@@ -469,6 +804,26 @@ static void emulate_umount(Tracee *tracee, const char *target_user)
 	 * didn't ask to unmount (e.g. its containing rootfs).  */
 	if (strcmp(binding->guest.path, guest_path) != 0)
 		return;
+
+	/* The mounts stacked under it go too: the kernel refuses to
+	 * unmount a busy tree, except with MNT_DETACH, which detaches
+	 * all of it (bubblewrap's umount2("oldroot", MNT_DETACH) after
+	 * its first pivot_root).  */
+	{
+		size_t length = strlen(guest_path);
+		Binding *iter;
+		Binding *next;
+
+		for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+		     iter != (void *) tracee->fs->bindings.guest;
+		     iter = next) {
+			next = CIRCLEQ_NEXT(iter, link.guest);
+			if (iter != binding
+			    && strncmp(iter->guest.path, guest_path, length) == 0
+			    && iter->guest.path[length] == '/')
+				remove_binding_from_all_lists(tracee, iter);
+		}
+	}
 
 	remove_binding_from_all_lists(tracee, binding);
 }
@@ -1367,6 +1722,8 @@ static size_t relay_route_dump(const uint8_t *req, size_t req_len,
 	return off;
 }
 
+static uint32_t netlink_visible_pid(const Tracee *tracee, uint32_t pid);
+
 /**
  * Parse the netlink request the tracee just sent (whether via sendto
  * with a flat buffer or via sendmsg with an iovec) and build the reply
@@ -1389,7 +1746,7 @@ static void build_fake_netlink_reply(Tracee *tracee, struct fake_netlink_socket 
 	struct nlmsghdr hdr;
 	uint8_t *out;
 	size_t   max = MAX_FAKE_NETLINK_REPLY;
-	uint32_t pid = (uint32_t) tracee->pid;
+	uint32_t pid = netlink_visible_pid(tracee, (uint32_t) tracee->pid);
 	uint32_t seq = 0;
 	uint16_t type, flags;
 	bool dump;
@@ -1608,6 +1965,24 @@ static size_t scatter_fake_netlink_reply(Tracee *tracee, word_t iov_ptr,
  * asked for a namespace -- keep failing as before.
  */
 
+/**
+ * The port id the kernel gives a netlink socket is its owner's real
+ * pid.  To the init of an emulated pid namespace getpid() says 1, and
+ * bubblewrap drops replies whose nlmsg_pid is not getpid(): show it
+ * the pid it believes it has.
+ */
+static uint32_t netlink_visible_pid(const Tracee *tracee, uint32_t pid)
+{
+	const struct fake_pidns *ns = tracee->pidns;
+
+	if (   ns != NULL
+	    && ns->init != 0
+	    && ns->init == fakens_tgid(tracee)
+	    && pid == (uint32_t) ns->init)
+		return 1;
+	return pid;
+}
+
 /* rtnetlink message types come in groups of four -- NEW, DEL, GET,
  * SET -- and everything but the GET reconfigures the network.  */
 static bool nl_type_reconfigures(uint16_t type)
@@ -1724,6 +2099,12 @@ void handle_netlink_reply_exit(Tracee *tracee, word_t syscall_number)
 
 		if (   hdr.nlmsg_type == NLMSG_ERROR
 		    && hdr.nlmsg_seq  == tracee->netlink_ack_seq) {
+			uint32_t visible = netlink_visible_pid(tracee, hdr.nlmsg_pid);
+
+			if (visible != hdr.nlmsg_pid)
+				poke_uint32(tracee, buf_addr + off
+					    + offsetof(struct nlmsghdr, nlmsg_pid), visible);
+			errno = 0;
 			memcpy(&error, reply + off + NLMSG_HDRLEN, sizeof(error));
 			if (error != -EPERM && error != -EACCES)
 				break; /* a real error: report it as is */
@@ -1844,6 +2225,109 @@ static void maybe_redirect_userns_file(Tracee *tracee, Reg reg)
 }
 
 /**
+ * Writes to /proc/sys/user/max_<type>_namespaces (or the read-only
+ * stand-in Portal binds there) go to /dev/null: the limits belong to
+ * the tracee's own, emulated, user namespace.  Bubblewrap's
+ * "--disable-userns", used by Flatpak for every app, sets the limit
+ * to 1 this way, and a shared file would leak it to every sandbox.
+ */
+static void maybe_discard_userns_sysctl_write(Tracee *tracee, Reg path_reg, Reg flags_reg)
+{
+	char host_path[PATH_MAX];
+	const char *name;
+	size_t length;
+
+	if ((peek_reg(tracee, CURRENT, flags_reg) & O_ACCMODE) == O_RDONLY)
+		return;
+	if (get_sysarg_path(tracee, host_path, path_reg) < 0)
+		return;
+
+	/* The guest path, the host one may be a stand-in bound
+	 * there.  */
+	if (detranslate_path(tracee, host_path, NULL) < 0)
+		return;
+	if (strncmp(host_path, "/proc/sys/user/", strlen("/proc/sys/user/")) != 0)
+		return;
+
+	name = host_path + strlen("/proc/sys/user/");
+	length = strlen(name);
+	if (   strncmp(name, "max_", 4) != 0
+	    || length < 4 + strlen("_namespaces")
+	    || strcmp(name + length - strlen("_namespaces"), "_namespaces") != 0)
+		return;
+
+	if (strcmp(name, "max_user_namespaces") == 0)
+		fakens_limit_userns(tracee);
+	(void) set_sysarg_path(tracee, "/dev/null", path_reg);
+}
+
+/**
+ * A bind mount keeps its source file alive once unlinked, as the
+ * kernel holds the inode: bubblewrap's "--ro-bind-data" and
+ * "--bind-data" (Flatpak's /run/host/font-dirs.xml, ...) write a temp
+ * file, bind it, then unlink it.  A binding only holds a path, so move
+ * the file aside, out of the tracee's sight, and rebind it from there.
+ * This function returns true if the file named by @reg was a binding
+ * source in a mount namespace of the tracee's own and was moved; the
+ * unlink must then report success without running.
+ */
+static bool keep_bound_file(Tracee *tracee, Reg reg)
+{
+	char host_path[PATH_MAX];
+	char kept[PATH_MAX];
+	char guest[PATH_MAX];
+	struct stat statl;
+	const char *dir;
+	Binding **matches;
+	Binding *iter;
+	size_t count = 0;
+	size_t i;
+
+	if (!tracee->private_mountns)
+		return false;
+	if (get_sysarg_path(tracee, host_path, reg) < 0)
+		return false;
+	if (lstat(host_path, &statl) < 0 || S_ISDIR(statl.st_mode))
+		return false;
+
+	for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+	     iter != (void *) tracee->fs->bindings.guest;
+	     iter = CIRCLEQ_NEXT(iter, link.guest)) {
+		if (strcmp(iter->host.path, host_path) == 0)
+			count++;
+	}
+	if (count == 0)
+		return false;
+
+	matches = talloc_array(tracee->ctx, Binding *, count);
+	if (matches == NULL)
+		return false;
+	i = 0;
+	for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+	     iter != (void *) tracee->fs->bindings.guest && i < count;
+	     iter = CIRCLEQ_NEXT(iter, link.guest)) {
+		if (strcmp(iter->host.path, host_path) == 0)
+			matches[i++] = iter;
+	}
+	count = i;
+
+	dir = create_temp_directory(tracee->fs->bindings.guest, "proot-unlinked-");
+	if (dir == NULL)
+		return false;
+	if ((size_t) snprintf(kept, sizeof(kept), "%s/file", dir) >= sizeof(kept))
+		return false;
+	if (rename(host_path, kept) < 0)
+		return false;
+
+	for (i = 0; i < count; i++) {
+		strcpy(guest, matches[i]->guest.path);
+		remove_binding_from_all_lists(tracee, matches[i]);
+		(void) insort_binding3(tracee, tracee->fs, kept, guest);
+	}
+	return true;
+}
+
+/**
  * Translate the input arguments of the current @tracee's syscall in the
  * @tracee->pid process area. This function sets @tracee->status to
  * -errno if an error occured from the tracee's point-of-view (EFAULT
@@ -1930,6 +2414,24 @@ int translate_syscall_enter(Tracee *tracee)
 		status = -ENOSYS;
 		break;
 
+	/* The new mount API resolves paths and mounts on the host:
+	 * open_tree("/") opened Android's root, and Flatpak tried to make
+	 * its sandbox there.  PRoot emulates mount(2) only; ENOSYS makes
+	 * callers (Flatpak, util-linux, systemd) use it and
+	 * /proc/self/mountinfo, as on kernels older than 5.2.  */
+	case PR_open_tree:
+	case PR_move_mount:
+	case PR_fsopen:
+	case PR_fsconfig:
+	case PR_fsmount:
+	case PR_fspick:
+	case PR_mount_setattr:
+	case PR_statmount:
+	case PR_listmount:
+	case PR_open_tree_attr:
+		status = -ENOSYS;
+		break;
+
 	case PR_getcwd:
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
@@ -1944,6 +2446,15 @@ int translate_syscall_enter(Tracee *tracee)
 		/* The ending "." ensures an error will be reported if
 		 * path does not exist or if it is not a directory.  */
 		if (syscall_number == PR_chdir) {
+			/* chdir(NULL) fails with EFAULT: emulated, it would
+			 * "succeed" into the cwd.  Bubblewrap does it when
+			 * getcwd(3) failed, then crashes on the NULL it
+			 * thinks it went to.  */
+			if (peek_reg(tracee, CURRENT, SYSARG_1) == 0) {
+				status = -EFAULT;
+				break;
+			}
+
 			status = get_sysarg_path(tracee, path, SYSARG_1);
 			if (status < 0)
 				break;
@@ -1982,12 +2493,18 @@ int translate_syscall_enter(Tracee *tracee)
 		 *    /a
 		 *
 		 * A solution would be to follow each file descriptor
-		 * just like it is done for cwd.
+		 * just like it is done for cwd: that is done in emulated
+		 * mount namespaces, where the canonical guest path of
+		 * the translation is known.
 		 */
 
-		status = detranslate_path(tracee, path, NULL);
-		if (status < 0)
-			break;
+		if (tracee->mountns && tracee->last_guest_valid)
+			strcpy(path, tracee->last_guest_path);
+		else {
+			status = detranslate_path(tracee, path, NULL);
+			if (status < 0)
+				break;
+		}
 
 		/* Remove the trailing "/" or "/.".  */
 		chop_finality(path);
@@ -2458,6 +2975,11 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_unshare:
 		if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNET) != 0)
 			tracee->fake_netns = true;
+		if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNS) != 0) {
+			status = unshare_mount_namespace(tracee);
+			if (status < 0)
+				break;
+		}
 		/* An unshared PID namespace may need its seccomp filter
 		 * installed instead (see syscall/fakens.c); the exit
 		 * stage reports success either way.  */
@@ -2571,7 +3093,10 @@ int translate_syscall_enter(Tracee *tracee)
 			status = translate_sysarg(tracee, SYSARG_1, REGULAR);
 		if (status >= 0) {
 			maybe_redirect_userns_file(tracee, SYSARG_1);
+			maybe_discard_userns_sysctl_write(tracee, SYSARG_1, SYSARG_2);
 			fake_evdev_open(tracee, SYSARG_1, SYSARG_2);
+			open_unreadable_dir_as_path(tracee, SYSARG_1, SYSARG_2);
+			note_fd_path_open(tracee, flags);
 		}
 		break;
 
@@ -2646,6 +3171,12 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_unlink:
 	case PR_rmdir:
 		status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
+		if (   status >= 0
+		    && get_sysnum(tracee, ORIGINAL) == PR_unlink
+		    && keep_bound_file(tracee, SYSARG_1)) {
+			poke_reg(tracee, SYSARG_RESULT, 0);
+			set_sysnum(tracee, PR_void);
+		}
 		break;
 
 	case PR_mkdir:
@@ -2702,6 +3233,9 @@ int translate_syscall_enter(Tracee *tracee)
 		set_sysnum(tracee, PR_openat);
 		poke_reg(tracee, SYSARG_3, how.flags);
 		poke_reg(tracee, SYSARG_4, how.mode);
+		status = openat2_resolve_in_root(tracee, how.resolve);
+		if (status < 0)
+			break;
 	}
 		/* Fall through.  */
 
@@ -2725,7 +3259,10 @@ int translate_syscall_enter(Tracee *tracee)
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
 		if (status >= 0) {
 			maybe_redirect_userns_file(tracee, SYSARG_2);
+			maybe_discard_userns_sysctl_write(tracee, SYSARG_2, SYSARG_3);
 			fake_evdev_open(tracee, SYSARG_2, SYSARG_3);
+			open_unreadable_dir_as_path(tracee, SYSARG_2, SYSARG_3);
+			note_fd_path_open(tracee, flags);
 		}
 		break;
 
@@ -2738,6 +3275,13 @@ int translate_syscall_enter(Tracee *tracee)
 			break;
 
 		status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
+		if (   status >= 0
+		    && get_sysnum(tracee, ORIGINAL) == PR_unlinkat
+		    && (peek_reg(tracee, CURRENT, SYSARG_3) & AT_REMOVEDIR) == 0
+		    && keep_bound_file(tracee, SYSARG_2)) {
+			poke_reg(tracee, SYSARG_RESULT, 0);
+			set_sysnum(tracee, PR_void);
+		}
 		break;
 
 	case PR_mkdirat:

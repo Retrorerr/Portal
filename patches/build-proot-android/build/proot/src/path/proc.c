@@ -129,8 +129,34 @@ Action readlink_proc(const Tracee *tracee, char result[PATH_MAX],
 		 * of tracee->???.  */
 		SUBSTITUTE(exe, known_tracee->exe);
 		SUBSTITUTE(cwd, known_tracee->fs->cwd);
-		SUBSTITUTE(root, get_root(known_tracee));
 #undef SUBSTITUTE
+
+		/* The link names the root as the reader sees it: "/"
+		 * for its own, as with the kernel, rather than its host
+		 * path; a root elsewhere in the guest by its guest path.
+		 * (Paths through it are resolved by
+		 * substitute_proc_root().)  */
+		if (strcmp(component, "root") == 0) {
+			const char *root = get_root(known_tracee);
+			const char *own_root = get_root(tracee);
+
+			if (root == NULL || own_root == NULL || strlen(root) >= PATH_MAX)
+				return DEFAULT;
+			switch (compare_paths(own_root, root)) {
+			case PATHS_ARE_EQUAL:
+				strcpy(result, "/");
+				break;
+			case PATH1_IS_PREFIX:
+				strcpy(result, strcmp(own_root, "/") == 0
+					       ? root : root + strlen(own_root));
+				break;
+			default:
+				/* Out of the reader's sight: no guest
+				 * path names it.  */
+				return DEFAULT;
+			}
+			return CANONICALIZE;
+		}
 		return DEFAULT;
 
 	case PATH1_IS_PREFIX:

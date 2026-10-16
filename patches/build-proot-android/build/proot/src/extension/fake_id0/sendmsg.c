@@ -7,6 +7,7 @@
 #include "tracee/mem.h"
 #include "syscall/sysnum.h"
 #include "syscall/syscall.h"
+#include "syscall/fakens.h"
 #include "extension/fake_id0/sendmsg.h"
 
 #define MAX_CONTROLLEN 1024
@@ -162,9 +163,14 @@ int handle_sendmsg_enter_end(Tracee *tracee, word_t sysnum)
 				}
 				struct ucred *ucred = (struct ucred *) &cmsg_buf[msg_position + tracee_sizeof_cmsghdr];
 				/* Set uid and gid of SCM_CREDENTIALS to ones that proot really has.
-				 * Pid is not changed as we don't fiddle with getpid()  */
+				 * The init of an emulated PID namespace sends the pid getpid()
+				 * told it (1): the kernel wants the real one (bwrap's
+				 * intermediate pid socket for --userns/--pidns).  */
 				ucred->uid = getuid();
 				ucred->gid = getgid();
+				if (ucred->pid == 1 && tracee->pidns != NULL
+				    && tracee->pidns->init == fakens_tgid(tracee))
+					ucred->pid = fakens_tgid(tracee);
 				did_modify = true;
 			}
 

@@ -29,10 +29,13 @@
 #include <errno.h>    /* E* */
 #include <sys/queue.h> /* CIRCLEQ_*, */
 #include <talloc.h>   /* talloc_*, */
+#include <stdlib.h>   /* strtol(3), */
+#include <stdio.h>    /* snprintf(3), */
 
 #include "path/binding.h"
 #include "path/path.h"
 #include "path/canon.h"
+#include "syscall/sysnum.h"
 #include "cli/note.h"
 
 #include "compat.h"
@@ -236,11 +239,81 @@ const char *get_root(const Tracee* tracee)
  *     * 1 if it is a binding location and a substitution was performed
  *       ("asymmetric" binding)
  */
+/**
+ * Substitute the guest @path "/proc/<pid>/root[/...]", where <pid> is
+ * a tracee, with the host path of that tracee's root.  The kernel's
+ * link names Android's root, and the root a tracee pivoted into (a
+ * bubblewrap sandbox) is not in the guest at all:
+ * xdg-desktop-portal reads /proc/<pid>/root/.flatpak-info to tell
+ * which Flatpak app calls it.  Only where the guest's /proc is the
+ * real one.  This function returns 1 if @path was substituted, 0
+ * otherwise.
+ */
+static int substitute_proc_root(const Tracee *tracee, char path[PATH_MAX])
+{
+	char host_path[PATH_MAX];
+	const Binding *binding;
+	const Tracee *target;
+	const char *target_root;
+	const char *rest;
+	char *end;
+	long pid;
+	int status;
+
+	if (strncmp(path, "/proc/", strlen("/proc/")) != 0)
+		return 0;
+
+	/* Digits as the kernel names a pid: no sign, no leading zero.  */
+	if (path[strlen("/proc/")] < '1' || path[strlen("/proc/")] > '9')
+		return 0;
+	errno = 0;
+	pid = strtol(path + strlen("/proc/"), &end, 10);
+	if (errno != 0 || pid <= 0 || pid > INT_MAX)
+		return 0;
+	if (strncmp(end, "/root", strlen("/root")) != 0)
+		return 0;
+	rest = end + strlen("/root");
+	if (rest[0] != '\0' && rest[0] != '/')
+		return 0;
+
+	/* readlink(2) of the link itself keeps answering as before.  */
+	if (   rest[0] == '\0'
+	    && (   get_sysnum(tracee, ORIGINAL) == PR_readlink
+		|| get_sysnum(tracee, ORIGINAL) == PR_readlinkat))
+		return 0;
+
+	binding = get_binding(tracee, GUEST, path);
+	if (   binding == NULL
+	    || strcmp(binding->guest.path, "/proc") != 0
+	    || strcmp(binding->host.path, "/proc") != 0)
+		return 0;
+
+	target = get_tracee(tracee, (pid_t) pid, false);
+	if (target == NULL)
+		return 0;
+
+	target_root = get_root(target);
+	if (target_root == NULL)
+		return 0;
+
+	status = snprintf(host_path, sizeof(host_path), "%s%s",
+			  strcmp(target_root, "/") == 0 && rest[0] != '\0' ? "" : target_root,
+			  rest);
+	if (status < 0 || (size_t) status >= sizeof(host_path))
+		return 0;
+
+	strcpy(path, host_path);
+	return 1;
+}
+
 int substitute_binding(const Tracee *tracee, Side side, char path[PATH_MAX])
 {
 	const Path *reverse_ref;
 	const Path *ref;
 	const Binding *binding;
+
+	if (side == GUEST && substitute_proc_root(tracee, path) > 0)
+		return 1;
 
 	binding = get_binding(tracee, side, path);
 	if (!binding)

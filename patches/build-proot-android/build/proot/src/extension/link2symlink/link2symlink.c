@@ -488,7 +488,7 @@ static void readlink_proc_fd(struct readlink_proc_fd_state *state)
  * real hard link a path leads to, whatever symbolic links were
  * followed before.
  */
-static void remember_dereferenced_link(Extension *extension, const char *link, const char *referee)
+static int remember_dereferenced_link(Extension *extension, const char *link, const char *referee)
 {
 	Link2SymlinkConfig *config;
 	const char *link_name;
@@ -500,7 +500,7 @@ static void remember_dereferenced_link(Extension *extension, const char *link, c
 	name = (name == NULL ? referee : name + 1);
 
 	if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
-		return;
+		return 0;
 
 	/* Both a faked hard link and its intermediate point to a name
 	 * that starts with PREFIX, but only the intermediate points to
@@ -515,14 +515,13 @@ static void remember_dereferenced_link(Extension *extension, const char *link, c
 		for (i = length + 1; isdigit((unsigned char) name[i]); i++)
 			;
 		if (name[i] == '\0')
-			return;
+			return 1;
 	}
 
 	config = get_config(extension, true);
-	if (config == NULL)
-		return;
-
-	strcpy(config->dereferenced_link, link);
+	if (config != NULL)
+		strcpy(config->dereferenced_link, link);
+	return 1;
 }
 
 /**
@@ -1398,8 +1397,8 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 	}
 
 	case SYMLINK_DEREFERENCED:
-		remember_dereferenced_link(extension, (const char *) data1, (const char *) data2);
-		return 0;
+		/* 1: a faked hard link, see canonicalize().  */
+		return remember_dereferenced_link(extension, (const char *) data1, (const char *) data2);
 
 	case TRANSLATED_PATH:
 		translated_path(extension, (char *) data1);

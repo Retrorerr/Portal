@@ -41,6 +41,7 @@ extern int fakens_enter_unshare(Tracee *tracee, word_t flags);
 extern int fakens_enter(Tracee *tracee, Sysnum sysnum, bool *handled);
 extern bool fakens_exit_start(Tracee *tracee);
 extern void fakens_exit(Tracee *tracee, Sysnum sysnum);
-extern void fakens_fix_ns_path(const Tracee *tracee, char path[PATH_MAX]);
+extern void fakens_limit_userns(Tracee *tracee);
+extern void fakens_fix_ns_path(const Tracee *tracee, char path[PATH_MAX], bool deref_final);
 
 #endif /* FAKENS_H */

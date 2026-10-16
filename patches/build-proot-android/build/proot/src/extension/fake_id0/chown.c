@@ -57,8 +57,19 @@ int handle_chown_enter_end(Tracee *tracee, Reg path_sysarg, Reg owner_sysarg,
 	if(status < 0)
 		return status;
 
-	if(path_exists(meta_path) != 0)
+	if(path_exists(meta_path) != 0) {
+		/* Without a meta file, the file shows as owned by the
+		 * emulated user (stat maps the real ids to them), so a
+		 * non-root chown to their own ids changes nothing: the real
+		 * call would fail with EPERM (gpg's keyring fchown).  */
+		owner = peek_reg(tracee, ORIGINAL, owner_sysarg);
+		group = peek_reg(tracee, ORIGINAL, group_sysarg);
+		if (config->euid != 0
+		    && ((int) owner == -1 || owner == config->euid)
+		    && ((int) group == -1 || group == config->egid))
+			set_sysnum(tracee, PR_getuid);
 		return 0;
+	}
 
 	status = get_fd_path(tracee, rel_path, dirfd_sysarg, CURRENT);
 	if(status < 0)
