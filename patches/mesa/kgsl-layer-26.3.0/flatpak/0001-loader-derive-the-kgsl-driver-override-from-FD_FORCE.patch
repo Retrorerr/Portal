@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Retrorerr <116828772+Retrorerr@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 09:50:35 +0100
+Subject: [PATCH] loader: derive the kgsl driver override from FD_FORCE_KGSL in
+ Flatpak sandboxes
+
+Portal sets MESA_LOADER_DRIVER_OVERRIDE=kgsl for its session, but the
+variable makes any Mesa without the kgsl winsys fail to load a driver, so
+Portal unsets it inside Flatpak sandboxes. Portal's GL extension still needs
+it there: FD_FORCE_KGSL=1 (read only by the kgsl stack) now stands in for an
+unset override whenever /dev/kgsl-3d0 is usable. x11_dri3_open read the
+variable with getenv; route it through os_get_option like the other users.
+---
+ src/util/os_misc.c | 13 +++++++++++++
+ src/x11/x11_dri3.c |  3 ++-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/src/util/os_misc.c b/src/util/os_misc.c
+index 16dd51b..a93dc90 100644
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -241,6 +241,19 @@ os_get_option_internal(const char *name, bool use_secure_getenv)
+    if (!opt) {
+       opt = os_get_android_option(name);
+    }
++#endif
++#if DETECT_OS_LINUX
++   /* Portal's Flatpak GL extension: the session exports
++    * MESA_LOADER_DRIVER_OVERRIDE=kgsl for its own Mesa, but the variable
++    * breaks every other Mesa (a runtime without this extension), so Portal
++    * unsets it in Flatpak sandboxes. FD_FORCE_KGSL, which only the kgsl
++    * stack reads, stands in for it here whenever the KGSL node is usable. */
++   if (!opt && strcmp(name, "MESA_LOADER_DRIVER_OVERRIDE") == 0) {
++      const char *force = getenv("FD_FORCE_KGSL");
++      if (force && strcmp(force, "1") == 0 &&
++          access("/dev/kgsl-3d0", R_OK | W_OK) == 0)
++         opt = "kgsl";
++   }
+ #endif
+    return opt;
+ }
+diff --git a/src/x11/x11_dri3.c b/src/x11/x11_dri3.c
+index b995372..afa699c 100644
+--- a/src/x11/x11_dri3.c
++++ b/src/x11/x11_dri3.c
+@@ -22,6 +22,7 @@
+  */
+ 
+ #include "x11_dri3.h"
++#include "util/os_misc.h"
+ 
+ #include <string.h>
+ #include <stdbool.h>
+@@ -49,7 +50,7 @@ x11_dri3_open(xcb_connection_t *conn,
+    int                          fd;
+    const xcb_query_extension_reply_t *extension;
+ 
+-   const char *env = getenv("MESA_LOADER_DRIVER_OVERRIDE");
++   const char *env = os_get_option("MESA_LOADER_DRIVER_OVERRIDE");
+    if (env && !strcmp(env, "kgsl"))
+       return open("/dev/kgsl-3d0", O_RDWR);
+ 
