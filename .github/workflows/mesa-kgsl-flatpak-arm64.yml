@@ -1,0 +1,62 @@
+# Portal's Mesa KGSL layer as a Flatpak GL extension, built on ARM64.
+#
+# Builds org.freedesktop.Platform.GL.portal for each supported freedesktop
+# runtime branch with patches/mesa/kgsl-layer-26.3.0/flatpak/build.sh on a
+# native ARM64 runner, and uploads the single-file bundles and their SHA-256
+# sums.
+#
+# permissions: contents:read. No secrets, releases or pushes.
+
+name: Mesa KGSL Flatpak GL extension ARM64
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - patches/mesa/kgsl-layer-26.3.0/**
+      - .github/workflows/mesa-kgsl-flatpak-arm64.yml
+  push:
+    branches:
+      - main
+      - 'claude/**'
+    paths:
+      - patches/mesa/kgsl-layer-26.3.0/**
+      - .github/workflows/mesa-kgsl-flatpak-arm64.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build GL.portal ${{ matrix.branch }} (ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ['24.08', '25.08']
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: portal
+
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          # bwrap needs unprivileged user namespaces, which Ubuntu 24.04's
+          # AppArmor restricts by default.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Build
+        run: portal/patches/mesa/kgsl-layer-26.3.0/flatpak/build.sh portal out "${{ matrix.branch }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mesa-kgsl-flatpak-gl-portal-${{ matrix.branch }}
+          path: out/
+          if-no-files-found: error

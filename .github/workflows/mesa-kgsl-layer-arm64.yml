@@ -26,12 +26,14 @@ on:
   pull_request:
     paths:
       - patches/mesa/kgsl-layer-26.3.0/**
+      - '!patches/mesa/kgsl-layer-26.3.0/flatpak/**'
       - .github/workflows/mesa-kgsl-layer-arm64.yml
   push:
     branches:
       - main
     paths:
       - patches/mesa/kgsl-layer-26.3.0/**
+      - '!patches/mesa/kgsl-layer-26.3.0/flatpak/**'
       - .github/workflows/mesa-kgsl-layer-arm64.yml
 
 permissions:

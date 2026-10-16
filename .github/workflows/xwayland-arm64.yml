@@ -2,8 +2,9 @@
 #
 # Builds the pinned lfdevs 2:24.1.6-91 XWayland source natively on ARM64
 # inside a digest-pinned Debian 13 (trixie) container, either unmodified
-# (baseline reproduction), with the Portal 0006 buffer-leak fix (portal,
-# the app's default Xwayland) or with the Portal 0005 input patch
+# (baseline reproduction), with the Portal 0006 buffer-leak and 0007
+# opaque-format fixes (portal, the app's default Xwayland) or with the
+# Portal 0005 input patch
 # (candidate).
 #
 # Safety properties (do not weaken without review):
@@ -61,6 +62,7 @@ env:
   TRIXIE_IMAGE: debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1
   PORTAL_PATCH: patches/xwayland/0005-xwayland-preserve-finger-axis-source.patch
   LEAK_PATCH: patches/xwayland/0006-xwayland-kgsl-frame-callback-recovery-leak.patch
+  OPAQUE_PATCH: patches/xwayland/0007-xwayland-kgsl-opaque-format-for-depth-24-windows.patch
 
 jobs:
   setup:
@@ -153,16 +155,18 @@ jobs:
           head -n 3 xwayland-src/debian/changelog
           tail -n 2 xwayland-src/debian/patches/series
 
-      - name: Apply Portal 0006 patch (portal only)
+      - name: Apply Portal 0006 and 0007 patches (portal only)
         if: matrix.variant == 'portal'
         run: |
           set -eu
-          test -f "portal/$LEAK_PATCH"
-          cp "portal/$LEAK_PATCH" xwayland-src/debian/patches/0006-xwayland-kgsl-frame-callback-recovery-leak.patch
-          printf '%s\n' '0006-xwayland-kgsl-frame-callback-recovery-leak.patch' >> xwayland-src/debian/patches/series
-          sed -i '1s/xwayland (2:24.1.6-91)/xwayland (2:24.1.6-91portal2)/' xwayland-src/debian/changelog
-          # 0006 builds on lfdevs 0003/0004 (KGSL recovery): prove it applies
-          # on top of the full -91 series before the build does.
+          for patch in "$LEAK_PATCH" "$OPAQUE_PATCH"; do
+            test -f "portal/$patch"
+            cp "portal/$patch" xwayland-src/debian/patches/
+            basename "$patch" >> xwayland-src/debian/patches/series
+          done
+          sed -i '1s/xwayland (2:24.1.6-91)/xwayland (2:24.1.6-91portal3)/' xwayland-src/debian/changelog
+          # 0006/0007 build on lfdevs 0002-0004 (KGSL surfaceless): prove
+          # they apply on top of the full -91 series before the build does.
           apt-get update
           apt-get install -y --no-install-recommends quilt
           cd xwayland-src

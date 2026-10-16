@@ -206,6 +206,14 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         ("FD_KGSL_ENABLE_DMABUF".into(), "1".into()),
         ("TURNIP_KMD".into(), "kgsl".into()),
         ("XWAYLAND_FORCE_KGSL_SURFACELESS".into(), "1".into()),
+        // Flatpak apps get Portal's KGSL Mesa through the
+        // org.freedesktop.Platform.GL.portal extension (installed by
+        // portal-system-services) and the runtime's own Mesa (llvmpipe)
+        // otherwise. The extension derives the kgsl driver from
+        // FD_FORCE_KGSL, since the session's MESA_LOADER_DRIVER_OVERRIDE
+        // and GALLIUM_DRIVER are unset in sandboxes: stock Mesa can't use
+        // them.
+        ("FLATPAK_GL_DRIVERS".into(), "portal:default:host".into()),
         // Firefox backend selection: native Wayland. With the forced
         // WebRender prefs (see core::guest_browser), Firefox 140 on
         // Wayland composites on the GPU (about:support `Compositing:
@@ -480,8 +488,27 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
     }
     binds.extend(fake_drm_binds(files));
     binds.extend(fake_pci_binds(files));
+    binds.extend(fake_video_binds());
     binds.extend(crate::android::guest_procfs::session_binds());
     binds
+}
+
+/// `/dev/video0..3` for the Portal cameras.
+///
+/// Apps find cameras by opening these names; the session's portal-v4l2.so
+/// preload hands the opens to PipeWire's V4L2 emulation, which maps
+/// `/dev/videoN` to the N-th camera node. The emulation `realpath()`s the
+/// name first, so it must be a real file and not a symlink: `/dev/null` is
+/// bound over each one, which also answers "not a camera" (ENOTTY) to apps
+/// running without the preload or when there is no camera behind a number.
+fn fake_video_binds() -> Vec<crate::core::runtime::BindMount> {
+    use crate::core::runtime::BindMount;
+
+    (0..4)
+        .map(|index| format!("/dev/video{index}"))
+        .filter(|guest| std::fs::metadata(guest).is_err())
+        .map(|guest| BindMount::new(std::path::PathBuf::from("/dev/null"), guest))
+        .collect()
 }
 
 /// An empty PCI device list over `/proc/bus/pci/devices`, which the app

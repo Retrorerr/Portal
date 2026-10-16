@@ -1,0 +1,67 @@
+From: Retrorerr <116828772+Retrorerr@users.noreply.github.com>
+Subject: xwayland: give KGSL window buffers the opaque format of their depth
+
+lfdevs 0002 sends a KGSL-surfaceless window buffer to the compositor with
+the format its glamor texture exports, which is always one with alpha
+(ARGB8888/ABGR8888). For depth 24 windows those alpha bits are X padding
+that nothing keeps opaque: clients that write their own pixels through
+PutImage leave them 0, so the compositor showed those pixels as fully
+transparent. Mesa's software GLX path (llvmpipe/softpipe) does exactly
+that, so every software-rendered OpenGL window showed whatever was behind
+it ("blank white window"), while GPU clients happened to write alpha 1.
+
+Map the exported format to its opaque variant unless the window is depth
+32, the same choice wl_drm_format_for_depth() makes on the GBM path.
+---
+diff --git a/hw/xwayland/xwayland-glamor-gbm.c b/hw/xwayland/xwayland-glamor-gbm.c
+index c89a7be..16be13e 100644
+--- a/hw/xwayland/xwayland-glamor-gbm.c
++++ b/hw/xwayland/xwayland-glamor-gbm.c
+@@ -997,6 +997,37 @@ init_buffer_params_fallback(struct xwl_pixmap *xwl_pixmap,
+     return TRUE;
+ }
+ 
++/* Glamor keeps every pixmap in an RGBA texture, so the dma-buf export of a
++ * depth 24 (or 30) pixmap reports a format with alpha. Its alpha bits are
++ * the X server's padding, which nothing keeps opaque: clients that write
++ * their own pixels (PutImage, e.g. Mesa's software GLX path) leave it 0, and
++ * the compositor then shows the window as transparent. Tell the compositor
++ * the format X actually means for the depth, as wl_drm_format_for_depth()
++ * does on the GBM path. */
++static uint32_t
++xwl_glamor_kgsl_format_for_depth(uint32_t fourcc, int depth)
++{
++    if (depth == 32)
++        return fourcc;
++
++    switch (fourcc) {
++    case DRM_FORMAT_ARGB8888:
++        return DRM_FORMAT_XRGB8888;
++    case DRM_FORMAT_ABGR8888:
++        return DRM_FORMAT_XBGR8888;
++    case DRM_FORMAT_RGBA8888:
++        return DRM_FORMAT_RGBX8888;
++    case DRM_FORMAT_BGRA8888:
++        return DRM_FORMAT_BGRX8888;
++    case DRM_FORMAT_ARGB2101010:
++        return DRM_FORMAT_XRGB2101010;
++    case DRM_FORMAT_ABGR2101010:
++        return DRM_FORMAT_XBGR2101010;
++    default:
++        return fourcc;
++    }
++}
++
+ static Bool
+ init_buffer_params_kgsl_surfaceless(struct xwl_screen *xwl_screen,
+                                     PixmapPtr          pixmap,
+@@ -1103,7 +1134,8 @@ init_buffer_params_kgsl_surfaceless(struct xwl_screen *xwl_screen,
+         offsets[i] = egl_offsets[i];
+     }
+ 
+-    *format = fourcc;
++    *format = xwl_glamor_kgsl_format_for_depth(fourcc,
++                                               pixmap->drawable.depth);
+     return TRUE;
+ }
+ 

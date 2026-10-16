@@ -1,9 +1,10 @@
 # Portal default XWayland staging pin.
 #
 # Xwayland: pinned lfdevs 461772ae63c8985fd5671ea85d38d5102590d760
-# (2:24.1.6-91) plus patches/xwayland/0006-xwayland-kgsl-frame-callback-recovery-leak.patch,
-# package 2:24.1.6-91portal2, built in debian:trixie@sha256:f324c7ff... arm64
+# (2:24.1.6-91) plus patches/xwayland/0006-xwayland-kgsl-frame-callback-recovery-leak.patch
+# and 0007-xwayland-kgsl-opaque-format-for-depth-24-windows.patch,
+# package 2:24.1.6-91portal3, built in debian:trixie@sha256:f324c7ff... arm64
 # (same recipe as the "portal" variant of .github/workflows/xwayland-arm64.yml).
 # Staged to /usr/local/lib/portal-xwayland-default/ (never /usr/bin); the
 # KWin wrapper uses stock /usr/bin/Xwayland on any mismatch.
-dbfd83bbf796bafa62a3f029e737f7d1835c942d4a581b060cfd7fab6c21637d  Xwayland
+f94c8d208efbe2690c21130feda006de9fe54bf673e662ff07629b885a189179  Xwayland
