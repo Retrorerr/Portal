@@ -26,6 +26,7 @@ assets/libs/arm64-v8a/libspa-audioconvert.so
 assets/libs/arm64-v8a/libspa-audiomixer.so
 assets/libs/arm64-v8a/libspa-support.so
 assets/libs/arm64-v8a/liblocaldesktop_pipewire_aaudio_sink.so
+assets/libs/arm64-v8a/liblocaldesktop_pipewire_capture.so
 assets/libs/arm64-v8a/libwireplumber_exec.so
 assets/libs/arm64-v8a/libwireplumber-0.5.so
 assets/wireplumber-share.tar

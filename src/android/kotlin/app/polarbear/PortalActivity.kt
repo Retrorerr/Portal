@@ -39,6 +39,7 @@ package app.polarbear
 
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Bundle
@@ -188,6 +189,22 @@ open class PortalActivity : GameActivity() {
         super.onResume()
         TouchControls.attach(this)
         AppUpdateInstaller.onActivityResumed(this)
+        CapturePermissions.refresh(this)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        CapturePermissions.reportRotation(this)
+    }
+
+    /** Called from native code when a Linux app starts using the mic or a camera. */
+    fun requestCapturePermission(kind: Int) {
+        runOnUiThread { CapturePermissions.request(this, kind) }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        CapturePermissions.onResult(this, requestCode, grantResults)
     }
 
     override fun onPause() {

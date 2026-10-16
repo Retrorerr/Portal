@@ -1,0 +1,30 @@
+portal-v4l2.so — lazy V4L2 front for the Portal cameras (guest-native ARM64 glibc).
+
+Linux apps that read /dev/videoN (ffmpeg, OBS, GStreamer v4l2src, Chromium,
+Zoom, ...) reach the Portal cameras through PipeWire's V4L2 emulation,
+libpw-v4l2.so (Debian pipewire-v4l2 1.4.2-1, bundled by
+scripts/build_pipewire_camera_bridge.py). Preloading libpw-v4l2 into every
+process would put PipeWire in front of all file I/O, so this front is
+preloaded session-wide instead (before drmshim.so, whose open/ioctl use raw
+syscalls and do not chain) and:
+
+  - dlopens libpw-v4l2 only when a process opens /dev/videoN;
+  - routes only the fds and mappings libpw-v4l2 created to it;
+  - forwards every other open spelling to its own RTLD_NEXT definition, so
+    unrelated paths behave exactly as without it.
+
+PRoot binds /dev/null over /dev/video0..3 (libpw-v4l2 realpath()s the
+path, so a symlink would not do). With no camera node behind a number the
+real /dev/null answers and apps see "not a camera" (ENOTTY).
+
+Build in Debian 13 arm64 (docker run --platform linux/arm64 debian:trixie):
+
+  apt-get install -y gcc libc6-dev
+  gcc -shared -fPIC -O2 -Wall -Wextra -o portal-v4l2.so portal-v4l2.c -ldl -lpthread
+
+Test (container with pipewire, wireplumber, gstreamer1.0-pipewire, ffmpeg):
+publish a videotestsrc through pipewiresink with media.class=Video/Source,
+mknod /dev/video0 c 1 3, then
+
+  LD_PRELOAD=./portal-v4l2.so ffmpeg -f v4l2 -i /dev/video0 -frames:v 10 out%d.png
+  LD_PRELOAD=./portal-v4l2.so gst-launch-1.0 v4l2src device=/dev/video0 num-buffers=10 ! fakesink

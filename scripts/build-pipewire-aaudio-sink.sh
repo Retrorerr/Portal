@@ -19,7 +19,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API="${API:-30}"
 ABI="${ABI:-arm64-v8a}"
 TARGET="${TARGET:-aarch64-linux-android}"
-OUT="${OUT:-$ROOT/assets/libs/$ABI/liblocaldesktop_pipewire_aaudio_sink.so}"
+# BIN=localdesktop_pipewire_capture builds the mic/camera helper instead.
+BIN="${BIN:-localdesktop_pipewire_aaudio_sink}"
+OUT="${OUT:-$ROOT/assets/libs/$ABI/lib$BIN.so}"
 
 ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
 if [[ -z "$ANDROID_NDK_HOME" ]]; then
@@ -69,13 +71,13 @@ cargo build \
   --release \
   --target "$TARGET" \
   --features pipewire-sink \
-  --bin localdesktop_pipewire_aaudio_sink
+  --bin "$BIN"
 
 TARGET_DIR="$(cargo metadata --manifest-path "$ROOT/Cargo.toml" --format-version 1 --no-deps \
   | tr ',' '\n' | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | head -1)"
 TARGET_DIR="${TARGET_DIR:-$ROOT/target}"
 
 mkdir -p "$(dirname "$OUT")"
-cp "$TARGET_DIR/$TARGET/release/localdesktop_pipewire_aaudio_sink" "$OUT"
+cp "$TARGET_DIR/$TARGET/release/$BIN" "$OUT"
 
 echo "wrote $OUT"

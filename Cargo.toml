@@ -17,6 +17,11 @@ name = "localdesktop_pipewire_aaudio_sink"
 path = "src/bin/localdesktop_pipewire_aaudio_sink.rs"
 required-features = ["pipewire-sink"]
 
+[[bin]]
+name = "localdesktop_pipewire_capture"
+path = "src/bin/localdesktop_pipewire_capture.rs"
+required-features = ["pipewire-sink"]
+
 [features]
 pipewire-sink = ["dep:pipewire"]
 portal-debug = []

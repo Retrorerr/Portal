@@ -83,6 +83,15 @@ android:
       - name: android.permission.WRITE_EXTERNAL_STORAGE
         max_sdk_version: 28
       - name: android.permission.REQUEST_INSTALL_PACKAGES
+      # Linux apps' microphone and cameras; asked for only when one is used.
+      - name: android.permission.RECORD_AUDIO
+      - name: android.permission.CAMERA
     uses_feature:
       - name: android.hardware.type.pc
+        required: false
+      - name: android.hardware.camera
+        required: false
+      - name: android.hardware.camera.front
+        required: false
+      - name: android.hardware.microphone
         required: false
