@@ -75,4 +75,24 @@ impl ArchProcess {
         }
         runtime.execute(spec, self.log, Some(cancel))
     }
+
+    /// Run the desktop session: as `run_with_cancel_env_and_binds`, with
+    /// the guest's system services started first in the same PRoot.
+    pub fn run_session<I, B>(self, cancel: Arc<AtomicBool>, environment: I, binds: B) -> Output
+    where
+        I: IntoIterator<Item = (String, String)>,
+        B: IntoIterator<Item = crate::core::runtime::BindMount>,
+    {
+        let runtime = PRootRuntime::active();
+        let mut spec = ProcessSpec::new(self.command);
+        if let Some(user) = self.user {
+            spec = spec.with_user(user);
+        }
+        for (key, value) in environment {
+            spec = spec.with_env(key, value);
+        }
+        spec.extra_binds.extend(binds);
+        spec.system_services = true;
+        runtime.execute(spec, self.log, Some(cancel))
+    }
 }

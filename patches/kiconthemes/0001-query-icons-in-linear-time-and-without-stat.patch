@@ -1,0 +1,76 @@
+From: Retrorerr <116828772+Retrorerr@users.noreply.github.com>
+Subject: Query icons in linear time and without stat(2)ing every entry
+
+KIconLoader::queryIcons() dropped duplicate names by looking each one up
+in a QStringList, so listing a theme was quadratic in its size. A large
+icon theme with its inherited ones (Gruvbox Plus, breeze-dark, breeze,
+hicolor and their @2x/@3x dirs: some 250k entries over 30k names) costs
+billions of string compares. On top of that QDir::Files stat(2)s every
+symlink, and these themes are mostly symlinks. Discover builds such a
+list on its GUI thread the first time it shows an app with a stock icon
+(AppStreamUtils::kIconLoaderHasIcon), and froze for a minute or more
+under PRoot, where each stat is a traced system call.
+
+Keep the seen names in a QSet, and list icon files by name only: no
+icon directory holds "*.png" directories, and a broken link fails when
+it is loaded, as it would after any lookup.
+---
+diff --git a/src/kiconloader.cpp b/src/kiconloader.cpp
+index d18cae0..5b88ec5 100644
+--- a/src/kiconloader.cpp
++++ b/src/kiconloader.cpp
+@@ -47,6 +47,7 @@
+ #include <QPainter>
+ #include <QPixmap>
+ #include <QPixmapCache>
++#include <QSet>
+ #include <QStringBuilder> // % operator for QString
+ #include <QtGui/private/qiconloader_p.h>
+ 
+@@ -76,7 +77,8 @@ QStringList deduplicateIconsByName(const QStringList &icons)
+ {
+     // Eliminate duplicate entries (same icon in different directories)
+     QStringList result;
+-    QStringList entries;
++    QSet<QString> entries;
++    entries.reserve(icons.size());
+     for (const auto &icon : icons) {
+         const int n = icon.lastIndexOf(QLatin1Char('/'));
+         QString name;
+@@ -87,7 +89,7 @@ QStringList deduplicateIconsByName(const QStringList &icons)
+         }
+         name = removeIconExtension(name);
+         if (!entries.contains(name)) {
+-            entries += name;
++            entries.insert(name);
+             result += icon;
+         }
+     }
+@@ -1356,7 +1358,8 @@ QStringList KIconLoader::queryIconsByDir(const QString &iconsDir) const
+ {
+     const QDir dir(iconsDir);
+     const QStringList formats = QStringList() << QStringLiteral("*.png") << QStringLiteral("*.xpm") << QStringLiteral("*.svg") << QStringLiteral("*.svgz");
+-    const QStringList lst = dir.entryList(formats, QDir::Files);
++    // Listed without stat(2)ing each entry, see KIconThemeDir::iconList().
++    const QStringList lst = dir.entryList(formats, QDir::Files | QDir::Dirs | QDir::System);
+     QStringList result;
+     for (const auto &file : lst) {
+         result += iconsDir + QLatin1Char('/') + file;
+diff --git a/src/kicontheme.cpp b/src/kicontheme.cpp
+index 6fd318c..9000e6a 100644
+--- a/src/kicontheme.cpp
++++ b/src/kicontheme.cpp
+@@ -845,7 +845,12 @@ QStringList KIconThemeDir::iconList() const
+     const QDir icondir = constructFileName(QString());
+ 
+     const QStringList formats = QStringList() << QStringLiteral("*.png") << QStringLiteral("*.svg") << QStringLiteral("*.svgz") << QStringLiteral("*.xpm");
+-    const QStringList lst = icondir.entryList(formats, QDir::Files);
++    // Icon themes are mostly symlinks, and QDir::Files alone stat(2)s
++    // every one to tell a file from a directory or a broken link. Listing
++    // the names is enough here (no icon directory holds "*.png"
++    // directories), and themes of 100k entries otherwise take seconds,
++    // much longer where file system calls are slow.
++    const QStringList lst = icondir.entryList(formats, QDir::Files | QDir::Dirs | QDir::System);
+ 
+     QStringList result;
+     result.reserve(lst.size());

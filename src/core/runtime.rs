@@ -46,6 +46,10 @@ pub struct ProcessSpec {
     pub env: HashMap<String, String>,
     /// Additional bind mounts specific to this process invocation.
     pub extra_binds: Vec<BindMount>,
+    /// Start the guest's system services (the D-Bus system bus, and polkit
+    /// and PackageKit through it) as root before switching to `user`, and
+    /// stop them when the command exits. For the desktop session only.
+    pub system_services: bool,
 }
 
 impl ProcessSpec {
@@ -56,6 +60,7 @@ impl ProcessSpec {
             working_dir: None,
             env: HashMap::new(),
             extra_binds: Vec::new(),
+            system_services: false,
         }
     }
 

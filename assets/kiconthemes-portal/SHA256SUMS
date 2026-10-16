@@ -1,0 +1,15 @@
+# Portal KIconThemes staging pin.
+#
+# libKF6IconThemes.so.6.13.0: Debian kf6-kiconthemes 6.13.0-2 source (its
+# Debian patches applied by dpkg-source) plus
+# patches/kiconthemes/0001-query-icons-in-linear-time-and-without-stat.patch,
+# built natively in the Debian 13 arm64 guest with dpkg-buildflags (-g -O2
+# -fstack-protector-strong -fstack-clash-protection -Wformat
+# -Werror=format-security -mbranch-protection=standard, -Wl,-z,relro),
+# CMAKE_BUILD_TYPE=None, KDE_INSTALL_USE_QT_SYS_PATHS=ON, target KF6IconThemes,
+# then strip --strip-unneeded like dh_strip. Same NEEDED, SONAME and exported
+# symbols as the stock library.
+# Staged to /usr/local/lib/portal-kiconthemes/ and bound over the stock file
+# only while it hashes to Debian's 6.13.0-2 build:
+# 34e751932d5c0f1a683adb2e4972efb7110a07948365a736464dc436d8a0a058
+8bd4d442ccbc9d0ed06225ecbae92464cd7099c8db8ee1229839e50fc3c40d41  libKF6IconThemes.so.6.13.0

@@ -1,0 +1,17 @@
+# Portal KPackage staging pin.
+#
+# libKF6Package.so.6.13.0: Debian kf6-kpackage 6.13.0-1 source
+# (orig a622694aa723d79b7b4988cb2bc51f85d20fcaafee020f741ee52053dc85648a,
+# debian 8e65e22e51868974faa7f6e50addeaf25319226ece89411f217bd7a5fa08a1c0,
+# no Debian patches) plus
+# patches/kpackage/0001-packagejob-run-update-only-on-the-pool-thread.patch,
+# built natively in the Debian 13 arm64 guest with Debian's hardening flags
+# (-g -O2 -fstack-protector-strong -fstack-clash-protection -Wformat
+# -Werror=format-security -mbranch-protection=standard -D_FORTIFY_SOURCE=2,
+# -Wl,-z,relro -Wl,-z,now), CMAKE_BUILD_TYPE=None, KDE_INSTALL_USE_QT_SYS_PATHS=ON,
+# then strip --strip-unneeded like dh_strip. Same NEEDED, SONAME and 87
+# exported symbols as the stock library.
+# Staged to /usr/local/lib/portal-kpackage/ and bound over the stock file only
+# while it hashes to Debian's 6.13.0-1 build:
+# 78b27bfb16e4862212c02705e35877ec2d150a097e1cc505e3275ad5116b09e1
+08495f03e3f8c5c644151e24cd6b4f78af72e70985db57c7e8889138021cce2e  libKF6Package.so.6.13.0

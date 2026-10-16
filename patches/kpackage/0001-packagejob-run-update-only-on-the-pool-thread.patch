@@ -1,0 +1,25 @@
+From: Retrorerr <116828772+Retrorerr@users.noreply.github.com>
+Subject: packagejob: run Update jobs only on the pool thread
+
+PackageJobThread already queues update() for QThreadPool, but the
+PackageJob constructor also called it directly, so every Update job ran
+twice and the first run blocked the caller's thread. KNewStuff installs
+every store item through PackageJob::update(), and a global theme
+installs its dependencies by running knshandler and waiting for each
+one, so System Settings' GUI thread froze until all of them finished.
+Under PRoot an icon theme dependency (40k+ files and links) takes
+30 s or more and KWin marks the window Not Responding.
+
+Leave the work to the pooled run, like Install and Uninstall.
+---
+diff --git a/src/kpackage/packagejob.cpp b/src/kpackage/packagejob.cpp
+--- a/src/kpackage/packagejob.cpp
++++ b/src/kpackage/packagejob.cpp
+@@ -73,7 +73,6 @@ PackageJob::PackageJob(OperationType type, const Package &package, const QString
+         setupNotificationsOnJobFinished(QStringLiteral("packageInstalled"));
+     } else if (type == Update) {
+         setupNotificationsOnJobFinished(QStringLiteral("packageUpdated"));
+-        d->thread->update(src, dest, package);
+     } else if (type == Uninstall) {
+         setupNotificationsOnJobFinished(QStringLiteral("packageUninstalled"));
+     } else {

@@ -1,11 +1,12 @@
 //! Stand-ins for the `/proc` files Android's app sandbox denies.
 //!
 //! SELinux keeps apps from reading `/proc/stat`, `/proc/uptime`,
-//! `/proc/loadavg`, `/proc/vmstat`, `/proc/version` and
-//! `/proc/sys/kernel/cap_last_cap`. Ordinary Linux tools need them: `ps aux`
+//! `/proc/loadavg`, `/proc/vmstat`, `/proc/version` and several
+//! `/proc/sys` limits. Ordinary Linux tools need them: `ps aux`
 //! printed only a header and "Unable to get system boot time", `uptime`,
 //! `htop`, Python's psutil and Plasma's System Monitor failed or showed
-//! nothing. Portal binds generated files over those paths. Uptime and boot
+//! nothing; bubblewrap (Flatpak, Discover) stopped at "Can't read
+//! /proc/sys/kernel/overflowuid". Portal binds generated files over those paths. Uptime and boot
 //! time are exact; CPU time is what Portal's own processes (the desktop and
 //! everything in it) used, since nothing else is visible to the app; the
 //! load average follows their runnable count.
@@ -17,13 +18,27 @@ use std::collections::HashMap;
 
 /// Files Portal generates, relative to its fake-proc directory, with the
 /// guest path each is bound over.
-pub const FILES: [(&str, &str); 6] = [
+pub const FILES: [(&str, &str); 11] = [
     ("stat", "/proc/stat"),
     ("uptime", "/proc/uptime"),
     ("loadavg", "/proc/loadavg"),
     ("vmstat", "/proc/vmstat"),
     ("version", "/proc/version"),
     ("cap_last_cap", "/proc/sys/kernel/cap_last_cap"),
+    ("overflowuid", "/proc/sys/kernel/overflowuid"),
+    ("overflowgid", "/proc/sys/kernel/overflowgid"),
+    ("ngroups_max", "/proc/sys/kernel/ngroups_max"),
+    ("pid_max", "/proc/sys/kernel/pid_max"),
+    ("max_user_namespaces", "/proc/sys/user/max_user_namespaces"),
+];
+
+/// Fixed `/proc/sys` limits, with the values of a stock arm64 kernel.
+pub const SYSCTLS: [(&str, &str); 5] = [
+    ("overflowuid", "65534\n"),
+    ("overflowgid", "65534\n"),
+    ("ngroups_max", "65536\n"),
+    ("pid_max", "4194304\n"),
+    ("max_user_namespaces", "15000\n"),
 ];
 
 /// Highest capability on Android's 5.x/6.x kernels (CAP_CHECKPOINT_RESTORE).

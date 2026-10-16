@@ -780,11 +780,11 @@ fn xwayland_variant_selection_policy() {
         assert!(KWIN_WRAPPER_SOURCE.contains(pinned));
         assert!(XWAYLAND_SHA256SUMS_SOURCE.contains(pinned));
     }
-    // 2b. Portal's default build (0006 leak fix) is staged in its own dir and
+    // 2b. Portal's default build (0006 leak and 0007 opaque-format fixes) is staged in its own dir and
     // pinned the same way.
     assert!(ANDROID_SETUP_SOURCE.contains("usr/local/lib/portal-xwayland-default"));
     assert!(KWIN_WRAPPER_SOURCE.contains("xwayland_cand_dir=/usr/local/lib/portal-xwayland-default"));
-    for pinned in ["dbfd83bbf796bafa62a3f029e737f7d1835c942d4a581b060cfd7fab6c21637d"] {
+    for pinned in ["f94c8d208efbe2690c21130feda006de9fe54bf673e662ff07629b885a189179"] {
         assert!(KWIN_WRAPPER_SOURCE.contains(pinned));
         assert!(XWAYLAND_PORTAL_SHA256SUMS_SOURCE.contains(pinned));
     }

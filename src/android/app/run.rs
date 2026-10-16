@@ -1395,13 +1395,34 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 // window focus hid it, and the guest sends no new ACTIVATE for a field that
                 // never lost focus, so nothing else would bring it back.
                 WindowEvent::Focused(true) => ime::refresh_visibility(),
-                WindowEvent::Touch(touch) if touch.phase == TouchPhase::Started => {
-                    ime::reset_text_context(&backend.android_app);
+                // Taps also bring back a keyboard the user dismissed over a field that kept
+                // guest focus (see ime::note_pointer).
+                WindowEvent::Touch(touch) => {
+                    let app = &backend.android_app;
+                    let (x, y) = (touch.location.x, touch.location.y);
+                    match touch.phase {
+                        TouchPhase::Started => {
+                            ime::reset_text_context(app);
+                            ime::note_pointer(app, touch.id, Some(true), x, y);
+                        }
+                        TouchPhase::Moved => ime::note_pointer(app, touch.id, None, x, y),
+                        TouchPhase::Ended => ime::note_pointer(app, touch.id, Some(false), x, y),
+                        TouchPhase::Cancelled => ime::cancel_pointer(touch.id),
+                    }
                 }
-                WindowEvent::MouseInput {
-                    state: ElementState::Pressed,
-                    ..
-                } => ime::reset_text_context(&backend.android_app),
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let pressed = *state == ElementState::Pressed;
+                    if pressed {
+                        ime::reset_text_context(&backend.android_app);
+                    }
+                    if *button == MouseButton::Left {
+                        ime::note_mouse_button(&backend.android_app, pressed);
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. }
+                | WindowEvent::AndroidPointerMoved { position, .. } => {
+                    ime::note_cursor(position.x, position.y)
+                }
                 WindowEvent::Focused(false) => {
                     if let Err(error) = ime::hide(&backend.android_app) {
                         log::debug!("Software keyboard bridge could not be hidden: {error}");

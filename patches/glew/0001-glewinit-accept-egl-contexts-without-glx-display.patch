@@ -1,0 +1,26 @@
+From: Retrorerr <116828772+Retrorerr@users.noreply.github.com>
+Subject: glewInit: accept a context without a GLX display
+
+GLEW built for GLX loads every GL entry point in glewContextInit() and only
+then asks glxewInit() for GLX extensions, which fails with
+GLEW_ERROR_NO_GLX_DISPLAY when the current context came from EGL: SDL2,
+GLFW and friends on native Wayland. The caller sees glewInit() fail and
+gives up on GL (HyperRogue draws a black window), although every GL
+function it needs is loaded. A missing GLX display now only leaves the
+GLX extension flags unset, as on an EGL build.
+
+--- a/src/glew.c
++++ b/src/glew.c
+@@ -23116,7 +23116,12 @@ GLenum GLEWAPIENTRY glewInit (void)
+ #elif defined(_WIN32)
+   return wglewInit();
+ #elif !defined(__APPLE__) || defined(GLEW_APPLE_GLX) /* _UNIX */
+-  return glxewInit();
++  /* The GL entry points are loaded by now. A context made current through
++   * EGL (native Wayland) has no GLX display: that only leaves the GLX
++   * extension flags unset.  */
++  r = glxewInit();
++  return r == GLEW_ERROR_NO_GLX_DISPLAY ? GLEW_OK : r;
+ #else
+   return r;
+ #endif /* _WIN32 */

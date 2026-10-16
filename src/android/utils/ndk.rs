@@ -18,6 +18,11 @@ where
             .expect("Failed to get JavaVM");
 
     let mut env = vm.attach_current_thread().expect("Failed to attach thread");
+    // The event-loop thread stays attached and never returns to Java, so local references made
+    // by each callback (the Activity, class loaders, strings) would pile up for the life of the
+    // process, pinning old Activities. A frame frees them when the callback is done; nothing
+    // the callback returns can hold a local reference past the guard anyway.
+    let frame = env.push_local_frame(16).is_ok();
 
     // Call the provided JNI function. `AttachGuard` owns the attachment and
     // detaches it on drop when this thread was not already attached. Calling
@@ -34,6 +39,10 @@ where
         log::error!("JNI callback returned with a pending Java exception; clearing it");
         let _ = env.exception_describe();
         let _ = env.exception_clear();
+    }
+    if frame {
+        // SAFETY: pops the frame pushed above; a null result keeps no reference.
+        let _ = unsafe { env.pop_local_frame(&JObject::null()) };
     }
 
     res

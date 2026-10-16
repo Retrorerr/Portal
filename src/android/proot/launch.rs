@@ -204,6 +204,7 @@ pub fn launch() {
         return;
     }
     crate::android::ime::start_ime_fifo_listener(&rootfs);
+    let library_overlay_binds = crate::android::proot::setup::library_overlay_binds(rootfs);
 
     let cancel = Arc::new(AtomicBool::new(false));
     let Ok(mut state) = launch_state().lock() else {
@@ -277,6 +278,7 @@ pub fn launch() {
                 extra_binds.len()
             );
         }
+        extra_binds.extend(library_overlay_binds);
         let broker_environment = broker_environment.into_iter().chain(extra_env);
         let output = ArchProcess {
             // Graphical login is a fixed, validated unprivileged boundary;
@@ -285,11 +287,7 @@ pub fn launch() {
             user: Some(username),
             log: Some(Arc::new(|it| log::info!("guest-session: {}", it))),
         }
-        .run_with_cancel_env_and_binds(
-            thread_cancel.clone(),
-            broker_environment,
-            extra_binds,
-        );
+        .run_session(thread_cancel.clone(), broker_environment, extra_binds);
         let status = output.status.code();
         diagnostics::desktop_exit(status, started.elapsed().as_millis());
         let planned = output.status.success() || thread_cancel.load(Ordering::Acquire);

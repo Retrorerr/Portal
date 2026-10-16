@@ -158,7 +158,7 @@ else
             ;;
         portal)
             xwayland_cand_dir=/usr/local/lib/portal-xwayland-default
-            xwayland_cand_sha_expected="dbfd83bbf796bafa62a3f029e737f7d1835c942d4a581b060cfd7fab6c21637d"
+            xwayland_cand_sha_expected="f94c8d208efbe2690c21130feda006de9fe54bf673e662ff07629b885a189179"
             ;;
     esac
     if [ "$xwayland_variant" != "stock" ]; then

@@ -1,0 +1,15 @@
+# Portal GLEW staging pin.
+#
+# libGLEW.so.2.2.0: Debian glew 2.2.0-4 source (its one Debian patch,
+# kFreeBSD-only, does not touch the Linux build) plus
+# patches/glew/0001-glewinit-accept-egl-contexts-without-glx-display.patch,
+# built natively in the Debian 13 arm64 guest with Debian's make invocation
+# (SYSTEM=linux, GL_LDFLAGS=-lGL, 'LD=$(CC)') and dpkg-buildflags (-g -O2
+# -fstack-protector-strong -fstack-clash-protection -Wformat
+# -Werror=format-security -mbranch-protection=standard -Wall,
+# -Wl,-z,relro), target lib/libGLEW.so.2.2.0, then strip --strip-unneeded
+# like dh_strip. Same NEEDED, SONAME and exported symbols as libglew2.2
+# 2.2.0-4+b2 (ce4f1918b934c3bfbfe56ff3b603729cc08af676f488a27b49bf04d53a8d34f8).
+# Staged to /usr/local/lib/portal-glew/, which /etc/ld.so.conf.d/
+# 00-portal-glew.conf puts ahead of the multiarch directory.
+ff2c54fad921f5f89d7d104e1c8a61887ba751c9fda6a52cceb4248fa68b0238  libGLEW.so.2.2.0

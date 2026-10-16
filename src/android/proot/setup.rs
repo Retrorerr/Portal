@@ -140,6 +140,11 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
                 sub(/^Exec=[^ ]+/, "& --no-stdio-init")
             if (electron == 1 && index($0, "--ozone-platform=") == 0)
                 sub(/^Exec=[^ ]+/, "& --ozone-platform=wayland")
+            # On Wayland Chromium reports text fields to the input method
+            # (and so opens the Android keyboard) only with this switch.
+            # The bare name also spots a --disable-wayland-ime the user chose.
+            if (index($0, "wayland-ime") == 0)
+                sub(/^Exec=[^ ]+/, "& --enable-wayland-ime --wayland-text-input-version=3")
             # KDE confirms each portal global-shortcut session by opening
             # System Settings over the app on launch.
             if (index($0, "--disable-features=") == 0)
@@ -151,6 +156,9 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
         printf 'Failed to update Portal desktop integration for %s\n' "$src" >&2
     fi
 done
+"#;
+const CHROMIUM_WAYLAND_IME: &str = r#"# Portal: report text fields to the input method (Android keyboard) on Wayland.
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --enable-wayland-ime --wayland-text-input-version=3"
 "#;
 const PLASMA_LAUNCHER: &str = include_str!("../../../assets/localdesktop-startplasma.sh");
 const PORTAL_PING: &str = include_str!("../../../assets/portal-ping.sh");
@@ -187,6 +195,11 @@ const PORTAL_IBUS_COMPONENT: &str = include_str!("../../../assets/portal-ibus-co
 /// fixed sleep on the splash->desktop path. Packages are provisioned
 /// pre-session by `provision_ibus_packages`.
 const PORTAL_IBUS_LAZY: &str = include_str!("../../../assets/portal-ibus-lazy.sh");
+const PORTAL_SYSTEM_SERVICES: &str = include_str!("../../../assets/portal-system-services.sh");
+/// Flatpak's bubblewrap front-end (`FLATPAK_BWRAP`, set by startplasma):
+/// drops binds of device nodes SELinux hides from stat and gives
+/// `--device=dri` sandboxes the kgsl GPU and DMA heaps.
+const PORTAL_FLATPAK_BWRAP: &str = include_str!("../../../assets/portal-flatpak-bwrap.py");
 /// One-time first-run Plasma color scheme and KScreen scale applicator. The
 /// autostart entry is inert when native setup has no pending plan or has
 /// already accepted the matching attempt-bound proof.
@@ -228,13 +241,71 @@ const KWIN_ANLAND_LIBRARY: &[u8] =
 const XWAYLAND_CANDIDATE_BINARY: &[u8] =
     include_bytes!("../../../assets/xwayland-candidate/Xwayland");
 /// Portal's default XWayland: pinned lfdevs 461772ae (2:24.1.6-91) plus
-/// Portal 0006 (package 2:24.1.6-91portal2), which stops the KGSL stale
-/// frame-callback recovery leaking a window-sized buffer each time it fires
-/// (fullscreen DXVK games leaked GBs and Android killed the app). Served
+/// Portal 0006 and 0007 (package 2:24.1.6-91portal3). 0006 stops the KGSL
+/// stale frame-callback recovery leaking a window-sized buffer each time it
+/// fires (fullscreen DXVK games leaked GBs and Android killed the app); 0007
+/// presents depth-24 windows opaque, so software GL (llvmpipe, e.g. in
+/// Flatpak sandboxes) no longer shows as a blank window. Served
 /// from `/usr/local/lib/portal-xwayland-default`; `/usr/bin/Xwayland` stays
 /// stock and the wrapper falls back to it on any staging problem. Pins:
 /// `assets/xwayland-portal/SHA256SUMS`.
 const XWAYLAND_PORTAL_BINARY: &[u8] = include_bytes!("../../../assets/xwayland-portal/Xwayland");
+/// Portal's KPackage: Debian kf6-kpackage 6.13.0-1 plus
+/// `patches/kpackage/0001`, which stops Update jobs (every KDE Store
+/// install) running on the caller's thread. Without it System Settings
+/// freezes until a global theme's dependencies are all installed. Staged
+/// in `/usr/local/lib/portal-kpackage` and bound over the stock library
+/// only while that is the exact stock build it replaces, so a Debian
+/// update always wins. Pins: `assets/kpackage-portal/SHA256SUMS`.
+const KPACKAGE_OVERLAY: LibraryOverlay = LibraryOverlay {
+    tag: "kpackage",
+    payload: include_bytes!("../../../assets/kpackage-portal/libKF6Package.so.6.13.0"),
+    dir: "usr/local/lib/portal-kpackage",
+    file: "libKF6Package.so.6.13.0",
+    stock: "usr/lib/aarch64-linux-gnu/libKF6Package.so.6.13.0",
+    // libkf6package6 6.13.0-1 arm64.
+    stock_sha256: "78b27bfb16e4862212c02705e35877ec2d150a097e1cc505e3275ad5116b09e1",
+};
+/// Portal's KIconThemes: Debian kf6-kiconthemes 6.13.0-2 plus
+/// `patches/kiconthemes/0001`, which lists icon themes in linear time and
+/// without a stat(2) per entry. Discover lists the whole theme on its GUI
+/// thread the first time it shows an app, and froze for a minute or more
+/// with a large theme. Pins: `assets/kiconthemes-portal/SHA256SUMS`.
+const KICONTHEMES_OVERLAY: LibraryOverlay = LibraryOverlay {
+    tag: "kiconthemes",
+    payload: include_bytes!("../../../assets/kiconthemes-portal/libKF6IconThemes.so.6.13.0"),
+    dir: "usr/local/lib/portal-kiconthemes",
+    file: "libKF6IconThemes.so.6.13.0",
+    stock: "usr/lib/aarch64-linux-gnu/libKF6IconThemes.so.6.13.0",
+    // libkf6iconthemes6 6.13.0-2 arm64.
+    stock_sha256: "34e751932d5c0f1a683adb2e4972efb7110a07948365a736464dc436d8a0a058",
+};
+const LIBRARY_OVERLAYS: [LibraryOverlay; 2] = [KPACKAGE_OVERLAY, KICONTHEMES_OVERLAY];
+/// Portal's GLEW: Debian glew 2.2.0-4 plus `patches/glew/0001`, so
+/// glewInit() no longer fails on a context made current through EGL. SDL2
+/// runs on native Wayland here, where Debian's GLX-only GLEW gave every
+/// GLEW game (HyperRogue and ~50 other packages) a black window. Unlike the
+/// binds above it must also cover a package installed mid-session (Discover,
+/// then Launch), so it goes on the library path instead:
+/// `/etc/ld.so.conf.d/00-portal-glew.conf` lists its directory ahead of the
+/// multiarch one, and every package install re-runs ldconfig. Same SONAME
+/// and upstream version as Debian's. Pins: `assets/glew-portal/SHA256SUMS`.
+const GLEW_LIBRARY: &[u8] = include_bytes!("../../../assets/glew-portal/libGLEW.so.2.2.0");
+const GLEW_DIR: &str = "usr/local/lib/portal-glew";
+const GLEW_FILE: &str = "libGLEW.so.2.2.0";
+const GLEW_LD_CONF: &str = "etc/ld.so.conf.d/00-portal-glew.conf";
+
+/// A Debian library Portal ships rebuilt with a fix. Staged in `dir` and
+/// bound over `stock` only while that is the exact build it replaces, so a
+/// Debian update always wins.
+struct LibraryOverlay {
+    tag: &'static str,
+    payload: &'static [u8],
+    dir: &'static str,
+    file: &'static str,
+    stock: &'static str,
+    stock_sha256: &'static str,
+}
 /// Stock Debian trixie arm64 xinput (diagnostic tool for the XI2 proof;
 /// same overlay staging, never in the default loader path).
 const XWAYLAND_XINPUT_BINARY: &[u8] = include_bytes!("../../../assets/xwayland-candidate/xinput");
@@ -1393,6 +1464,12 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
             .expect("Failed to install Plasma shell autostart supervision");
     }
     write_executable(&fs_root.join("usr/local/bin/kwin_wayland"), KWIN_WRAPPER);
+    sync_bwrap_shim(fs_root);
+    write_executable(
+        &fs_root.join("usr/local/lib/portal/portal-flatpak-bwrap"),
+        PORTAL_FLATPAK_BWRAP,
+    );
+    sync_system_services(fs_root);
     let kwin_script = fs_root.join("usr/share/kwin/scripts/portal-borderless-fullscreen");
     for (name, contents) in KWIN_SCRIPT_BORDERLESS_FULLSCREEN {
         let path = kwin_script.join(name);
@@ -1464,6 +1541,7 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         include_bytes!("../../../assets/guest-arm64/libcanberra-copyright"),
     )
     .expect("Failed to install backend license");
+    install_camera_bridge(fs_root);
     // Migrate older APKs that shadowed the distribution's splash executables.
     let _ = fs::remove_file(fs_root.join("usr/local/bin/ksplashqml"));
     let _ = fs::remove_file(fs_root.join("usr/local/bin/plasma_waitforname"));
@@ -1502,6 +1580,15 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
+    repair_virtual_keyboard_toggle(fs_root);
+    // Debian's chromium launcher sources /etc/chromium.d. Under Wayland Chromium
+    // reports text fields to the input method only with --enable-wayland-ime,
+    // so without it no field ever opens the Android keyboard. X11 ignores it.
+    let chromium_ime = fs_root.join("etc/chromium.d/portal-wayland-ime");
+    if let Some(parent) = chromium_ime.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(chromium_ime, CHROMIUM_WAYLAND_IME);
     // Stop guest PipeWire clients from clamping RLIMIT_RTTIME to 0 through
     // the RTKit-less realtime portal (see the asset for the failure mode).
     for relative in PIPEWIRE_CLIENT_NO_RT_PATHS {
@@ -1603,6 +1690,46 @@ fn sync_guest_host_path_alias(fs_root: &Path) {
     }
 }
 
+/// KWin only drives Portal's input method (the Android keyboard bridge) while its virtual
+/// keyboard is enabled. Plasma's Virtual Keyboard tray toggle turns that off in kwinrc for
+/// good, after which no guest Wayland text field opens the Android keyboard again; Portal
+/// has no other on-screen keyboard to offer, so a session never starts with it off.
+fn repair_virtual_keyboard_toggle(fs_root: &Path) {
+    let username = get_application_context().local_config.user.username;
+    let kwinrc = chroot_home_dir(fs_root, &username).join(".config/kwinrc");
+    let Ok(text) = fs::read_to_string(&kwinrc) else {
+        return;
+    };
+    if kconfig_value(&text, "Wayland", "VirtualKeyboardEnabled")
+        .is_some_and(|value| value.eq_ignore_ascii_case("false"))
+    {
+        log::info!("Re-enabling KWin's virtual keyboard for the Android keyboard bridge");
+        if let Err(error) =
+            try_upsert_kconfig_value(&kwinrc, "Wayland", "VirtualKeyboardEnabled", "true")
+        {
+            log::warn!("Could not re-enable KWin's virtual keyboard: {error}");
+        }
+    }
+}
+
+fn kconfig_value<'a>(text: &'a str, group: &str, key: &str) -> Option<&'a str> {
+    let header = format!("[{group}]");
+    let mut in_group = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_group = line.eq_ignore_ascii_case(&header);
+        } else if in_group {
+            if let Some((name, value)) = line.split_once('=') {
+                if name.trim().eq_ignore_ascii_case(key) {
+                    return Some(value.trim());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Keep the Chromium/Electron entries helper current and bring entries it
 /// already derived up to its current flags. Only entries carrying the helper's
 /// marker are touched, so entries the user removed or wrote stay as they are.
@@ -1651,10 +1778,13 @@ fn sync_chromium_entries(fs_root: &Path) {
                     None => (exec, String::new()),
                 };
                 let mut added = String::new();
-                for (probe, flag) in [(
-                    "--disable-features=",
-                    "--disable-features=GlobalShortcutsPortal",
-                )] {
+                for (probe, flag) in [
+                    ("--disable-features=", "--disable-features=GlobalShortcutsPortal"),
+                    (
+                        "wayland-ime",
+                        "--enable-wayland-ime --wayland-text-input-version=3",
+                    ),
+                ] {
                     if !exec.contains(probe) {
                         added.push(' ');
                         added.push_str(flag);
@@ -1898,16 +2028,37 @@ fn upsert_kv_file(path: &Path, delimiter: char, updates: &[(&str, String)]) {
 }
 
 fn setup_fake_bwrap(_: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(PRODUCTION_FS_ROOT);
+    sync_bwrap_shim(Path::new(PRODUCTION_FS_ROOT));
+    None
+}
+
+/// Also run at every session start (`sync_portal_runtime_assets`), so
+/// existing installs pick up a changed shim.
+fn sync_bwrap_shim(fs_root: &Path) {
     let wrapper_path = fs_root.join("usr/local/bin/bwrap");
 
     // bwrap (Bubblewrap) requires Linux user namespaces (CLONE_NEWUSER) which are
     // blocked by Android SELinux. We replace it with a shim that strips all
     // namespace/sandbox flags and directly exec's the target binary.
     // This unblocks glycin-svg (used by Onboard) which sandbox-loads SVG files via bwrap.
+    //
+    // PRoot now emulates the mount, user and pid namespaces bubblewrap uses
+    // (Flatpak calls /usr/bin/bwrap directly). The session's system
+    // services probe it each start (assets/portal-system-services.sh); the
+    // shim runs the real one whenever that probe passed.
     let wrapper = r#"#!/bin/sh
-# bwrap shim for proot/Android: namespaces are unavailable, exec directly.
-# Strips all bwrap sandbox/namespace/bind flags, then exec's the target binary.
+# bwrap shim for proot/Android. The real bubblewrap runs whenever it works
+# under this PRoot (probed at session start, or here when that left no
+# verdict); otherwise this strips all sandbox/namespace/bind flags and
+# exec's the target binary directly.
+if [ -x /usr/bin/bwrap ]; then
+    if [ -e /run/portal-bwrap-ok ] || { [ ! -e /run/portal-bwrap-failed ] &&
+        /usr/bin/bwrap --unshare-all --share-net --die-with-parent \
+            --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp \
+            /bin/true </dev/null >/dev/null 2>&1; }; then
+        exec /usr/bin/bwrap "$@"
+    fi
+fi
 while [ $# -gt 0 ]; do
     case "$1" in
         # Three-argument flags (flag + src/key + dest/value)
@@ -1934,16 +2085,55 @@ done
 exec "$@"
 "#;
 
-    let _ = fs::create_dir_all(
-        wrapper_path
-            .parent()
-            .expect("Failed to read bwrap wrapper parent directory"),
-    );
-    fs::write(&wrapper_path, wrapper).expect("Failed to write bwrap wrapper");
-    fs::set_permissions(&wrapper_path, fs::Permissions::from_mode(0o755))
-        .expect("Failed to mark bwrap wrapper executable");
+    write_executable(&wrapper_path, wrapper);
+}
 
+/// Lets the `sudo` group (the desktop user) administer the system without a
+/// password, as `/etc/sudoers.d/portal-desktop` already does for sudo.
+const POLKIT_ADMIN_RULE: &str = "// Managed by Portal: the desktop account has no password, as with sudo.\n\
+polkit.addRule(function(action, subject) {\n    \
+if (subject.isInGroup(\"sudo\"))\n        return polkit.Result.YES;\n});\n";
+
+/// Flatpak's system helper hands downloads over through revokefs-fuse,
+/// and Android gives apps no /dev/fuse: have it pull them itself.
+const FLATPAK_SYSTEM_HELPER_SERVICE: &str = "[D-BUS Service]\n\
+Name=org.freedesktop.Flatpak.SystemHelper\n\
+Exec=/usr/bin/env FLATPAK_DISABLE_REVOKEFS=yes /usr/libexec/flatpak-system-helper\n\
+SystemdService=flatpak-system-helper.service\n\
+User=root\n";
+
+/// The system bus and what it starts (polkit, PackageKit, Flatpak's
+/// helper), run by the desktop session's PRoot before the user's session
+/// (see `ProcessSpec::system_services`).
+fn setup_system_services(_: &SetupOptions) -> StageOutput {
+    sync_system_services(Path::new(PRODUCTION_FS_ROOT));
     None
+}
+
+/// Also run at every session start, like `sync_bwrap_shim`.
+fn sync_system_services(fs_root: &Path) {
+    write_executable(
+        &fs_root.join("usr/local/sbin/portal-system-services"),
+        PORTAL_SYSTEM_SERVICES,
+    );
+    for (relative, contents) in [
+        ("etc/polkit-1/rules.d/49-portal-admin.rules", POLKIT_ADMIN_RULE),
+        (
+            "usr/local/share/dbus-1/system-services/org.freedesktop.Flatpak.SystemHelper.service",
+            FLATPAK_SYSTEM_HELPER_SERVICE,
+        ),
+    ] {
+        let path = fs_root.join(relative);
+        if fs::read_to_string(&path).is_ok_and(|current| current == contents) {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(error) = fs::write(&path, contents) {
+            log::warn!("{relative} could not be written: {error}");
+        }
+    }
 }
 
 fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
@@ -2063,6 +2253,55 @@ fn write_executable(path: &Path, contents: &str) {
     }
 }
 
+/// The Portal cameras for apps that read /dev/videoN or use GStreamer's
+/// pipewiresrc. The cameras themselves are PipeWire nodes published by the
+/// Android-side capture helper; these pieces only let guest apps reach them.
+/// libpw-v4l2 and libgstpipewire are Debian 1.4.2-1 builds, ABI-matched to
+/// the guest's libpipewire (scripts/build_pipewire_camera_bridge.py), and
+/// step aside when the user installs the packages themselves. The session
+/// preloads portal-v4l2.so, which loads libpw-v4l2 only on a /dev/videoN
+/// open (recipe: assets/guest-arm64/portal-v4l2-recipe.txt). Optional: a
+/// failure here only costs camera access.
+fn install_camera_bridge(fs_root: &Path) {
+    let dpkg_info = fs_root.join("var/lib/dpkg/info");
+    let pieces: [(&str, Option<&str>, &[u8]); 3] = [
+        (
+            "usr/local/lib/portal/portal-v4l2.so",
+            None,
+            include_bytes!("../../../assets/guest-arm64/portal-v4l2.so"),
+        ),
+        (
+            "usr/lib/aarch64-linux-gnu/pipewire-0.3/v4l2/libpw-v4l2.so",
+            Some("pipewire-v4l2:arm64.list"),
+            include_bytes!("../../../assets/guest-arm64/libpw-v4l2.so"),
+        ),
+        (
+            "usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstpipewire.so",
+            Some("gstreamer1.0-pipewire:arm64.list"),
+            include_bytes!("../../../assets/guest-arm64/libgstpipewire.so"),
+        ),
+    ];
+    for (guest_path, owner, contents) in pieces {
+        if owner.is_some_and(|list| dpkg_info.join(list).exists()) {
+            continue;
+        }
+        let path = fs_root.join(guest_path);
+        if fs::read(&path).is_ok_and(|current| current == contents) {
+            continue;
+        }
+        if let Err(error) = write_guest_binary_result(&path, contents) {
+            log::warn!("camera bridge piece {guest_path} not installed: {error:#}");
+        }
+    }
+    let notice = fs_root.join("usr/share/doc/portal-pipewire-camera");
+    if fs::create_dir_all(&notice).is_ok() {
+        let _ = fs::write(
+            notice.join("copyright"),
+            include_bytes!("../../../assets/guest-arm64/pipewire-copyright"),
+        );
+    }
+}
+
 fn write_guest_binary(path: &Path, contents: &[u8]) {
     write_guest_binary_result(path, contents).expect("Failed to install guest binary");
 }
@@ -2100,6 +2339,17 @@ fn write_default_file(path: &Path, contents: &str) {
 /// user preferences. Plasma's classic-session switch is an upgrade-sensitive
 /// setting, so unlike an initial default it must be repaired on every setup.
 fn upsert_kconfig_value(path: &Path, group: &str, key: &str, value: &str) {
+    try_upsert_kconfig_value(path, group, key, value).expect("Failed to update KConfig value");
+}
+
+/// [`upsert_kconfig_value`] for launch-time repairs, where a failed write must not stop the
+/// session from starting.
+fn try_upsert_kconfig_value(
+    path: &Path,
+    group: &str,
+    key: &str,
+    value: &str,
+) -> std::io::Result<()> {
     let content = fs::read_to_string(path).unwrap_or_default();
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
     let group_header = format!("[{group}]");
@@ -2115,8 +2365,7 @@ fn upsert_kconfig_value(path: &Path, group: &str, key: &str, value: &str) {
         lines.push(format!("{key}={value}"));
         let mut output = lines.join("\n");
         output.push('\n');
-        fs::write(path, output).expect("Failed to write KConfig value");
-        return;
+        return fs::write(path, output);
     };
 
     let group_end = lines
@@ -2158,7 +2407,7 @@ fn upsert_kconfig_value(path: &Path, group: &str, key: &str, value: &str) {
     }
     let mut output = lines.join("\n");
     output.push('\n');
-    fs::write(path, output).expect("Failed to update KConfig value");
+    fs::write(path, output)
 }
 
 /// Map Android density to a whole-number UI scale factor (same baseline as the old LXQt setup).
@@ -2665,6 +2914,8 @@ fn sync_initial_desktop_defaults(fs_root: &Path) {
 
     // Configure the stock defaults before the first panel exists. Editing only
     // desktop-appletsrc cannot repair a clean install's initial default value.
+    // Discover keeps its stock places when the image has it.
+    let discover_installed = fs_root.join("usr/bin/plasma-discover").is_file();
     for (relative, old, new) in [
         (
             "usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml",
@@ -2682,6 +2933,9 @@ fn sync_initial_desktop_defaults(fs_root: &Path) {
             "",
         ),
     ] {
+        if discover_installed && old.contains("org.kde.discover.desktop") {
+            continue;
+        }
         let path = fs_root.join(relative);
         if let Ok(text) = fs::read_to_string(&path) {
             if text.contains(old) {
@@ -3531,6 +3785,83 @@ fn sync_kwin_overlay(fs_root: &Path) {
     sync_kwin_anland_overlay(fs_root);
     // Phase B XWayland touchpad-source candidate (own dir, stock default).
     sync_xwayland_candidate_overlay(fs_root);
+    sync_library_overlays(fs_root);
+    sync_glew_library(fs_root);
+}
+
+/// Stage Portal's rebuilt Debian libraries (see `LibraryOverlay`). Inert by
+/// themselves: `library_overlay_binds` decides per launch whether each one
+/// replaces the stock library.
+fn sync_library_overlays(fs_root: &Path) {
+    for overlay in &LIBRARY_OVERLAYS {
+        stage_library(&fs_root.join(overlay.dir), overlay.file, overlay.payload);
+    }
+}
+
+/// Write `payload` to `dir/file` unless it is already there.
+fn stage_library(dir: &Path, file: &str, payload: &[u8]) -> bool {
+    let target = dir.join(file);
+    if payload_is_current(&target, payload) {
+        return true;
+    }
+    let _ = fs::create_dir_all(dir);
+    // Never write over the file in place: running apps have it mapped.
+    let tmp = dir.join(format!("{file}.tmp"));
+    if fs::write(&tmp, payload).is_ok() {
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644));
+        if fs::rename(&tmp, &target).is_ok() {
+            mark_payload_current(&target, payload);
+            return true;
+        }
+    }
+    false
+}
+
+/// Stage Portal's GLEW (see `GLEW_LIBRARY`) and put its directory on the
+/// library path. portal-system-services runs ldconfig when the cache is
+/// older than either.
+fn sync_glew_library(fs_root: &Path) {
+    if !stage_library(&fs_root.join(GLEW_DIR), GLEW_FILE, GLEW_LIBRARY) {
+        return;
+    }
+    let conf = fs_root.join(GLEW_LD_CONF);
+    let wanted = format!("/{GLEW_DIR}\n");
+    if fs::read_to_string(&conf).ok().as_deref() != Some(wanted.as_str()) {
+        let _ = fs::write(&conf, wanted);
+    }
+}
+
+/// Bind each of Portal's rebuilt libraries over the stock one when the guest
+/// still has the exact Debian build it was made from. Any other version (an
+/// update, a user rebuild) is left alone.
+pub fn library_overlay_binds(fs_root: &Path) -> Vec<crate::core::runtime::BindMount> {
+    use sha2::{Digest, Sha256};
+
+    let mut binds = Vec::new();
+    for overlay in &LIBRARY_OVERLAYS {
+        let tag = overlay.tag;
+        let staged = fs_root.join(overlay.dir).join(overlay.file);
+        if !payload_is_current(&staged, overlay.payload) {
+            log::warn!("{tag}: Portal library not staged; using stock");
+            continue;
+        }
+        let stock = match fs::read(fs_root.join(overlay.stock)) {
+            Ok(bytes) => format!("{:x}", Sha256::digest(&bytes)),
+            Err(error) => {
+                log::info!("{tag}: stock library absent ({error}); using guest's own");
+                continue;
+            }
+        };
+        if stock != overlay.stock_sha256 {
+            log::info!("{tag}: stock library is not the Debian build it replaces ({stock}); using it as is");
+            continue;
+        }
+        binds.push(crate::core::runtime::BindMount::new(
+            staged,
+            format!("/{}", overlay.stock),
+        ));
+    }
+    binds
 }
 
 /// Install Portal's Anland-unified KWin library for GPU sessions. Runs on
@@ -4423,6 +4754,7 @@ fn stages() -> Vec<NamedSetupStage> {
         ("machine-id", Box::new(setup_machine_id)),
         ("firefox-config", Box::new(setup_firefox_config)),
         ("bwrap-shim", Box::new(setup_fake_bwrap)),
+        ("system-services", Box::new(setup_system_services)),
         ("chromium-no-sandbox", Box::new(setup_chromium_no_sandbox)),
         ("onboard-signal-fix", Box::new(setup_onboard_signal_fix)),
         ("mesa-kgsl-layer", Box::new(setup_mesa_layer)),

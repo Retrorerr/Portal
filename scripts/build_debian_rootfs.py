@@ -182,6 +182,17 @@ SEED_PACKAGES = [
     "dolphin-plugins",
     "libkf6kcmutils-bin",
     "kinfocenter",
+    # Software management as on a native Debian Plasma install: Discover
+    # with its Debian (PackageKit) and Flatpak backends, pkexec for admin
+    # prompts. Portal runs the system bus, polkit and Flatpak's bubblewrap
+    # sandbox (assets/portal-system-services.sh).
+    "plasma-discover",
+    "plasma-discover-backend-flatpak",
+    "flatpak",
+    "packagekit",
+    "packagekit-tools",
+    "pkexec",
+    "appstream",
 ]
 
 # Packages to skip if pulled in as optional/heavy non-critical dependencies

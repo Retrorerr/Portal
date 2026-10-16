@@ -34,6 +34,14 @@ const PROOT_SPIN_US: &str = "50";
 /// Must match `GameSettings.DIR` / `GameSettings.GUEST_DIR` in Kotlin.
 const GAME_SETTINGS_DIR: &str = "game-settings";
 const GAME_SETTINGS_GUEST: &str = "/usr/local/lib/portal/settings";
+/// `sh -c` script for a session with system services: `$0` is the
+/// session command, `$1` its user (see `ProcessSpec::system_services`).
+const SESSION_WITH_SYSTEM_SERVICES: &str = r#"services=/usr/local/sbin/portal-system-services
+[ -x "$services" ] && "$services" start
+runuser -u "$1" -- sh -c "$0"
+status=$?
+[ -x "$services" ] && "$services" stop
+exit $status"#;
 
 /// Concrete PRoot-based Linux runtime.
 #[derive(Debug, Clone)]
@@ -478,17 +486,28 @@ impl LinuxRuntime for PRootRuntime {
         process.arg(format!("PWD={}", working_dir.display()));
 
         if user == "root" {
-            process.arg("sh");
+            process.arg("sh").arg("-c").arg(&command);
+        } else if spec.system_services {
+            // D-Bus and polkit tell clients apart by SO_PEERCRED, which
+            // PRoot fakes only between processes it traces: the system bus
+            // has to run as root in this very instance, ahead of the user.
+            // It is stopped afterwards so PRoot can exit with the session.
+            process
+                .arg("sh")
+                .arg("-c")
+                .arg(SESSION_WITH_SYSTEM_SERVICES)
+                .arg(&command)
+                .arg(&user);
         } else {
             process
                 .arg("runuser")
                 .arg("-u")
                 .arg(&user)
                 .arg("--")
-                .arg("sh");
+                .arg("sh")
+                .arg("-c")
+                .arg(&command);
         }
-
-        process.arg("-c").arg(&command);
 
         let mut child = process
             .stdout(Stdio::piped())
@@ -659,9 +678,17 @@ fn remove_stale_proot_temporaries(directory: &Path) {
             else {
                 continue;
             };
-            let Some(pid) = rest.split('-').next().filter(|pid| {
-                !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())
-            }) else {
+            // PRoot names them "<prefix>-<pid>-XXXXXX", and prefixes such as
+            // "proot-tmpfs-" (emulated mounts) or "proot-ns-" carry dashes
+            // of their own: the pid is the field before the random suffix.
+            let is_pid =
+                |pid: &&str| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit());
+            let Some(pid) = rest
+                .rsplit('-')
+                .nth(1)
+                .filter(is_pid)
+                .or_else(|| rest.split('-').next().filter(is_pid))
+            else {
                 continue;
             };
             if Path::new("/proc").join(pid).exists() {

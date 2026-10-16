@@ -12,14 +12,14 @@
 
 use std::ffi::CString;
 use std::fs;
-use std::io::{BufRead, BufReader, Cursor, Read};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::Shutdown;
 use std::os::raw::c_int;
 use std::os::unix::fs as unix_fs;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -54,6 +54,7 @@ const PIPEWIRE_DAEMON_LIB: &str = "libpipewire_exec.so";
 const PIPEWIRE_PULSE_DAEMON_LIB: &str = "libpipewire_pulse_exec.so";
 const WIREPLUMBER_DAEMON_LIB: &str = "libwireplumber_exec.so";
 const AAUDIO_SINK_LIB: &str = "liblocaldesktop_pipewire_aaudio_sink.so";
+const CAPTURE_LIB: &str = "liblocaldesktop_pipewire_capture.so";
 const PIPEWIRE_SOCKET_NAME: &str = "pipewire-0";
 const PULSE_SOCKET_NAME: &str = "pulse/native";
 const MIN_PIPEWIRE_API_LEVEL: c_int = 30;
@@ -75,6 +76,85 @@ static AAUDIO_WANTED: AtomicBool = AtomicBool::new(false);
 // backend can recover instead of leaving a selectable silent output.
 static AAUDIO_SINK_ERROR_PID: AtomicU32 = AtomicU32::new(0);
 
+/// The tablet's microphone and cameras, each published to the guest by its
+/// own capture helper process (`localdesktop_pipewire_capture`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CaptureKind {
+    Mic = 0,
+    Camera = 1,
+}
+
+impl CaptureKind {
+    const ALL: [CaptureKind; 2] = [CaptureKind::Mic, CaptureKind::Camera];
+
+    pub fn from_index(index: i32) -> Option<CaptureKind> {
+        Self::ALL.get(usize::try_from(index).ok()?).copied()
+    }
+
+    fn log_name(self) -> &'static str {
+        match self {
+            CaptureKind::Mic => "mic-capture",
+            CaptureKind::Camera => "camera-capture",
+        }
+    }
+}
+
+const CAPTURE_PERMISSION_UNKNOWN: u8 = 0;
+const CAPTURE_PERMISSION_GRANTED: u8 = 1;
+const CAPTURE_PERMISSION_DENIED: u8 = 2;
+
+/// Android's latest answer per kind, replayed to a restarted helper.
+static CAPTURE_PERMISSION: [AtomicU8; 2] = [
+    AtomicU8::new(CAPTURE_PERMISSION_UNKNOWN),
+    AtomicU8::new(CAPTURE_PERMISSION_UNKNOWN),
+];
+/// Portal is in the background: capture helpers release the devices.
+static CAPTURE_PAUSED: AtomicBool = AtomicBool::new(false);
+static DISPLAY_ROTATION: AtomicU32 = AtomicU32::new(0);
+/// Each running helper's control pipe, kept apart from `AAUDIO_CHILDREN` so
+/// answers from the UI thread never wait on a startup or teardown.
+static CAPTURE_INPUT: Mutex<[Option<ChildStdin>; 2]> = Mutex::new([None, None]);
+
+fn send_capture(kind: CaptureKind, command: &str) {
+    let Ok(mut inputs) = CAPTURE_INPUT.lock() else {
+        return;
+    };
+    if let Some(input) = inputs[kind as usize].as_mut() {
+        if input.write_all(format!("{command}\n").as_bytes()).is_err() {
+            inputs[kind as usize] = None;
+        }
+    }
+}
+
+fn send_capture_all(command: &str) {
+    for kind in CaptureKind::ALL {
+        send_capture(kind, command);
+    }
+}
+
+/// Android answered RECORD_AUDIO / CAMERA (see `utils::capture_permissions`).
+pub fn set_capture_permission(kind: CaptureKind, granted: bool) {
+    let state = if granted {
+        CAPTURE_PERMISSION_GRANTED
+    } else {
+        CAPTURE_PERMISSION_DENIED
+    };
+    CAPTURE_PERMISSION[kind as usize].store(state, Ordering::SeqCst);
+    send_capture(kind, if granted { "grant" } else { "deny" });
+}
+
+/// The display rotation in degrees, for upright camera frames.
+pub fn set_display_rotation(degrees: u32) {
+    if DISPLAY_ROTATION.swap(degrees, Ordering::SeqCst) != degrees {
+        send_capture(CaptureKind::Camera, &format!("rotation {degrees}"));
+    }
+}
+
+struct CaptureChild {
+    kind: CaptureKind,
+    child: Child,
+}
+
 /// The daemons outlive Android suspends: guest clients stay connected to
 /// them, so only the AAudio sink (the Android output stream) stops while
 /// Portal is in the background and comes back on resume.
@@ -84,6 +164,10 @@ struct PipewireAaudioChildren {
     wireplumber: Option<Child>,
     sink: Option<Child>,
     sink_bin: PathBuf,
+    /// Running mic/camera helpers; a missing kind is restarted by the
+    /// monitor while `capture_bin` exists.
+    capture: Vec<CaptureChild>,
+    capture_bin: Option<PathBuf>,
     env: PipewireAaudioEnv,
 }
 
@@ -102,6 +186,10 @@ struct PipewireAaudioEnv {
 /// Schedule the single PipeWire/AAudio owner before launching Plasma.
 pub fn spawn_after_ready(android_app: AndroidApp) {
     AAUDIO_WANTED.store(true, Ordering::SeqCst);
+    crate::android::utils::capture_permissions::attach(&android_app);
+    if CAPTURE_PAUSED.swap(false, Ordering::SeqCst) {
+        send_capture_all("resume");
+    }
 
     schedule_start(android_app);
 }
@@ -178,6 +266,10 @@ fn pipewire_runtime_dir() -> PathBuf {
 /// sink is back and WirePlumber links them to it again.
 pub fn suspend_output() {
     AAUDIO_WANTED.store(false, Ordering::SeqCst);
+    // Android silences the mic and takes the camera from a background app;
+    // the helpers close them now and keep their guest nodes (silence/black).
+    CAPTURE_PAUSED.store(true, Ordering::SeqCst);
+    send_capture_all("pause");
     thread::spawn(|| {
         let _operation = AAUDIO_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
         // A newer resume may have superseded this queued suspend.
@@ -269,6 +361,7 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
     let pipewire_bin = lib_dir.join(PIPEWIRE_DAEMON_LIB);
     let pulse_bin = lib_dir.join(PIPEWIRE_PULSE_DAEMON_LIB);
     let sink_bin = lib_dir.join(AAUDIO_SINK_LIB);
+    let capture_bin = Some(lib_dir.join(CAPTURE_LIB)).filter(|bin| bin.exists());
     let wireplumber_bin = lib_dir.join(WIREPLUMBER_DAEMON_LIB);
 
     if !pipewire_bin.exists() || !pulse_bin.exists() || !sink_bin.exists() {
@@ -367,6 +460,24 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
         Some(child)
     };
 
+    let capture = match &capture_bin {
+        Some(bin) => CaptureKind::ALL
+            .into_iter()
+            .filter_map(|kind| match spawn_capture(bin, &env, kind) {
+                Ok(child) => Some(CaptureChild { kind, child }),
+                // Optional: audio output works without capture.
+                Err(e) => {
+                    pw_warn!("capture", "{kind:?} helper unavailable: {e}");
+                    None
+                }
+            })
+            .collect(),
+        None => {
+            pw_info!("capture", "{CAPTURE_LIB} missing; no guest microphone or camera");
+            Vec::new()
+        }
+    };
+
     let runtime_dir = env.runtime_dir.clone();
     *AAUDIO_CHILDREN
         .lock()
@@ -376,6 +487,8 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
         wireplumber,
         sink: Some(sink),
         sink_bin,
+        capture,
+        capture_bin,
         env,
     });
     cleanup_on_error.armed = false;
@@ -395,6 +508,8 @@ fn spawn_child_monitor(runtime_dir: PathBuf, android_app: AndroidApp) {
     thread::spawn(move || {
         let mut sink_failures: u32 = 0;
         let mut next_sink_attempt = Instant::now();
+        let mut capture_failures = [0u32; 2];
+        let mut next_capture_attempt = [Instant::now(); 2];
         loop {
             thread::sleep(Duration::from_secs(1));
 
@@ -435,6 +550,7 @@ fn spawn_child_monitor(runtime_dir: PathBuf, android_app: AndroidApp) {
                             Ok(None) => {}
                             Err(e) => pw_error!("monitor", "failed to poll sink state: {e}"),
                         }
+                        supervise_capture(children, &mut capture_failures, &mut next_capture_attempt);
                         if children.sink.is_some() {
                             sink_failures = 0;
                         } else if AAUDIO_WANTED.load(Ordering::SeqCst)
@@ -839,6 +955,17 @@ stream.properties = {{
     resample.quality = 4
 }}
 
+# Peak meters (PA_STREAM_PEAK_DETECT: Plasma's volume applet, pavucontrol)
+# follow the default source, which is Portal Microphone. Passive, they read
+# it while something else records but never keep it (and Android's mic
+# indicator) on by themselves.
+stream.rules = [
+    {{
+        matches = [ {{ stream.monitor = true }} ]
+        actions = {{ update-props = {{ node.passive = true }} }}
+    }}
+]
+
 pulse.cmd = [ ]
 pulse.rules = [ ]
 "#,
@@ -924,6 +1051,115 @@ fn spawn_aaudio_sink(binary: &Path, env: &PipewireAaudioEnv) -> Result<Child, St
     spawn_logged(command, "aaudio-sink")
 }
 
+/// The app's package name (its process name), which AAudio attributes the
+/// recording to.
+fn package_name() -> Option<String> {
+    let cmdline = fs::read("/proc/self/cmdline").ok()?;
+    let name = cmdline.split(|&b| b == 0).next()?;
+    let name = String::from_utf8_lossy(name);
+    let name = name.split(':').next()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Optional `<files>/mic-preset`: the AAudio input preset (`voice-recognition`
+/// by default, the least processed; `communication` adds Android's echo
+/// cancellation for apps that do none of their own).
+fn mic_preset() -> Option<String> {
+    let flag = Path::new(crate::core::config::APP_FILES_ROOT).join("mic-preset");
+    fs::read_to_string(flag)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn spawn_capture(binary: &Path, env: &PipewireAaudioEnv, kind: CaptureKind) -> Result<Child, String> {
+    pw_info!("spawn", "exec {} ({kind:?})", binary.display());
+    let mut command = Command::new(binary);
+    apply_pipewire_env(&mut command, env);
+    match kind {
+        CaptureKind::Mic => {
+            command.arg("--mic");
+            if let Some(package) = package_name() {
+                command.arg("--package").arg(package);
+            }
+            if let Some(preset) = mic_preset() {
+                command.arg("--preset").arg(preset);
+            }
+        }
+        CaptureKind::Camera => {
+            command.arg("--camera");
+        }
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = spawn_logged(command, kind.log_name())?;
+    let Some(mut input) = child.stdin.take() else {
+        kill_child(kind.log_name(), &mut child);
+        return Err("capture helper has no control pipe".into());
+    };
+    // Replay what a restarted helper missed.
+    let mut state = format!("rotation {}\n", DISPLAY_ROTATION.load(Ordering::SeqCst));
+    match CAPTURE_PERMISSION[kind as usize].load(Ordering::SeqCst) {
+        CAPTURE_PERMISSION_GRANTED => state.push_str("grant\n"),
+        CAPTURE_PERMISSION_DENIED => state.push_str("deny\n"),
+        _ => {}
+    }
+    if CAPTURE_PAUSED.load(Ordering::SeqCst) {
+        state.push_str("pause\n");
+    }
+    let _ = input.write_all(state.as_bytes());
+    if let Ok(mut inputs) = CAPTURE_INPUT.lock() {
+        inputs[kind as usize] = Some(input);
+    }
+    Ok(child)
+}
+
+/// Restart capture helpers that exited, with backoff. Their guest nodes
+/// disappear meanwhile; the rest of the audio graph is unaffected.
+fn supervise_capture(
+    children: &mut PipewireAaudioChildren,
+    failures: &mut [u32; 2],
+    next_attempt: &mut [Instant; 2],
+) {
+    let Some(bin) = children.capture_bin.clone() else {
+        return;
+    };
+    children.capture.retain_mut(|helper| match helper.child.try_wait() {
+        Ok(None) => true,
+        result => {
+            pw_warn!(
+                "monitor",
+                "{} pid={} exited ({result:?})",
+                helper.kind.log_name(),
+                helper.child.id()
+            );
+            if let Ok(mut inputs) = CAPTURE_INPUT.lock() {
+                inputs[helper.kind as usize] = None;
+            }
+            let index = helper.kind as usize;
+            failures[index] = failures[index].saturating_add(1);
+            next_attempt[index] = Instant::now() + Duration::from_secs(1 << failures[index].min(6));
+            false
+        }
+    });
+    for kind in CaptureKind::ALL {
+        let index = kind as usize;
+        if children.capture.iter().any(|helper| helper.kind == kind) || Instant::now() < next_attempt[index] {
+            continue;
+        }
+        match spawn_capture(&bin, &children.env, kind) {
+            Ok(child) => children.capture.push(CaptureChild { kind, child }),
+            Err(e) => {
+                failures[index] = failures[index].saturating_add(1);
+                next_attempt[index] = Instant::now() + Duration::from_secs(1 << failures[index].min(6));
+                pw_error!("monitor", "{kind:?} helper restart failed: {e}");
+            }
+        }
+    }
+}
+
 fn spawn_logged(mut command: Command, name: &'static str) -> Result<Child, String> {
     let mut child = command.spawn().map_err(|e| format!("spawn {name}: {e}"))?;
     let pid = child.id();
@@ -958,6 +1194,12 @@ fn stream_child_lines(name: &'static str, pid: u32, stream: &'static str, pipe: 
     for line in BufReader::new(pipe).lines().map_while(Result::ok) {
         if name == "aaudio-sink" && line.contains("[pipewire-aaudio-sink] AAudio error:") {
             AAUDIO_SINK_ERROR_PID.store(pid, Ordering::SeqCst);
+        }
+        if line == "[portal-capture] demand" {
+            let kind = CaptureKind::ALL.into_iter().find(|kind| kind.log_name() == name);
+            if let Some(kind) = kind {
+                crate::android::utils::capture_permissions::request(kind);
+            }
         }
         pw_info!("daemon", "[{name}:{stream}] {line}");
     }
@@ -1018,6 +1260,12 @@ fn cleanup_socket(runtime_dir: &Path) {
 fn stop_children(mut children: PipewireAaudioChildren) {
     if let Some(mut pulse) = children.pulse.take() {
         kill_child("pipewire-pulse", &mut pulse);
+    }
+    for mut helper in children.capture.drain(..) {
+        if let Ok(mut inputs) = CAPTURE_INPUT.lock() {
+            inputs[helper.kind as usize] = None;
+        }
+        kill_child(helper.kind.log_name(), &mut helper.child);
     }
     if let Some(mut sink) = children.sink.take() {
         kill_child("aaudio-sink", &mut sink);

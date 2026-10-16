@@ -14,7 +14,10 @@ export XDG_SESSION_DESKTOP=plasma
 export XDG_SESSION_CLASS=user
 export XDG_CURRENT_DESKTOP=KDE
 export XDG_CONFIG_DIRS=/etc/xdg
-export XDG_DATA_DIRS=/usr/local/share:/usr/share
+# Flatpak's exports first, as its systemd environment generator does on a
+# native session (there is no systemd here): the launcher and Discover's
+# "Launch" find installed Flatpak apps only through XDG_DATA_DIRS.
+export XDG_DATA_DIRS="${XDG_DATA_HOME:-${HOME:-/home/desktop}/.local/share}/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/local/share:/usr/share"
 export XDG_MENU_PREFIX=plasma-
 export DESKTOP_SESSION=plasma
 export KDE_FULL_SESSION=true
@@ -25,6 +28,11 @@ export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
 # No udev in the guest: SDL (Steam, Proton, games) then finds Portal's
 # game pads by scanning and watching /dev/input.
 export SDL_JOYSTICK_DISABLE_UDEV=1
+# Flatpak runs bubblewrap through Portal's front-end, which fits its device
+# binds to Android (see /usr/local/lib/portal/portal-flatpak-bwrap).
+if [ -x /usr/local/lib/portal/portal-flatpak-bwrap ] && command -v python3 >/dev/null; then
+    export FLATPAK_BWRAP=/usr/local/lib/portal/portal-flatpak-bwrap
+fi
 # Firefox 147+ keeps a new profile in ~/.config/mozilla but switches to
 # ~/.mozilla/firefox once that exists (Debian's firefox-esr creates it), which
 # looks like every setting was lost. Keep every Firefox on ~/.mozilla.
@@ -74,6 +82,15 @@ if [ -n "${ANLAND_SOCKET:-}" ]; then
             *) export LD_PRELOAD="/usr/local/lib/portal/drmshim.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
         esac
     fi
+fi
+# Portal cameras for /dev/videoN apps: loads PipeWire's V4L2 emulation only
+# when a process opens a camera (assets/guest-arm64/portal-v4l2-recipe.txt).
+# First in line, ahead of drmshim, whose raw-syscall open does not chain.
+if [ -r /usr/local/lib/portal/portal-v4l2.so ]; then
+    case ":${LD_PRELOAD:-}:" in
+        *:/usr/local/lib/portal/portal-v4l2.so:*) ;;
+        *) export LD_PRELOAD="/usr/local/lib/portal/portal-v4l2.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+    esac
 fi
 
 state_dir=/var/lib/localdesktop/session

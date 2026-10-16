@@ -28,6 +28,9 @@ pub fn session_binds() -> Vec<BindMount> {
     }
     write(&dir, "cap_last_cap", procfs::CAP_LAST_CAP);
     write(&dir, "vmstat", procfs::VMSTAT);
+    for (name, contents) in procfs::SYSCTLS {
+        write(&dir, name, contents);
+    }
     let (release, version) = uname();
     write(&dir, "version", &procfs::render_version(&release, &version));
     refresh();
