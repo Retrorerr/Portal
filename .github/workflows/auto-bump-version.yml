@@ -32,7 +32,7 @@ jobs:
         env:
           LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
         run: |
-          python <<'PY'
+          python -I <<'PY'
           import json
           import os
 
@@ -90,7 +90,7 @@ jobs:
         run: |
           git fetch origin "main:refs/remotes/origin/main" --tags --force
 
-          EXPECTED_VERSION=$(python <<'PY'
+          EXPECTED_VERSION=$(python -I <<'PY'
           import os
           import re
           import subprocess
@@ -146,7 +146,7 @@ jobs:
           echo "Expected version: ${EXPECTED_VERSION}"
           export EXPECTED_VERSION
 
-          python <<'PY'
+          python -I <<'PY'
           import os
           import re
           from pathlib import Path
@@ -203,7 +203,7 @@ jobs:
         env:
           LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
         run: |
-          python <<'PY'
+          python -I <<'PY'
           import json
           import os
 
@@ -238,7 +238,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          VERSION=$(python <<'PY'
+          VERSION=$(python -I <<'PY'
           import re
           from pathlib import Path
 

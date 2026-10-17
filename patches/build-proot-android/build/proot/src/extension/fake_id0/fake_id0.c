@@ -354,7 +354,12 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_oldlstat,		FILTER_SYSEXIT },
 	{ PR_oldstat,		FILTER_SYSEXIT },
 	{ PR_prctl,		FILTER_SYSEXIT },
-	{ PR_sendmsg,		0 },
+	/* Only SCM_CREDENTIALS needs rewriting (the guest's fake ids and
+	 * pids would be rejected by the kernel).  Credential senders (GLib's
+	 * GDBus auth, bwrap, sd_notify, PulseAudio) use blocking sends, while
+	 * the hot paths (libwayland, PipeWire, Gecko IPC) always pass
+	 * MSG_DONTWAIT; trapping those cost a ptrace stop per Wayland flush.  */
+	{ PR_sendmsg,		FILTER_SEND_BLOCKING },
 	{ PR_setfsgid,		FILTER_SYSEXIT },
 	{ PR_setfsgid32,	FILTER_SYSEXIT },
 	{ PR_setfsuid,		FILTER_SYSEXIT },

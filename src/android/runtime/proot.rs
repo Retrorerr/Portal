@@ -225,9 +225,12 @@ where
         if stop.load(Ordering::Acquire) {
             break;
         }
-        line.clear();
+        // A WouldBlock keeps the partial line read so far; it is completed
+        // by the next read, not discarded.
         match reader.read_until(b'\n', &mut line) {
-            Ok(0) => break,
+            // EOF; a partial line left by an earlier WouldBlock is emitted
+            // first.
+            Ok(0) if line.is_empty() => break,
             Ok(_) => {
                 if output.len() < MAX_CAPTURED_OUTPUT_BYTES {
                     let remaining = MAX_CAPTURED_OUTPUT_BYTES - output.len();
@@ -256,6 +259,7 @@ where
                 if stream == "stderr" && !text.is_empty() {
                     log::debug!("guest-stderr: {text}");
                 }
+                line.clear();
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
@@ -610,7 +614,6 @@ impl LinuxRuntime for PRootRuntime {
                             ),
                         );
                     }
-                    reader_stop.store(true, Ordering::Release);
                     break status;
                 }
                 Ok(None) => {
@@ -643,6 +646,15 @@ impl LinuxRuntime for PRootRuntime {
                 }
             }
         };
+        // Let the readers reach EOF so a command's last lines (apt's error,
+        // the "network" cause setup classifies) are not dropped; a daemon
+        // that inherited the pipes only gets a short grace.
+        let drain_deadline = Instant::now() + Duration::from_millis(250);
+        while !(stdout_thread.is_finished() && stderr_thread.is_finished())
+            && Instant::now() < drain_deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
         reader_stop.store(true, Ordering::Release);
         let stdout = stdout_thread.join().unwrap_or_default();
         let stderr = stderr_thread.join().unwrap_or_default();

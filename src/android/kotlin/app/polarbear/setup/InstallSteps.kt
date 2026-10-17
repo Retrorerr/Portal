@@ -67,7 +67,7 @@ fun installStep(progress: Int, message: String): InstallStep {
         0 -> "Downloading Debian"
         1 -> if (progress < 52) "Checking the download" else "Unpacking Debian"
         2 -> when (STAGE.find(message)?.groupValues?.get(1)) {
-            "mesa-kgsl-layer" -> "Setting up graphics"
+            "mesa-kgsl-layer", "flatpak-gl" -> "Setting up graphics"
             "desktop-login" -> "Preparing your account"
             "mozilla-firefox" -> "Installing Firefox"
             "optional-apps" -> "Installing your apps"

@@ -500,24 +500,38 @@ fn pump_thread_choreo(
 }
 
 fn pump_thread_timer(tick_fd: libc::c_int, running: Arc<AtomicBool>, period_ns: u64) {
-    let step = std::time::Duration::from_millis(50);
-    let mut acc: u64 = 0;
+    // Absolute CLOCK_MONOTONIC deadlines: one tick per period with no drift
+    // (the old 50ms sleep step only ever ticked at 20 Hz).
     let mut ticks: u64 = 0;
     let mut last_log_ns = now_ns();
+    let mut deadline_ns = now_ns();
     while running.load(Ordering::Acquire) {
-        std::thread::sleep(step);
-        acc += 50_000_000;
-        if acc >= period_ns {
-            acc = 0;
-            ticks += 1;
-            let one: u64 = 1;
-            unsafe {
-                libc::write(
-                    tick_fd,
-                    &one as *const u64 as *const libc::c_void,
-                    8,
-                );
-            }
+        deadline_ns = deadline_ns.wrapping_add(period_ns);
+        let now = now_ns();
+        if deadline_ns < now {
+            // Fell behind (freezer, suspend): resync instead of bursting.
+            deadline_ns = now.wrapping_add(period_ns);
+        }
+        let ts = libc::timespec {
+            tv_sec: (deadline_ns / 1_000_000_000) as libc::time_t,
+            tv_nsec: (deadline_ns % 1_000_000_000) as libc::c_long,
+        };
+        unsafe {
+            libc::clock_nanosleep(
+                libc::CLOCK_MONOTONIC,
+                libc::TIMER_ABSTIME,
+                &ts,
+                std::ptr::null_mut(),
+            );
+        }
+        ticks += 1;
+        let one: u64 = 1;
+        unsafe {
+            libc::write(
+                tick_fd,
+                &one as *const u64 as *const libc::c_void,
+                8,
+            );
         }
         let now = now_ns();
         if now.wrapping_sub(last_log_ns) >= 5_000_000_000 {

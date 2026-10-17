@@ -230,6 +230,14 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         // Naming the node turns DMABUF on: fullscreen WebGL used ~35% less CPU
         // (Pad 3, 2026-09-29). Gecko-only, so Thunderbird gets it too.
         ("MOZ_DRM_DEVICE".into(), "/dev/dri/renderD128".into()),
+        // Gecko's gfxInfo can't identify the Adreno (no real DRM device) and
+        // falls back to software WebRender unless forced. The prefs in
+        // core::guest_browser cover the profiles Portal finds, but a profile's
+        // first start (a just-installed Flatpak, tarball or fork such as Zen
+        // or LibreWolf) only sees the environment: Zen's Flatpak pegged its
+        // Renderer thread on software WebRender playing 1080p60 YouTube.
+        ("MOZ_WEBRENDER".into(), "1".into()),
+        ("MOZ_ACCELERATED".into(), "1".into()),
         // Gecko shared memory: the parent tests memfd by reopening one
         // read-only through /proc/self/fd, which Android's SELinux denies
         // on some devices (Galaxy Z Fold5, kernel 5.15). The parent then

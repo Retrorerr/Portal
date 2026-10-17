@@ -714,7 +714,10 @@ where
         expected_present_ns: Option<i64>,
     ) -> Result<Option<u64>, SwapBuffersError> {
         let mut damage = match damage {
-            Some(damage) if self.damage_tracking && !damage.is_empty() => {
+            // No valid bind yet (window was 0x0): swap without damage.
+            Some(damage)
+                if self.damage_tracking && !damage.is_empty() && self.bind_size.is_some() =>
+            {
                 let bind_size = self
                     .bind_size
                     .expect("submitting without ever binding the renderer.");

@@ -146,7 +146,11 @@ fn read_text_inner<'local>(
             "Ignoring Android clipboard selection larger than {} bytes",
             MAX_CLIPBOARD_BYTES
         );
-        return Ok(None);
+        // An error, not `None`: `None` means "cleared" and would wipe the
+        // guest clipboard; an oversized clip is just not synced.
+        return Err(ClipboardError(format!(
+            "clip larger than {MAX_CLIPBOARD_BYTES} bytes"
+        )));
     }
     Ok(Some(text))
 }

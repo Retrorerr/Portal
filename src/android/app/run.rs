@@ -441,7 +441,7 @@ fn resume_anland(
 /// tests stay observable in logcat without flooding it.
 static LAST_MOTION_LOG_NS: AtomicU64 = AtomicU64::new(0);
 
-fn note_motion_logged(x: f64, y: f64, detail: &str) {
+fn note_motion_logged(x: f64, y: f64, detail: std::fmt::Arguments) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -471,7 +471,7 @@ fn forward_anland_input(
             note_motion_logged(
                 touch.location.x,
                 touch.location.y,
-                &format!("touch action={action} id={}", touch.id),
+                format_args!("touch action={action} id={}", touch.id),
             );
             session.send_input(&AnlandInput::touch(
                 action,
@@ -482,7 +482,7 @@ fn forward_anland_input(
             session.send_input(&AnlandInput::touch_frame());
         }
         WindowEvent::CursorMoved { position, .. } => {
-            note_motion_logged(position.x, position.y, "cursor");
+            note_motion_logged(position.x, position.y, format_args!("cursor"));
             session.send_pointer_motion(position.x as f32, position.y as f32);
         }
         WindowEvent::AndroidPointerMoved {
@@ -495,7 +495,7 @@ fn forward_anland_input(
             log::debug!(
                 "anland.input pointer dev={android_device_id} src={source:#x} tool={tool_type}"
             );
-            note_motion_logged(position.x, position.y, "android-pointer");
+            note_motion_logged(position.x, position.y, format_args!("android-pointer"));
             session.send_pointer_motion(position.x as f32, position.y as f32);
         }
         WindowEvent::AndroidStylus {
@@ -523,7 +523,7 @@ fn forward_anland_input(
             note_motion_logged(
                 position.x,
                 position.y,
-                &format!(
+                format_args!(
                     "stylus flags={flags:#x} pressure={pressure:.2} tilt=({tilt_x:.0},{tilt_y:.0}) distance={distance:.2}"
                 ),
             );

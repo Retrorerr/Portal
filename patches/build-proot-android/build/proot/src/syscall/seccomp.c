@@ -43,6 +43,7 @@
 #include <linux/sockios.h>  /* SIOCGIFINDEX, */
 #include <sched.h>         /* CLONE_NEW*, */
 #include <signal.h>        /* SIGSYS, */
+#include <sys/socket.h>    /* MSG_DONTWAIT, */
 #include "syscall/evdev.h"  /* FAKE_EVDEV_IOCTL_TYPE, */
 
 #include "syscall/seccomp.h"
@@ -186,41 +187,82 @@ static int add_trace_ioctl(struct sock_fprog *program, word_t syscall, int flag)
 			0x02000000 /* CLONE_NEWCGROUP */ | \
 			0x00000080 /* CLONE_NEWTIME */)
 
-#define LENGTH_TRACE_ARG 5
+/* The argument conditions add_trace_arg() knows, in emission order.  */
+static const int trace_arg_conditions[] = {
+	FILTER_HIGH_FD, FILTER_CLONE_NS, FILTER_SIGSYS, FILTER_SEND_BLOCKING,
+};
+#define NB_TRACE_ARG_CONDITIONS 	(sizeof(trace_arg_conditions) / sizeof(trace_arg_conditions[0]))
+#define MAX_LENGTH_TRACE_ARG (3 + 2 * NB_TRACE_ARG_CONDITIONS)
 
 /**
- * Like add_trace_syscall(), but only when the first argument of
- * @syscall matches @flag: FILTER_HIGH_FD, a descriptor PRoot moved to
- * PROOT_TRACED_FD_BASE or higher (negative ones match too), or
- * FILTER_CLONE_NS, clone(2) flags asking for a namespace, or
- * FILTER_SIGSYS, the signal number SIGSYS.  close(2),
- * send(2) and recv(2) calls otherwise stop every Wayland, X11, D-Bus
- * and PipeWire message, and clone(2) every thread.
+ * Number of statements add_trace_arg() emits for @flag.
+ */
+static size_t length_trace_arg(int flag)
+{
+	size_t length = 3;
+	size_t i;
+
+	for (i = 0; i < NB_TRACE_ARG_CONDITIONS; i++)
+		if ((flag & trace_arg_conditions[i]) != 0)
+			length += 2;
+	return length;
+}
+
+/**
+ * Like add_trace_syscall(), but only when one of the argument
+ * conditions in @flag holds: FILTER_HIGH_FD, a first argument that
+ * is a descriptor PRoot moved to PROOT_TRACED_FD_BASE or higher
+ * (negative ones match too), FILTER_CLONE_NS, clone(2) flags asking
+ * for a namespace, FILTER_SIGSYS, the signal number SIGSYS, or
+ * FILTER_SEND_BLOCKING, sendmsg(2) flags without MSG_DONTWAIT.
+ * close(2), send(2) and recv(2) calls otherwise stop every Wayland,
+ * X11, D-Bus and PipeWire message, and clone(2) every thread.
  */
 static int add_trace_arg(struct sock_fprog *program, word_t syscall, int flag)
 {
-	/* Compare the low 32 bits of the first argument (little-endian).  */
-	const size_t arg_offset = offsetof(struct seccomp_data, args[0]);
-	struct sock_filter statements[LENGTH_TRACE_ARG];
+	/* Compare the low 32 bits of the arguments (little-endian).  */
+	const size_t arg0_offset = offsetof(struct seccomp_data, args[0]);
+	const size_t arg2_offset = offsetof(struct seccomp_data, args[2]);
+	struct sock_filter statements[MAX_LENGTH_TRACE_ARG];
+	const size_t length = length_trace_arg(flag);
+	/* Index of the final "trace" statement; "allow" is just before.  */
+	const size_t trace = length - 1;
+	size_t position = 1;
+	size_t i;
 
-	if (syscall > UINT32_MAX || arg_offset > UINT32_MAX)
+	if (syscall > UINT32_MAX || arg2_offset > UINT32_MAX)
 		return -ERANGE;
 
 	/* Not @syscall: skip this block.  */
-	statements[0] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, syscall, 0, LENGTH_TRACE_ARG - 1);
-	statements[1] = (struct sock_filter) BPF_STMT(BPF_LD + BPF_W + BPF_ABS, arg_offset);
-	if ((flag & FILTER_HIGH_FD) != 0)
-		statements[2] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JGE + BPF_K, PROOT_TRACED_FD_BASE, 1, 0);
-	else if ((flag & FILTER_SIGSYS) != 0)
-		statements[2] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, SIGSYS, 1, 0);
-	else
-		statements[2] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JSET + BPF_K, CLONE_NS_FLAGS, 1, 0);
-	statements[3] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW);
-	statements[4] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + (flag & FILTER_SYSEXIT));
+	statements[0] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, syscall, 0, length - 1);
 
-	DEBUG_FILTER("FILTER:     trace if syscall == %ld and its first argument matches\n", syscall);
+	for (i = 0; i < NB_TRACE_ARG_CONDITIONS; i++) {
+		const int condition = flag & trace_arg_conditions[i];
+		/* Jump offsets are relative to the next statement.  */
+		const size_t to_trace = trace - (position + 1) - 1;
 
-	return add_statements(program, LENGTH_TRACE_ARG, statements);
+		if (condition == 0)
+			continue;
+
+		statements[position] = (struct sock_filter) BPF_STMT(BPF_LD + BPF_W + BPF_ABS,
+				condition == FILTER_SEND_BLOCKING ? arg2_offset : arg0_offset);
+		if (condition == FILTER_HIGH_FD)
+			statements[position + 1] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JGE + BPF_K, PROOT_TRACED_FD_BASE, to_trace, 0);
+		else if (condition == FILTER_SIGSYS)
+			statements[position + 1] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, SIGSYS, to_trace, 0);
+		else if (condition == FILTER_CLONE_NS)
+			statements[position + 1] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JSET + BPF_K, CLONE_NS_FLAGS, to_trace, 0);
+		else
+			statements[position + 1] = (struct sock_filter) BPF_JUMP(BPF_JMP + BPF_JSET + BPF_K, MSG_DONTWAIT, 0, to_trace);
+		position += 2;
+	}
+	statements[position] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW);
+	statements[position + 1] = (struct sock_filter) BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + (flag & FILTER_SYSEXIT));
+	assert(position + 1 == trace);
+
+	DEBUG_FILTER("FILTER:     trace if syscall == %ld and one of its argument conditions holds\n", syscall);
+
+	return add_statements(program, length, statements);
 }
 #endif
 
@@ -382,7 +424,7 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 					continue;
 				}
 				if ((sysnums[k].flags & FILTER_ARGS) != 0) {
-					section_length += LENGTH_TRACE_ARG;
+					section_length += length_trace_arg(sysnums[k].flags);
 					continue;
 				}
 #endif
@@ -607,12 +649,18 @@ static int merge_filtered_sysnums(TALLOC_CTX *context, FilteredSysnum **sysnums,
 			(*sysnums)[j + 1].value = PR_void;
 		}
 		else
+		{
 			/* The sysnum is already filtered, merge the
-			 * flags.  An argument restriction stays only if
-			 * every list asks for it.  */
+			 * flags.  Argument conditions are alternatives:
+			 * the call is traced when any list's condition
+			 * holds, and always when one list has none.  */
+			word_t old_args = (*sysnums)[j].flags & FILTER_ARGS;
+			word_t new_args = new_sysnums[i].flags & FILTER_ARGS;
+
 			(*sysnums)[j].flags =
 				(((*sysnums)[j].flags | new_sysnums[i].flags) & ~FILTER_ARGS)
-				| ((*sysnums)[j].flags & new_sysnums[i].flags & FILTER_ARGS);
+				| (old_args != 0 && new_args != 0 ? old_args | new_args : 0);
+		}
 	}
 
 	return 0;

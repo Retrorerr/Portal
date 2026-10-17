@@ -92,6 +92,14 @@ if [ -r /usr/local/lib/portal/portal-v4l2.so ]; then
         *) export LD_PRELOAD="/usr/local/lib/portal/portal-v4l2.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
     esac
 fi
+# Qt Widgets animations at the display rate instead of Qt's fixed 60 Hz
+# tick (assets/guest-arm64/qt-anim-rate.c); inert in non-Qt processes.
+if [ -r /usr/local/lib/portal/qt-anim-rate.so ]; then
+    case ":${LD_PRELOAD:-}:" in
+        *:/usr/local/lib/portal/qt-anim-rate.so:*) ;;
+        *) export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}/usr/local/lib/portal/qt-anim-rate.so" ;;
+    esac
+fi
 
 state_dir=/var/lib/localdesktop/session
 mkdir -p "$state_dir"

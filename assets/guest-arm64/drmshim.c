@@ -140,6 +140,7 @@ struct kstat {
 #define SYS_write 64
 #define SYS_ioctl 29
 #define SYS_fstat 80
+#define SYS_newfstatat 79
 /* fcntl commands for AArch64 (asm-generic/fcntl.h + linux/fcntl.h, LP64).
  * Explicit because the shim is -nostdlib. Do not guess: values below match
  * the NDK sysroot headers (27.2.12479018) and Linux UAPI. */
@@ -424,6 +425,22 @@ static void remember_fd(int fd) {
     lock_table();
     remember_fd_locked(fd);
     unlock_table();
+}
+
+/* Whether fd is the real /dev/kgsl-3d0 character device (same st_rdev).
+ * Only consulted on a DRM version probe of an untracked fd, so the two
+ * stat SVCs never touch the per-frame ioctl path. */
+static int is_kgsl_device(int fd) {
+    struct kstat st, kgsl;
+    long rc = raw_syscall6(SYS_fstat, (long)fd, (long)&st, 0, 0, 0, 0);
+    if (rc < 0 && rc > -4096)
+        return 0;
+    if ((st.st_mode & 0170000) != 0020000 /* S_IFCHR */)
+        return 0;
+    rc = raw_syscall6(SYS_newfstatat, AT_FDCWD, (long)"/dev/kgsl-3d0", (long)&kgsl, 0, 0, 0);
+    if (rc < 0 && rc > -4096)
+        return 0;
+    return st.st_rdev == kgsl.st_rdev;
 }
 
 static int is_dri_node(const char *path) {
@@ -759,8 +776,18 @@ int ioctl(int fd, unsigned long request, ...) {
         arg = __builtin_va_arg(ap, void *);
         __builtin_va_end(ap);
     }
-    if (!is_fake_fast(fd))
+    if (!is_fake_fast(fd)) {
+        /* A render-node fd this process never opened itself (Chromium's GPU
+         * process gets it from its sandbox broker over a socket) is still the
+         * kgsl device underneath: adopt it on the version probe, or Ozone
+         * aborts "Can't get version for device". */
+        if (DRM_IOCTL_TYPE(request) == DRM_IOCTL_VERSION_TYPE &&
+            DRM_IOCTL_NR(request) == DRM_IOCTL_VERSION_NR && is_kgsl_device(fd)) {
+            remember_fd(fd);
+            return handle_version_ioctl((struct drm_version *)arg);
+        }
         return set_errno_ret(raw_syscall6(SYS_ioctl, (long)fd, (long)request, (long)arg, 0, 0, 0));
+    }
     if (DRM_IOCTL_TYPE(request) != DRM_IOCTL_VERSION_TYPE) {
         /* Non-DRM ioctls (notably KGSL 'k' ioctls when the backing is the
          * real /dev/kgsl-3d0) must reach the real device: the kgsl winsys

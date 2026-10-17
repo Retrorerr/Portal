@@ -1455,13 +1455,21 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         PLASMASHELL_SUPERVISOR,
     );
     let shell_autostart = fs_root.join("etc/xdg/autostart/org.kde.plasmashell.desktop");
-    let desktop_entry = fs::read_to_string(&shell_autostart)
-        .expect("Failed to read the distro Plasma shell autostart entry");
-    let supervised_entry = supervise_plasmashell_autostart(&desktop_entry)
-        .expect("Could not preserve Plasma shell autostart metadata");
-    if supervised_entry != desktop_entry {
-        fs::write(&shell_autostart, supervised_entry)
-            .expect("Failed to install Plasma shell autostart supervision");
+    // Supervision is a robustness layer, not a requirement: a distro update
+    // that reshapes this entry must leave the stock shell starting, not
+    // block every launch.
+    match fs::read_to_string(&shell_autostart)
+        .map_err(anyhow::Error::from)
+        .and_then(|entry| Ok((supervise_plasmashell_autostart(&entry)?, entry)))
+    {
+        Ok((supervised_entry, desktop_entry)) if supervised_entry != desktop_entry => {
+            fs::write(&shell_autostart, supervised_entry)
+                .expect("Failed to install Plasma shell autostart supervision");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("Plasma shell left unsupervised: {error:#}");
+        }
     }
     write_executable(&fs_root.join("usr/local/bin/kwin_wayland"), KWIN_WRAPPER);
     sync_bwrap_shim(fs_root);
@@ -1542,6 +1550,7 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     )
     .expect("Failed to install backend license");
     install_camera_bridge(fs_root);
+    sync_qt_anim_rate(fs_root);
     // Migrate older APKs that shadowed the distribution's splash executables.
     let _ = fs::remove_file(fs_root.join("usr/local/bin/ksplashqml"));
     let _ = fs::remove_file(fs_root.join("usr/local/bin/plasma_waitforname"));
@@ -2304,6 +2313,21 @@ fn install_camera_bridge(fs_root: &Path) {
 
 fn write_guest_binary(path: &Path, contents: &[u8]) {
     write_guest_binary_result(path, contents).expect("Failed to install guest binary");
+}
+
+/// Qt animation timer at the display rate for every Qt Widgets app (Qt's
+/// fixed 16 ms tick judders on 120/144 Hz outputs); the session preloads it.
+/// Source: `assets/guest-arm64/qt-anim-rate.c`. Optional: a failure here only
+/// leaves Qt animations at 60 Hz.
+fn sync_qt_anim_rate(fs_root: &Path) {
+    const QT_ANIM_RATE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/qt-anim-rate.so");
+    let path = fs_root.join("usr/local/lib/portal/qt-anim-rate.so");
+    if fs::read(&path).is_ok_and(|current| current == QT_ANIM_RATE_BINARY) {
+        return;
+    }
+    if let Err(error) = write_guest_binary_result(&path, QT_ANIM_RATE_BINARY) {
+        log::warn!("qt-anim-rate preload not installed: {error:#}");
+    }
 }
 
 fn write_guest_binary_result(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
@@ -3082,6 +3106,7 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     sync_guest_network_config(fs_root);
     sync_android_timezone(fs_root);
     browser::repair_mozilla_profiles(fs_root);
+    browser::sync_gecko_profiles(fs_root);
 }
 
 /// Run Portal-owned session support behind the same recoverable boundary used
@@ -4243,6 +4268,31 @@ fn setup_mesa_layer(options: &SetupOptions) -> StageOutput {
     }))
 }
 
+/// Portal's KGSL Mesa for Flatpak apps (the GL.portal extension, every
+/// supported runtime branch), installed before the desktop first starts so
+/// a Flatpak app the user installs later gets GPU GL from its first launch
+/// instead of the runtime's CPU-bound llvmpipe. Never fails setup: each
+/// session start repeats the install while it is incomplete (offline setup).
+fn setup_flatpak_gl(_: &SetupOptions) -> StageOutput {
+    if !crate::android::anland::is_anland_requested() {
+        return None;
+    }
+    Some(thread::spawn(|| {
+        let output = PRootRuntime::active().execute(
+            ProcessSpec::new("/usr/local/sbin/portal-system-services flatpak-gl"),
+            None,
+            None,
+        );
+        if !output.status.success() {
+            log::warn!(
+                "Flatpak GL extension install failed; the next session start retries: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }))
+}
+
 fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let username = get_application_context().local_config.user.username;
@@ -4711,6 +4761,7 @@ fn stage_weight(name: &str, options: &SetupOptions) -> usize {
     ) {
         ("optional-apps", true, Some(plan)) => 1 + 2 * plan.selected_apps().len(),
         ("mozilla-firefox", _, _) => 2,
+        ("flatpak-gl", _, _) => 2,
         _ => 1,
     }
 }
@@ -4758,6 +4809,7 @@ fn stages() -> Vec<NamedSetupStage> {
         ("chromium-no-sandbox", Box::new(setup_chromium_no_sandbox)),
         ("onboard-signal-fix", Box::new(setup_onboard_signal_fix)),
         ("mesa-kgsl-layer", Box::new(setup_mesa_layer)),
+        ("flatpak-gl", Box::new(setup_flatpak_gl)),
         ("plasma-wayland", Box::new(setup_plasma_wayland)),
         ("desktop-login", Box::new(setup_desktop_login)),
         ("mozilla-firefox", Box::new(setup_mozilla_firefox)),

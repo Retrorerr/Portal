@@ -123,6 +123,8 @@ fi
         fi
         kdialog --title "Portal recovery logs" --textbox "$message" 760 520 2>/dev/null || true
         kdialog --title "Portal recovery logs" --textbox "$state_dir/plasma.log" 980 680 2>/dev/null || true
+        # A kdialog that fails at once must not turn this into a fork loop.
+        sleep 1
     done
 ) &
 AUTOSTART

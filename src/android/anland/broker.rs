@@ -228,10 +228,9 @@ impl Broker {
         }
         send?;
         log::info!("anland.broker FDS_READY generation={gen} screen={sw}x{sh}");
-        if let Ok(slot) = self.slot.lock() {
-            for tx in slot.attach_notify.iter() {
-                let _ = tx.send(gen);
-            }
+        if let Ok(mut slot) = self.slot.lock() {
+            // Drop subscribers whose consumer went away (one per restart).
+            slot.attach_notify.retain(|tx| tx.send(gen).is_ok());
         }
         Ok(())
     }

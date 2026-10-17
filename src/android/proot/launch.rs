@@ -289,7 +289,11 @@ pub fn launch() {
         }
         .run_session(thread_cancel.clone(), broker_environment, extra_binds);
         let status = output.status.code();
-        diagnostics::desktop_exit(status, started.elapsed().as_millis());
+        diagnostics::desktop_exit(
+            status,
+            started.elapsed().as_millis(),
+            thread_cancel.load(Ordering::Acquire),
+        );
         let planned = output.status.success() || thread_cancel.load(Ordering::Acquire);
         log::log!(
             if planned { log::Level::Info } else { log::Level::Warn },

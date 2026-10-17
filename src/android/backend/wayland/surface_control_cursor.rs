@@ -397,9 +397,9 @@ impl SurfaceControlCursor {
                     &mut destination,
                 )
             };
-            if release_fence >= 0 {
-                unsafe { libc::close(release_fence) };
-            }
+            // AHardwareBuffer_lock owns `release_fence` from here on (gralloc
+            // closes it even on error); closing it again would close an
+            // unrelated fd that reused the number.
             if lock_result != 0 || destination.is_null() {
                 slot.release.available.store(true, Ordering::Release);
                 return Err(format!("AHardwareBuffer_lock failed: {lock_result}"));

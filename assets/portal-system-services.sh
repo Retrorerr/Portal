@@ -1,5 +1,5 @@
 #!/bin/sh
-# portal-system-services start|stop
+# portal-system-services start|stop|flatpak-gl
 #
 # Debian's system services for the Portal session: the D-Bus system bus,
 # with polkit, PackageKit, UDisks and the rest started on demand through
@@ -64,8 +64,12 @@ start() {
 	refresh_ld_cache
 	divert_fwupd_backend
 	flatpak_sandbox_env
-	[ -e "$app_store_marker" ] || app_store >/dev/null 2>&1 </dev/null &
-	flatpak_gl_portal >/dev/null 2>&1 </dev/null &
+	# app_store first: on older images it is what installs Flatpak. Its
+	# own subshell, since it exits on failure.
+	{
+		[ -e "$app_store_marker" ] || (app_store)
+		flatpak_gl_portal
+	} >/dev/null 2>&1 </dev/null &
 }
 
 # The session's Mesa variables name drivers only Portal's own Mesa has;
@@ -82,10 +86,16 @@ flatpak_sandbox_env() {
 # Portal's KGSL Mesa for Flatpak apps: org.freedesktop.Platform.GL.portal,
 # built by .github/workflows/mesa-kgsl-flatpak-arm64.yml, one bundle per
 # freedesktop runtime branch. FLATPAK_GL_DRIVERS (session env) lists it
-# first. Installed for each branch an installed runtime's GL extension
-# point asks for, once per pinned build, in the background.
+# first. Without it a Flatpak app's runtime Mesa is llvmpipe, which draws
+# every frame on the CPU, pegs all cores and stutters the whole desktop.
+# Every supported branch is installed up front, whether or not an app
+# needs it yet, so an app installed later has GPU GL on its first start:
+# first setup runs "flatpak-gl" before the desktop starts, and each session
+# start repeats the (otherwise instant) check in the background for setups
+# that were offline, images without Flatpak until app_store, and pin bumps.
 flatpak_gl_tag=flatpak-gl-portal-26.3.0-20261016
 flatpak_gl_url=https://github.com/Retrorerr/Portal/releases/download/$flatpak_gl_tag
+flatpak_gl_branches="24.08 25.08"
 flatpak_gl_sha256() {
 	case "$1" in
 	24.08) echo 78cd0f0649146c282ab655370b958a6a5287bb9166c1c57a8222361349985550 ;;
@@ -96,28 +106,26 @@ flatpak_gl_portal() {
 	local log=/var/log/portal-flatpak-gl.log
 	[ -e /dev/kgsl-3d0 ] && command -v flatpak >/dev/null || return 0
 	state=/var/lib/localdesktop/flatpak-gl-portal
-	branches=$(for metadata in /var/lib/flatpak/runtime/*/aarch64/*/active/metadata; do
-		[ -e "$metadata" ] || continue
-		awk '/^\[Extension org\.freedesktop\.Platform\.GL\]/ { s = 1; next }
-			/^\[/ { s = 0 }
-			s && /^versions? *=/ { sub(/^versions? *= */, ""); gsub(/ /, ""); print }' "$metadata"
-	done | tr ';' '\n' | sort -u)
-	for branch in $branches; do
+	failed=0
+	for branch in $flatpak_gl_branches; do
 		sha=$(flatpak_gl_sha256 "$branch")
-		[ -n "$sha" ] || continue
-		[ "$(cat "$state/$branch" 2>/dev/null)" = "$sha" ] && continue
+		# "flatpak uninstall --unused" removes it too, state file or not.
+		[ "$(cat "$state/$branch" 2>/dev/null)" = "$sha" ] &&
+			[ -e "/var/lib/flatpak/runtime/org.freedesktop.Platform.GL.portal/aarch64/$branch/active" ] &&
+			continue
 		{
 			bundle=$(mktemp) || continue
-			if curl -fsSL --retry 3 -o "$bundle" \
-				"$flatpak_gl_url/org.freedesktop.Platform.GL.portal-$branch-aarch64.flatpak" &&
+			if curl -fsSL --retry 3 -o "$bundle" 				"$flatpak_gl_url/org.freedesktop.Platform.GL.portal-$branch-aarch64.flatpak" &&
 				echo "$sha  $bundle" | sha256sum -c - &&
-				flatpak install --system -y --noninteractive --reinstall \
-					--bundle "$bundle"; then
+				flatpak install --system -y --noninteractive --reinstall 					--bundle "$bundle"; then
 				mkdir -p "$state" && echo "$sha" >"$state/$branch"
+			else
+				failed=1
 			fi
 			rm -f "$bundle"
 		} >>"$log" 2>&1
 	done
+	return $failed
 }
 
 # Portal stages libraries for the library path (its GLEW, listed by
@@ -197,6 +205,7 @@ app_store() {
 case "$1" in
 start) start ;;
 stop) stop ;;
-*) echo "usage: $0 start|stop" >&2; exit 2 ;;
+flatpak-gl) flatpak_gl_portal || exit 1 ;;
+*) echo "usage: $0 start|stop|flatpak-gl" >&2; exit 2 ;;
 esac
 exit 0

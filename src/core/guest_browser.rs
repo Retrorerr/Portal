@@ -1,12 +1,12 @@
 //! Browser defaults inside the guest: which browser is the default, and
 //! Portal's Firefox preferences for every Firefox a user can install.
 //!
-//! The image ships Debian's `firefox-esr`, but `sudo apt install` can add
-//! Mozilla's own `firefox` (from packages.mozilla.org, into
-//! `/usr/lib/firefox`) or its beta, developer-edition and nightly channels
-//! (`/usr/lib/firefox-beta`, `-devedition`, `-nightly`). All of them need the
-//! same preferences, and the default browser must follow whichever is
-//! installed, so nothing here names only `firefox-esr`.
+//! The image ships Mozilla's own `firefox` (from packages.mozilla.org, into
+//! `/usr/lib/firefox`); older images shipped Debian's `firefox-esr`, and
+//! `sudo apt install` can add either, or Mozilla's beta, developer-edition
+//! and nightly channels (`/usr/lib/firefox-beta`, `-devedition`, `-nightly`).
+//! All of them need the same preferences, and the default browser must
+//! follow whichever is installed, so nothing here names only one of them.
 //!
 //! The preferences go through Firefox's autoconfig (`defaults/pref/autoconfig.js`
 //! plus a `.cfg` next to the executable), which sets any preference; the
@@ -240,6 +240,149 @@ pub fn repair_mozilla_profiles(fs_root: &Path) {
     }
 }
 
+const USER_JS_BEGIN: &str = "// BEGIN Portal preferences (rewritten on every Portal start)";
+const USER_JS_END: &str = "// END Portal preferences";
+
+/// Portal's Firefox preferences as `user.js` lines.
+fn portal_user_js_block() -> String {
+    let mut block = format!("{USER_JS_BEGIN}\n");
+    for line in FIREFOX_CFG.lines() {
+        if let Some(rest) = line.strip_prefix("defaultPref(") {
+            block.push_str("user_pref(");
+            block.push_str(rest);
+            block.push('\n');
+        }
+    }
+    block.push_str(USER_JS_END);
+    block.push('\n');
+    block
+}
+
+/// `user_js` with Portal's block replaced by `block` (or appended), keeping
+/// everything the user wrote around it.
+fn merge_user_js(user_js: &str, block: &str) -> String {
+    let mut kept = String::new();
+    let mut inside = false;
+    let mut unclosed = Vec::new();
+    for line in user_js.lines() {
+        if line == USER_JS_BEGIN {
+            inside = true;
+        } else if line == USER_JS_END {
+            inside = false;
+            unclosed.clear();
+        } else if inside {
+            unclosed.push(line);
+        } else {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    // A BEGIN whose END was deleted: only Portal's own lines are dropped, the
+    // user's lines after it are kept.
+    for line in unclosed {
+        if !block.lines().any(|managed| managed == line) {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    if !kept.is_empty() && !kept.ends_with("\n\n") {
+        kept.push('\n');
+    }
+    kept + block
+}
+
+/// Gecko profile roots under `base`: dot-directories holding a
+/// `profiles.ini` themselves (`.zen`, `.librewolf`, `.floorp`, `.waterfox`)
+/// or one level down (`.mozilla/firefox`, `.thunderbird` style).
+fn gecko_profile_roots(base: &Path, roots: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with('.') || matches!(&*name, ".cache" | ".local" | ".var" | ".ld.so") {
+            continue;
+        }
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        if dir.join("profiles.ini").is_file() {
+            roots.push(dir.clone());
+        }
+        if let Ok(children) = fs::read_dir(&dir) {
+            for child in children.flatten() {
+                if child.path().join("profiles.ini").is_file() {
+                    roots.push(child.path());
+                }
+            }
+        }
+    }
+}
+
+/// Profile directories listed by `<root>/profiles.ini`.
+fn gecko_profiles(root: &Path) -> Vec<PathBuf> {
+    let Ok(ini) = fs::read_to_string(root.join("profiles.ini")) else {
+        return Vec::new();
+    };
+    let mut profiles = Vec::new();
+    let mut relative = true;
+    let mut path: Option<String> = None;
+    let mut flush = |relative: bool, path: &mut Option<String>| {
+        if let Some(path) = path.take() {
+            // Absolute paths are guest paths; only relative ones resolve here.
+            if relative {
+                profiles.push(root.join(path));
+            }
+        }
+    };
+    for line in ini.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            flush(relative, &mut path);
+            relative = true;
+        } else if let Some(value) = line.strip_prefix("Path=") {
+            path = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("IsRelative=") {
+            relative = value != "0";
+        }
+    }
+    flush(relative, &mut path);
+    profiles.retain(|profile| profile.is_dir());
+    profiles
+}
+
+/// Give every Gecko browser profile Portal's Firefox preferences through a
+/// managed block in its `user.js`. The autoconfig in `sync_firefox_config`
+/// only reaches browsers installed under `/usr/lib`; Flatpaks (Zen, Firefox,
+/// LibreWolf), tarball installs and forks read their prefs from elsewhere.
+/// Without them Zen's Flatpak composited with software WebRender (its
+/// Renderer thread pegged a core on 1080p60 YouTube, Pad 3, 2026-10-16)
+/// and rendered at the integer scale. The session's MOZ_WEBRENDER /
+/// MOZ_ACCELERATED cover a profile's very first start, before this has run.
+pub fn sync_gecko_profiles(fs_root: &Path) {
+    let home = fs_root.join("home/desktop");
+    let mut roots = Vec::new();
+    gecko_profile_roots(&home, &mut roots);
+    if let Ok(apps) = fs::read_dir(home.join(".var/app")) {
+        for app in apps.flatten() {
+            gecko_profile_roots(&app.path(), &mut roots);
+        }
+    }
+    let block = portal_user_js_block();
+    for root in roots {
+        for profile in gecko_profiles(&root) {
+            let path = profile.join("user.js");
+            let current = fs::read_to_string(&path).unwrap_or_default();
+            let merged = merge_user_js(&current, &block);
+            if let Err(error) = write_if_changed(&path, &merged, None) {
+                log::warn!("Browser prefs {} could not be written: {error}", path.display());
+            }
+        }
+    }
+}
+
 fn move_profile_root(from: &Path, to: &Path) -> io::Result<()> {
     if !to.exists() {
         if let Some(parent) = to.parent() {
@@ -456,4 +599,23 @@ pub fn replace_default_entries(text: &str, replacements: &[(String, String)]) ->
             format!("{key}={};{eol}", ids.join(";"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unclosed_portal_block_keeps_the_users_lines() {
+        let block = portal_user_js_block();
+        let managed = block.lines().nth(1).unwrap();
+        let user_js = format!(
+            "user_pref(\"a\", 1);\n{USER_JS_BEGIN}\n{managed}\nuser_pref(\"b\", 2);\n"
+        );
+        let merged = merge_user_js(&user_js, &block);
+        assert!(merged.contains("user_pref(\"a\", 1);"));
+        assert!(merged.contains("user_pref(\"b\", 2);"));
+        assert_eq!(merged.matches(managed).count(), 1);
+        assert!(merged.ends_with(&block));
+    }
 }

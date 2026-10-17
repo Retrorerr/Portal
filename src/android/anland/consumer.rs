@@ -185,6 +185,8 @@ struct Inner {
     connected_gen: Mutex<Option<u64>>,
     // Proof counters.
     frames_queued: AtomicU64,
+    /// KWin damage hints received (content repaints), for the fps line.
+    damage_hints: AtomicU64,
     frames_fenced: AtomicU64,
     frames_bare: AtomicU64,
     fallback_count: AtomicU64,
@@ -472,6 +474,7 @@ impl AnlandSession {
             transition_lock: Mutex::new(()),
             connected_gen: Mutex::new(None),
             frames_queued: AtomicU64::new(0),
+            damage_hints: AtomicU64::new(0),
             frames_fenced: AtomicU64::new(0),
             frames_bare: AtomicU64::new(0),
             fallback_count: AtomicU64::new(0),
@@ -1656,9 +1659,10 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
     let mut hints: u64 = 0;
     let mut wakes: u64 = 0;
     let mut log_ns: u64 = 0;
+    let mut recv_failures: u64 = 0;
     while inner.running.load(Ordering::Acquire) {
         match socket.recv(&mut buf) {
-            Ok(_) => {}
+            Ok(_) => recv_failures = 0,
             Err(error)
                 if matches!(
                     error.kind(),
@@ -1672,8 +1676,16 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
                 continue;
             }
             Err(error) => {
-                log::warn!("anland.damage listener stopped: {error}");
-                break;
+                // Never give up: without hints, frame-callback clients drop
+                // to the idle heartbeat for the rest of the session.
+                // Logged once per error streak: a dead socket must not
+                // flood the diagnostics log at 10 lines a second.
+                recv_failures += 1;
+                if recv_failures == 1 || recv_failures % 600 == 0 {
+                    log::warn!("anland.damage recv failed x{recv_failures} (retrying): {error}");
+                }
+                thread::sleep(Duration::from_millis(100));
+                continue;
             }
         }
         let now = sys::now_ns();
@@ -1681,6 +1693,7 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
             log::info!("anland.damage first KWin damage hint received");
         }
         hints += 1;
+        inner.damage_hints.fetch_add(1, Ordering::Relaxed);
         let until = now.wrapping_add(DAMAGE_BURST_NS);
         if inner.demand_until_ns.fetch_max(until, Ordering::AcqRel) <= now {
             wakes += 1;
@@ -1769,8 +1782,11 @@ fn render_loop(inner: Arc<Inner>) {
             }
             if failed {
                 // Retry without blocking Android's lifecycle/input thread.
-                let _ = sys::poll_readable(&wake, 500);
-                drain_fd(&wake);
+                // Drain only when signalled: the eventfd is blocking, and a
+                // read after a timeout would stall frames until the next kick.
+                if matches!(sys::poll_readable(&wake, 500), Ok(true)) {
+                    drain_fd(&wake);
+                }
             }
             continue;
         }
@@ -2188,8 +2204,11 @@ fn log_fps_window(
     let acq_ready_pct = *win_acq_ready * 100 / frames.max(1);
     let skip_pct = skips * 100 / (frames + skips).max(1);
     let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
+    // KWin repaint requests per second: the rate guest content changes.
+    let hint_hz = inner.damage_hints.swap(0, Ordering::Relaxed) as f64 * 1_000_000_000.0
+        / elapsed_ns as f64;
     log::info!(
-        "anland.fps hz={hz:.1} comp_avg_us={avg_us} comp_max_us={} acq_avg_us={acq_avg_us} acq_max_us={} acq_ready_pct={acq_ready_pct} skip_pct={skip_pct} acquire_stalls={} demanding={demanding}",
+        "anland.fps hz={hz:.1} hint_hz={hint_hz:.1} comp_avg_us={avg_us} comp_max_us={} acq_avg_us={acq_avg_us} acq_max_us={} acq_ready_pct={acq_ready_pct} skip_pct={skip_pct} acquire_stalls={} demanding={demanding}",
         *win_comp_max_us,
         *win_acq_max_us,
         *win_stalls,
@@ -2232,7 +2251,18 @@ fn refresh_done(
         let quantum_ms = 200.min((budget_ms - waited_ms).max(1) as i32);
         match sys::poll_readable(fence, quantum_ms) {
             Ok(true) => break,
-            _ => {
+            Err(_) => {
+                // POLLHUP/POLLERR returns at once: the producer is gone, so
+                // do not burn the stall budget in a zero-sleep spin.
+                if !inner.running.load(Ordering::Acquire)
+                    || !inner.window_live.load(Ordering::Acquire)
+                {
+                    return FENCE_LOST;
+                }
+                enter_fallback(inner, generation, "fence channel hangup (producer gone)");
+                return FENCE_LOST;
+            }
+            Ok(false) => {
                 waited_ms += quantum_ms as i64;
                 if !inner.running.load(Ordering::Acquire)
                     || !inner.window_live.load(Ordering::Acquire)
@@ -2289,6 +2319,9 @@ fn event_loop(inner: Arc<Inner>) {
     log::info!("anland.event thread started");
     let mut cur_gen: u64 = 0;
     let mut cur_data: Option<OwnedFd> = None;
+    // Generation whose data socket hung up; its fd stays POLLHUP until the
+    // render side replaces the generation, so re-polling it would spin.
+    let mut dead_gen: u64 = 0;
     while inner.running.load(Ordering::Acquire)
         && inner.window_live.load(Ordering::Acquire)
     {
@@ -2299,6 +2332,10 @@ fn event_loop(inner: Arc<Inner>) {
             .as_ref()
             .map(|g| g.id)
             .unwrap_or(0);
+        if gen_id != 0 && gen_id == dead_gen {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
         if gen_id != cur_gen {
             cur_gen = gen_id;
             cur_data = None;
@@ -2326,6 +2363,7 @@ fn event_loop(inner: Arc<Inner>) {
                 continue;
             }
             Err(_) => {
+                dead_gen = cur_gen;
                 cur_gen = 0;
                 cur_data = None;
                 continue;
@@ -2333,6 +2371,7 @@ fn event_loop(inner: Arc<Inner>) {
         }
         let mut wire = [0u8; 8 + 20];
         if sys::recv_all(data, &mut wire).is_err() {
+            dead_gen = cur_gen;
             cur_gen = 0;
             cur_data = None;
             continue;

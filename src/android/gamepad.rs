@@ -47,7 +47,7 @@ struct Pad {
     master: Arc<File>,
     // Held so the master never reads EIO while no guest program has the
     // pad open, and so the raw termios settings persist.
-    _slave: File,
+    slave: File,
     pts: u32,
     state: PadState,
     sent: PadState,
@@ -82,7 +82,10 @@ fn clear_stale() {
 
 fn open_pty() -> std::io::Result<(File, File, u32)> {
     unsafe {
-        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+        // Non-blocking: a pad nobody reads must never stall Android's
+        // input thread (see `flush`).
+        let master =
+            libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK);
         if master < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -162,7 +165,7 @@ fn add_pad(hub: &mut Hub, device_id: i32) -> Option<&mut Pad> {
             Pad {
                 slot,
                 master,
-                _slave: slave,
+                slave,
                 pts,
                 state: PadState::default(),
                 sent: PadState::default(),
@@ -193,9 +196,40 @@ fn flush(pad: &mut Pad) {
     unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
     let bytes = gamepad::encode_events(&events, now.tv_sec, now.tv_nsec / 1000);
     // One write per frame keeps a frame contiguous in the pty buffer.
-    match (&*pad.master).write_all(&bytes) {
-        Ok(()) => pad.sent = pad.state,
-        Err(error) => log::debug!("gamepad: event write failed: {error}"),
+    if write_frame(pad, &bytes) {
+        pad.sent = pad.state;
+        return;
+    }
+    // The master is non-blocking: a full buffer means no program has read
+    // this pad for a while (or none has it open). Like evdev, drop the
+    // stale backlog (it also drops any torn partial frame) and send the
+    // whole current state, so a reader that opens later starts in sync.
+    // Never block here: this runs on Android's input thread under HUB.
+    unsafe { libc::tcflush(pad.slave.as_raw_fd(), libc::TCIFLUSH) };
+    let mut unknown = pad.state;
+    for button in &mut unknown.buttons {
+        *button = !*button;
+    }
+    for axis in &mut unknown.axes {
+        *axis = axis.wrapping_add(1);
+    }
+    let events = pad.state.diff(&unknown);
+    let bytes = gamepad::encode_events(&events, now.tv_sec, now.tv_nsec / 1000);
+    if write_frame(pad, &bytes) {
+        pad.sent = pad.state;
+    } else {
+        log::debug!("gamepad: event write failed after flushing the backlog");
+    }
+}
+
+/// Whole-frame write to the non-blocking master; false on a short write.
+fn write_frame(pad: &Pad, bytes: &[u8]) -> bool {
+    loop {
+        match (&*pad.master).write(bytes) {
+            Ok(count) => return count == bytes.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
     }
 }
 

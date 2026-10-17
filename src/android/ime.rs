@@ -11,6 +11,7 @@ use jni::{
     objects::{JClass, JObject, JString},
     JNIEnv,
 };
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{
     atomic::{AtomicBool, AtomicI8, AtomicU8, Ordering},
     Mutex, OnceLock,
@@ -136,18 +137,47 @@ pub fn set_ime_cmd_file_for_test(file: Option<std::fs::File>) {
     }
 }
 
+/// Write to a command FIFO without ever stalling the caller (often the
+/// Android UI thread inside an IME callback). The FIFOs are opened O_RDWR
+/// so the pipe always has a reader: with the bridge or engine down, nothing
+/// drains it and a blocking write would hang once ~64 KiB of commits pile
+/// up. Waits briefly for room so a live reader still gets large commits.
+fn write_fifo(file: &mut std::fs::File, mut bytes: &[u8]) -> bool {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    while !bytes.is_empty() {
+        match file.write(bytes) {
+            Ok(0) => return false,
+            Ok(count) => bytes = &bytes[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    log::warn!("IME command FIFO full; command dropped");
+                    return false;
+                }
+                let mut poll = libc::pollfd {
+                    fd: file.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                unsafe { libc::poll(&mut poll, 1, left.as_millis().max(1) as libc::c_int) };
+            }
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 pub fn send_ime_command(cmd: &str) -> bool {
     let mut guard = match IME_CMD_FIFO.lock() {
         Ok(g) => g,
         Err(_) => return false,
     };
-    if let Some(file) = guard.as_mut() {
-        use std::io::Write;
-        if file.write_all(cmd.as_bytes()).is_ok() && file.flush().is_ok() {
-            return true;
-        }
-    }
-    false
+    guard
+        .as_mut()
+        .is_some_and(|file| write_fifo(file, cmd.as_bytes()))
 }
 
 /// Write one line to the IBus engine command FIFO (X11/GTK delivery; the
@@ -158,13 +188,9 @@ pub fn send_engine_command(cmd: &str) -> bool {
         Ok(g) => g,
         Err(_) => return false,
     };
-    if let Some(file) = guard.as_mut() {
-        use std::io::Write;
-        if file.write_all(cmd.as_bytes()).is_ok() && file.flush().is_ok() {
-            return true;
-        }
-    }
-    false
+    guard
+        .as_mut()
+        .is_some_and(|file| write_fifo(file, cmd.as_bytes()))
 }
 
 /// Format + send a commit through the IBus engine (any UTF-8).
@@ -305,6 +331,7 @@ pub fn start_ime_fifo_listener(rootfs_path: &std::path::Path) {
         if let Ok(file) = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(libc::O_NONBLOCK)
             .open(&commands_fifo_path)
         {
             if let Ok(mut guard) = IME_CMD_FIFO.lock() {
@@ -317,6 +344,7 @@ pub fn start_ime_fifo_listener(rootfs_path: &std::path::Path) {
         if let Ok(file) = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(libc::O_NONBLOCK)
             .open(&engine_fifo_path)
         {
             if let Ok(mut guard) = ENGINE_CMD_FIFO.lock() {

@@ -51,12 +51,15 @@ typedef struct {
 #define FILTER_CLONE_NS 0x4
 /* Trace rt_sigaction(2) only when it is about SIGSYS.  */
 #define FILTER_SIGSYS   0x8
+/* Trace sendmsg(2) only when its flags lack MSG_DONTWAIT.  */
+#define FILTER_SEND_BLOCKING 0x10
 #else
 #define FILTER_HIGH_FD  0
 #define FILTER_CLONE_NS 0
 #define FILTER_SIGSYS   0
+#define FILTER_SEND_BLOCKING 0
 #endif
-#define FILTER_ARGS (FILTER_HIGH_FD | FILTER_CLONE_NS | FILTER_SIGSYS)
+#define FILTER_ARGS (FILTER_HIGH_FD | FILTER_CLONE_NS | FILTER_SIGSYS | FILTER_SEND_BLOCKING)
 
 /* PRoot moves the descriptors it has to see every send, receive and
  * close of up here (see syscall/exit.c).  Guests rarely hold this many

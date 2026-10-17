@@ -432,7 +432,17 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
     };
 
     let pulse = {
-        let config = write_pipewire_pulse_config(&env.config_dir, &env)?;
+        let config = match write_pipewire_pulse_config(&env.config_dir, &env) {
+            Ok(config) => config,
+            Err(e) => {
+                kill_child("aaudio-sink", &mut sink);
+                if let Some(child) = wireplumber.as_mut() {
+                    kill_child("wireplumber", child);
+                }
+                kill_child("pipewire", &mut pipewire);
+                return Err(e);
+            }
+        };
         let mut child = match spawn_pipewire_pulse(&pulse_bin, &config, &env) {
             Ok(child) => child,
             Err(e) => {
@@ -1099,7 +1109,10 @@ fn spawn_capture(binary: &Path, env: &PipewireAaudioEnv, kind: CaptureKind) -> R
         kill_child(kind.log_name(), &mut child);
         return Err("capture helper has no control pipe".into());
     };
-    // Replay what a restarted helper missed.
+    // Replay what a restarted helper missed. The state is read under the
+    // input lock: a pause/grant sent before the pipe is installed would
+    // otherwise be lost and the helper could open the device in background.
+    let mut inputs = CAPTURE_INPUT.lock().unwrap_or_else(|e| e.into_inner());
     let mut state = format!("rotation {}\n", DISPLAY_ROTATION.load(Ordering::SeqCst));
     match CAPTURE_PERMISSION[kind as usize].load(Ordering::SeqCst) {
         CAPTURE_PERMISSION_GRANTED => state.push_str("grant\n"),
@@ -1110,9 +1123,8 @@ fn spawn_capture(binary: &Path, env: &PipewireAaudioEnv, kind: CaptureKind) -> R
         state.push_str("pause\n");
     }
     let _ = input.write_all(state.as_bytes());
-    if let Ok(mut inputs) = CAPTURE_INPUT.lock() {
-        inputs[kind as usize] = Some(input);
-    }
+    inputs[kind as usize] = Some(input);
+    drop(inputs);
     Ok(child)
 }
 

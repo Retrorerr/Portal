@@ -45,10 +45,13 @@ struct Paths {
 }
 
 static PATHS: OnceLock<Paths> = OnceLock::new();
-static FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+/// Open append handles with their current length, so a log line costs one
+/// write instead of mkdir + stat + open + close on every call (this runs for
+/// every host log record and every guest stdout line).
+static FILE_LOCK: OnceLock<Mutex<Vec<(PathBuf, File, u64)>>> = OnceLock::new();
 
-fn lock() -> &'static Mutex<()> {
-    FILE_LOCK.get_or_init(|| Mutex::new(()))
+fn lock() -> &'static Mutex<Vec<(PathBuf, File, u64)>> {
+    FILE_LOCK.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn now_ms() -> u128 {
@@ -58,8 +61,7 @@ fn now_ms() -> u128 {
         .unwrap_or_default()
 }
 
-fn append_line(path: &Path, line: &str) {
-    let _guard = lock().lock().ok();
+fn open_append(path: &Path) -> Option<(File, u64)> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -71,9 +73,44 @@ fn append_line(path: &Path, line: &str) {
             let _ = fs::rename(path, rotated);
         }
     }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{line}");
-        let _ = file.flush();
+    let file = OpenOptions::new().create(true).append(true).open(path).ok()?;
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    Some((file, len))
+}
+
+fn append_line(path: &Path, line: &str) {
+    let Ok(mut files) = lock().lock() else { return };
+    let index = match files.iter().position(|(p, _, _)| p == path) {
+        Some(index) => index,
+        None => {
+            let Some((file, len)) = open_append(path) else { return };
+            files.push((path.to_path_buf(), file, len));
+            files.len() - 1
+        }
+    };
+    let entry = &mut files[index];
+    if entry.2 > MAX_FILE_BYTES {
+        match open_append(path) {
+            Some((file, len)) => {
+                entry.1 = file;
+                entry.2 = len;
+            }
+            None => {
+                files.swap_remove(index);
+                return;
+            }
+        }
+    }
+    let entry = &mut files[index];
+    // One write per line keeps O_APPEND lines whole; File is unbuffered.
+    let mut buf = String::with_capacity(line.len() + 1);
+    buf.push_str(line);
+    buf.push('\n');
+    if entry.1.write_all(buf.as_bytes()).is_ok() {
+        entry.2 += buf.len() as u64;
+    } else {
+        // Reopen on the next line (file removed, disk full, ...).
+        files.swap_remove(index);
     }
 }
 
@@ -274,7 +311,7 @@ pub fn guest_process_line(command: &str, user: &str, stream: &str, line: &str) {
 /// Record a desktop process exit and mark an abnormal KWin exit for the guest
 /// recovery script.  Unix signal exits are reported by `Output` as 128+signal
 /// on the Android PRoot build, while shell wrappers commonly use 139 for SIGSEGV.
-pub fn desktop_exit(status: Option<i32>, elapsed_ms: u128) {
+pub fn desktop_exit(status: Option<i32>, elapsed_ms: u128, stopped_on_purpose: bool) {
     let status_text = status
         .map(|value| value.to_string())
         .unwrap_or_else(|| "unknown".into());
@@ -282,7 +319,10 @@ pub fn desktop_exit(status: Option<i32>, elapsed_ms: u128) {
         "desktop-exit",
         &format!("status={status_text} elapsed_ms={elapsed_ms}"),
     );
-    if status.is_some_and(|value| value == 139 || value == 134 || value >= 128) {
+    // A session `stop()` killed (TERM/KILL) is no crash.
+    if !stopped_on_purpose
+        && status.is_some_and(|value| value == 139 || value == 134 || value >= 128)
+    {
         let marker = guest_session_state_dir().join("kwin-crash");
         if let Some(parent) = marker.parent() {
             let _ = fs::create_dir_all(parent);

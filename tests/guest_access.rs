@@ -756,3 +756,32 @@ fn firefox_restores_tabs_after_a_kill_instead_of_the_recovery_page() {
     assert!(guest_browser::FIREFOX_CFG
         .contains("defaultPref(\"browser.sessionstore.max_resumed_crashes\", -1);"));
 }
+
+#[test]
+fn every_gecko_profile_gets_portals_prefs_and_keeps_the_users_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let zen = "home/desktop/.var/app/app.zen_browser.zen/.zen";
+    write(
+        root,
+        &format!("{zen}/profiles.ini"),
+        "[Profile0]\nName=Default (release)\nIsRelative=1\nPath=ab.Default (release)\n",
+    );
+    write(root, &format!("{zen}/ab.Default (release)/prefs.js"), "");
+    write(
+        root,
+        "home/desktop/.mozilla/firefox/profiles.ini",
+        "[Profile0]\nIsRelative=1\nPath=x.default\n\n[Profile1]\nIsRelative=0\nPath=/elsewhere\n",
+    );
+    write(root, "home/desktop/.mozilla/firefox/x.default/user.js", "user_pref(\"a.b\", 1);\n");
+
+    guest_browser::sync_gecko_profiles(root);
+    guest_browser::sync_gecko_profiles(root);
+
+    let zen_js = read(root, &format!("{zen}/ab.Default (release)/user.js"));
+    assert!(zen_js.contains("user_pref(\"gfx.webrender.all\", true);"));
+    assert!(zen_js.contains("user_pref(\"widget.wayland.fractional-scale.enabled\", true);"));
+    let ff_js = read(root, "home/desktop/.mozilla/firefox/x.default/user.js");
+    assert!(ff_js.starts_with("user_pref(\"a.b\", 1);\n"));
+    assert_eq!(ff_js.matches("BEGIN Portal preferences").count(), 1);
+}
