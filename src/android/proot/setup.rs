@@ -4278,6 +4278,9 @@ fn setup_flatpak_gl(_: &SetupOptions) -> StageOutput {
         return None;
     }
     Some(thread::spawn(|| {
+        // First setup reaches here before the session files (DNS among
+        // them) are synced.
+        sync_guest_network_config(Path::new(PRODUCTION_FS_ROOT));
         let output = PRootRuntime::active().execute(
             ProcessSpec::new("/usr/local/sbin/portal-system-services flatpak-gl"),
             None,
