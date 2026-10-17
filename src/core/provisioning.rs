@@ -1331,8 +1331,16 @@ impl RuntimeArtifact {
             }
             rename_synced(partial, archive)?;
             remove_path_synced(checkpoint)?;
+            return Ok(());
         }
-        Ok(())
+        // A body that ended cleanly but short (a proxy's Content-Length, a
+        // close-delimited cut) must resume like a dropped connection: the
+        // streaming unpacker is still waiting for these bytes.
+        Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "Runtime download ended before the archive was complete",
+        )
+        .into())
     }
 }
 

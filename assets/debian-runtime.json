@@ -1,7 +1,7 @@
 {
-  "version": "debian13-arm64-2026.10.08.1",
-  "url": "https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.10.08.1/portal-debian13-arm64-2026.10.08.1.tar.zst",
-  "sha256": "5e3716bd35c81665964a8e01eb88724a0d8f193143885a08d09b224244f80d20",
-  "compressed_bytes": 917941452,
-  "source_commit": "713413aa559af938f158d31f30deefb991cd234c"
+  "version": "debian13-arm64-2026.10.17.1",
+  "url": "https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.10.17.1/portal-debian13-arm64-2026.10.17.1.tar.zst",
+  "sha256": "33cc5145bf02ef26f60a6901d5dc358ddff62a2db0b16535ac4a8ecc35d75332",
+  "compressed_bytes": 944908960,
+  "source_commit": "local-test"
 }

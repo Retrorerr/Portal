@@ -71,13 +71,16 @@ APP_DESKTOP_FILES = {
 TASK_MANAGER_TYPES = ("org.kde.plasma.taskmanager", "org.kde.plasma.icontasks")
 # When a first-run applet has never saved its StringList, Plasma scripting
 # returns the supplied fallback rather than the KConfig schema default. These
-# are Plasma 6.3.6's shipped defaults without the unavailable Discover
-# shortcut. preferred://filemanager already resolves to Dolphin, so adding
-# Dolphin explicitly would create two identical panel icons. Once saved, the
+# are Plasma 6.3.6's shipped defaults; Discover is kept only when the image
+# has it (older images shipped without a package-management backend).
+# preferred://filemanager already resolves to Dolphin, so adding Dolphin
+# explicitly would create two identical panel icons. Once saved, the
 # user-owned list is read unchanged and becomes fully authoritative.
+DISCOVER_LAUNCHER = "applications:org.kde.discover.desktop"
 TASK_MANAGER_DEFAULT_LAUNCHERS = (
     "applications:systemsettings.desktop",
     "applications:org.kde.konsole.desktop",
+    *((DISCOVER_LAUNCHER,) if os.path.exists("/usr/bin/plasma-discover") else ()),
     "preferred://filemanager",
     "preferred://browser",
 )

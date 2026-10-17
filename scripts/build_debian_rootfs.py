@@ -5,7 +5,7 @@ off-device on the development machine.
 
 Downloads the official Debian Trixie package catalog, resolves the transitive
 dependency closure for Plasma 6, KWin, Dolphin, System Settings, Konsole, KScreen,
-Breeze, D-Bus, XWayland, PipeWire, and Firefox ESR, downloads the .deb files
+Breeze, D-Bus, XWayland and PipeWire, downloads the .deb files
 concurrently, and extracts them into a clean rootfs directory ready for packaging
 and deployment into Portal's runtime slots.
 """
@@ -57,8 +57,8 @@ SEED_PACKAGES = [
     "wireplumber",
     "pipewire-pulse",
     "plasma-pa",
-    # Browser
-    "firefox-esr",
+    # Browser: Mozilla's own Firefox, from packages.mozilla.org (see
+    # MOZILLA_FIREFOX_DEB below); Debian's firefox-esr is not part of the image.
     "libgtk-3-bin",
     "libglib2.0-bin",
     # Fonts
@@ -674,6 +674,9 @@ def build_rootfs(output_dir: Path, deb_cache_dir: Path, payload_tar=None, locked
             "deb http://security.debian.org/debian-security trixie-security main\n"
         )
 
+    if packages.get("firefox", {}).get("Filename") == MOZILLA_FIREFOX_DEB["filename"]:
+        write_mozilla_apt_source(output_dir, deb_cache_dir)
+
     # Write /etc/apt/apt.conf.d/01no-sandbox: tells apt not to drop privileges to _apt in PRoot
     apt_no_sandbox = output_dir / "etc" / "apt" / "apt.conf.d" / "01no-sandbox"
     with open(apt_no_sandbox, "w", newline="\n", encoding="utf-8") as f:
@@ -1043,6 +1046,61 @@ def prepare_locked_packages_with_anland(base_locked: dict, cache_dir: Path) -> d
     effective.update(overlay)
     print(f"Anland overlay: replaced stock packages {replaced}; added {added}.")
     return effective
+
+# ---------------------------------------------------------------------------
+# Mozilla's Firefox (packages.mozilla.org), the image's browser instead of
+# Debian's firefox-esr. The .deb and the repository's signing key are pinned
+# like the lfdevs bundle; the image carries Mozilla's apt source and key, so
+# apt and Discover update it as on a stock install. Every dependency resolves
+# inside the locked Debian closure (verified against its Provides).
+# ---------------------------------------------------------------------------
+
+MOZILLA_APT_URL = "https://packages.mozilla.org/apt"
+MOZILLA_FIREFOX_DEB = {
+    "url": f"{MOZILLA_APT_URL}/pool/mozilla/firefox_158.0~build2_arm64_cf523f4276139ced54b205479820b0aa.deb",
+    "filename": "firefox_158.0~build2_arm64.deb",
+    "size": 83136208,
+    "sha256": "d579b53ce7c31c624eb61079b8a0b4e9db3d97a8457257c42cac434064ee9726",
+}
+# Armored key with fingerprint 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3, the
+# one MOZILLA_FIREFOX_INSTALL in src/android/proot/setup.rs checks for.
+MOZILLA_KEY = {
+    "url": f"{MOZILLA_APT_URL}/repo-signing-key.gpg",
+    "filename": "packages.mozilla.org.asc",
+    "size": 1022,
+    "sha256": "3ecc63922b7795eb23fdc449ff9396f9114cb3cf186d6f5b53ad4cc3ebfbb11f",
+}
+
+
+def prepare_locked_packages_with_mozilla_firefox(base_locked: dict, cache_dir: Path) -> dict:
+    """Return the install set with Mozilla's verified firefox .deb added."""
+    deb = MOZILLA_FIREFOX_DEB
+    deb_path = download_pinned(deb["url"], cache_dir / deb["filename"], deb["size"], deb["sha256"])
+    fields = read_deb_control_fields(deb_path)
+    if fields["Package"] != "firefox" or fields["Architecture"] != "arm64":
+        raise ValueError(f"Unexpected package in Mozilla Firefox asset: {fields['Package']}")
+    effective = {name: entry for name, entry in base_locked.items() if name != "firefox-esr"}
+    effective["firefox"] = {
+        "Version": fields["Version"],
+        "Filename": deb["filename"],
+        "SHA256": deb["sha256"],
+        "Size": deb["size"],
+    }
+    print(f"Mozilla Firefox {fields['Version']} added; firefox-esr left out.")
+    return effective
+
+
+def write_mozilla_apt_source(output_dir: Path, cache_dir: Path) -> None:
+    key = MOZILLA_KEY
+    key_path = download_pinned(key["url"], cache_dir / key["filename"], key["size"], key["sha256"])
+    keyring = output_dir / "etc" / "apt" / "keyrings" / key["filename"]
+    keyring.parent.mkdir(parents=True, exist_ok=True)
+    keyring.write_bytes(key_path.read_bytes())
+    source = output_dir / "etc" / "apt" / "sources.list.d" / "mozilla.list"
+    source.write_text(
+        f"deb [arch=arm64 signed-by=/etc/apt/keyrings/{key['filename']}] {MOZILLA_APT_URL} mozilla main\n",
+        newline="\n", encoding="utf-8")
+
 
 if __name__ == "__main__":
     base_dir = Path(__file__).resolve().parent.parent

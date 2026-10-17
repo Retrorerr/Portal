@@ -636,15 +636,15 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
 #[test]
 fn production_runtime_artifact_matches_manifest_and_archive_verification() {
     let artifact = RuntimeArtifact::production();
-    assert_eq!(artifact.version, "debian13-arm64-2026.10.08.1");
+    assert_eq!(artifact.version, "debian13-arm64-2026.10.17.1");
     assert_eq!(
         artifact.sha256,
-        "5e3716bd35c81665964a8e01eb88724a0d8f193143885a08d09b224244f80d20"
+        "33cc5145bf02ef26f60a6901d5dc358ddff62a2db0b16535ac4a8ecc35d75332"
     );
-    assert_eq!(artifact.compressed_bytes, 917941452);
-    assert!(artifact.url.starts_with("https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.10.08.1/"));
+    assert_eq!(artifact.compressed_bytes, 944908960);
+    assert!(artifact.url.starts_with("https://github.com/Retrorerr/Portal/releases/download/runtime-debian13-arm64-2026.10.17.1/"));
     let archive_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target/portal-debian13-arm64-2026.10.08.1.tar.zst");
+        .join("target/portal-debian13-arm64-2026.10.17.1.tar.zst");
     if archive_path.exists() {
         artifact
             .verify(&archive_path)

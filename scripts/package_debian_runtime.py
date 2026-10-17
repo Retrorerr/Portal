@@ -19,6 +19,7 @@ from build_debian_rootfs import (
     build_rootfs,
     fetch_package_index,
     prepare_locked_packages_with_anland,
+    prepare_locked_packages_with_mozilla_firefox,
     resolve_dependencies,
     SEED_PACKAGES,
 )
@@ -28,7 +29,7 @@ LOCK = REPO / "assets/debian-runtime-packages.json"
 # New canonical runtime: Debian base plus the pinned lfdevs Anland KWin/XWayland
 # stack. Older versions (e.g. debian13-arm64-2026.09.05.3) are never rebuilt or
 # replaced; pass --version explicitly to target a different image.
-VERSION = "debian13-arm64-2026.10.08.1"
+VERSION = "debian13-arm64-2026.10.17.1"
 # The device decoder caps zstd windows at 2^27 (128 MiB); keep these in step
 # with ZSTD_WINDOW_LOG_MAX in src/core/provisioning.rs.
 ZSTD_LEVEL = 19
@@ -102,6 +103,7 @@ def build(output, refresh_lock=False, version=VERSION, with_anland=True):
         # runtime-packages.json below records the effective set, so the
         # archive always describes exactly what was installed.
         packages = prepare_locked_packages_with_anland(packages, cache)
+    packages = prepare_locked_packages_with_mozilla_firefox(packages, cache)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="portal-runtime-") as temporary:
         config = Path(temporary)

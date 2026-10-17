@@ -311,12 +311,6 @@
     "SHA256": "c8b505ce907c293031095b3a237cb231967963b1d5aa8b1699aff45ccec3158a",
     "Size": "695700"
   },
-  "firefox-esr": {
-    "Version": "140.12.0esr-1~deb13u1",
-    "Filename": "pool/main/f/firefox-esr/firefox-esr_140.12.0esr-1~deb13u1_arm64.deb",
-    "SHA256": "725598efcf320c6c81f3fdf79a9d1f9b08f9862c7bef8f42b5bd5048fbf9eac8",
-    "Size": "64434176"
-  },
   "fontconfig": {
     "Version": "2.15.0-2.3",
     "Filename": "pool/main/f/fontconfig/fontconfig_2.15.0-2.3_arm64.deb",
@@ -7156,5 +7150,143 @@
     "Filename": "pool/main/x/xdg-utils/xdg-utils_1.2.1-2_all.deb",
     "SHA256": "01dd31db093f1e810824519200112ec3fd447ba0341f7213244525eaa289355e",
     "Size": "75840"
+  },
+  "appstream": {
+    "Version": "1.0.5-1",
+    "Filename": "pool/main/a/appstream/appstream_1.0.5-1_arm64.deb",
+    "SHA256": "f1faaa6358303435cc9171a73ca07e4998214dda9197ea5feebabe0b2a06f86e",
+    "Size": "535908"
+  },
+  "apt-config-icons": {
+    "Version": "1.0.5-1",
+    "Filename": "pool/main/a/appstream/apt-config-icons_1.0.5-1_all.deb",
+    "SHA256": "f80f032836c6cf1e004de3696899b21b42a3453fa234a29623c053536b5c3a36",
+    "Size": "8236"
+  },
+  "flatpak": {
+    "Version": "1.16.6-1~deb13u1",
+    "Filename": "pool/main/f/flatpak/flatpak_1.16.6-1~deb13u1_arm64.deb",
+    "SHA256": "6e3bc163719631c4b4e3b7542c9732cf5b81864c3aaad9773684d7efc6b45f68",
+    "Size": "1468700"
+  },
+  "libavahi-glib1": {
+    "Version": "0.8-16",
+    "Filename": "pool/main/a/avahi/libavahi-glib1_0.8-16_arm64.deb",
+    "SHA256": "02262d470d2e7b9289b8a6f03c0d92a57f4c0c1f385c9c5b460ea56a64138c41",
+    "Size": "29696"
+  },
+  "libflatpak0": {
+    "Version": "1.16.6-1~deb13u1",
+    "Filename": "pool/main/f/flatpak/libflatpak0_1.16.6-1~deb13u1_arm64.deb",
+    "SHA256": "9ef71eea8e0c9f801539935a1a16d4122152257de77fdc3699dc805455175659",
+    "Size": "348748"
+  },
+  "libglib2.0-data": {
+    "Version": "2.84.4-3~deb13u3",
+    "Filename": "pool/main/g/glib2.0/libglib2.0-data_2.84.4-3~deb13u3_all.deb",
+    "SHA256": "bb9c50614316ccb8533d65f2f995e25d1275e0d83dcd2b675c2b6da8d620e55b",
+    "Size": "1286720"
+  },
+  "libmalcontent-0-0": {
+    "Version": "0.13.0-2+deb13u1",
+    "Filename": "pool/main/m/malcontent/libmalcontent-0-0_0.13.0-2+deb13u1_arm64.deb",
+    "SHA256": "3fdccdf7ec845766e2d3c3154185274d28e33db6dbdf557868dc353945466c09",
+    "Size": "21780"
+  },
+  "libmarkdown2": {
+    "Version": "2.2.7-2.1",
+    "Filename": "pool/main/d/discount/libmarkdown2_2.2.7-2.1_arm64.deb",
+    "SHA256": "ed3cc2a474fa3b2646b82015054e1fd1fb3b0137389741434c98a30958dd693b",
+    "Size": "33064"
+  },
+  "libostree-1-1": {
+    "Version": "2025.2-1",
+    "Filename": "pool/main/o/ostree/libostree-1-1_2025.2-1_arm64.deb",
+    "SHA256": "4661066e9aa7e5e332ef4e8ae9ba0f11838684bf47089ca95f049ae9cc922b78",
+    "Size": "314328"
+  },
+  "libpackagekit-glib2-18": {
+    "Version": "1.3.1-1+deb13u1",
+    "Filename": "pool/main/p/packagekit/libpackagekit-glib2-18_1.3.1-1+deb13u1_arm64.deb",
+    "SHA256": "38edb33fc56cdfb8a1eb5db52eee0410514217d024f4073bb3906cd030c93b7f",
+    "Size": "105152"
+  },
+  "libqcoro6core0t64": {
+    "Version": "0.12.0-1+deb13u1",
+    "Filename": "pool/main/q/qcoro/libqcoro6core0t64_0.12.0-1+deb13u1_arm64.deb",
+    "SHA256": "ad058f2205de715ed8a04de3692146e814cc9047e33192adefd684b83559becd",
+    "Size": "37448"
+  },
+  "libqt6webview6": {
+    "Version": "6.8.2-2",
+    "Filename": "pool/main/q/qt6-webview/libqt6webview6_6.8.2-2_arm64.deb",
+    "SHA256": "4d48ce900cfd27e972267e3e0ab505d0faa369b27424761d8ece792ce2239a58",
+    "Size": "21316"
+  },
+  "packagekit": {
+    "Version": "1.3.1-1+deb13u1",
+    "Filename": "pool/main/p/packagekit/packagekit_1.3.1-1+deb13u1_arm64.deb",
+    "SHA256": "91bbd203d2b713e634507b7a160595db5323a519fe338ccf61d80e3dd43934e2",
+    "Size": "628088"
+  },
+  "packagekit-tools": {
+    "Version": "1.3.1-1+deb13u1",
+    "Filename": "pool/main/p/packagekit/packagekit-tools_1.3.1-1+deb13u1_arm64.deb",
+    "SHA256": "421b9bc13a2c6a883c253c7989eaf0fc276c8c0dc9095307046c946afad616d2",
+    "Size": "30296"
+  },
+  "pkexec": {
+    "Version": "126-2",
+    "Filename": "pool/main/p/policykit-1/pkexec_126-2_arm64.deb",
+    "SHA256": "29a6271aee0fcb927a95dc77769e2bc80af07650c0868ac58486a1a37b5a5244",
+    "Size": "24392"
+  },
+  "plasma-discover": {
+    "Version": "6.3.6-1",
+    "Filename": "pool/main/p/plasma-discover/plasma-discover_6.3.6-1_arm64.deb",
+    "SHA256": "e93f4f7e82a5d792b641d818002a357c1c291901dea7aef607cb539a3db8205b",
+    "Size": "634864"
+  },
+  "plasma-discover-backend-flatpak": {
+    "Version": "6.3.6-1",
+    "Filename": "pool/main/p/plasma-discover/plasma-discover-backend-flatpak_6.3.6-1_arm64.deb",
+    "SHA256": "648bb038246438fef16bfae8a5beb6890f0151aebfdf06019e3ef49a7e778ef3",
+    "Size": "195236"
+  },
+  "plasma-discover-common": {
+    "Version": "6.3.6-1",
+    "Filename": "pool/main/p/plasma-discover/plasma-discover-common_6.3.6-1_all.deb",
+    "SHA256": "ea1de6517c96174da014988d1316b97facc201bb20b5013563f26923b0e6427a",
+    "Size": "516840"
+  },
+  "qml6-module-org-kde-kirigamiaddons-datetime": {
+    "Version": "1.7.0-1",
+    "Filename": "pool/main/k/kirigami-addons/qml6-module-org-kde-kirigamiaddons-datetime_1.7.0-1_arm64.deb",
+    "SHA256": "3b6c6c9178debaf79d45396aa3daf9517579fa66abd39783ed31b3a99bb8e7da",
+    "Size": "78608"
+  },
+  "qml6-module-org-kde-kirigamiaddons-formcard": {
+    "Version": "1.7.0-1",
+    "Filename": "pool/main/k/kirigami-addons/qml6-module-org-kde-kirigamiaddons-formcard_1.7.0-1_arm64.deb",
+    "SHA256": "c812ebb84d9c90b5bc054cd95a0570e70274fffb19206071ea1989dd8fab8dda",
+    "Size": "189412"
+  },
+  "qml6-module-org-kde-purpose": {
+    "Version": "6.13.0-1",
+    "Filename": "pool/main/k/kf6-purpose/qml6-module-org-kde-purpose_6.13.0-1_arm64.deb",
+    "SHA256": "8caa67ef436dfd03213d0e2b5e79330fc17d3563fdda09df5cdef719719701bd",
+    "Size": "116512"
+  },
+  "qml6-module-qtwebview": {
+    "Version": "6.8.2-2",
+    "Filename": "pool/main/q/qt6-webview/qml6-module-qtwebview_6.8.2-2_arm64.deb",
+    "SHA256": "1aad74f4fbfed31444043bd69b1456be1707585a2f361c7dc2aea092b6030bdf",
+    "Size": "34024"
+  },
+  "xdg-dbus-proxy": {
+    "Version": "0.1.6-1+deb13u1",
+    "Filename": "pool/main/x/xdg-dbus-proxy/xdg-dbus-proxy_0.1.6-1+deb13u1_arm64.deb",
+    "SHA256": "9662c9cff513b6467852b1b7cddd2720ae3e73ddfc471e58f2b856d57510db0c",
+    "Size": "24292"
   }
 }
