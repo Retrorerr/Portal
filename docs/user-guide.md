@@ -24,11 +24,13 @@ When you switch back to Portal from another Android app, the screen that restore
 - **Updates** covers Portal itself, its graphics driver layer, ChatGPT and Debian packages. Tap the capsule to see the list, then **Update**. The first time Portal updates itself, Android asks you to let Portal install apps; after that, Android asks to install the new version and closes Portal to finish. Nothing appears when everything is current.
 - **Apps** lists the optional apps from setup, such as Steam. Add or remove any of them at any time; installs carry on beside the running desktop.
 
-Portal 2.4.x predates the updater, so install 2.5.0 once by hand from the [latest release](https://github.com/Retrorerr/Portal/releases/latest). Later versions arrive in the app.
+Portal 2.4.x predates the updater, so install the current version once by hand from the [latest release](https://github.com/Retrorerr/Portal/releases/latest). Later versions arrive in the app.
 
 ## Installing software
 
-Portal uses Debian's standard package manager. You are the `desktop` user and `sudo` works without a password (the account has none), so ordinary Debian instructions apply as written:
+**Discover**, KDE's app store, is the easiest way: it installs Debian packages and Flatpak apps from Flathub, and shows updates for both. Flatpak apps run with their normal sandbox, and Portal installs its GPU driver for them during setup, so they are hardware accelerated from their first start.
+
+Under the hood Portal uses Debian's standard package manager. You are the `desktop` user and `sudo` works without a password (the account has none), so ordinary Debian instructions apply as written:
 
 ```bash
 sudo apt update
@@ -43,7 +45,7 @@ Portal keeps its own KWin and Xwayland builds pinned so a package upgrade cannot
 
 ### Firefox
 
-Setup installs Mozilla's own Firefox from Mozilla's APT repository, so the launcher shows a single Firefox. Debian's Firefox ESR stays installed, hidden from the menu, as a fallback; the `firefox-beta`, `firefox-devedition` and `firefox-nightly` channels install from the same repository. Portal applies the settings it needs for Android (GPU compositing on) to every Firefox under `/usr/lib`, at each launch and again after every `apt`/`dpkg` run, so a new install or upgrade needs nothing extra. **System Settings → Default Applications** chooses the default browser.
+Portal ships Mozilla's own Firefox from Mozilla's APT repository, so the launcher shows a single Firefox. Installs set up before 2.6 keep Debian's Firefox ESR installed, hidden from the menu, as a fallback; the `firefox-beta`, `firefox-devedition` and `firefox-nightly` channels install from the same repository. Portal applies the settings it needs for Android (GPU compositing on) to every Firefox under `/usr/lib`, at each launch and again after every `apt`/`dpkg` run, so a new install or upgrade needs nothing extra. **System Settings → Default Applications** chooses the default browser.
 
 Android's kernel has no user or PID namespaces, so PRoot emulates the parts browser sandboxes rely on. Chrome, Chromium, Electron apps and Firefox run with their own sandboxes on, as on a desktop Linux install, without `--no-sandbox`.
 
@@ -65,6 +67,10 @@ While Steam runs, a small handle sits at the top of the screen. One side shows o
 - **Game settings**: the video memory Windows games are told the GPU has and a **Frame-rate cap** for steadier pacing and less heat. These can also be kept per game, and apply the next time the game starts.
 
 Games and browser pages that lock the mouse pointer get Android pointer capture, so mouse look works with a physical mouse. On OnePlus, OPPO and realme devices, add Portal to the **Games** app so the screen is not held at a lower refresh rate.
+
+## Camera and microphone
+
+Linux apps see the tablet's cameras as ordinary video devices and its microphone as the default PipeWire source, so Firefox video calls, `ffmpeg` or `pw-record` work as on a desktop. Android asks for camera or microphone permission the first time an app opens one, and the device is released when the app stops using it.
 
 ## Android storage
 

@@ -83,18 +83,18 @@ The [user guide](docs/user-guide.md) covers updates, games, Firefox and troubles
 
 ## What you get
 
-**Out of the box:** Firefox, Dolphin (files), Konsole (terminal), Kate (text editor), Okular (documents), Gwenview (images), Ark (archives), KCalc and System Settings. Handy command-line tools are included too: `git`, `htop`, `nano`, `curl`, `ping`, `man` and friends.
+**Out of the box:** Firefox, Discover (app store), Dolphin (files), Konsole (terminal), Kate (text editor), Okular (documents), Gwenview (images), Ark (archives), KCalc and System Settings. Handy command-line tools are included too: `git`, `htop`, `nano`, `curl`, `ping`, `man` and friends.
 
 **Optional apps** (pick them during setup, or add and remove them later from the apps panel when you return to Portal): Claude, ChatGPT, LibreOffice, Thunderbird, GIMP, Krita, Inkscape, VLC and Steam.
 
-**Anything else** you can install the normal Debian way. You're the `desktop` user and `sudo` works without a password:
+**Anything else** you can get from Discover, which installs Debian packages and Flatpak apps from Flathub, or the normal Debian way. You're the `desktop` user and `sudo` works without a password:
 
 ```bash
 sudo apt update
 sudo apt install gnome-calculator
 ```
 
-Third-party `.deb` files and APT repos work too, as long as they're arm64. Graphical apps show up in the Plasma launcher after you install them.
+Third-party `.deb` files and APT repos work too, as long as they're arm64. Flatpak apps run with their normal sandbox and GPU acceleration. Graphical apps show up in the Plasma launcher after you install them.
 
 ## Gaming
 
@@ -112,6 +112,7 @@ Pick Steam during setup and you get the ARM64 Steam client running natively.
   - If the switch is greyed out, open Portal's **App info**, tap **⋮** and choose **Allow restricted settings**. Android 13 and newer does this for apps installed outside an app store.
 - **Tablet or desktop:** with no keyboard or mouse plugged in, Plasma switches to tablet mode and the Android keyboard pops up when you tap a text field. Plug in a keyboard and mouse and it goes back to desktop mode.
 - **Sound** goes through Android, and pausing and resuming Portal doesn't break it. You might notice a "Portal Audio (standby)" device in the volume list. That's what keeps apps connected while Portal is in the background, so leave it be.
+- **Camera and microphone:** Linux apps can use the tablet's cameras and microphone (video calls in Firefox, for example). Android asks for permission the first time an app opens one.
 - **Your Android files:** grant **All files access** if you want to open shared storage (Downloads, Pictures and so on) from Linux. Debian itself lives in Portal's private storage.
 - **Browsers:** Firefox, Chromium and Electron apps run with their normal sandboxes on, no `--no-sandbox` needed. The Firefox you get is Mozilla's own build from Mozilla's APT repo, and Portal sets up any Firefox you install automatically.
 - **Uninstalling Portal deletes the whole Linux install**, so copy out anything you care about first.
