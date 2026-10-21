@@ -45,3 +45,4 @@ test_apply_probe.tmp
 /scripts/test_turnip_dmabuf_export.py
 /scripts/test_turnip_export_dma.py
 /scripts/test_wayland_ahb_client
+/third_party/tawcroot/build/

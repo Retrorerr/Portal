@@ -67,3 +67,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libtalloc-dev lld
           scripts/proot-regression/run.sh
+
+  tawcroot:
+    name: tawcroot reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # r27c is NDK 27.2.12479018, the version the committed binary is built with.
+      - name: Download Android NDK r27c
+        run: |
+          curl -sSfL -o android-ndk-r27c-linux.zip https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q android-ndk-r27c-linux.zip
+          rm android-ndk-r27c-linux.zip
+
+      # The shipped libtawcroot.so must be exactly what third_party/tawcroot builds.
+      - name: Rebuild and compare libtawcroot.so
+        run: |
+          committed=$(sha256sum assets/libs/arm64-v8a/libtawcroot.so | cut -d' ' -f1)
+          ANDROID_NDK_HOME="$PWD/android-ndk-r27c" bash scripts/build-tawcroot.sh
+          rebuilt=$(sha256sum assets/libs/arm64-v8a/libtawcroot.so | cut -d' ' -f1)
+          echo "committed=$committed rebuilt=$rebuilt"
+          test "$committed" = "$rebuilt"

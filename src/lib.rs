@@ -67,6 +67,7 @@ pub mod android {
     }
     pub mod runtime {
         pub mod proot;
+        pub mod tawcroot;
     }
     pub mod utils {
         pub mod application_context;

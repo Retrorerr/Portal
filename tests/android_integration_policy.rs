@@ -68,7 +68,7 @@ use clipboard_policy::{
 fn optional_libreoffice_has_a_wayland_backend_and_guest_proc_version() {
     let proot = include_str!("../src/android/runtime/proot.rs");
     assert!(ANDROID_SETUP_SOURCE.contains("proc/.version"));
-    assert!(proot.contains("/proc/.version:/proc/version"));
+    assert!(proot.contains("{}/proc/.version\", rootfs_str),\n                Some(\"/proc/version\")"));
     // The package list lives in the optional-app allowlist; installs use it verbatim.
     assert!(include_str!("../src/core/install_plan.rs")
         .replace("\r\n", "\n")

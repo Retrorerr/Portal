@@ -22,7 +22,7 @@ use winit::platform::android::activity::AndroidApp;
 const MAX_CAPTURED_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_LINE_BYTES: usize = 64 * 1024;
 const SUPPORT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-const SUPPORT_CHECK_BINARY: &str = "ld-linux-aarch64.so.1";
+pub(super) const SUPPORT_CHECK_BINARY: &str = "ld-linux-aarch64.so.1";
 /// How long PRoot polls for the next tracee stop before it sleeps, in
 /// microseconds. Each traced syscall wakes PRoot, and waking an idle core
 /// costs more than PRoot's own work per stop. Guest syscalls come in
@@ -297,9 +297,29 @@ fn signal_process_group(process_group: Option<libc::pid_t>, signal: libc::c_int)
     unsafe { libc::kill(-process_group, signal) == 0 }
 }
 
+/// A `--bind` for PRoot or a `-b` for tawcroot; `dst` defaults to `src`.
+fn bind_arg(tawcroot: bool, src: &str, dst: Option<&str>, readonly: bool) -> Vec<String> {
+    let ro = if readonly { ":ro" } else { "" };
+    if tawcroot {
+        vec![
+            "-b".to_string(),
+            format!("{src}:{}{ro}", dst.unwrap_or(src)),
+        ]
+    } else {
+        match dst {
+            Some(dst) => vec![format!("--bind={src}:{dst}{ro}")],
+            None => vec![format!("--bind={src}{ro}")],
+        }
+    }
+}
+
 impl LinuxRuntime for PRootRuntime {
     fn engine_name(&self) -> &'static str {
-        "proot"
+        if super::tawcroot::selected() {
+            "tawcroot"
+        } else {
+            "proot"
+        }
     }
 
     fn rootfs_path(&self) -> &Path {
@@ -334,68 +354,108 @@ impl LinuxRuntime for PRootRuntime {
             PathBuf::from("/home").join(&user)
         };
         let working_dir = spec.working_dir.clone().unwrap_or(guest_home);
+        let tawcroot = super::tawcroot::selected();
+        let bind = |src: &str, dst: Option<&str>| bind_arg(tawcroot, src, dst, false);
 
-        remove_stale_proot_temporaries(&context.data_dir);
-        let mut process = Command::new(context.native_library_dir.join("libproot.so"));
-        process
-            .env(
-                "PROOT_LOADER",
-                context.native_library_dir.join("libproot_loader.so"),
-            )
-            .env("PROOT_TMP_DIR", &context.data_dir)
-            .env("PROOT_SPIN_US", PROOT_SPIN_US);
-
-        // link2symlink otherwise keeps a hard link's data beside its first
-        // name, so that directory cannot be removed while another link
-        // survives (a local `git clone` links every object of its source).
-        // A central directory, hidden by `-H`, keeps user trees removable;
-        // pairs created before this still resolve by their absolute paths.
-        let l2s_dir = self.rootfs.join(".proot.l2s");
-        match fs::create_dir_all(&l2s_dir) {
-            Ok(()) => {
-                process.env("PROOT_L2S_DIR", &l2s_dir);
-            }
-            Err(error) => log::warn!("PRoot link2symlink directory unavailable: {error}"),
-        }
-
-        // Game pads: `/dev/input` is Portal's pty-backed pads, and PRoot
-        // answers their evdev ioctls (see `android::gamepad`).
+        // Game pads: `/dev/input` is Portal's pty-backed pads, and the
+        // engine answers their evdev ioctls (see `android::gamepad`).
+        // tawcroot finds the registry beside the bound input directory.
         let pad_input = crate::android::gamepad::input_dir();
         let pad_registry = crate::android::gamepad::registry_dir();
-        let pads_ready = fs::create_dir_all(&pad_input).is_ok() && fs::create_dir_all(&pad_registry).is_ok();
-        if pads_ready {
-            process.env("PROOT_FAKE_EVDEV_DIR", &pad_registry);
-        }
+        let pads_ready =
+            fs::create_dir_all(&pad_input).is_ok() && fs::create_dir_all(&pad_registry).is_ok();
 
         let rootfs_str = self.rootfs.to_string_lossy().to_string();
+        let mut process;
+        // Without a marker the process-group kill still covers everything
+        // but daemons that called setsid.
+        let instance = tawcroot
+            .then(|| {
+                super::tawcroot::Instance::new()
+                    .inspect_err(|error| {
+                        log::warn!("No tawcroot instance marker for {command}: {error}")
+                    })
+                    .ok()
+            })
+            .flatten();
+        if tawcroot {
+            process = Command::new(super::tawcroot::binary());
+            process.arg("-r").arg(&self.rootfs);
+            if let Some(instance) = &instance {
+                process.args(bind_arg(
+                    true,
+                    &instance.bind_source().to_string_lossy(),
+                    Some(super::tawcroot::INSTANCE_GUEST_PATH),
+                    false,
+                ));
+            }
+            super::tawcroot::ensure_dev_links(&self.rootfs);
+            // PRoot emulates the guest umask from 022; tawcroot guests use
+            // the real one, and Android starts apps at 077.
+            #[cfg(target_os = "android")]
+            unsafe {
+                process.pre_exec(|| {
+                    libc::umask(0o022);
+                    Ok(())
+                });
+            }
+        } else {
+            remove_stale_proot_temporaries(&context.data_dir);
+            process = Command::new(context.native_library_dir.join("libproot.so"));
+            process
+                .env(
+                    "PROOT_LOADER",
+                    context.native_library_dir.join("libproot_loader.so"),
+                )
+                .env("PROOT_TMP_DIR", &context.data_dir)
+                .env("PROOT_SPIN_US", PROOT_SPIN_US);
+
+            // link2symlink otherwise keeps a hard link's data beside its first
+            // name, so that directory cannot be removed while another link
+            // survives (a local `git clone` links every object of its source).
+            // A central directory, hidden by `-H`, keeps user trees removable;
+            // pairs created before this still resolve by their absolute paths.
+            let l2s_dir = self.rootfs.join(".proot.l2s");
+            match fs::create_dir_all(&l2s_dir) {
+                Ok(()) => {
+                    process.env("PROOT_L2S_DIR", &l2s_dir);
+                }
+                Err(error) => log::warn!("PRoot link2symlink directory unavailable: {error}"),
+            }
+            if pads_ready {
+                process.env("PROOT_FAKE_EVDEV_DIR", &pad_registry);
+            }
+
+            process
+                .arg("-r")
+                .arg(&self.rootfs)
+                // Start every guest process in its Debian home directory unless a
+                // caller supplied an explicit working directory.  Merely setting
+                // PWD below does not change the kernel cwd, so Konsole and other
+                // GUI-launched clients otherwise inherit `/` from startplasma.
+                .arg("-w")
+                .arg(&working_dir)
+                .arg("-L")
+                // Hide PRoot's own `.proot-meta-file.*` (fake root) and
+                // `.proot.l2s.*` (link2symlink) bookkeeping from directory
+                // listings, so git, ripgrep and globbing tools never see or
+                // commit them. They stay reachable by name for PRoot itself.
+                .arg("-H")
+                .arg("--link2symlink")
+                .arg("--sysvipc")
+                .arg("--kill-on-exit")
+                .arg("--root-id");
+        }
 
         process
-            .arg("-r")
-            .arg(&self.rootfs)
-            // Start every guest process in its Debian home directory unless a
-            // caller supplied an explicit working directory.  Merely setting
-            // PWD below does not change the kernel cwd, so Konsole and other
-            // GUI-launched clients otherwise inherit `/` from startplasma.
-            .arg("-w")
-            .arg(&working_dir)
-            .arg("-L")
-            // Hide PRoot's own `.proot-meta-file.*` (fake root) and
-            // `.proot.l2s.*` (link2symlink) bookkeeping from directory
-            // listings, so git, ripgrep and globbing tools never see or
-            // commit them. They stay reachable by name for PRoot itself.
-            .arg("-H")
-            .arg("--link2symlink")
-            .arg("--sysvipc")
-            .arg("--kill-on-exit")
-            .arg("--root-id")
-            .arg("--bind=/dev")
-            .arg("--bind=/proc")
-            .arg("--bind=/sys")
-            .arg(format!("--bind={}/tmp:/dev/shm", rootfs_str))
-            .arg("--bind=/dev/tty:/dev/tty");
+            .args(bind("/dev", None))
+            .args(bind("/proc", None))
+            .args(bind("/sys", None))
+            .args(bind(&format!("{}/tmp", rootfs_str), Some("/dev/shm")))
+            .args(bind("/dev/tty", Some("/dev/tty")));
 
         if pads_ready {
-            process.arg(format!("--bind={}:/dev/input", pad_input.display()));
+            process.args(bind(&pad_input.display().to_string(), Some("/dev/input")));
         }
 
         // Game settings from Portal's game panel (gaming/GameSettings.kt),
@@ -404,50 +464,61 @@ impl LinuxRuntime for PRootRuntime {
         let game_settings = Path::new(config::APP_FILES_ROOT).join(GAME_SETTINGS_DIR);
         if self.rootfs.join("usr").is_dir()
             && fs::create_dir_all(&game_settings).is_ok()
-            && fs::create_dir_all(self.rootfs.join(GAME_SETTINGS_GUEST.trim_start_matches('/'))).is_ok()
+            && fs::create_dir_all(
+                self.rootfs
+                    .join(GAME_SETTINGS_GUEST.trim_start_matches('/')),
+            )
+            .is_ok()
         {
-            process.arg(format!(
-                "--bind={}:{}",
-                game_settings.display(),
-                GAME_SETTINGS_GUEST
+            process.args(bind(
+                &game_settings.display().to_string(),
+                Some(GAME_SETTINGS_GUEST),
             ));
         }
 
         if context.permission_all_files_access {
             process
-                .arg("--bind=/sdcard:/android")
-                .arg("--bind=/sdcard:/root/Android");
+                .args(bind("/sdcard", Some("/android")))
+                .args(bind("/sdcard", Some("/root/Android")));
         }
 
         process
-            .arg("--bind=/dev/urandom:/dev/random")
+            .args(bind("/dev/urandom", Some("/dev/random")))
             // Android denies unprivileged reads of /proc/version. The guest
             // already seeds this file; expose it through the same PRoot path
             // so ordinary Debian launchers can probe the kernel.
-            .arg(format!("--bind={}/proc/.version:/proc/version", rootfs_str))
-            .arg("--bind=/proc/self/fd:/dev/fd")
-            .arg("--bind=/proc/self/fd/0:/dev/stdin")
-            .arg("--bind=/proc/self/fd/1:/dev/stdout")
-            .arg("--bind=/proc/self/fd/2:/dev/stderr")
-            .arg(format!("--bind={}/proc/.sysctl_entry_cap_last_cap:/proc/sys/kernel/cap_last_cap", rootfs_str))
-            .arg(format!("--bind={}/proc/.sysctl_inotify_max_user_watches:/proc/sys/fs/inotify/max_user_watches", rootfs_str))
-            .arg(format!("--bind={}/sys/.empty:/sys/fs/selinux", rootfs_str));
+            .args(bind(
+                &format!("{}/proc/.version", rootfs_str),
+                Some("/proc/version"),
+            ));
+        if !tawcroot {
+            process
+                .arg("--bind=/proc/self/fd:/dev/fd")
+                .arg("--bind=/proc/self/fd/0:/dev/stdin")
+                .arg("--bind=/proc/self/fd/1:/dev/stdout")
+                .arg("--bind=/proc/self/fd/2:/dev/stderr");
+        }
+        process
+            .args(bind(
+                &format!("{}/proc/.sysctl_entry_cap_last_cap", rootfs_str),
+                Some("/proc/sys/kernel/cap_last_cap"),
+            ))
+            .args(bind(
+                &format!("{}/proc/.sysctl_inotify_max_user_watches", rootfs_str),
+                Some("/proc/sys/fs/inotify/max_user_watches"),
+            ))
+            .args(bind(
+                &format!("{}/sys/.empty", rootfs_str),
+                Some("/sys/fs/selinux"),
+            ));
 
-        for bind in &spec.extra_binds {
-            let bind_arg = if bind.readonly {
-                format!(
-                    "--bind={}:{}:ro",
-                    bind.host_path.display(),
-                    bind.guest_path.display()
-                )
-            } else {
-                format!(
-                    "--bind={}:{}",
-                    bind.host_path.display(),
-                    bind.guest_path.display()
-                )
-            };
-            process.arg(bind_arg);
+        for extra in &spec.extra_binds {
+            process.args(bind_arg(
+                tawcroot,
+                &extra.host_path.display().to_string(),
+                Some(&extra.guest_path.display().to_string()),
+                extra.readonly,
+            ));
         }
 
         #[cfg(target_os = "android")]
@@ -467,6 +538,9 @@ impl LinuxRuntime for PRootRuntime {
             });
         }
 
+        if tawcroot {
+            process.arg("--");
+        }
         process.arg("/usr/bin/env").arg("-i");
         if user == "root" {
             process.arg("HOME=/root");
@@ -489,8 +563,14 @@ impl LinuxRuntime for PRootRuntime {
 
         process.arg(format!("PWD={}", working_dir.display()));
 
+        let run_command = if tawcroot {
+            super::tawcroot::with_working_dir(&command, &working_dir)
+        } else {
+            command.clone()
+        };
+
         if user == "root" {
-            process.arg("sh").arg("-c").arg(&command);
+            process.arg("sh").arg("-c").arg(&run_command);
         } else if spec.system_services {
             // D-Bus and polkit tell clients apart by SO_PEERCRED, which
             // PRoot fakes only between processes it traces: the system bus
@@ -500,7 +580,7 @@ impl LinuxRuntime for PRootRuntime {
                 .arg("sh")
                 .arg("-c")
                 .arg(SESSION_WITH_SYSTEM_SERVICES)
-                .arg(&command)
+                .arg(&run_command)
                 .arg(&user);
         } else {
             process
@@ -510,7 +590,7 @@ impl LinuxRuntime for PRootRuntime {
                 .arg("--")
                 .arg("sh")
                 .arg("-c")
-                .arg(&command);
+                .arg(&run_command);
         }
 
         let mut child = process
@@ -596,6 +676,19 @@ impl LinuxRuntime for PRootRuntime {
 
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    // PRoot's --kill-on-exit: nothing the command started
+                    // outlives it. tawcroot has no tracer to do that.
+                    #[cfg(target_os = "android")]
+                    if tawcroot {
+                        signal_process_group(process_group, libc::SIGKILL);
+                        let killed = instance.as_ref().map_or(0, |i| i.kill_members());
+                        if killed > 0 {
+                            diagnostics::host_event(
+                                "guest-exit-sweep",
+                                &format!("command={command} killed={killed}"),
+                            );
+                        }
+                    }
                     if terminate_deadline.is_some() {
                         #[cfg(target_os = "android")]
                         let signalled_group = signal_process_group(process_group, libc::SIGKILL);
