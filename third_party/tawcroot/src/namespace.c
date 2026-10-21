@@ -26,36 +26,6 @@
 #endif
 struct tawc_namespace tawcroot_namespace;
 
-/* bubblewrap opens the maps relative to a /proc/self (or /proc) dirfd:
- * openat(openat(proc_fd, "self", O_PATH), "uid_map"). Rebuild the
- * absolute name from the dirfd's /proc link and route it as above. */
-long tawcroot_namespace_openat(int dirfd, const char *path, int flags)
-{
-    if (!tawcroot_namespace.user) return TAWC_ENOSYS;
-    if (path[0] == '/' || dirfd == AT_FDCWD) return tawcroot_namespace_open(path, flags);
-    if (dirfd < 0) return TAWC_ENOSYS;
-    char link[24] = "/proc/self/fd/", digits[12];
-    size_t n = 14, d = 0;
-    unsigned v = (unsigned)dirfd;
-    do { digits[d++] = (char)('0' + v % 10); v /= 10; } while (v);
-    while (d) link[n++] = digits[--d];
-    link[n] = 0;
-    char full[96];
-    long len = tawc_readlinkat(AT_FDCWD, link, full, 32);
-    if (len < 5 || len >= 32) return TAWC_ENOSYS;
-    full[len] = 0;
-    if (!tawc_starts_with(full, "/proc") || (full[5] && full[5] != '/')) return TAWC_ENOSYS;
-    for (const char *c = full + 6; len > 5 && *c; c++)
-        if (*c < '0' || *c > '9') return TAWC_ENOSYS;
-    full[len++] = '/';
-    for (const char *c = path; *c; c++) {
-        if ((size_t)len >= sizeof full - 1) return TAWC_ENOSYS;
-        full[len++] = *c;
-    }
-    full[len] = 0;
-    return tawcroot_namespace_open(full, flags);
-}
-
 int tawcroot_namespace_probe(const char *path)
 {
     return tawc_streq(path, "/proc/self/ns/user") ||
@@ -115,13 +85,72 @@ static long new_user(void)
 
 void tawcroot_namespace_restore(void)
 {
+    tawcroot_namespace.sysctl_fd1 = 0;  /* CLOEXEC: gone after exec */
     if (tawcroot_namespace.user)
         for (int i = 0; i < 3; ++i)
             (void)tawcroot_fd_record_reserved(tawcroot_namespace.maps[i]);
 }
 
+/* user.max_user_namespaces: per user namespace in the kernel, and
+ * unreadable on Android. Writes set the emulated limit (namespace_write). */
+static long userns_sysctl_open(int flags)
+{
+    struct tawc_namespace *ns = &tawcroot_namespace;
+    int cloexec = (flags & O_CLOEXEC) ? 1 : 0;
+    long fd = tawc_memfd_create("max_user_namespaces", 2 | cloexec);
+    if (fd < 0) return fd;
+    if ((flags & O_ACCMODE) == O_RDONLY) {
+        char text[16];
+        size_t n = 0;
+        uint32_t v = ns->userns_limited ? ns->userns_left : 63432;
+        char digits[12];
+        size_t d = 0;
+        do { digits[d++] = (char)('0' + v % 10); v /= 10; } while (v);
+        while (d) text[n++] = digits[--d];
+        text[n++] = '\n';
+        (void)tawc_write((int)fd, text, n);
+        (void)tawc_lseek((int)fd, 0, SEEK_SET);
+        return fd;
+    }
+    if (!ns->user) { tawc_close((int)fd); return TAWC_EPERM; }
+    /* The guest writes natively (write traps only reserved fds); our
+     * reserved dup reads the value back when a namespace is charged. */
+    long keep = tawc_fcntl((int)fd, F_DUPFD_CLOEXEC, 0);
+    if (keep >= 0) keep = tawcroot_fd_reserve((int)keep);
+    if (keep < 0) { tawc_close((int)fd); return keep; }
+    if (ns->sysctl_fd1) {
+        tawcroot_fd_forget_reserved(ns->sysctl_fd1 - 1);
+        tawc_close(ns->sysctl_fd1 - 1);
+    }
+    ns->sysctl_fd1 = (int32_t)keep + 1;
+    return fd;
+}
+
+/* Apply a value written to the sysctl since the last charge. */
+static void userns_sysctl_apply(void)
+{
+    struct tawc_namespace *ns = &tawcroot_namespace;
+    if (!ns->sysctl_fd1) return;
+    int fd = ns->sysctl_fd1 - 1;
+    char text[16];
+    long n = TAWC_RAW(TAWC_SYS_pread64, fd, (long)text, sizeof text - 1, 0, 0, 0);
+    if (n <= 0) return;
+    text[n] = 0;
+    (void)TAWC_RAW(TAWC_SYS_ftruncate, fd, 0, 0, 0, 0, 0);
+    uint64_t v = 0;
+    const char *t = text;
+    if (*t < '0' || *t > '9') return;
+    while (*t >= '0' && *t <= '9' && v <= 0x7fffffff) v = v * 10 + (uint64_t)(*t++ - '0');
+    if (v > 0x7fffffff) return;
+    if (!ns->userns_limited || v < ns->userns_left) ns->userns_left = (uint32_t)v;
+    ns->userns_limited = 1;
+}
+
 long tawcroot_namespace_open(const char *path, int flags)
 {
+    if (tawc_streq(path, "/proc/sys/user/max_user_namespaces") &&
+        !(flags & (O_CREAT | O_DIRECTORY | O_PATH)))
+        return userns_sysctl_open(flags);
     if (!tawcroot_namespace.user || !tawc_starts_with(path, "/proc/")) return TAWC_ENOSYS;
     const char *leaf = path + 6;
     if (tawc_starts_with(leaf, "self/")) leaf += 5;
@@ -158,10 +187,22 @@ long tawcroot_namespace_open(const char *path, int flags)
     return tawc_fcntl(fd, (flags & O_CLOEXEC) ? F_DUPFD_CLOEXEC : F_DUPFD, 0);
 }
 
+/* A user namespace counts against the limit set above it (ENOSPC). */
+static long charge_user(void)
+{
+    struct tawc_namespace *ns = &tawcroot_namespace;
+    userns_sysctl_apply();
+    if (!ns->userns_limited) return 0;
+    if (!ns->userns_left) return TAWC_ENOSPC;
+    ns->userns_left--;
+    return 0;
+}
+
 static long clone_namespace(const tawcroot_syscall_args *a, ucontext_t *uc)
 {
     unsigned long flags = (unsigned long)a->a;
     if (flags & (CLONE_VM | CLONE_THREAD)) return TAWC_EINVAL;
+    if ((flags & CLONE_NEWUSER) && charge_user() < 0) return TAWC_ENOSPC;
     if ((flags & CLONE_NEWUSER) && (flags & CLONE_FS)) return TAWC_EINVAL;
     if (flags & CLONE_FS) {
         long error = tawcroot_fs_share();
@@ -199,6 +240,7 @@ static long unshare_namespace(const tawcroot_syscall_args *a, ucontext_t *uc)
     if (!result && (flags & CLONE_NEWPID)) tawcroot_namespace.pid_pending = 1;
     if (!result && (flags & CLONE_NEWNET)) tawcroot_namespace.net = 1;
     if (!result && (flags & CLONE_FS)) tawcroot_fs_detach();
+    if (!result && (flags & CLONE_NEWUSER)) result = charge_user();
     if (!result && (flags & CLONE_NEWUSER)) result = new_user();
     return result;
 }

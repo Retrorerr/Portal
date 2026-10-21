@@ -23,6 +23,10 @@
 #include <linux/seccomp.h>
 #include <sys/mount.h>
 #include "path.h"
+#include "path_scratch.h"
+#include "io.h"
+#include "tawc_string.h"
+#include "tawc_uapi.h"
 
 #include "dispatch.h"
 #include "errno_neg.h"
@@ -348,18 +352,122 @@ static long handle_alarm(const tawcroot_syscall_args *args, ucontext_t *uc)
 }
 #endif
 
+/* A fresh, empty directory standing in for a tmpfs: <parent of the
+ * root>/.tawcroot-tmpfs/<pid>-<n>, outside the guest's view so no guest
+ * path aliases it. Portal clears the directory at session start. */
+static long make_tmpfs_dir(char *out, size_t cap, unsigned mode)
+{
+	static unsigned seq;
+	size_t n = tawcroot_rootfs_host_path_len;
+	while (n > 1 && tawcroot_rootfs_host_path[n - 1] != '/') n--;
+	if (n <= 1 || n + 64 >= cap) return TAWC_ENAMETOOLONG;
+	memcpy(out, tawcroot_rootfs_host_path, n);
+	size_t pos = n;
+	if (tawc_str_append(out, cap, &pos, ".tawcroot-tmpfs")) return TAWC_ENAMETOOLONG;
+	long e = TAWC_RAW(TAWC_SYS_mkdirat, AT_FDCWD, (long)out, 0755, 0, 0, 0);
+	if (e < 0 && e != TAWC_EEXIST) return e;
+	size_t base = pos;
+	for (int tries = 0; tries < 64; tries++) {
+		pos = base;
+		if (tawc_str_append(out, cap, &pos, "/") ||
+		    tawc_str_append_dec(out, cap, &pos, tawc_getpid()) ||
+		    tawc_str_append(out, cap, &pos, "-") ||
+		    tawc_str_append_dec(out, cap, &pos, (long)__atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED)))
+			return TAWC_ENAMETOOLONG;
+		e = TAWC_RAW(TAWC_SYS_mkdirat, AT_FDCWD, (long)out, 0700, 0, 0, 0);
+		if (e == TAWC_EEXIST) continue;
+		if (e < 0) return e;
+		/* mkdir is filtered by the real umask; set the mode outright. */
+		(void)TAWC_RAW(TAWC_SYS_fchmodat, AT_FDCWD, (long)out, mode & 07777, 0, 0, 0);
+		return (long)pos;
+	}
+	return TAWC_EEXIST;
+}
+
+/* "mode=<octal>" from a tmpfs option string; tmpfs defaults to 1777. */
+static unsigned tmpfs_mode(const char *data)
+{
+	char opts[256];
+	if (!data || tawc_copy_string_from_guest(opts, sizeof opts, data) < 0)
+		return 01777;
+	for (const char *p = opts; *p; p++) {
+		if ((p == opts || p[-1] == ',') && p[0] == 'm' && p[1] == 'o' &&
+		    p[2] == 'd' && p[3] == 'e' && p[4] == '=') {
+			unsigned m = 0;
+			for (p += 5; *p >= '0' && *p <= '7'; p++) m = m * 8 + (unsigned)(*p - '0');
+			return m;
+		}
+	}
+	return 01777;
+}
+
 static long handle_mount(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
-	/* A bounded path-view operation, not a kernel mount or security boundary.
-	 * Binds (recursive or not) enter this process's path view; everything
-	 * else — propagation changes, remounts, moves, proc/tmpfs/sysfs mounts —
-	 * succeeds without effect, as under PRoot. Sandboxes and `unshare
-	 * --mount-proc` set those up and then use the tree that is already
-	 * there; failing them aborted the whole tool. */
+	/* A bounded path-view operation, not a kernel mount or security
+	 * boundary (no CAP_SYS_ADMIN here). Binds enter this process's path
+	 * view, as do the filesystems sandboxes build their root from:
+	 * tmpfs is a fresh private directory, proc/sysfs/devpts the host's.
+	 * A bind remount sets the bind's read-only bit. Propagation
+	 * changes, moves and other filesystems succeed without effect, as
+	 * under PRoot: sandboxes and `unshare --mount-proc` set those up and
+	 * then use the tree that is already there; failing them aborted the
+	 * whole tool. */
 	unsigned long flags = (unsigned long)args->d;
-	if ((flags & MS_BIND) && !(flags & MS_REMOUNT))
-		return tawcroot_path_bind_guest((const char *)args->a, (const char *)args->b);
+	const char *target = (const char *)args->b;
+	if (!target) return TAWC_EFAULT;
+	if (flags & MS_REMOUNT) {
+		if (flags & MS_BIND)
+			return tawcroot_path_bind_set_ro(target, (flags & MS_RDONLY) != 0);
+		return 0;
+	}
+	if (flags & MS_BIND)
+		return tawcroot_path_bind_guest((const char *)args->a, target,
+						(flags & MS_REC) != 0);
+	if (flags & (MS_MOVE | MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE))
+		return 0;
+	char fstype[16];
+	if (!args->c || tawc_copy_string_from_guest(fstype, sizeof fstype,
+						    (const char *)args->c) < 0)
+		return 0;
+	int ro = (flags & MS_RDONLY) != 0;
+	if (tawc_streq(fstype, "proc")) return tawcroot_path_bind_host("/proc", target, ro);
+	if (tawc_streq(fstype, "sysfs")) return tawcroot_path_bind_host("/sys", target, ro);
+	if (tawc_streq(fstype, "devpts")) return tawcroot_path_bind_host("/dev/pts", target, ro);
+	if (tawc_streq(fstype, "tmpfs")) {
+		TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+		char *dir = scratch->buf[0];
+		long e = make_tmpfs_dir(dir, TAWCROOT_PATH_SCRATCH_SIZE,
+					tmpfs_mode((const char *)args->e));
+		if (e < 0) return e;
+		return tawcroot_path_bind_host(dir, target, ro);
+	}
+	return 0;
+}
+
+/* umount2: the bind mounted at `target` stops routing (MNT_DETACH: and
+ * the ones below it). A target outside the view or without a bind (an
+ * emulated propagation-only "mount") succeeds without effect. */
+static long handle_umount2(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	if (!args->a) return TAWC_EFAULT;
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *rel = scratch->buf[0], *abs = scratch->buf[1], *folded = scratch->buf[2];
+	const size_t cap = TAWCROOT_PATH_SCRATCH_SIZE;
+	long e = tawc_copy_string_from_guest(rel, cap, (const char *)args->a);
+	if (e < 0) return e;
+	size_t pos = 0;
+	if (rel[0] != '/') {
+		long cn = tawcroot_cwd_to_guest_abs(abs, cap);
+		if (cn < 0) return 0;
+		pos = (size_t)cn;
+		if (tawc_str_append(abs, cap, &pos, "/")) return 0;
+	}
+	if (tawc_str_append(abs, cap, &pos, rel)) return 0;
+	if (tawcroot_path_fold_absolute(abs, folded, cap) < 0) return 0;
+	/* The fold drops the leading '/'; "" is the root. */
+	if (folded[0]) tawcroot_path_unmount(folded, (args->b & MNT_DETACH) != 0);
 	return 0;
 }
 
@@ -424,23 +532,15 @@ void tawcroot_control_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_alarm,           handle_alarm);
 #endif
 
-	/* Defense-in-depth denials. Trapped so the guest can't mutate kernel
-	 * state our path-translation layer assumes is fixed: pivot_root would
-	 * desync our root-relative bookkeeping (we don't model mounts, so the
-	 * "pivot the rootfs onto a sibling mount" semantics have nothing to
-	 * pivot to); kernel mount/umount2 would tear down our setup binds (/dev/shm,
-	 * /proc, libhybris stage); unshare/setns would hand the guest a
+	/* Mount syscalls never reach the kernel: they would tear down our
+	 * setup binds (/dev/shm, /proc, libhybris stage) or hand the guest a
 	 * namespace where our fd-relative /proc walks no longer name what we
-	 * think they name. pivot_root stays -EPERM; mount, umount2, unshare
-	 * and setns are emulated (handle_mount, namespace.c) and never reach
-	 * the kernel's mount table.
-	 *
-	 * chroot is NOT in this list — it has its own handler in chroot.c
-	 * that swaps the root-view bookkeeping. */
-	tawcroot_dispatch_install(TAWC_SYS_pivot_root,      tawcroot_deny_eperm);
+	 * think they name. mount, umount2, unshare and setns are emulated on
+	 * the path view (handle_mount, namespace.c); pivot_root and chroot
+	 * swap its root (chroot.c). */
 	tawcroot_dispatch_install(TAWC_SYS_mount,           handle_mount);
-	/* PRoot parity: unmounts and namespace joins succeed without effect
-	 * (the setup binds stay; there are no other namespaces to join). */
-	tawcroot_dispatch_install(TAWC_SYS_umount2,         tawcroot_answer_zero);
+	/* PRoot parity: namespace joins succeed without effect (there are
+	 * no other namespaces to join). */
+	tawcroot_dispatch_install(TAWC_SYS_umount2,         handle_umount2);
 	tawcroot_dispatch_install(TAWC_SYS_setns,           tawcroot_answer_zero);
 }

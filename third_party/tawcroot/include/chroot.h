@@ -25,9 +25,7 @@
 
 /* Register the chroot dispatch entry. Called from
  * tawcroot_dispatch_init alongside the other registration entry
- * points. (pivot_root continues to deny with -EPERM via
- * `fake_eperm` in syscalls_control.c — different syscall, different
- * registration site.) */
+ * points; pivot_root is registered there too. */
 void tawcroot_chroot_register(void);
 long tawcroot_fs_share(void);
 void tawcroot_fs_detach(void);

@@ -275,6 +275,31 @@ static long open_emulated_leaf(int dirfd, const char *path, int flags,
 			   flags & ~(O_CREAT | O_EXCL), mode);
 }
 
+/* An O_PATH|O_NOFOLLOW fd opened through a bind keeps the guest name
+ * it was opened by (tawcroot_fd_name_note), for mounts onto it. */
+static void note_fd_name(int fd, int dirfd, const char *gpath)
+{
+	TAWCROOT_PATH_SCRATCH_AUTO(s);
+	const size_t cap = TAWCROOT_PATH_SCRATCH_SIZE;
+	char *rel = s->buf[0], *abs = s->buf[1], *name = s->buf[2];
+	if (tawc_copy_string_from_guest(rel, cap, gpath) < 0) return;
+	for (const char *c = rel; *c; c++)
+		if (c[0] == '.' && c[1] == '.' && (c == rel || c[-1] == '/'))
+			return;
+	size_t n = 0;
+	if (rel[0] != '/') {
+		long b = dirfd == AT_FDCWD ? tawcroot_cwd_to_guest_abs(abs, cap)
+					   : tawcroot_fd_to_guest_abs(dirfd, abs, cap);
+		if (b < 0) return;
+		n = (size_t)b;
+		if (tawc_str_append(abs, cap, &n, "/")) return;
+	}
+	if (tawc_str_append(abs, cap, &n, rel)) return;
+	name[0] = '/';
+	if (tawcroot_path_fold_absolute(abs, name + 1, cap - 1) < 0) return;
+	tawcroot_fd_name_note(fd, name);
+}
+
 static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
@@ -293,7 +318,15 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (!(flags & O_NOFOLLOW))
 		proc_exe_substitute(scratch, dirfd, path);
 	flags = tawcroot_gamepad_open_flags(path, flags);
-	long nsfd = tawcroot_namespace_openat(dirfd, path, flags);
+	/* The "/proc/..." name of a procfs path reached through a /proc
+	 * dirfd or another bind of /proc (bubblewrap's proc_fd and
+	 * /oldroot/proc), for the synthesizers below. buf[3] is free
+	 * until translate_local. */
+	const char *pc = path;
+	if (tawcroot_proc_alias(dirfd, path, scratch->buf[3],
+				TAWCROOT_PATH_SCRATCH_SIZE) > 0)
+		pc = scratch->buf[3];
+	long nsfd = tawcroot_namespace_open(pc, flags);
 	if (nsfd != TAWC_ENOSYS) return nsfd;
 
 	/* /proc/self/maps and /proc/<our-pid>/maps: synthesize a shadow fd
@@ -343,7 +376,7 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if ((flags & O_ACCMODE) == O_RDONLY &&
 	    (flags & O_DIRECTORY) == 0 &&
 	    (flags & O_PATH) == 0) {
-		int kind = proc_shadow_classify_at(scratch, dirfd, path);
+		int kind = proc_shadow_classify_at(scratch, dirfd, pc);
 		if (kind != TAWCROOT_PROC_SHADOW_NONE) {
 			long shadow = tawcroot_proc_shadow_open(kind);
 			/* The shadow memfds are created MFD_CLOEXEC.
@@ -357,8 +390,9 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	}
 
 	if ((flags & O_ACCMODE) == O_RDONLY && (flags & O_PATH) == 0 &&
-	    tawc_starts_with(path, "/proc/")) {
-		long status = tawcroot_proc_status_open(path);
+	    tawc_starts_with(pc, "/proc/")) {
+		long status = tawcroot_proc_status_open(pc);
+		if (status == TAWC_ENOSYS) status = tawcroot_proc_mounts_open(pc);
 		if (status != TAWC_ENOSYS) {
 			if (status >= 0 && (flags & O_CLOEXEC) == 0)
 				(void)tawc_fcntl((int)status, F_SETFD, 0);
@@ -403,6 +437,17 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		e = translate_local(scratch, 0, dirfd, openat_mode(flags),
 				    TAWCROOT_PATH_INTENT_READ, &t);
 		if (e == TAWC_ENOENT) return TAWC_EROFS;
+	}
+	/* O_CREAT|O_EXCL looks the name up first: an existing one is
+	 * EEXIST on a read-only mount too (bubblewrap's mount points). */
+	if (e == TAWC_EROFS && (flags & O_CREAT) && (flags & O_EXCL)) {
+		struct fs_path x;
+		struct stat st;
+		if (translate_local(scratch, 0, dirfd, TAWCROOT_PATH_NOFOLLOW,
+				    TAWCROOT_PATH_INTENT_READ, &x) == 0 &&
+		    (x.is_root || TAWC_RAW(TAWC_SYS_fstatat, x.fd, (long)x.path,
+					   (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0) == 0))
+			return TAWC_EEXIST;
 	}
 	if (e) return e;
 
@@ -487,6 +532,15 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	    tawcroot_shm_migrate_guest_memfd(self_fd) == 0)
 		fd = tawc_openat(t.fd, p, flags, mode);
 
+	/* SELinux lets an app search host directories such as /dev but
+	 * not read them. A read-only directory open serves as a dirfd
+	 * (bubblewrap's mount point walk, *at calls, fchdir); an O_PATH
+	 * fd does all that, and listing it answers EACCES as before. */
+	if (fd == TAWC_EACCES && (flags & O_DIRECTORY) &&
+	    (flags & O_ACCMODE) == O_RDONLY && !(flags & (O_CREAT | O_PATH)))
+		fd = tawc_openat(t.fd, p, O_PATH | (flags & (O_DIRECTORY |
+				 O_NOFOLLOW | O_CLOEXEC)), 0);
+
 	/* Reactive O_NOFOLLOW: the kernel just ELOOPed a leaf symlink; if
 	 * it is an emulated name, open the object KEEPING O_NOFOLLOW — a
 	 * regular object opens (the name "is" a regular file), a symlink
@@ -500,6 +554,9 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	/* See the O_CREAT retry above: the leaf turned out not to exist,
 	 * so the create the guest asked for would have been real — EROFS. */
 	if (erofs_creat_retry && fd == TAWC_ENOENT) return TAWC_EROFS;
+	if (fd >= 0 && (flags & O_PATH) && (flags & O_NOFOLLOW) &&
+	    t.fd != tawcroot_rootfs_fd)
+		note_fd_name((int)fd, dirfd, gpath);
 	return fd;
 }
 
@@ -941,6 +998,9 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 	    tawcroot_compose_fd_relative(dirfd, path, composed,
 					 TAWCROOT_PATH_SCRATCH_SIZE) > 0)
 		cls = composed;
+	else if (tawcroot_proc_alias(dirfd, path, scratch->buf[3],
+				     TAWCROOT_PATH_SCRATCH_SIZE) > 0)
+		cls = scratch->buf[3];  /* /oldroot/proc/self/fd/N (bwrap) */
 	int link_cls = tawcroot_proc_link_classify(cls);
 	if (link_cls == TAWCROOT_PROC_LINK_EXE_SELF &&
 	    tawcroot_guest_exe_path_len > 0) {
@@ -1253,8 +1313,42 @@ static long handle_##name(const tawcroot_syscall_args *args,             \
 			(narg) > 5 ? args->f : 0);                        \
 }
 
-DECLARE_AT_PASS(mkdirat,    TAWC_SYS_mkdirat,    3, TAWCROOT_PATH_PARENT_CREATE,
-		TAWCROOT_PATH_INTENT_WRITE)
+/* mkdirat: like the kernel, an existing name in a read-only part of the
+ * view is EEXIST, not EROFS (bubblewrap ensures its mount points exist
+ * with mkdir and only accepts EEXIST, e.g. --ro-bind / / --proc /proc). */
+static long handle_mkdirat(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	int dirfd = (int)args->a;
+	const char *gpath = (const char *)(uintptr_t)args->b;
+	if (!gpath) return TAWC_EFAULT;
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	struct fs_path t;
+	long e = translate_at(scratch, 0, dirfd, gpath, TAWCROOT_PATH_PARENT_CREATE,
+			      TAWCROOT_PATH_INTENT_WRITE, &t);
+	if (e == TAWC_EROFS &&
+	    translate_at(scratch, 0, dirfd, gpath, TAWCROOT_PATH_NOFOLLOW,
+			 TAWCROOT_PATH_INTENT_READ, &t) == 0) {
+		struct stat st;
+		if (t.is_root || TAWC_RAW(TAWC_SYS_fstatat, t.fd, (long)t.path,
+					   (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0) == 0)
+			return TAWC_EEXIST;
+		return TAWC_EROFS;
+	}
+	if (e) return e;
+	/* A bind destination or the root always exists; the kernel finds
+	 * an existing name before checking write access (Android denies
+	 * that on host dirs such as /dev). */
+	if (t.is_root) return TAWC_EEXIST;
+	long r = TAWC_RAW(TAWC_SYS_mkdirat, t.fd, (long)t.path, args->c, 0, 0, 0);
+	if (r == TAWC_EACCES || r == TAWC_EPERM) {
+		struct stat st;
+		if (TAWC_RAW(TAWC_SYS_fstatat, t.fd, (long)t.path, (long)&st,
+			     AT_SYMLINK_NOFOLLOW, 0, 0) == 0)
+			return TAWC_EEXIST;
+	}
+	return r;
+}
 
 /* mknodat: translate and attempt the host call. FIFOs, sockets and
  * regular files succeed as the app uid; S_IFCHR/S_IFBLK needs
@@ -1430,6 +1524,9 @@ static long handle_unlinkat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		    tawcroot_linkstore_state() == TAWCROOT_STORE_READY)
 			return tawcroot_link_del(tok, t.fd, t.path);
 	}
+	if (!(flag & AT_REMOVEDIR) &&
+	    tawcroot_path_bind_unlink_guard(t.fd, t.path))
+		return 0;
 	long rv = TAWC_RAW(TAWC_SYS_unlinkat, t.fd, (long)t.path, flag, 0, 0, 0);
 	/* A directory the guest sees empty can still hold records (PRoot
 	 * leaves orphans behind): clear them and retry. */
@@ -3075,15 +3172,146 @@ static long handle_fremovexattr(const tawcroot_syscall_args *args,
 	return TAWC_RAW(TAWC_SYS_fremovexattr, args->a, args->b, 0, 0, 0, 0);
 }
 
+/* Is guest path `gabs` a symlink? Its target goes to `out` (length
+ * returned); <= 0 when it isn't one (or can't be read). Emulated hard
+ * links read as the regular files they stand for. */
+static long guest_symlink(const char *gabs, char *out, size_t cap)
+{
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *suffix = scratch->buf[0];
+	tawcroot_path_result r = tawcroot_path_translate(gabs, suffix,
+		TAWCROOT_PATH_SCRATCH_SIZE, TAWCROOT_PATH_NOFOLLOW,
+		TAWCROOT_PATH_INTENT_READ);
+	if (r.err || !suffix[0]) return 0;
+	long n = tawc_readlinkat(r.base_fd, suffix, out, cap - 1);
+	if (n <= 0) return 0;
+	out[n] = 0;
+	const char *tok;
+	if (tawcroot_store_link_fd >= 0 && tawcroot_link_target_is_token(out, &tok))
+		return 0;
+	return n;
+}
+
+#define TAWC_RESOLVE_NO_XDEV       0x01
+#define TAWC_RESOLVE_NO_MAGICLINKS 0x02
+#define TAWC_RESOLVE_NO_SYMLINKS   0x04
+#define TAWC_RESOLVE_BENEATH       0x08
+#define TAWC_RESOLVE_IN_ROOT       0x10
+#define TAWC_RESOLVE_CACHED        0x20
+
+/* openat2(2). bubblewrap 0.12 opens every sandbox source and destination
+ * with RESOLVE_IN_ROOT relative to /oldroot or /newroot, and Debian
+ * builds it without the openat fallback, so ENOSYS here is fatal. The
+ * kernel's own openat2 would resolve host paths, so the walk happens
+ * here on guest paths: start at the dirfd's place in the view, clamp
+ * ".." there, restart absolute symlinks there (RESOLVE_BENEATH refuses
+ * both with EXDEV), then open the result like openat. Magic links are
+ * left to that open; no caller we know sends one through openat2. */
+static long handle_openat2(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	struct { uint64_t flags, mode, resolve; } how;
+	size_t size = (size_t)args->d;
+	if (size < sizeof how) return TAWC_EINVAL;
+	if (size > 4096) return TAWC_E2BIG;
+	if (!args->b) return TAWC_EFAULT;
+	if (tawc_copy_from_guest(&how, sizeof how, (const void *)args->c) < 0)
+		return TAWC_EFAULT;
+	if ((how.flags >> 32) || (how.mode & ~(uint64_t)07777) ||
+	    (how.resolve & ~(uint64_t)0x3f) ||
+	    (how.mode && !(how.flags & (O_CREAT | __O_TMPFILE))))
+		return TAWC_EINVAL;
+	tawcroot_syscall_args o = *args;
+	o.nr = TAWC_SYS_openat;
+	o.c = (long)how.flags;
+	o.d = (long)how.mode;
+	uint64_t res = how.resolve;
+	if (!(res & (TAWC_RESOLVE_IN_ROOT | TAWC_RESOLVE_BENEATH | TAWC_RESOLVE_NO_SYMLINKS)))
+		return handle_openat(&o, uc);
+	int beneath = (res & TAWC_RESOLVE_BENEATH) && !(res & TAWC_RESOLVE_IN_ROOT);
+	int scoped = (res & (TAWC_RESOLVE_IN_ROOT | TAWC_RESOLVE_BENEATH)) != 0;
+
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *cur = scratch->buf[0], *rest = scratch->buf[1], *link = scratch->buf[2];
+	const size_t cap = TAWCROOT_PATH_SCRATCH_SIZE;
+	long e = tawc_copy_string_from_guest(rest, cap, (const char *)args->b);
+	if (e < 0) return e;
+	if (rest[0] == '/' && beneath) return TAWC_EXDEV;
+	if (rest[0] == '/' && !scoped) {
+		cur[0] = 0;
+	} else {
+		long n = (int)args->a == AT_FDCWD
+			? tawcroot_cwd_to_guest_abs(cur, cap)
+			: tawcroot_fd_to_guest_abs((int)args->a, cur, cap);
+		/* A dirfd outside the view: nothing to scope against. */
+		if (n < 0) return handle_openat(&o, uc);
+		if (n == 1) cur[0] = 0;  /* "/" */
+	}
+	size_t root_len = tawc_strlen(cur);
+	if (!scoped) root_len = 0;
+	int links = 0;
+	const char *p = rest;
+	while (*p) {
+		while (*p == '/') p++;
+		if (!*p) break;
+		const char *q = p;
+		while (*q && *q != '/') q++;
+		size_t cl = (size_t)(q - p);
+		if (cl == 1 && p[0] == '.') { p = q; continue; }
+		if (cl == 2 && p[0] == '.' && p[1] == '.') {
+			size_t n = tawc_strlen(cur);
+			if (n <= root_len) {
+				if (beneath) return TAWC_EXDEV;
+				p = q;
+				continue;
+			}
+			while (n > root_len && cur[n - 1] != '/') n--;
+			if (n > root_len) n--;
+			cur[n] = 0;
+			p = q;
+			continue;
+		}
+		size_t before = tawc_strlen(cur), n = before;
+		if (n + 1 + cl + 1 > cap) return TAWC_ENAMETOOLONG;
+		cur[n++] = '/';
+		memcpy(cur + n, p, cl);
+		cur[n + cl] = 0;
+		const char *after = q;
+		while (*after == '/') after++;
+		int last = !*after;
+		if (last && (how.flags & O_NOFOLLOW)) break;
+		long ln = guest_symlink(cur, link, cap);
+		if (ln <= 0) { p = q; continue; }
+		if (res & TAWC_RESOLVE_NO_SYMLINKS) return TAWC_ELOOP;
+		if (++links > 40) return TAWC_ELOOP;
+		/* Continue with the target, then whatever followed the link. */
+		cur[before] = 0;
+		if (link[0] == '/') {
+			if (beneath) return TAWC_EXDEV;
+			cur[root_len] = 0;
+		}
+		size_t m = (size_t)ln;
+		if (*q && (tawc_str_append(link, cap, &m, "/") ||
+			   tawc_str_append(link, cap, &m, q)))
+			return TAWC_ENAMETOOLONG;
+		memcpy(rest, link, m + 1);
+		p = rest;
+	}
+	if (!cur[0]) { cur[0] = '/'; cur[1] = 0; }
+	o.a = AT_FDCWD;
+	o.b = (long)cur;
+	long fd = handle_openat(&o, uc);
+	if (fd >= 0) tawcroot_fd_name_note((int)fd, cur);
+	return fd;
+}
+
 void tawcroot_fs_register(void)
 {
 	tawcroot_dispatch_install(TAWC_SYS_openat,      handle_openat);
 	tawcroot_dispatch_install(TAWC_SYS_fstatat,     handle_newfstatat);
 	tawcroot_dispatch_install(TAWC_SYS_fstat,       handle_fstat);
 	tawcroot_dispatch_install(TAWC_SYS_readlinkat,  handle_readlinkat);
-	/* openat2 returns ENOSYS for the caller's older-kernel path.
-	 * fchmodat2 is translated here, including O_PATH and empty paths. */
-	tawcroot_dispatch_install(TAWC_SYS_openat2,     tawcroot_deny_enosys);
+	/* fchmodat2 is translated here, including O_PATH and empty paths. */
+	tawcroot_dispatch_install(TAWC_SYS_openat2,     handle_openat2);
 	tawcroot_dispatch_install(TAWC_SYS_fchmodat2,   handle_fchmodat2);
 	tawcroot_dispatch_install(TAWC_SYS_inotify_add_watch,
 				  handle_inotify_add_watch);

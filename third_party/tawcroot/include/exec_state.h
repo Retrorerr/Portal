@@ -94,7 +94,8 @@ extern "C" {
 /* v8: namespace startup metadata, independent of guest environment. */
 /* v9: pinned executable descriptor survives the internal re-exec. */
 /* v10: transport the complete runtime bind table instead of truncating at 16. */
-#define TAWCROOT_EXEC_STATE_VERSION 11
+/* v12: 256 binds (a Flatpak sandbox mounts ~80 over the session's). */
+#define TAWCROOT_EXEC_STATE_VERSION 12
 /* MAX_ARGS at 4096: shell glob expansions, linker invocations, and
  * pacman hooks routinely pass hundreds-to-thousands of args; the kernel
  * allows ~2 MB of argv strings. MAX_ENV at 1024 covers the busiest bash

@@ -10,6 +10,7 @@
 #include "identity.h"
 #include "io.h"
 #include "loader_map.h"
+#include "namespace.h"
 #include "path.h"
 #include "proc_rewrite.h"
 #include "proc_shadow.h"
@@ -22,15 +23,15 @@
 
 /* Fast-out: does this guest-relative leaf even have a chance of
  * composing into a /proc/<x> path that we shadow? Legitimate first chars
- * are {b,c,s,t,m,e,l,u,v,digit} — covering "bus/" (pci/devices), "cwd",
+ * are {b,c,s,t,m,e,l,u,v,g,digit} — covering "bus/" (pci/devices), "cwd",
  * "self/", "stat", "sys/", "task/", "maps", "exe", "loadavg", "uptime",
- * "version", and numeric "<tid>/" forms. Anything else (the vast
+ * "version", "uid_map", "gid_map", and numeric "<tid>/" forms. Anything else (the vast
  * majority of fd-relative opens and stats — config files, dotfiles,
  * library names, etc.) skips the readlinkat. */
 int tawcroot_could_be_proc_relative(const char *p)
 {
 	char c = p[0];
-	return c == 'b' || c == 'c' || c == 's' || c == 't' || c == 'm' ||
+	return c == 'b' || c == 'c' || c == 's' || c == 't' || c == 'm' || c == 'g' ||
 	       c == 'e' || c == 'l' || c == 'u' || c == 'v' || c == 'n' ||
 	       (c >= '0' && c <= '9');
 }
@@ -932,4 +933,175 @@ long tawcroot_proc_shadow_access(int kind, int mode)
 	 * so there is no NOFOLLOW variant to consider. */
 	if (mode & (2 /*W_OK*/ | 1 /*X_OK*/)) return TAWC_EACCES;
 	return 0;
+}
+
+/* ---------- Canonical /proc names ----------
+ *
+ * The synthesizers key on "/proc/..." strings, but sandbox helpers reach
+ * procfs other ways: relative to a /proc dirfd (bubblewrap's proc_fd:
+ * openat(proc_fd, "self/mountinfo")), or through a second bind of host
+ * /proc (bwrap's /oldroot/proc and /newroot/proc). Writes the
+ * "/proc/..." name for those into `out` and returns its length; 0 when
+ * `path` is already canonical or not procfs at all. */
+long tawcroot_proc_alias(int dirfd, const char *path, char *out, size_t cap)
+{
+	if (path[0] == '/') {
+		if (tawc_starts_with(path, "/proc/") || tawc_streq(path, "/proc"))
+			return 0;
+		for (size_t i = 0; i < tawcroot_n_binds; i++) {
+			const struct tawcroot_bind *b = &tawcroot_binds[i];
+			if (!b->active || b->leaf[0] || b->src_len != 5 ||
+			    !tawc_starts_with(b->src, "/proc") || !b->dst_len)
+				continue;
+			const char *rest = path + 1;
+			size_t k = 0;
+			while (k < b->dst_len && rest[k] == b->dst[k]) k++;
+			if (k < b->dst_len || (rest[k] && rest[k] != '/')) continue;
+			size_t n = 0;
+			if (tawc_str_append(out, cap, &n, "/proc") ||
+			    tawc_str_append(out, cap, &n, rest + k))
+				return 0;
+			return (long)n;
+		}
+		return 0;
+	}
+	if (dirfd == AT_FDCWD || !tawcroot_could_be_proc_relative(path))
+		return 0;
+	long n = tawcroot_compose_fd_relative(dirfd, path, out, cap);
+	if (n <= 0 || !tawc_starts_with(out, "/proc/")) return 0;
+	return n;
+}
+
+/* ---------- /proc/self/mountinfo, /proc/self/mounts ----------
+ *
+ * Inside an emulated user namespace (sandbox helpers: bubblewrap,
+ * Flatpak), the mount table is the path view: the root plus every
+ * active bind, mount(2)-made ones included. bwrap re-reads mountinfo
+ * after each bind to find the mount it just made (bind-mount.c
+ * parse_mountinfo) and dies when it isn't listed; Android's own table
+ * names host paths the guest doesn't have. Outside a namespace the
+ * kernel's file is left alone. A bind's parent is the innermost earlier
+ * bind holding its mountpoint, as the kernel would record it. */
+
+static int mount_append(char *buf, size_t cap, size_t *pos, const char *s)
+{
+	while (*s) {
+		if (*pos + 1 >= cap) return -1;
+		buf[(*pos)++] = *s++;
+	}
+	return 0;
+}
+
+static int mount_append_path(char *buf, size_t cap, size_t *pos,
+			     const char *s, size_t len)
+{
+	if (*pos + 1 >= cap) return -1;
+	buf[(*pos)++] = '/';
+	for (size_t i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)s[i];
+		if (c == ' ' || c == '\t' || c == '\n' || c == '\\') {
+			if (*pos + 4 >= cap) return -1;
+			buf[(*pos)++] = '\\';
+			buf[(*pos)++] = (char)('0' + (c >> 6));
+			buf[(*pos)++] = (char)('0' + ((c >> 3) & 7));
+			buf[(*pos)++] = (char)('0' + (c & 7));
+		} else {
+			if (*pos + 1 >= cap) return -1;
+			buf[(*pos)++] = (char)c;
+		}
+	}
+	return 0;
+}
+
+static int mount_append_dec(char *buf, size_t cap, size_t *pos, unsigned v)
+{
+	char tmp[12];
+	size_t n = 0;
+	do { tmp[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+	if (*pos + n + 1 >= cap) return -1;
+	while (n) buf[(*pos)++] = tmp[--n];
+	return 0;
+}
+
+static int bind_under(const struct tawcroot_bind *outer,
+		      const struct tawcroot_bind *inner)
+{
+	return outer->dst_len < inner->dst_len &&
+	       memcmp(outer->dst, inner->dst, outer->dst_len) == 0 &&
+	       inner->dst[outer->dst_len] == '/';
+}
+
+long tawcroot_proc_mounts_open(const char *path)
+{
+	long tid;
+	const char *tail = strip_proc_pid_prefix(path, &tid);
+	if (!tail) return TAWC_ENOSYS;
+	int info = tawc_streq(tail, "mountinfo");
+	if (!info && !tawc_streq(tail, "mounts")) return TAWC_ENOSYS;
+	if (!tawcroot_namespace.user || !resolve_mine(tid)) return TAWC_ENOSYS;
+
+	size_t cap = (size_t)TAWCROOT_MAX_BINDS * 640 + 256;
+	long map = maps_mmap(cap);
+	if (map < 0) return map;
+	char *buf = (char *)map;
+	size_t pos = 0;
+	int bad = 0;
+	const char *root_opt = tawcroot_root_ro ? "ro" : "rw";
+	if (info) {
+		bad |= mount_append(buf, cap, &pos, "1 0 0:1 / / ");
+		bad |= mount_append(buf, cap, &pos, root_opt);
+		bad |= mount_append(buf, cap, &pos, ",relatime - rootfs rootfs ");
+	} else {
+		bad |= mount_append(buf, cap, &pos, "rootfs / rootfs ");
+	}
+	bad |= mount_append(buf, cap, &pos, root_opt);
+	bad |= mount_append(buf, cap, &pos, info ? "\n" : " 0 0\n");
+	for (size_t i = 0; i < tawcroot_n_binds && !bad; i++) {
+		const struct tawcroot_bind *b = &tawcroot_binds[i];
+		if (!b->active || !b->dst_len) continue;
+		const char *opt = b->read_only ? "ro" : "rw";
+		int proc = b->src_len == 5 && tawc_starts_with(b->src, "/proc");
+		const char *fs = proc ? "proc" : "none";
+		if (info) {
+			unsigned parent = 1;
+			size_t best = 0;
+			for (size_t j = 0; j < i; j++) {
+				const struct tawcroot_bind *o = &tawcroot_binds[j];
+				if (o->active && o->dst_len > best && bind_under(o, b)) {
+					best = o->dst_len;
+					parent = (unsigned)j + 2;
+				}
+			}
+			bad |= mount_append_dec(buf, cap, &pos, (unsigned)i + 2);
+			bad |= mount_append(buf, cap, &pos, " ");
+			bad |= mount_append_dec(buf, cap, &pos, parent);
+			bad |= mount_append(buf, cap, &pos, " 0:");
+			bad |= mount_append_dec(buf, cap, &pos, (unsigned)i + 2);
+			bad |= mount_append(buf, cap, &pos, " / ");
+			bad |= mount_append_path(buf, cap, &pos, b->dst, b->dst_len);
+			bad |= mount_append(buf, cap, &pos, " ");
+			bad |= mount_append(buf, cap, &pos, opt);
+			bad |= mount_append(buf, cap, &pos, ",relatime - ");
+			bad |= mount_append(buf, cap, &pos, fs);
+			bad |= mount_append(buf, cap, &pos, " ");
+			bad |= mount_append(buf, cap, &pos, fs);
+			bad |= mount_append(buf, cap, &pos, " ");
+			bad |= mount_append(buf, cap, &pos, opt);
+			bad |= mount_append(buf, cap, &pos, "\n");
+		} else {
+			bad |= mount_append(buf, cap, &pos, fs);
+			bad |= mount_append(buf, cap, &pos, " ");
+			bad |= mount_append_path(buf, cap, &pos, b->dst, b->dst_len);
+			bad |= mount_append(buf, cap, &pos, " ");
+			bad |= mount_append(buf, cap, &pos, fs);
+			bad |= mount_append(buf, cap, &pos, " ");
+			bad |= mount_append(buf, cap, &pos, opt);
+			bad |= mount_append(buf, cap, &pos, " 0 0\n");
+		}
+	}
+	long fd = bad ? TAWC_ENOMEM
+		      : memfd_from_bytes(info ? "tawcroot-mountinfo" : "tawcroot-mounts",
+					 buf, pos);
+	tawc_munmap(buf, cap);
+	return fd;
 }

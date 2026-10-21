@@ -452,6 +452,12 @@ static long handle_getdents64(const tawcroot_syscall_args *args,
 	unsigned int count = (unsigned int)args->c;
 
 	long n = getdents64_meta_batch(fd, buf, count);
+	/* An unreadable host directory opened as O_PATH (handle_openat's
+	 * EACCES fallback): listing it is what SELinux refused. */
+	if (n == TAWC_EBADF) {
+		long fl = tawc_fcntl(fd, F_GETFL, 0);
+		if (fl >= 0 && (fl & O_PATH)) return TAWC_EACCES;
+	}
 	if (n <= 0 || tawcroot_n_reserved_fds == 0) return n;
 
 	/* Classify the dirfd via its /proc link (one readlinkat per

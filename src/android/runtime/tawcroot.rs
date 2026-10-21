@@ -29,6 +29,7 @@ const ENGINE_CHOICE_FILE: &str = "guest-engine";
 const ENGINE_BINARY: &str = "libtawcroot.so";
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(10);
 const INSTANCES_DIR: &str = "tawcroot-instances";
+const TMPFS_DIR: &str = ".tawcroot-tmpfs";
 /// Where an instance's marker directory appears in the guest. Absent from
 /// the rootfs, so it never shows up in a listing of `/`.
 pub const INSTANCE_GUEST_PATH: &str = "/.tawcroot-instance";
@@ -141,8 +142,11 @@ impl Instance {
         let root = Path::new(config::APP_FILES_ROOT).join(INSTANCES_DIR);
         // Markers left by an earlier app process: Android killed their
         // holders with it.
+        // So are the private tmpfs directories their sandboxes mounted
+        // (tawcroot makes them beside the rootfs).
         SWEPT.get_or_init(|| {
             let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_dir_all(Path::new(config::APP_FILES_ROOT).join(TMPFS_DIR));
         });
         let dir = root.join(format!(
             "{}-{}",

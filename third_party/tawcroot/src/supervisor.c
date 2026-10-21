@@ -177,6 +177,7 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 	 * a missing/uncreatable store degrades to the v1 link fallback.
 	 * Runs the O(1) session-start intent check when the store exists. */
 	tawcroot_linkstore_configure(args->store_host_path);
+	tawcroot_path_pin_store_bind();
 
 	/* (6) Memoise well-known guest paths and initialise the dispatch
 	 * table BEFORE installing the handler. The handler reads both. */

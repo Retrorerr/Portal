@@ -144,7 +144,7 @@ extern size_t tawcroot_rootfs_host_path_len;
  *
  * Fixed size — no malloc reachable from the handler. The exec-state
  * transport uses this same limit, including nested runtime views. */
-#define TAWCROOT_MAX_BINDS 128
+#define TAWCROOT_MAX_BINDS 256
 
 struct tawcroot_bind {
 	int    src_fd;               /* O_PATH directory anchor */
@@ -155,6 +155,10 @@ struct tawcroot_bind {
 	                              * centrally in path_orchestrate.c).
 	                              * Survives chroot re-anchoring (structs
 	                              * are edited in place). */
+	int    pinned;               /* 1 → the link store's view (see
+	                              * tawcroot_path_pin_store_bind): fixed
+	                              * at /.tawcroot-link, untouched by
+	                              * chroot, pivot_root, mount, umount.   */
 	int    active;               /* 0 → ignored by every iterator; the
 	                              * bind has been re-anchored out of the
 	                              * current root view by chroot. The
@@ -210,9 +214,20 @@ long tawcroot_pseudo_root_ensure(void);
 int  tawcroot_pseudo_root_get(void);
 void tawcroot_pseudo_root_adopt(int fd);
 
-/* Startup-only, process-local bind. Both names are resolved in the
- * current guest view; no kernel mount or namespace is created. */
-long tawcroot_path_bind_guest(const char *source, const char *target);
+/* mount(2) emulation, process-local: no kernel mount or namespace is
+ * created. bind_guest binds a guest source (recursive: its submounts
+ * too); bind_host a host path (procfs, tmpfs dirs). A new mount covers
+ * the binds at or below its target. bind_set_ro is a bind remount;
+ * unmount deactivates the bind at `dst` (no leading '/'), detach also
+ * those below. bind_unlink_guard moves an unlinked bind source aside
+ * (1 = done; the caller skips its unlink). */
+long tawcroot_path_bind_guest(const char *source, const char *target,
+			      int recursive);
+long tawcroot_path_bind_host(const char *src_host, const char *target,
+			     int read_only);
+long tawcroot_path_bind_set_ro(const char *target, int read_only);
+void tawcroot_path_unmount(const char *dst, int detach);
+int  tawcroot_path_bind_unlink_guard(int dirfd, const char *name);
 
 /* Re-anchor every bind in `binds[0..n_binds]` for a chroot to
  * `new_root_host`.
@@ -271,6 +286,8 @@ long tawcroot_proc_fd_to_host_path(int fd, char *out, size_t out_cap);
  * The fd may point into the rootfs or an active bind source. Output starts
  * with "/" and is NUL-terminated. */
 long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap);
+/* Remember the guest name `fd` was opened by (see path.c). */
+void tawcroot_fd_name_note(int fd, const char *guest_abs);
 
 /* Resolve a guest name without exposing a hardlink's store object. */
 long tawcroot_path_guest_name(const char *path, char *out, size_t out_cap);
@@ -286,6 +303,13 @@ long tawcroot_path_route_to_guest(int base_fd, const char *suffix,
  * getcwd, and relative-path cwd resolution so all three agree on what
  * "inside the view" means — getcwd previously matched only the rootfs
  * prefix, so a chdir into a bind dst broke every relative path. */
+/* Bind the hardlink store's link objects read-only at /.tawcroot-link
+ * (once; an inherited bind is re-pinned). An fd on an emulated
+ * hardlink names its link object, and /proc/self/fd/<n> must read back
+ * as a guest path every view can open (bubblewrap realpaths it, then
+ * reopens it from its pivoted root). */
+void tawcroot_path_pin_store_bind(void);
+
 long tawcroot_host_path_to_guest_abs(const char *host, size_t n,
 				     char *out, size_t out_cap);
 

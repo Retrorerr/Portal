@@ -213,7 +213,7 @@ long tawcroot_path_binds_reanchor(struct tawcroot_bind *binds, size_t n_binds,
 	long worst = 0;
 	for (size_t i = 0; i < n_binds; i++) {
 		struct tawcroot_bind *b = &binds[i];
-		if (!b->active) continue;
+		if (!b->active || b->pinned) continue;
 
 		/* Compose old host path = cur_root + "/" + dst. We don't
 		 * actually materialise the full string; just compare in

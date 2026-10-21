@@ -228,7 +228,94 @@ static long handle_chroot(const tawcroot_syscall_args *args, ucontext_t *uc)
     return result;
 }
 
+/* pivot_root(new_root, put_old), as sandboxes build their root
+ * (bubblewrap: pivot into a tmpfs with the old root at "oldroot", bind
+ * from /oldroot into /newroot, detach oldroot, then pivot_root(".",
+ * ".") into newroot). The view's root becomes new_root, as chroot; the
+ * old view (its root and every bind outside new_root) moves to put_old.
+ * put_old == new_root stacks the old root on the new one, which the
+ * caller detaches at once: that is a chroot. Not supported between
+ * CLONE_FS peers. */
+static long handle_pivot_root(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	if (!args->a || !args->b) return TAWC_EFAULT;
+	if (shared) return TAWC_EINVAL;
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *guest = scratch->buf[0], *put = scratch->buf[1];
+	char *rel = scratch->buf[2], *abs = scratch->buf[3];
+	const size_t cap = TAWCROOT_PATH_SCRATCH_SIZE;
+	int ro = 0;
+	long fd = open_chroot_target((void *)(uintptr_t)args->a, &ro, guest);
+	if (fd < 0) return fd;
+	long e = tawc_copy_string_from_guest(rel, cap, (const char *)args->b);
+	size_t pos = 0;
+	if (e >= 0 && rel[0] != '/') {
+		e = tawcroot_cwd_to_guest_abs(abs, cap);
+		if (e >= 0) {
+			pos = (size_t)e;
+			e = tawc_str_append(abs, cap, &pos, "/");
+		}
+	}
+	if (e >= 0) e = tawc_str_append(abs, cap, &pos, rel);
+	if (e >= 0) e = tawcroot_path_fold_absolute(abs, put, cap);
+	if (!guest[0] || guest[0] != '/') e = TAWC_EINVAL;
+	if (e < 0) {
+		tawc_close((int)fd);
+		return e;
+	}
+	/* put (folded) and nr carry no leading '/'. */
+	const char *nr = guest + 1;
+	size_t nl = strlen(nr);
+	if (tawc_streq(put, nr)) return apply_root(fd, ro, guest);
+
+	/* put_old must lie below new_root. */
+	if (!put[0] || (nl && (memcmp(put, nr, nl) != 0 || put[nl] != '/'))) {
+		tawc_close((int)fd);
+		return TAWC_EINVAL;
+	}
+	/* Move the old view under put_old (still in old coordinates, so
+	 * apply_root's re-anchoring keeps it): binds outside new_root... */
+	for (size_t i = 0; i < tawcroot_n_binds; i++) {
+		struct tawcroot_bind *b = &tawcroot_binds[i];
+		if (!b->active || b->pinned) continue;
+		if (nl && b->dst_len >= nl && memcmp(b->dst, nr, nl) == 0 &&
+		    (b->dst[nl] == '/' || b->dst[nl] == 0))
+			continue;
+		size_t n = 0;
+		char *d = abs;
+		if (tawc_str_append(d, cap, &n, put) ||
+		    tawc_str_append(d, cap, &n, "/") ||
+		    tawc_str_append(d, cap, &n, b->dst) || n >= sizeof b->dst) {
+			b->active = 0;
+			continue;
+		}
+		memcpy(b->dst, d, n + 1);
+		b->dst_len = n;
+	}
+	/* ...and the old root itself. */
+	e = tawcroot_path_add_bind(tawcroot_rootfs_host_path, put, tawcroot_root_ro);
+	if (e < 0) {
+		tawc_close((int)fd);
+		return e;
+	}
+	/* The pinned link-store view stays at the new root and also shows
+	 * under put_old, where the caller reopens its sources from. */
+	for (size_t i = 0; i < tawcroot_n_binds; i++) {
+		struct tawcroot_bind *b = &tawcroot_binds[i];
+		if (!b->active || !b->pinned) continue;
+		size_t n = 0;
+		if (!tawc_str_append(abs, cap, &n, put) &&
+		    !tawc_str_append(abs, cap, &n, "/") &&
+		    !tawc_str_append(abs, cap, &n, b->dst))
+			(void)tawcroot_path_add_bind(b->src, abs, 1);
+		break;
+	}
+	return apply_root(fd, ro, guest);
+}
+
 void tawcroot_chroot_register(void)
 {
 	tawcroot_dispatch_install(TAWC_SYS_chroot, handle_chroot);
+	tawcroot_dispatch_install(TAWC_SYS_pivot_root, handle_pivot_root);
 }
