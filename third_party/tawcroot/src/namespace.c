@@ -26,6 +26,36 @@
 #endif
 struct tawc_namespace tawcroot_namespace;
 
+/* bubblewrap opens the maps relative to a /proc/self (or /proc) dirfd:
+ * openat(openat(proc_fd, "self", O_PATH), "uid_map"). Rebuild the
+ * absolute name from the dirfd's /proc link and route it as above. */
+long tawcroot_namespace_openat(int dirfd, const char *path, int flags)
+{
+    if (!tawcroot_namespace.user) return TAWC_ENOSYS;
+    if (path[0] == '/' || dirfd == AT_FDCWD) return tawcroot_namespace_open(path, flags);
+    if (dirfd < 0) return TAWC_ENOSYS;
+    char link[24] = "/proc/self/fd/", digits[12];
+    size_t n = 14, d = 0;
+    unsigned v = (unsigned)dirfd;
+    do { digits[d++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (d) link[n++] = digits[--d];
+    link[n] = 0;
+    char full[96];
+    long len = tawc_readlinkat(AT_FDCWD, link, full, 32);
+    if (len < 5 || len >= 32) return TAWC_ENOSYS;
+    full[len] = 0;
+    if (!tawc_starts_with(full, "/proc") || (full[5] && full[5] != '/')) return TAWC_ENOSYS;
+    for (const char *c = full + 6; len > 5 && *c; c++)
+        if (*c < '0' || *c > '9') return TAWC_ENOSYS;
+    full[len++] = '/';
+    for (const char *c = path; *c; c++) {
+        if ((size_t)len >= sizeof full - 1) return TAWC_ENOSYS;
+        full[len++] = *c;
+    }
+    full[len] = 0;
+    return tawcroot_namespace_open(full, flags);
+}
+
 int tawcroot_namespace_probe(const char *path)
 {
     return tawc_streq(path, "/proc/self/ns/user") ||
@@ -122,7 +152,8 @@ long tawcroot_namespace_open(const char *path, int flags)
         (void)tawc_fcntl((int)copy, 1033, 8); /* F_ADD_SEALS, F_SEAL_WRITE */
         return copy;
     }
-    if ((flags & O_ACCMODE) != O_WRONLY) return TAWC_EINVAL;
+    /* Write-only or read-write (bubblewrap): both write the map. */
+    if ((flags & O_ACCMODE) == O_ACCMODE) return TAWC_EINVAL;
     (void)tawc_lseek(fd, 0, SEEK_SET);
     return tawc_fcntl(fd, (flags & O_CLOEXEC) ? F_DUPFD_CLOEXEC : F_DUPFD, 0);
 }
@@ -142,6 +173,7 @@ static long clone_namespace(const tawcroot_syscall_args *a, ucontext_t *uc)
         if ((flags & CLONE_NEWPID) || tawcroot_namespace.pid_pending)
             tawcroot_namespace.init_pid = (int)tawc_getpid();
         tawcroot_namespace.pid_pending = 0;
+        if (flags & CLONE_NEWNET) tawcroot_namespace.net = 1;
         if ((flags & CLONE_NEWUSER) && new_user() < 0) tawc_exit_group(125);
         if (a->b) {
 #if defined(__aarch64__)
@@ -165,6 +197,7 @@ static long unshare_namespace(const tawcroot_syscall_args *a, ucontext_t *uc)
     if (flags & ~(NS_FLAGS | CLONE_NEWTIME | real)) return TAWC_EINVAL;
     long result = (flags & real) ? TAWC_RAW(TAWC_SYS_unshare, flags & real, 0, 0, 0, 0, 0) : 0;
     if (!result && (flags & CLONE_NEWPID)) tawcroot_namespace.pid_pending = 1;
+    if (!result && (flags & CLONE_NEWNET)) tawcroot_namespace.net = 1;
     if (!result && (flags & CLONE_FS)) tawcroot_fs_detach();
     if (!result && (flags & CLONE_NEWUSER)) result = new_user();
     return result;

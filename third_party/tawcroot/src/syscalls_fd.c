@@ -740,6 +740,53 @@ static long handle_tcsets2_fallback(long fd, unsigned int cmd, long arg)
 	                (long)legacy, (long)buf, 0, 0, 0);
 }
 
+#define TAWC_SIOCGIFINDEX 0x8933u
+#define TAWC_IFNAMSIZ     16
+
+/* SIOCGIFINDEX: Android's xperms deny it (EACCES) on AF_UNIX and netlink
+ * sockets, which glibc's if_nametoindex() and bubblewrap's loopback
+ * setup use, so Flatpak apps die at "loopback: Failed to look up lo".
+ * Retry on a private AF_INET socket, then sysfs, and answer loopback
+ * with index 1 as every Linux kernel numbers it (PRoot does the same).
+ * Only ifr_name is read and ifr_ifindex written, both at fixed offsets. */
+static long handle_siocgifindex_fallback(long arg)
+{
+	char ifr[TAWC_IFNAMSIZ + 4];
+	if (tawc_copy_from_guest(ifr, TAWC_IFNAMSIZ, (const void *)arg) < 0)
+		return TAWC_EFAULT;
+	ifr[TAWC_IFNAMSIZ - 1] = 0;
+	for (const char *c = ifr; *c; c++)
+		if (*c == '/') return -19 /* ENODEV */;
+
+	int index = 0;
+	long s = TAWC_RAW(TAWC_SYS_socket, 2 /* AF_INET */,
+	                  2 /* SOCK_DGRAM */ | 02000000 /* SOCK_CLOEXEC */, 0, 0, 0, 0);
+	if (s >= 0) {
+		if (TAWC_RAW(TAWC_SYS_ioctl, s, (long)TAWC_SIOCGIFINDEX,
+		             (long)ifr, 0, 0, 0) == 0)
+			index = *(int *)(void *)(ifr + TAWC_IFNAMSIZ);
+		tawc_close((int)s);
+	}
+	if (index <= 0) {
+		char path[64] = "/sys/class/net/";
+		size_t n = 15;
+		for (const char *c = ifr; *c; c++) path[n++] = *c;
+		for (const char *c = "/ifindex"; *c; c++) path[n++] = *c;
+		path[n] = 0;
+		long f = tawc_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+		if (f >= 0) {
+			char num[16];
+			long got = tawc_read((int)f, num, sizeof num - 1);
+			tawc_close((int)f);
+			for (long i = 0; i < got && num[i] >= '0' && num[i] <= '9'; i++)
+				index = index * 10 + (num[i] - '0');
+		}
+	}
+	if (index <= 0 && tawc_streq(ifr, "lo")) index = 1;
+	if (index <= 0) return TAWC_EACCES;
+	return tawc_copy_to_guest((char *)arg + TAWC_IFNAMSIZ, &index, sizeof index);
+}
+
 static long handle_ioctl(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
@@ -748,6 +795,13 @@ static long handle_ioctl(const tawcroot_syscall_args *args, ucontext_t *uc)
 	long arg = args->c;
 	long gamepad;
 	if (tawcroot_gamepad_ioctl((int)fd, cmd, arg, &gamepad)) return gamepad;
+
+	if (cmd == TAWC_SIOCGIFINDEX) {
+		long rv = TAWC_RAW(TAWC_SYS_ioctl, fd, (long)cmd, arg,
+		                   args->d, args->e, args->f);
+		if (rv != TAWC_EACCES || !arg) return rv;
+		return handle_siocgifindex_fallback(arg);
+	}
 
 	if (cmd == TAWC_TCGETS2 || cmd == TAWC_TCSETS2 ||
 	    cmd == TAWC_TCSETSW2 || cmd == TAWC_TCSETSF2) {

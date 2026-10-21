@@ -293,7 +293,7 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (!(flags & O_NOFOLLOW))
 		proc_exe_substitute(scratch, dirfd, path);
 	flags = tawcroot_gamepad_open_flags(path, flags);
-	long nsfd = tawcroot_namespace_open(path, flags);
+	long nsfd = tawcroot_namespace_openat(dirfd, path, flags);
 	if (nsfd != TAWC_ENOSYS) return nsfd;
 
 	/* /proc/self/maps and /proc/<our-pid>/maps: synthesize a shadow fd

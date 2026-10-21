@@ -43,6 +43,7 @@
 
 #include "errno_neg.h"
 #include "io.h"
+#include "namespace.h"
 #include "raw_sys.h"
 #include "rtnl_emu.h"
 #include "sysnr.h"
@@ -160,7 +161,12 @@ int tawcroot_rtnl_is_stub(int fd)
 
 unsigned int tawcroot_rtnl_port_id(void)
 {
-	return (unsigned int)tawc_getpid();
+	/* The pid the guest sees: bubblewrap, as its PID namespace's
+	 * init, drops replies whose nlmsg_pid isn't its getpid() of 1. */
+	long pid = tawc_getpid();
+	if (tawcroot_namespace.init_pid && pid == tawcroot_namespace.init_pid)
+		return 1;
+	return (unsigned int)pid;
 }
 
 /* "\0tawcroot-rtnl.<pid>.<seq>"; returns the addrlen. */
@@ -501,6 +507,16 @@ static void do_getlink(struct ctx *c, const struct nlmsghdr *req)
  * the forced success ack is dropped again. */
 static long relay(struct ctx *c, const struct nlmsghdr *req)
 {
+	/* A process that unshared its network namespace configures one
+	 * it doesn't really have (bubblewrap brings up its loopback with
+	 * RTM_NEWADDR / RTM_NEWLINK): ack every change, as PRoot does,
+	 * instead of relaying it to the host, which refuses it. */
+	if (tawcroot_namespace.net && req->nlmsg_type >= RTM_BASE &&
+	    req->nlmsg_type <= RTM_MAX &&
+	    ((req->nlmsg_type - RTM_BASE) & 3) != 2 /* RTM_GET* */) {
+		if (req->nlmsg_flags & NLM_F_ACK) put_error(c, req, 0);
+		return 0;
+	}
 	long e = open_priv(c);
 	if (e < 0) return e;
 	int dump = (req->nlmsg_flags & NLM_F_DUMP) != 0;

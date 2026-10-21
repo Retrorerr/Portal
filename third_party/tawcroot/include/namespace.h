@@ -8,9 +8,11 @@ struct tawc_namespace {
     int32_t maps[3];
     uint32_t pid_pending;  /* unshare(CLONE_NEWPID): next child is init */
     uint32_t outer_ids[4]; /* ruid, euid, rgid, egid outside the user ns */
+    uint32_t net;          /* unshared a network namespace: rtnl changes are acked */
 };
 extern struct tawc_namespace tawcroot_namespace;
 void tawcroot_namespace_register(void);
 void tawcroot_namespace_restore(void);
 long tawcroot_namespace_open(const char *path, int flags);
+long tawcroot_namespace_openat(int dirfd, const char *path, int flags);
 int tawcroot_namespace_probe(const char *path);

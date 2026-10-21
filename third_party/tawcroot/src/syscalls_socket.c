@@ -896,7 +896,7 @@ static long getname_with_reverse(int nr, long a, long guest_addr_l,
 		struct tawc_sockaddr_nl nl;
 		memset(&nl, 0, sizeof nl);
 		nl.nl_family = AF_NETLINK_FAMILY;
-		nl.nl_pid = (uint32_t)TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0);
+		nl.nl_pid = tawcroot_rtnl_port_id();  /* the guest-visible pid */
 		memcpy(&kbuf, &nl, sizeof nl);
 		kern_len = (long)sizeof nl;
 	} else {

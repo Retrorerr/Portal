@@ -142,16 +142,18 @@ long tawcroot_build_filter(struct sock_filter *prog, size_t prog_cap,
 			continue;
 		}
 		/* ioctl: the handler answers only evdev requests (type 'E',
-		 * emulated game pads) and the termios2 fallbacks
+		 * emulated game pads), SIOCGIFINDEX (0x8933, denied by
+		 * Android's xperms) and the termios2 fallbacks
 		 * (TCGETS2..TCSETSF2, 'T' 0x2A-0x2D). Every GPU, DRM, sound
 		 * and terminal ioctl runs natively. */
 		if (trap_nrs[t] == TAWC_SYS_ioctl) {
 			EMIT_OR_FAIL(TAWC_BPF_J(BPF_JMP | BPF_JEQ | BPF_K,
-					(uint32_t)trap_nrs[t], 0, 9));
+					(uint32_t)trap_nrs[t], 0, 10));
 			EMIT_OR_FAIL(TAWC_BPF_S(BPF_LD | BPF_W | BPF_ABS, 24));
 			EMIT_OR_FAIL(TAWC_BPF_S(BPF_ALU | BPF_AND | BPF_K, 0xff00));
-			EMIT_OR_FAIL(TAWC_BPF_J(BPF_JMP | BPF_JEQ | BPF_K, 'E' << 8, 4, 0));
+			EMIT_OR_FAIL(TAWC_BPF_J(BPF_JMP | BPF_JEQ | BPF_K, 'E' << 8, 5, 0));
 			EMIT_OR_FAIL(TAWC_BPF_S(BPF_LD | BPF_W | BPF_ABS, 24));
+			EMIT_OR_FAIL(TAWC_BPF_J(BPF_JMP | BPF_JEQ | BPF_K, 0x8933, 3, 0));
 			EMIT_OR_FAIL(TAWC_BPF_S(BPF_ALU | BPF_AND | BPF_K, 0xffff));
 			EMIT_OR_FAIL(TAWC_BPF_J(BPF_JMP | BPF_JGE | BPF_K, 0x542A, 0, 2));
 			EMIT_OR_FAIL(TAWC_BPF_J(BPF_JMP | BPF_JGT | BPF_K, 0x542D, 1, 0));
