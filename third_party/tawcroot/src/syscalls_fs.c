@@ -1086,6 +1086,11 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 	long n = tawc_readlinkat(t.fd, p, readlink_scratch,
 				 TAWCROOT_PATH_SCRATCH_SIZE);
 	if (n < 0) return n;
+	/* Same view the resolver walks, so userspace realpath agrees. */
+	if (n > 0 && n < (long)TAWCROOT_PATH_SCRATCH_SIZE) {
+		readlink_scratch[n] = 0;
+		n = tawcroot_proot_l2s_rebase(readlink_scratch, n);
+	}
 
 	/* Hardlink emulation: an emulated name is "a regular file" to the
 	 * guest — readlink answers EINVAL, and the opaque token literal

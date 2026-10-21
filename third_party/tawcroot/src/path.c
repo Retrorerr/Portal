@@ -667,6 +667,39 @@ void tawcroot_path_pin_store_bind(void)
 		tawcroot_binds[i].pinned = 1;
 }
 
+/* The rootfs's PRoot hard-link directory, pinned at /.proot.l2s like the
+ * store so rebased link2symlink targets (path_resolve.c) still resolve
+ * after a sandbox pivots onto another root. A sandbox's own exec finds
+ * the inherited pin; a rootfs PRoot never touched has none. */
+void tawcroot_path_pin_l2s_bind(void)
+{
+	for (size_t i = 0; i < tawcroot_n_binds; ++i) {
+		struct tawcroot_bind *b = &tawcroot_binds[i];
+		if (b->active && !b->leaf[0] &&
+		    tawc_streq(b->dst, ".proot.l2s")) {
+			b->pinned = 1;
+			return;
+		}
+	}
+	if (!tawcroot_rootfs_host_path_len) return;
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *dir = scratch->buf[0];
+	size_t n = 0;
+	if (tawc_str_append(dir, TAWCROOT_PATH_SCRATCH_SIZE, &n,
+			    tawcroot_rootfs_host_path) ||
+	    tawc_str_append(dir, TAWCROOT_PATH_SCRATCH_SIZE, &n,
+			    "/.proot.l2s"))
+		return;
+	struct stat st;
+	if (TAWC_RAW(TAWC_SYS_fstatat, AT_FDCWD, (long)dir, (long)&st, 0, 0,
+		     0) != 0 || !S_ISDIR(st.st_mode))
+		return;
+	size_t i = tawcroot_n_binds;
+	if (tawcroot_path_add_bind(dir, ".proot.l2s", 0) == 0 &&
+	    tawcroot_n_binds > i)
+		tawcroot_binds[i].pinned = 1;
+}
+
 void tawcroot_path_unmount(const char *dst, int detach)
 {
 	size_t n = tawc_strlen(dst);

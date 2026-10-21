@@ -309,6 +309,10 @@ long tawcroot_path_route_to_guest(int base_fd, const char *suffix,
  * as a guest path every view can open (bubblewrap realpaths it, then
  * reopens it from its pivoted root). */
 void tawcroot_path_pin_store_bind(void);
+void tawcroot_path_pin_l2s_bind(void);
+/* Rebase a PRoot link2symlink target (absolute host path) onto
+ * /.proot.l2s in place; returns the new length. */
+long tawcroot_proot_l2s_rebase(char *target, long n);
 
 long tawcroot_host_path_to_guest_abs(const char *host, size_t n,
 				     char *out, size_t out_cap);

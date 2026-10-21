@@ -109,6 +109,34 @@ static long splice_target(const char *suf, size_t suf_len,
 	return 0;
 }
 
+/* PRoot's --link2symlink stores a hard link as a symlink to
+ * <rootfs host path>/.proot.l2s/.proot.l2s.<name>, an absolute HOST path.
+ * Files installed under PRoot keep them (Flatpak repo objects and every
+ * deployment checked out from them). Outside a sandbox the rootfs's
+ * data/data/<pkg>/files/<rootfs> -> / alias resolves them; inside one
+ * (bwrap pivots onto a tmpfs) nothing does. Rebase them onto
+ * /.proot.l2s, which tawcroot_path_pin_l2s_bind keeps visible in every
+ * view. Returns the new length. */
+long tawcroot_proot_l2s_rebase(char *target, long n)
+{
+	static const char mark[] = "/.proot.l2s/.proot.l2s.";
+	const size_t ml = sizeof mark - 1;
+	if (target[0] != '/') return n;
+	for (long i = 1; i + (long)ml < n; i++) {
+		if (target[i] != '/') continue;
+		size_t k = 0;
+		while (k < ml && target[i + k] == mark[k]) k++;
+		if (k < ml) continue;
+		for (long j = i + (long)ml; j < n; j++)
+			if (target[j] == '/') return n;
+		long m = n - i;
+		for (long j = 0; j < m; j++) target[j] = target[i + j];
+		target[m] = 0;
+		return m;
+	}
+	return n;
+}
+
 long tawcroot_path_resolve_symlinks(char *suf, size_t cap,
 				    tawcroot_path_mode mode,
 				    const struct tawcroot_path_oracle *oracle)
@@ -201,6 +229,7 @@ long tawcroot_path_resolve_symlinks_tok(char *suf, size_t cap,
 				return TAWC_ENOENT;
 			}
 			target[n] = 0;
+			n = tawcroot_proot_l2s_rebase(target, n);
 
 			/* Hardlink-emulation token: the target is an opaque
 			 * literal, never a path. If the object is itself a
