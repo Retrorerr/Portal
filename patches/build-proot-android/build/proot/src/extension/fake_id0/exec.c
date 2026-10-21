@@ -42,18 +42,20 @@ int handle_exec_enter_end(Tracee *tracee, Reg filename_sysarg, Config *config)
 	if((perms & 1) != 1) 
 		return -EACCES;
 
-	/* If the setuid or setgid bits are on, change config accordingly. */
+	/* If the setuid or setgid bits are on, change config accordingly:
+	 * like execve(2), only the effective and saved ids become the
+	 * file's owner, and the real ids stay the caller's.
+	 * dbus-daemon-launch-helper (setuid root, run by messagebus)
+	 * refuses to start any system service when its real uid is 0. */
 	read_meta_file(meta_path, &mode, &uid, &gid, config);
 	if ((mode & S_ISUID) != 0) {
-		config->ruid = 0;
-		config->euid = 0;
-		config->suid = 0;
+		config->euid = uid;
+		config->suid = uid;
 	}
 
 	if ((mode & S_ISGID) != 0) {
-		config->rgid = 0;
-		config->egid = 0;
-		config->sgid = 0;
+		config->egid = gid;
+		config->sgid = gid;
 	}
 
 	/** TODO Add logic to determine interpreter being used, and check
