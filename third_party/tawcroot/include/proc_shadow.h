@@ -86,6 +86,11 @@ int tawcroot_is_proc_self_exe(const char *path);
  * path (see id_beacon.h) into out. Returns the length, 0 if unknown. */
 long tawcroot_proc_other_exe(const char *path, char *out, size_t cap);
 
+/* /proc/<pid>/root[/...] of another guest process: the host path under
+ * its root (root beacon, id_beacon.h) into out. Returns the length, 0
+ * when not such a path or the peer has no beacon. */
+long tawcroot_proc_peer_root(const char *path, char *out, size_t cap);
+
 /* "/proc/..." name for a procfs path reached relative to a /proc dirfd
  * or through a second bind of host /proc; 0 when already canonical. */
 long tawcroot_proc_alias(int dirfd, const char *path, char *out, size_t cap);

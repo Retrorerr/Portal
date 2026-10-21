@@ -23,12 +23,14 @@
 #define BEACON_NAME_MAX 240
 #define EXE_PREFIX    "tawc-exe:"
 #define EXE_NAME_MAX  240  /* memfd names cap at 249 bytes */
+#define ROOT_PREFIX   "tawc-root:"
 #define MFD_CLOEXEC_FLAG 1u
 
 static int      g_armed;
 static uint32_t g_lock;
 static int      g_fd = -1;
 static int      g_exe_fd = -1;
+static int      g_root_fd = -1;
 
 static size_t put_u32(char *p, uint32_t v)
 {
@@ -119,12 +121,45 @@ static void publish_exe(void)
 	g_exe_fd = (int)resv;
 }
 
+static void publish_root(void)
+{
+	if (g_root_fd >= 0) {
+		tawcroot_fd_forget_reserved(g_root_fd);
+		tawc_close(g_root_fd);
+		g_root_fd = -1;
+	}
+	size_t len = tawcroot_rootfs_host_path_len;
+	if (!len || len > EXE_NAME_MAX - sizeof ROOT_PREFIX) return;
+	char name[EXE_NAME_MAX + 1];
+	size_t n = 0;
+	for (const char *s = ROOT_PREFIX; *s; s++) name[n++] = *s;
+	for (size_t i = 0; i < len; i++) name[n++] = tawcroot_rootfs_host_path[i];
+	name[n] = 0;
+	long fd = tawc_memfd_create(name, MFD_CLOEXEC_FLAG);
+	if (fd < 0) return;
+	long resv = tawcroot_fd_reserve((int)fd);
+	if (resv < 0) {
+		tawc_close((int)fd);
+		return;
+	}
+	g_root_fd = (int)resv;
+}
+
+void tawcroot_root_beacon_update(void)
+{
+	if (!__atomic_load_n(&g_armed, __ATOMIC_ACQUIRE)) return;
+	while (__atomic_exchange_n(&g_lock, 1, __ATOMIC_ACQUIRE)) {}
+	publish_root();
+	__atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE);
+}
+
 void tawcroot_id_beacon_arm(void)
 {
 	__atomic_store_n(&g_armed, 1, __ATOMIC_RELEASE);
 	while (__atomic_exchange_n(&g_lock, 1, __ATOMIC_ACQUIRE)) {}
 	publish();
 	publish_exe();
+	publish_root();
 	__atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE);
 }
 
@@ -232,4 +267,10 @@ size_t tawcroot_exe_beacon_peer(int pid, char *out, size_t cap)
 {
 	if (cap < EXE_NAME_MAX + 32) return 0;
 	return scan_peer(pid, EXE_PREFIX, out, cap);
+}
+
+size_t tawcroot_root_beacon_peer(int pid, char *out, size_t cap)
+{
+	if (cap < EXE_NAME_MAX + 32) return 0;
+	return scan_peer(pid, ROOT_PREFIX, out, cap);
 }

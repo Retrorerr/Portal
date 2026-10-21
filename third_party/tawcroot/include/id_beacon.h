@@ -34,3 +34,9 @@ int tawcroot_id_beacon_peer_groups(int pid, uint32_t ids[4],
 /* Read process `pid`'s guest executable path (published at arm time)
  * into out (cap >= 272). Returns its length, or 0 when unavailable. */
 size_t tawcroot_exe_beacon_peer(int pid, char *out, size_t cap);
+
+/* Root beacon: the host path of this process's root ("tawc-root:<path>"),
+ * so a peer opening /proc/<pid>/root lands on our view's root (a
+ * sandbox's tmpfs, not the app's "/"). Republished on chroot/pivot_root. */
+void tawcroot_root_beacon_update(void);
+size_t tawcroot_root_beacon_peer(int pid, char *out, size_t cap);

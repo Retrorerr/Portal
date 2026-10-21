@@ -302,6 +302,26 @@ long tawcroot_proc_other_exe(const char *path, char *out, size_t cap)
 	return (long)tawcroot_exe_beacon_peer((int)tid, out, cap);
 }
 
+long tawcroot_proc_peer_root(const char *path, char *out, size_t cap)
+{
+	long tid;
+	const char *tail = strip_proc_pid_prefix(path, &tid);
+	if (!tail || tid <= 0 || tail[0] != 'r' || tail[1] != 'o' ||
+	    tail[2] != 'o' || tail[3] != 't' || (tail[4] && tail[4] != '/'))
+		return 0;
+	const char *rest = tail + 4;
+	for (const char *c = rest; *c; c++)
+		if (c[0] == '/' && c[1] == '.' && c[2] == '.' &&
+		    (c[3] == '/' || !c[3]))
+			return 0;
+	if (is_my_tid(tid)) return 0;
+	size_t n = tawcroot_root_beacon_peer((int)tid, out, cap);
+	if (!n) return 0;
+	size_t pos = n;
+	if (tawc_str_append(out, cap, &pos, rest)) return 0;
+	return (long)pos;
+}
+
 int tawcroot_is_proc_self_exe(const char *path)
 {
 	return tawcroot_proc_exe_classify(path) == TAWCROOT_PROC_EXE_SELF;

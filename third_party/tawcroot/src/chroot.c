@@ -20,6 +20,7 @@
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "fdtab.h"
+#include "id_beacon.h"
 #include "io.h"
 #include "path.h"
 #include "path_scratch.h"
@@ -178,6 +179,7 @@ static long apply_root(long new_fd, int new_root_ro, const char *guest)
 	 * resolve to. Empty (no symlinks at the well-known names) is
 	 * fine — the symlink resolver covers everything memos miss. */
 	tawcroot_path_memoize_well_known();
+	tawcroot_root_beacon_update();
 
 	return 0;
 }

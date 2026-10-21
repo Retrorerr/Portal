@@ -558,6 +558,54 @@ static void replicate_below(const char *src_guest, const char *dst, size_t upto)
 	}
 }
 
+/* bubblewrap's --ro-bind-data (Flatpak's /.flatpak-info) binds a temp
+ * file onto an empty placeholder in its tmpfs. The bind lives only in
+ * this process's table, but xdg-desktop-portal reads the file through
+ * /proc/<pid>/root from outside. Into a placeholder in one of our tmpfs
+ * directories, copy small file binds so the host file has the data too. */
+static void materialize_file_bind(const char *src_host, const char *dst_guest)
+{
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *suffix = scratch->buf[0], *host = scratch->buf[1];
+	char *buf = scratch->buf[2];
+	tawcroot_path_result r = tawcroot_path_translate(dst_guest, suffix,
+		4096, TAWCROOT_PATH_NOFOLLOW, TAWCROOT_PATH_INTENT_READ);
+	if (r.err || !*suffix) return;
+	long pfd = tawc_openat(r.base_fd, suffix, O_PATH | O_NOFOLLOW | O_CLOEXEC, 0);
+	if (pfd < 0) return;
+	struct stat dst;
+	long e = TAWC_RAW(TAWC_SYS_fstat, pfd, (long)&dst, 0, 0, 0, 0);
+	long hn = e ? -1 : tawcroot_proc_fd_to_host_path((int)pfd, host, 4096);
+	tawc_close((int)pfd);
+	if (hn <= 0 || !S_ISREG(dst.st_mode) || dst.st_size != 0) return;
+	static const char mark[] = "/.tawcroot-tmpfs/";
+	int in_tmpfs = 0;
+	for (long i = 0; i + (long)sizeof mark - 1 <= hn && !in_tmpfs; i++)
+		in_tmpfs = !memcmp(host + i, mark, sizeof mark - 1);
+	if (!in_tmpfs) return;
+	long sfd = tawc_openat(AT_FDCWD, src_host, O_RDONLY | O_CLOEXEC, 0);
+	if (sfd < 0) return;
+	struct stat src;
+	if (TAWC_RAW(TAWC_SYS_fstat, sfd, (long)&src, 0, 0, 0, 0) != 0 ||
+	    !S_ISREG(src.st_mode) || src.st_size > 65536) {
+		tawc_close((int)sfd);
+		return;
+	}
+	TAWC_RAW(TAWC_SYS_fchmodat, AT_FDCWD, (long)host, 0600, 0, 0, 0);
+	long dfd = tawc_openat(AT_FDCWD, host, O_WRONLY | O_TRUNC | O_CLOEXEC, 0);
+	if (dfd >= 0) {
+		long off = 0, n;
+		while ((n = tawc_pread64((int)sfd, buf, 4096, off)) > 0) {
+			if (tawc_write((int)dfd, buf, (size_t)n) != n) break;
+			off += n;
+		}
+		tawc_close((int)dfd);
+	}
+	TAWC_RAW(TAWC_SYS_fchmodat, AT_FDCWD, (long)host, src.st_mode & 07777,
+		 0, 0, 0);
+	tawc_close((int)sfd);
+}
+
 long tawcroot_path_bind_guest(const char *source, const char *target,
 			      int recursive)
 {
@@ -603,6 +651,8 @@ long tawcroot_path_bind_guest(const char *source, const char *target,
 	if (e < 0) return e;
 	if (!!S_ISDIR(source_stat.st_mode) != is_dir) return TAWC_ENOTDIR;
 	if (!destination[1]) return TAWC_EBUSY;  /* onto "/" */
+	if (!is_dir && S_ISREG(source_stat.st_mode))
+		materialize_file_bind(host, destination);
 	cover_binds(destination + 1);
 	size_t before = tawcroot_n_binds;
 	e = tawcroot_path_add_bind(host, destination, read_only);

@@ -328,6 +328,16 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		pc = scratch->buf[3];
 	long nsfd = tawcroot_namespace_open(pc, flags);
 	if (nsfd != TAWC_ENOSYS) return nsfd;
+	/* Another guest's /proc/<pid>/root: its own root, which may be a
+	 * sandbox (xdg-desktop-portal reads Flatpak's /.flatpak-info). The
+	 * fd lies outside our view, so relative opens on it go to the
+	 * kernel. */
+	if (pc[0] == '/' && pc[1] == 'p') {
+		TAWCROOT_PATH_SCRATCH_AUTO(peer);
+		if (tawcroot_proc_peer_root(pc, peer->buf[0],
+					    TAWCROOT_PATH_SCRATCH_SIZE) > 0)
+			return tawc_openat(AT_FDCWD, peer->buf[0], flags, mode);
+	}
 
 	/* /proc/self/maps and /proc/<our-pid>/maps: synthesize a shadow fd
 	 * backed by a memfd containing the kernel's maps output with each
