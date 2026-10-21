@@ -6,6 +6,8 @@ struct tawc_namespace {
     uint32_t user;
     uint32_t capabilities[6];
     int32_t maps[3];
+    uint32_t pid_pending;  /* unshare(CLONE_NEWPID): next child is init */
+    uint32_t outer_ids[4]; /* ruid, euid, rgid, egid outside the user ns */
 };
 extern struct tawc_namespace tawcroot_namespace;
 void tawcroot_namespace_register(void);

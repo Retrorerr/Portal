@@ -193,6 +193,7 @@ SRC_C_PROD=(
     "$TAWCROOT_DIR/src/proc_rewrite.c"
     "$TAWCROOT_DIR/src/proc_shadow.c"
     "$TAWCROOT_DIR/src/identity.c"
+    "$TAWCROOT_DIR/src/id_beacon.c"
     "$TAWCROOT_DIR/src/fakeown.c"
     "$TAWCROOT_DIR/src/syscalls_fs.c"
     "$TAWCROOT_DIR/src/syscalls_fd.c"

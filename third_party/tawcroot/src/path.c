@@ -187,14 +187,23 @@ long tawcroot_host_path_to_guest_abs(const char *host, size_t n,
 	const struct tawcroot_bind *best_bind = 0;
 	size_t best_pl = 0;
 
-	if (host_prefix_match(host, n, tawcroot_rootfs_host_path,
-	                      tawcroot_rootfs_host_path_len))
+	int in_rootfs = host_prefix_match(host, n, tawcroot_rootfs_host_path,
+	                                  tawcroot_rootfs_host_path_len);
+	if (in_rootfs)
 		best_pl = tawcroot_rootfs_host_path_len;
 
 	for (size_t bi = 0; bi < tawcroot_n_binds; bi++) {
 		const struct tawcroot_bind *b = &tawcroot_binds[bi];
 		if (!b->active || b->src_len == 0) continue;
 		if (!host_prefix_match(host, n, b->src, b->src_len))
+			continue;
+		/* A bind of a rootfs directory (Portal's <rootfs>/tmp at
+		 * /dev/shm) is an alias: the file's own guest path wins.
+		 * Otherwise every cwd under /tmp read back as /dev/shm, and
+		 * a hard link there crossed into the bind (EXDEV). */
+		if (in_rootfs && host_prefix_match(b->src, b->src_len,
+		                                   tawcroot_rootfs_host_path,
+		                                   tawcroot_rootfs_host_path_len))
 			continue;
 		if (b->src_len > best_pl) {
 			best_bind = b;

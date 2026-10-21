@@ -50,6 +50,10 @@ int tawcroot_proc_shadow_classify(const char *path);
  * answers -EINVAL. */
 long tawcroot_proc_shadow_open(int kind);
 
+/* /proc/<pid>/status with virtual Uid:/Gid: lines (open only: the real
+ * file stats fine). -ENOSYS when not applicable; open the real file. */
+long tawcroot_proc_status_open(const char *path);
+
 /* Metadata surfaces for a classified kind. `stat`/`statx` describe a
  * procfs regular file (0444, root-owned, size 0) WITHOUT building the
  * memfd — synthesizing content on every stat would re-read and rewrite
@@ -77,6 +81,10 @@ int tawcroot_proc_link_classify(const char *path);
  * optional task/<tid>/ segment). Used by the readlink handlers for
  * guest-exe synthesis. */
 int tawcroot_is_proc_self_exe(const char *path);
+
+/* /proc/<other-pid>/exe of a tawcroot guest: its published guest exe
+ * path (see id_beacon.h) into out. Returns the length, 0 if unknown. */
+long tawcroot_proc_other_exe(const char *path, char *out, size_t cap);
 
 /* Finer-grained exe-link classification: distinguishes "/proc/<x>/exe
  * naming OUR process" (synthesize the stashed guest exe path) from

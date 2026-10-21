@@ -63,6 +63,7 @@
 #include "errno_neg.h"
 #include "fdtab.h"
 #include "io.h"
+#include "id_beacon.h"
 #include "identity.h"
 #include "path.h"
 #include "path_scratch.h"
@@ -82,6 +83,7 @@
 #define NETLINK_KOBJECT_UEVENT_PROTO 15
 #define SOL_SOCKET_LEVEL 1
 #define SO_PEERCRED_OPT 17
+#define SO_PEERGROUPS_OPT 59
 #define SOCK_TYPE_MASK  0xf
 #define SOCK_DGRAM_TYPE 2
 
@@ -727,9 +729,9 @@ _Static_assert(sizeof(struct tawc_cmsghdr) == 16, "cmsghdr ABI");
  * task creds and rejects the whole sendmsg with EPERM — libpulse's
  * autospawn handshake and GLib's GDBus EXTERNAL auth both send creds,
  * so every PulseAudio/D-Bus client connection died with "Operation not
- * permitted". Rewrite the sender identity to the real host creds (pid 0
- * lets the kernel fill the real pid, which also keeps /proc/<pid> probes
- * such as PipeWire's flatpak check working).
+ * permitted". Rewrite the sender identity to the real host creds and the
+ * real pid, which also keeps /proc/<pid> probes such as PipeWire's
+ * flatpak check working.
  *
  * The control buffer is copied to a bounded stack buffer; SCM_RIGHTS
  * batches larger than the cap pass through untouched (they never carry
@@ -764,7 +766,9 @@ static long rewrite_scm_credentials(struct tawc_msghdr *mh,
 			struct tawc_ucred *cr =
 				(struct tawc_ucred *)(void *)
 				((unsigned char *)c + sizeof(*c));
-			cr->pid = 0;
+			/* The kernel accepts only the sender's own tgid
+			 * (scm_check_creds); 0 is EPERM like any lie. */
+			cr->pid = (int32_t)TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0);
 			cr->uid = (uint32_t)tawc_getuid();
 			cr->gid = (uint32_t)tawc_getgid();
 			changed = 1;
@@ -966,6 +970,40 @@ static long handle_accept4(const tawcroot_syscall_args *args, ucontext_t *uc)
 	return result;
 }
 
+/* getsockopt(SOL_SOCKET, SO_PEERGROUPS) of a guest peer: its virtual
+ * supplementary groups from its beacon, not the Android app's kernel
+ * groups. dbus-daemon passes these to polkit as UnixGroupIDs, and
+ * Portal's admin rule (subject.isInGroup("sudo")) checks them. Kernel
+ * contract: optlen too small -> ERANGE with the needed size. -ENOSYS
+ * means "not a guest peer, forward to the kernel". */
+static long peer_groups(const tawcroot_syscall_args *args)
+{
+	struct tawc_ucred cred = { 0 };
+	uint32_t clen = sizeof cred;
+	long rv = TAWC_RAW(TAWC_SYS_getsockopt, args->a, SOL_SOCKET_LEVEL,
+			   SO_PEERCRED_OPT, (long)&cred, (long)&clen, 0);
+	if (rv < 0 || clen < sizeof cred ||
+	    cred.uid != (uint32_t)tawc_getuid())
+		return TAWC_ENOSYS;
+	uint32_t groups[32];
+	int ng = tawcroot_id_beacon_peer_groups(cred.pid, 0, groups, 32);
+	if (ng < 0) return TAWC_ENOSYS;
+	if (ng > 32) ng = 32;
+	uint32_t cap;
+	if (tawc_copy_from_guest(&cap, sizeof cap,
+				 (void *)(uintptr_t)args->e) < 0)
+		return TAWC_EFAULT;
+	uint32_t need = (uint32_t)ng * 4;
+	if (tawc_copy_to_guest((void *)(uintptr_t)args->e, &need,
+			       sizeof need) < 0)
+		return TAWC_EFAULT;
+	if (cap < need) return -34; /* ERANGE */
+	if (need && tawc_copy_to_guest((void *)(uintptr_t)args->d, groups,
+				       need) < 0)
+		return TAWC_EFAULT;
+	return 0;
+}
+
 /* getsockopt(SOL_SOCKET, SO_PEERCRED) hands back KERNEL credentials,
  * bypassing the virtual identity: server getuid() says 0 but the peer
  * shows the real app uid, so any peer-cred-authenticating server (tmux,
@@ -996,6 +1034,11 @@ static long handle_getsockopt(const tawcroot_syscall_args *args, ucontext_t *uc)
 	(void)uc;
 	void *guest_val  = (void *)(uintptr_t)args->d;
 	void *guest_lenp = (void *)(uintptr_t)args->e;
+	if ((int)args->b == SOL_SOCKET_LEVEL &&
+	    (int)args->c == SO_PEERGROUPS_OPT && guest_val && guest_lenp) {
+		long pg = peer_groups(args);
+		if (pg != TAWC_ENOSYS) return pg;
+	}
 	if ((int)args->b != SOL_SOCKET_LEVEL ||
 	    (int)args->c != SO_PEERCRED_OPT || !guest_val || !guest_lenp) {
 		long result = TAWC_RAW(TAWC_SYS_getsockopt, args->a, args->b,
@@ -1030,10 +1073,20 @@ static long handle_getsockopt(const tawcroot_syscall_args *args, ucontext_t *uc)
 		 * a reply"). Guest sessions are single-user, so
 		 * server-view == client-view and euid/egid is the right
 		 * peer answer for both. */
-		tawc_identity me;
-		tawcroot_identity_get(&me);
-		cred.uid = me.euid;
-		if (klen >= sizeof cred) cred.gid = me.egid;
+		uint32_t peer[4];
+		if (klen >= sizeof cred && tawcroot_id_beacon_peer(cred.pid, peer)) {
+			/* The peer's own virtual ids, from its beacon: the
+			 * system bus runs as fake root and must tell its
+			 * desktop clients from root ones (EXTERNAL auth
+			 * compares the claimed getuid() with this). */
+			cred.uid = peer[1];
+			cred.gid = peer[3];
+		} else {
+			tawc_identity me;
+			tawcroot_identity_get(&me);
+			cred.uid = me.euid;
+			if (klen >= sizeof cred) cred.gid = me.egid;
+		}
 	}
 
 	if (klen > 0) {

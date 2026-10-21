@@ -352,9 +352,15 @@ static long handle_mount(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
 	/* A bounded path-view operation, not a kernel mount or security boundary.
-	 * Recursive mounts, filesystem creation and propagation remain unsupported. */
-	if ((unsigned long)args->d != MS_BIND) return TAWC_EPERM;
-	return tawcroot_path_bind_guest((const char *)args->a, (const char *)args->b);
+	 * Binds (recursive or not) enter this process's path view; everything
+	 * else — propagation changes, remounts, moves, proc/tmpfs/sysfs mounts —
+	 * succeeds without effect, as under PRoot. Sandboxes and `unshare
+	 * --mount-proc` set those up and then use the tree that is already
+	 * there; failing them aborted the whole tool. */
+	unsigned long flags = (unsigned long)args->d;
+	if ((flags & MS_BIND) && !(flags & MS_REMOUNT))
+		return tawcroot_path_bind_guest((const char *)args->a, (const char *)args->b);
+	return 0;
 }
 
 void tawcroot_control_register(void)
@@ -425,13 +431,16 @@ void tawcroot_control_register(void)
 	 * pivot to); kernel mount/umount2 would tear down our setup binds (/dev/shm,
 	 * /proc, libhybris stage); unshare/setns would hand the guest a
 	 * namespace where our fd-relative /proc walks no longer name what we
-	 * think they name. Lying with -EPERM is the same posture proot takes.
+	 * think they name. pivot_root stays -EPERM; mount, umount2, unshare
+	 * and setns are emulated (handle_mount, namespace.c) and never reach
+	 * the kernel's mount table.
 	 *
 	 * chroot is NOT in this list — it has its own handler in chroot.c
-	 * that swaps the root-view bookkeeping. mount only accepts the bounded
-	 * process-local bind operation; all real mount operations stay denied. */
+	 * that swaps the root-view bookkeeping. */
 	tawcroot_dispatch_install(TAWC_SYS_pivot_root,      tawcroot_deny_eperm);
 	tawcroot_dispatch_install(TAWC_SYS_mount,           handle_mount);
-	tawcroot_dispatch_install(TAWC_SYS_umount2,         tawcroot_deny_eperm);
-	tawcroot_dispatch_install(TAWC_SYS_setns,           tawcroot_deny_eperm);
+	/* PRoot parity: unmounts and namespace joins succeed without effect
+	 * (the setup binds stay; there are no other namespaces to join). */
+	tawcroot_dispatch_install(TAWC_SYS_umount2,         tawcroot_answer_zero);
+	tawcroot_dispatch_install(TAWC_SYS_setns,           tawcroot_answer_zero);
 }

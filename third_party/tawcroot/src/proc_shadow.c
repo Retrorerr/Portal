@@ -6,6 +6,8 @@
 #include <sys/stat.h>
 
 #include "errno_neg.h"
+#include "id_beacon.h"
+#include "identity.h"
 #include "io.h"
 #include "loader_map.h"
 #include "path.h"
@@ -291,6 +293,14 @@ int tawcroot_proc_exe_classify(const char *path)
 	}
 }
 
+long tawcroot_proc_other_exe(const char *path, char *out, size_t cap)
+{
+	long tid;
+	const char *tail = strip_proc_pid_prefix(path, &tid);
+	if (!tail || tid <= 0 || !tawc_streq(tail, "exe")) return 0;
+	return (long)tawcroot_exe_beacon_peer((int)tid, out, cap);
+}
+
 int tawcroot_is_proc_self_exe(const char *path)
 {
 	return tawcroot_proc_exe_classify(path) == TAWCROOT_PROC_EXE_SELF;
@@ -458,7 +468,21 @@ static long memfd_from_bytes(const char *name, const char *bytes, size_t len)
 		tawc_close((int)memfd);
 		return sk;
 	}
-	return memfd;
+	/* Hand out an O_RDONLY description, as a real procfs open would:
+	 * consumers check F_GETFL (Chromium's mojo ReadOnlyFile CHECKs it
+	 * for the /proc/<pid>/status it passes to renderers). */
+	char link[32] = "/proc/self/fd/";
+	size_t n = 14;
+	char digits[12];
+	size_t d = 0;
+	unsigned long v = (unsigned long)memfd;
+	do { digits[d++] = (char)('0' + v % 10); v /= 10; } while (v);
+	while (d) link[n++] = digits[--d];
+	link[n] = 0;
+	long ro = tawc_openat(AT_FDCWD, link, O_RDONLY | O_CLOEXEC, 0);
+	if (ro < 0) return memfd;
+	tawc_close((int)memfd);
+	return ro;
 }
 
 static long open_proc_maps_shadow(void)
@@ -668,6 +692,104 @@ static long open_proc_loadavg_shadow(void)
 	if (!e) e = tawc_str_append(buf, sizeof buf, &pos, "\n");
 	if (e) return TAWC_EFAULT;
 	return memfd_from_bytes("tawcroot-loadavg", buf, pos);
+}
+
+/* Append "<label>\t<a>\t<b>\t<c>\t<d>\n". */
+static void put_id_line(char *out, size_t cap, size_t *pos, const char *label,
+			const uint32_t v[4])
+{
+	for (const char *s = label; *s && *pos + 1 < cap; s++) out[(*pos)++] = *s;
+	for (int i = 0; i < 4; i++) {
+		char tmp[10];
+		size_t n = 0;
+		uint32_t x = v[i];
+		do { tmp[n++] = (char)('0' + x % 10); x /= 10; } while (x);
+		if (*pos + n + 2 >= cap) return;
+		out[(*pos)++] = '\t';
+		while (n) out[(*pos)++] = tmp[--n];
+	}
+	out[(*pos)++] = '\n';
+}
+
+/* /proc/<pid>/status with the virtual ids on its Uid:/Gid: lines, as
+ * PRoot's fake_id0 shows them: procps (ps, top), htop and psutil read the
+ * owner from there, and saw the Android app uid. A process's own ids come
+ * from its identity; another guest process's from its beacon. Returns
+ * -ENOSYS when `path` is not such a file or the pid is no tawcroot guest
+ * (the caller then opens the real file). */
+long tawcroot_proc_status_open(const char *path)
+{
+	long tid;
+	const char *tail = strip_proc_pid_prefix(path, &tid);
+	if (!tail || !tawc_streq(tail, "status")) return TAWC_ENOSYS;
+
+	uint32_t uid[4], gid[4], groups[TAWC_IDENTITY_NGROUPS];
+	int ng;
+	if (tid < 0 || tid == tawc_getpid()) {
+		tawc_identity id;
+		tawcroot_identity_get(&id);
+		uid[0] = id.ruid; uid[1] = id.euid; uid[2] = id.suid; uid[3] = id.fsuid;
+		gid[0] = id.rgid; gid[1] = id.egid; gid[2] = id.sgid; gid[3] = id.fsgid;
+		ng = id.ngroups < TAWC_IDENTITY_NGROUPS ? (int)id.ngroups
+							: TAWC_IDENTITY_NGROUPS;
+		for (int i = 0; i < ng; i++) groups[i] = id.groups[i];
+	} else {
+		uint32_t ids[4];
+		ng = tawcroot_id_beacon_peer_groups((int)tid, ids, groups,
+						    TAWC_IDENTITY_NGROUPS);
+		if (ng < 0) return TAWC_ENOSYS;
+		if (ng > TAWC_IDENTITY_NGROUPS) ng = TAWC_IDENTITY_NGROUPS;
+		uid[0] = ids[0]; uid[1] = uid[2] = uid[3] = ids[1];
+		gid[0] = ids[2]; gid[1] = gid[2] = gid[3] = ids[3];
+	}
+
+	long src = tawc_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+	if (src < 0) return src;
+	const size_t cap = 16384;
+	long region = maps_mmap(2 * cap);
+	if (region < 0) {
+		tawc_close((int)src);
+		return region;
+	}
+	char *in = (char *)(uintptr_t)region;
+	char *out = in + cap;
+	size_t len = 0;
+	long got;
+	while (len < cap && (got = tawc_read((int)src, in + len, cap - len)) > 0)
+		len += (size_t)got;
+	tawc_close((int)src);
+
+	size_t pos = 0;
+	for (size_t i = 0; i < len;) {
+		size_t end = i;
+		while (end < len && in[end] != '\n') end++;
+		if (end - i >= 4 && in[i + 1] == 'i' && in[i + 2] == 'd' &&
+		    in[i + 3] == ':' && (in[i] == 'U' || in[i] == 'G')) {
+			put_id_line(out, cap, &pos, in[i] == 'U' ? "Uid:" : "Gid:",
+				    in[i] == 'U' ? uid : gid);
+		} else if (end - i >= 7 && in[i] == 'G' && in[i + 1] == 'r' &&
+			   in[i + 6] == ':' && in[i + 2] == 'o') {
+			const char *label = "Groups:\t";
+			for (const char *l = label; *l && pos + 1 < cap; l++)
+				out[pos++] = *l;
+			for (int g = 0; g < ng && pos + 12 < cap; g++) {
+				char tmp[10];
+				size_t d = 0;
+				uint32_t x = groups[g];
+				do { tmp[d++] = (char)('0' + x % 10); x /= 10; } while (x);
+				while (d) out[pos++] = tmp[--d];
+				out[pos++] = ' ';
+			}
+			if (pos < cap) out[pos++] = '\n';
+		} else {
+			for (size_t k = i; k <= end && k < len && pos < cap; k++)
+				out[pos++] = in[k];
+		}
+		i = end + 1;
+	}
+	long memfd = memfd_from_bytes("tawcroot-status", out, pos);
+	(void)tawc_munmap((void *)(uintptr_t)region, 2 * cap);
+	return memfd;
 }
 
 long tawcroot_proc_shadow_open(int kind)

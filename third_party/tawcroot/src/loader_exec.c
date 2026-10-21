@@ -10,6 +10,7 @@
 
 #include "errno_neg.h"
 #include "exec_state.h"
+#include "id_beacon.h"
 #include "identity.h"
 #include "io.h"
 #include "loader_elf.h"
@@ -575,6 +576,7 @@ void tawcroot_loader_exec_child(int state_fd, const char *platform)
 	if (st.has_identity) tawcroot_identity_load(&st.identity);
 	tawcroot_namespace = st.namespaces;
 	tawcroot_namespace_restore();
+	tawcroot_id_beacon_arm();
 
 	/* Don't bother closing — we're about to hand control to the guest
 	 * and any leftover fd dies on the next execve. */

@@ -356,6 +356,16 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		}
 	}
 
+	if ((flags & O_ACCMODE) == O_RDONLY && (flags & O_PATH) == 0 &&
+	    tawc_starts_with(path, "/proc/")) {
+		long status = tawcroot_proc_status_open(path);
+		if (status != TAWC_ENOSYS) {
+			if (status >= 0 && (flags & O_CLOEXEC) == 0)
+				(void)tawc_fcntl((int)status, F_SETFD, 0);
+			return status;
+		}
+	}
+
 	const char *shm_name;
 	if (classify_shm(path, &shm_name) == SHM_PEEK_NAME)
 		return tawcroot_shm_open(shm_name, flags, mode);
@@ -940,6 +950,17 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 			tawcroot_guest_exe_path, len);
 		if (ce < 0) return ce;
 		return (long)len;
+	}
+	if (link_cls == TAWCROOT_PROC_LINK_EXE_OTHER) {
+		char *exe = scratch->buf[2];
+		long en = tawcroot_proc_other_exe(cls, exe,
+						  TAWCROOT_PATH_SCRATCH_SIZE);
+		if (en > 0) {
+			if (en > (long)size) en = size;
+			long ce = tawc_copy_to_guest(buf, exe, (size_t)en);
+			if (ce < 0) return ce;
+			return en;
+		}
 	}
 	if (link_cls == TAWCROOT_PROC_LINK_CWD) {
 		/* `cls` may point into buf[1]; dead from here on. */

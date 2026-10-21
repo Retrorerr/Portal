@@ -42,6 +42,7 @@
 #include "exec_handler.h"
 #include "filter.h"
 #include "io.h"
+#include "id_beacon.h"
 #include "identity.h"
 #include "sysnr.h"
 #include "linkstore.h"
@@ -520,6 +521,7 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 	 * the loader jumps; the readlinkat handler reads it from the SIGSYS
 	 * dispatch path. (init_self_host_path runs inside supervisor_init.) */
 	tawcroot_set_guest_exe_path(argv[cmd_start]);
+	tawcroot_id_beacon_arm();
 
 	/* Hand off. The loader internally calls tawcroot_path_translate
 	 * for guest_path and PT_INTERP because tawcroot_rootfs_fd is now

@@ -43,6 +43,8 @@ void tawcroot_dispatch_install(int nr, tawcroot_handler_fn fn);
  * unshare, guest seccomp). Rationale lives at each registration. */
 long tawcroot_deny_enosys(const tawcroot_syscall_args *args, ucontext_t *uc);
 long tawcroot_deny_eperm(const tawcroot_syscall_args *args, ucontext_t *uc);
+/* Succeed without doing anything (emulated no-op). */
+long tawcroot_answer_zero(const tawcroot_syscall_args *args, ucontext_t *uc);
 tawcroot_handler_fn tawcroot_dispatch_get(int nr);
 
 /* Register every handler we ship today. Single source of

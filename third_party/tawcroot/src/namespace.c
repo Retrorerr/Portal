@@ -16,7 +16,14 @@
 #include "tawc_uapi.h"
 #include "usercopy.h"
 
-#define NS_FLAGS (CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)
+/* Stripped from clone(2) and answered by unshare(2), as PRoot does:
+ * Android kernels lack most of these, and the ones a sandbox checks are
+ * emulated here (user, PID) or path-local (mount: binds are per process). */
+#define NS_FLAGS (CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWNS | \
+                  CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWCGROUP)
+#ifndef CLONE_NEWTIME
+#define CLONE_NEWTIME 0x80
+#endif
 struct tawc_namespace tawcroot_namespace;
 
 int tawcroot_namespace_probe(const char *path)
@@ -59,6 +66,15 @@ static long new_user(void)
             tawc_close(ns->maps[i]);
         }
     memcpy(ns->maps, reserved, sizeof reserved);
+    if (!ns->user) {
+        /* What other processes see (status Uid:, SO_PEERCRED): the kernel
+         * maps a userns member's ids back out, so ids set inside (the
+         * sandbox's uid 0) must not leak to the parent namespace. */
+        tawc_identity id;
+        tawcroot_identity_get(&id);
+        ns->outer_ids[0] = id.ruid; ns->outer_ids[1] = id.euid;
+        ns->outer_ids[2] = id.rgid; ns->outer_ids[3] = id.egid;
+    }
     (void)tawc_write(ns->maps[2], "allow\n", 6);
     ns->user = 1;
     ns->capabilities[0] = ns->capabilities[1] = 0xffffffffu;
@@ -123,7 +139,9 @@ static long clone_namespace(const tawcroot_syscall_args *a, ucontext_t *uc)
     long result = TAWC_RAW(TAWC_SYS_clone, flags & ~NS_FLAGS, 0, a->c, a->d, a->e, 0);
     if (!result) {
         if (!(flags & CLONE_FS)) tawcroot_fs_detach();
-        if (flags & CLONE_NEWPID) tawcroot_namespace.init_pid = (int)tawc_getpid();
+        if ((flags & CLONE_NEWPID) || tawcroot_namespace.pid_pending)
+            tawcroot_namespace.init_pid = (int)tawc_getpid();
+        tawcroot_namespace.pid_pending = 0;
         if ((flags & CLONE_NEWUSER) && new_user() < 0) tawc_exit_group(125);
         if (a->b) {
 #if defined(__aarch64__)
@@ -132,6 +150,9 @@ static long clone_namespace(const tawcroot_syscall_args *a, ucontext_t *uc)
             uc->uc_mcontext.gregs[REG_RSP] = a->b;
 #endif
         }
+    } else if (result > 0) {
+        /* Only the first child of an unshared PID namespace is its init. */
+        tawcroot_namespace.pid_pending = 0;
     }
     return result;
 }
@@ -140,8 +161,10 @@ static long unshare_namespace(const tawcroot_syscall_args *a, ucontext_t *uc)
 {
     (void)uc;
     unsigned long flags = (unsigned long)a->a;
-    if (flags & ~(CLONE_NEWUSER | CLONE_NEWNET | CLONE_FS)) return TAWC_EINVAL;
-    long result = (flags & CLONE_FS) ? TAWC_RAW(TAWC_SYS_unshare, CLONE_FS, 0, 0, 0, 0, 0) : 0;
+    const unsigned long real = CLONE_FS | CLONE_FILES | CLONE_SYSVSEM;
+    if (flags & ~(NS_FLAGS | CLONE_NEWTIME | real)) return TAWC_EINVAL;
+    long result = (flags & real) ? TAWC_RAW(TAWC_SYS_unshare, flags & real, 0, 0, 0, 0, 0) : 0;
+    if (!result && (flags & CLONE_NEWPID)) tawcroot_namespace.pid_pending = 1;
     if (!result && (flags & CLONE_FS)) tawcroot_fs_detach();
     if (!result && (flags & CLONE_NEWUSER)) result = new_user();
     return result;

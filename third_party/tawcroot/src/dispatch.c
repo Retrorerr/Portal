@@ -94,3 +94,10 @@ size_t tawcroot_dispatch_trap_list(int *out, size_t out_cap)
 	}
 	return n;
 }
+
+long tawcroot_answer_zero(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)args;
+	(void)uc;
+	return 0;
+}

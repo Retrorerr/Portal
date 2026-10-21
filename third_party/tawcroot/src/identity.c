@@ -37,6 +37,7 @@
 
 #include "dispatch.h"
 #include "errno_neg.h"
+#include "id_beacon.h"
 #include "identity.h"
 #include "sysnr.h"
 #include "usercopy.h"
@@ -108,6 +109,9 @@ static void ident_writer_release(uint32_t s, const tawc_identity *next)
 	for (size_t i = 0; i < IDENT_WORDS; i++)
 		__atomic_store_n(&dst[i], src[i], __ATOMIC_RELAXED);
 	__atomic_store_n(&g_ident_seq, s + 2, __ATOMIC_RELEASE);
+	/* Peers read the ids from the beacon (SO_PEERCRED); a no-op until
+	 * the process arms it, and when the ids did not change. */
+	tawcroot_id_beacon_update();
 }
 
 void tawcroot_identity_load(const tawc_identity *in)
