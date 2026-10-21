@@ -219,6 +219,18 @@ const OUTPUT_SCALE_AUTOSTART: &str = concat!(
     "X-KDE-autostart-after=panel\n",
     "NoDisplay=true\n",
 );
+/// Opens the default KWallet at login the way kwallet-pam would, so apps
+/// that keep secrets there (Chromium, Electron) never stop on its wizard.
+const KWALLET_UNLOCK_HELPER: &str = include_str!("../../../assets/portal-kwallet-unlock.py");
+const KWALLET_UNLOCK_AUTOSTART: &str = concat!(
+    "[Desktop Entry]\n",
+    "Type=Application\n",
+    "Name=Portal Wallet Unlock\n",
+    "Exec=/usr/local/bin/portal-kwallet-unlock\n",
+    "OnlyShowIn=KDE;\n",
+    "X-KDE-autostart-phase=1\n",
+    "NoDisplay=true\n",
+);
 const CLIPBOARD_SYNC: &str = include_str!("../../../assets/localdesktop-clipboard-sync.sh");
 const CLIPBOARD_PUSH: &str = include_str!("../../../assets/localdesktop-clipboard-push.sh");
 const WL_COPY_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-copy");
@@ -1529,6 +1541,16 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     }
     if let Err(error) = fs::write(&output_scale_autostart, OUTPUT_SCALE_AUTOSTART) {
         log::warn!("Output scale autostart not installed: {error}");
+    }
+    write_executable(
+        &fs_root.join("usr/local/bin/portal-kwallet-unlock"),
+        KWALLET_UNLOCK_HELPER,
+    );
+    if let Err(error) = fs::write(
+        fs_root.join("etc/xdg/autostart/portal-kwallet-unlock.desktop"),
+        KWALLET_UNLOCK_AUTOSTART,
+    ) {
+        log::warn!("Wallet unlock autostart not installed: {error}");
     }
     // Debian Trixie's locked runtime still carries wl-clipboard 2.2.1,
     // which predates KWin's ext-data-control support. Bundle the matching
