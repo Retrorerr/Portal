@@ -292,6 +292,24 @@ static long handle_rt_sigprocmask(const tawcroot_syscall_args *args,
 	return 0;
 }
 
+/* rt_sigsuspend runs with the caller's mask, and GC stop-the-world code
+ * (Boehm/Mono, Unity) suspends with "everything but the restart signal",
+ * which blocks SIGSYS. The restart handler's first translated syscall
+ * then traps with SIGSYS blocked and the kernel kills the process. Strip
+ * SIGSYS and suspend from here: the guest handler runs nested on this
+ * frame, and our return restores the trap context's mask. */
+static long handle_rt_sigsuspend(const tawcroot_syscall_args *args,
+				 ucontext_t *uc)
+{
+	(void)uc;
+	if ((size_t)args->b != 8) return TAWC_EINVAL;
+	uint64_t set_val;
+	if (tawc_copy_from_guest(&set_val, 8, (const void *)(uintptr_t)args->a) < 0)
+		return TAWC_EFAULT;
+	set_val &= ~SIGSYS_BIT;
+	return TAWC_RAW(TAWC_SYS_rt_sigsuspend, (long)&set_val, 8, 0, 0, 0, 0);
+}
+
 #if defined(__x86_64__)
 /* x86_64 glibc's getpgrp(3) issues the legacy getpgrp syscall, which
  * Android's untrusted_app filter RET_TRAPs (bionic only ever calls
@@ -490,6 +508,7 @@ void tawcroot_control_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_prctl,           handle_prctl);
 	tawcroot_dispatch_install(TAWC_SYS_rt_sigaction,    handle_rt_sigaction);
 	tawcroot_dispatch_install(TAWC_SYS_rt_sigprocmask,  handle_rt_sigprocmask);
+	tawcroot_dispatch_install(TAWC_SYS_rt_sigsuspend,   handle_rt_sigsuspend);
 	/* Keep sigaltstack native: callers may unmap their stack before
 	 * disabling it. Trapping that disable would use the unmapped stack. */
 	/* io_uring_setup: deny with -ENOSYS so guest libraries fall back to

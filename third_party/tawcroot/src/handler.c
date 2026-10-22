@@ -31,6 +31,7 @@
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "rescue.h"
+#include "signal_shadow.h"
 #include "usercopy.h"
 
 extern const char tawcroot_raw_syscall_ret[];
@@ -44,6 +45,9 @@ struct kernel_sigaction {
 	void (*sa_restorer)(void);
 	uint64_t sa_mask;   /* sigsetsize=8 → exactly one u64 */
 };
+
+#define SA_SIGINFO_FLAG 4UL
+#define SA_RESETHAND_FLAG 0x80000000UL
 
 #ifndef SA_RESTORER
 # define SA_RESTORER 0x04000000
@@ -116,15 +120,30 @@ static volatile tawcroot_handler_obs g_obs;
 
 static void sigsys_handler(int sig, siginfo_t *info, void *ucontext)
 {
-	(void)sig;
 
 	/* Only seccomp-delivered SIGSYS carries a syscall frame. A
-	 * user-raised SIGSYS (kill/tgkill/raise — not trapped) would have
-	 * us read garbage "args" from an interrupted-code ucontext and,
-	 * worse, clobber a live register via write_return on resume. The
-	 * kernel default for SIGSYS is process death; match it loudly
-	 * (notes/tawcroot/sigsys-handler.md "SIGSYS handler": abort if not seccomp). */
+	 * user-raised SIGSYS (kill/tgkill/raise — not trapped) has no syscall
+	 * to translate: it is an ordinary signal for the guest. Runtimes pick
+	 * SIGSYS as a private thread-suspend signal when sigaction() shows it
+	 * unused (Mono's GC does, so every Unity game died on its first
+	 * collection), so deliver it to the guest's shadowed disposition
+	 * instead of killing the process. SIG_DFL keeps the kernel default
+	 * (death). */
 	if (info->si_code != SYS_SECCOMP) {
+		unsigned char action[TAWC_KERN_SIGACTION_SIZE];
+		tawc_sigshadow_action_get(action);
+		uint64_t handler, flags;
+		__builtin_memcpy(&handler, action, sizeof handler);
+		__builtin_memcpy(&flags, action + 8, sizeof flags);
+		if (handler == 1) return;               /* SIG_IGN */
+		if (handler != 0) {
+			if (flags & SA_RESETHAND_FLAG) tawc_sigshadow_reset();
+			if (flags & SA_SIGINFO_FLAG)
+				((void (*)(int, siginfo_t *, void *))handler)(sig, info, ucontext);
+			else
+				((void (*)(int))handler)(sig);
+			return;
+		}
 		tawc_io_str("tawcroot: non-seccomp SIGSYS (si_code=");
 		tawc_io_dec(info->si_code);
 		tawc_io_str("); dying\n");

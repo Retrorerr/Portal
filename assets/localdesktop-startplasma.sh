@@ -83,6 +83,15 @@ if [ -n "${ANLAND_SOCKET:-}" ]; then
         esac
     fi
 fi
+# Clean stack below main() for every process: the loader's leftovers broke
+# Steam's steam-launch-wrapper (uninitialised path buffer) once three
+# libraries were preloaded (assets/guest-arm64/portal-stackclean.c).
+if [ -r /usr/local/lib/portal/portal-stackclean.so ]; then
+    case ":${LD_PRELOAD:-}:" in
+        *:/usr/local/lib/portal/portal-stackclean.so:*) ;;
+        *) export LD_PRELOAD="/usr/local/lib/portal/portal-stackclean.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+    esac
+fi
 # Portal cameras for /dev/videoN apps: loads PipeWire's V4L2 emulation only
 # when a process opens a camera (assets/guest-arm64/portal-v4l2-recipe.txt).
 # First in line, ahead of drmshim, whose raw-syscall open does not chain.

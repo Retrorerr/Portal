@@ -1493,7 +1493,9 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     let kwin_script = fs_root.join("usr/share/kwin/scripts/portal-borderless-fullscreen");
     for (name, contents) in KWIN_SCRIPT_BORDERLESS_FULLSCREEN {
         let path = kwin_script.join(name);
-        let current = fs::read_to_string(&path).map(|old| old == contents).unwrap_or(false);
+        let current = fs::read_to_string(&path)
+            .map(|old| old == contents)
+            .unwrap_or(false);
         if !current {
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
@@ -1573,6 +1575,7 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     .expect("Failed to install backend license");
     install_camera_bridge(fs_root);
     sync_qt_anim_rate(fs_root);
+    sync_stackclean(fs_root);
     // Migrate older APKs that shadowed the distribution's splash executables.
     let _ = fs::remove_file(fs_root.join("usr/local/bin/ksplashqml"));
     let _ = fs::remove_file(fs_root.join("usr/local/bin/plasma_waitforname"));
@@ -1810,7 +1813,10 @@ fn sync_chromium_entries(fs_root: &Path) {
                 };
                 let mut added = String::new();
                 for (probe, flag) in [
-                    ("--disable-features=", "--disable-features=GlobalShortcutsPortal"),
+                    (
+                        "--disable-features=",
+                        "--disable-features=GlobalShortcutsPortal",
+                    ),
                     (
                         "wayland-ime",
                         "--enable-wayland-ime --wayland-text-input-version=3",
@@ -2121,7 +2127,8 @@ exec "$@"
 
 /// Lets the `sudo` group (the desktop user) administer the system without a
 /// password, as `/etc/sudoers.d/portal-desktop` already does for sudo.
-const POLKIT_ADMIN_RULE: &str = "// Managed by Portal: the desktop account has no password, as with sudo.\n\
+const POLKIT_ADMIN_RULE: &str =
+    "// Managed by Portal: the desktop account has no password, as with sudo.\n\
 polkit.addRule(function(action, subject) {\n    \
 if (subject.isInGroup(\"sudo\"))\n        return polkit.Result.YES;\n});\n";
 
@@ -2148,7 +2155,10 @@ fn sync_system_services(fs_root: &Path) {
         PORTAL_SYSTEM_SERVICES,
     );
     for (relative, contents) in [
-        ("etc/polkit-1/rules.d/49-portal-admin.rules", POLKIT_ADMIN_RULE),
+        (
+            "etc/polkit-1/rules.d/49-portal-admin.rules",
+            POLKIT_ADMIN_RULE,
+        ),
         (
             "usr/local/share/dbus-1/system-services/org.freedesktop.Flatpak.SystemHelper.service",
             FLATPAK_SYSTEM_HELPER_SERVICE,
@@ -2342,13 +2352,30 @@ fn write_guest_binary(path: &Path, contents: &[u8]) {
 /// Source: `assets/guest-arm64/qt-anim-rate.c`. Optional: a failure here only
 /// leaves Qt animations at 60 Hz.
 fn sync_qt_anim_rate(fs_root: &Path) {
-    const QT_ANIM_RATE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/qt-anim-rate.so");
+    const QT_ANIM_RATE_BINARY: &[u8] =
+        include_bytes!("../../../assets/guest-arm64/qt-anim-rate.so");
     let path = fs_root.join("usr/local/lib/portal/qt-anim-rate.so");
     if fs::read(&path).is_ok_and(|current| current == QT_ANIM_RATE_BINARY) {
         return;
     }
     if let Err(error) = write_guest_binary_result(&path, QT_ANIM_RATE_BINARY) {
         log::warn!("qt-anim-rate preload not installed: {error:#}");
+    }
+}
+
+/// Zeroes the loader's leftovers below `main()` in every process (the session
+/// preloads it first). Steam's `steam-launch-wrapper` reads an uninitialised
+/// path buffer and exits 255 once three libraries are preloaded, so no game
+/// started. Source: `assets/guest-arm64/portal-stackclean.c`.
+fn sync_stackclean(fs_root: &Path) {
+    const STACKCLEAN_BINARY: &[u8] =
+        include_bytes!("../../../assets/guest-arm64/portal-stackclean.so");
+    let path = fs_root.join("usr/local/lib/portal/portal-stackclean.so");
+    if fs::read(&path).is_ok_and(|current| current == STACKCLEAN_BINARY) {
+        return;
+    }
+    if let Err(error) = write_guest_binary_result(&path, STACKCLEAN_BINARY) {
+        log::warn!("stackclean preload not installed: {error:#}");
     }
 }
 
@@ -3519,7 +3546,10 @@ fn firefox_esr_menu_override(esr_entry: &str) -> String {
     let mut text = String::from(
         "# Managed by Portal: Mozilla's Firefox is installed; ESR stays as its fallback.\n",
     );
-    for line in esr_entry.lines().filter(|line| !line.starts_with("NoDisplay=")) {
+    for line in esr_entry
+        .lines()
+        .filter(|line| !line.starts_with("NoDisplay="))
+    {
         text.push_str(line);
         text.push('\n');
         if line == "[Desktop Entry]" {
@@ -3988,9 +4018,21 @@ fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow:
 /// the KWin overlay above.
 fn sync_xwayland_candidate_overlay(fs_root: &Path) {
     for (dir, name, payload) in [
-        ("usr/local/lib/portal-xwayland-default", "Xwayland", XWAYLAND_PORTAL_BINARY),
-        ("usr/local/lib/portal-xwayland", "Xwayland", XWAYLAND_CANDIDATE_BINARY),
-        ("usr/local/lib/portal-xwayland", "xinput", XWAYLAND_XINPUT_BINARY),
+        (
+            "usr/local/lib/portal-xwayland-default",
+            "Xwayland",
+            XWAYLAND_PORTAL_BINARY,
+        ),
+        (
+            "usr/local/lib/portal-xwayland",
+            "Xwayland",
+            XWAYLAND_CANDIDATE_BINARY,
+        ),
+        (
+            "usr/local/lib/portal-xwayland",
+            "xinput",
+            XWAYLAND_XINPUT_BINARY,
+        ),
     ] {
         let candidate_dir = fs_root.join(dir);
         let _ = fs::create_dir_all(&candidate_dir);
@@ -5248,7 +5290,9 @@ fn prepare_compatibility_renderer_retry(
     }
     match registration.android_app() {
         Some(android_app) if recycle_native_surface(&android_app) => {}
-        _ => log::warn!("The native surface was not replaced; the compatibility retry may not get a window"),
+        _ => log::warn!(
+            "The native surface was not replaced; the compatibility retry may not get a window"
+        ),
     }
     if let Err(error) = persist_install_plan_state(plan, InstallPlanState::InProgress) {
         log::error!("Could not re-arm the accepted plan for the compatibility retry: {error:#}");
