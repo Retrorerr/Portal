@@ -37,6 +37,9 @@ android:
     application:
       label: "Portal Debug"
       extract_native_libs: true
+      # Android backup and phone-to-phone transfer would copy a partial
+      # multi-GB guest rootfs and device-specific state (renderer-mode).
+      allow_backup: false
       theme: "@style/PortalSplashTheme"
       activities:
         - name: app.polarbear.PortalActivity

@@ -8,3 +8,8 @@
 -keepclasseswithmembernames class * {
     native <methods>;
 }
+# Verbose/debug logcat lines are for development; Info and above stay.
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+}

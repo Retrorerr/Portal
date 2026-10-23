@@ -89,6 +89,8 @@ pub struct Application {
     pub use_cleartext_traffic: Option<bool>,
     #[serde(rename(serialize = "android:extractNativeLibs"))]
     pub extract_native_libs: Option<bool>,
+    #[serde(rename(serialize = "android:allowBackup"))]
+    pub allow_backup: Option<bool>,
 }
 
 /// Android [activity element](https://developer.android.com/guide/topics/manifest/activity-element).
