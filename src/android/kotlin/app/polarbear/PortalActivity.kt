@@ -117,6 +117,7 @@ open class PortalActivity : GameActivity() {
         ComposeOverlay.attachContext(this)
         applyImmersive("onCreate")
         GamepadBridge.attach(this)
+        ClipboardWatch.attach(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             window.decorView.setOnCapturedPointerListener { _, event -> dispatchCaptured(event) }
         }

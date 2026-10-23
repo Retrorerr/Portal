@@ -48,7 +48,6 @@ wl-paste --help 2>&1 | grep -Fq -- '--watch' || fail 'wl-paste lacks clipboard w
 tmp_root=${TMPDIR:-/tmp}/localdesktop-clipboard
 mkdir -p "$tmp_root"
 chmod 700 "$tmp_root"
-cleanup_pid=''
 push_pid=''
 initial_gate="$tmp_root/ignore-initial"
 cleanup() {
@@ -57,22 +56,16 @@ cleanup() {
         kill -TERM "$push_pid" 2>/dev/null || true
         wait "$push_pid" 2>/dev/null || true
     fi
-    if [[ -n "$cleanup_pid" ]] && kill -0 "$cleanup_pid" 2>/dev/null; then
-        kill -TERM "$cleanup_pid" 2>/dev/null || true
-        wait "$cleanup_pid" 2>/dev/null || true
-    fi
+    # Injected wl-copy owners, including any that have not exited yet.
+    local owner
+    for owner in $(jobs -p); do
+        kill -TERM "$owner" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true
     rmdir "$initial_gate" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 143' HUP INT TERM
-
-stop_injected_owner() {
-    if [[ -n "$cleanup_pid" ]] && kill -0 "$cleanup_pid" 2>/dev/null; then
-        kill -TERM "$cleanup_pid" 2>/dev/null || true
-        wait "$cleanup_pid" 2>/dev/null || true
-    fi
-    cleanup_pid=''
-}
 
 run_guest_watcher() {
     # --watch is backed by ext-data-control-v1 in wl-clipboard 2.3+.  The
@@ -81,6 +74,9 @@ run_guest_watcher() {
     local watch_pid=''
     trap 'if [[ -n "$watch_pid" ]]; then kill -TERM "$watch_pid" 2>/dev/null || true; wait "$watch_pid" 2>/dev/null || true; fi; exit 0' TERM HUP INT
     while :; do
+        # Each (re)started watcher first reports the selection it finds,
+        # which is not a user copy.
+        mkdir "$initial_gate" 2>/dev/null || true
         LOCALDESKTOP_CLIPBOARD_INITIAL_GATE="$initial_gate" \
             wl-paste --type 'text/plain;charset=utf-8' --no-newline --watch "$PUSH_HELPER" &
         watch_pid=$!
@@ -94,7 +90,6 @@ run_guest_watcher() {
 # exists when observation begins. That is session initialization, not a user
 # copy. The one-shot directory gate lets the push helper discard it atomically.
 rmdir "$initial_gate" 2>/dev/null || true
-mkdir "$initial_gate"
 run_guest_watcher &
 push_pid=$!
 
@@ -115,13 +110,10 @@ while :; do
                 continue
                 ;;
             CLEAR)
-                # A broker subscription always starts with its current state.
-                # Avoid manufacturing a clear when KWin is already clear.
-                if ! wl-paste --type 'text/plain;charset=utf-8' --no-newline >/dev/null 2>&1; then
-                    continue
-                fi
-                stop_injected_owner
-                wl-copy --clear >/dev/null 2>&1 || true
+                # Android never empties the Plasma clipboard: a CLEAR is the
+                # snapshot of a broker that has no Android text yet (or saw
+                # an empty clip), and wiping the guest would lose its copy.
+                continue
                 ;;
             VALUE\ [0-9]*)
                 byte_count=${line#VALUE }
@@ -149,14 +141,17 @@ while :; do
                     continue
                 fi
                 rm -f -- "$current_file"
-                stop_injected_owner
+                # Start the new owner before the old one goes: killing the
+                # old owner first leaves an empty selection that Klipper
+                # fills by restoring the old text, which then echoes back to
+                # Android as a copy. The replaced wl-copy exits on its own
+                # when KWin cancels its source.
                 # Keep this source alive after the command returns so Plasma
                 # clients can paste even while no app owns the selection.
                 # Open the file in the parent before spawning: unlinking it
                 # after '&' races the child's input redirection.
                 exec 4< "$decoded_file"
                 wl-copy --foreground --type 'text/plain;charset=utf-8' <&4 3>&- 4<&- &
-                cleanup_pid=$!
                 exec 4<&-
                 rm -f -- "$decoded_file"
                 ;;

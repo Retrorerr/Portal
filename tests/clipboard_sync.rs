@@ -142,9 +142,12 @@ fn clipboard_wake_and_ordering_are_wired_without_timing_hacks() {
     assert!(CLIPBOARD.contains("observe_poll"));
     assert!(CLIPBOARD.contains("drain_pending"));
     assert!(CLIPBOARD.contains("send_event"));
-    // Signal-driven wait: clipboard reads happen at startup/resume/focus only.
+    // Signal-driven wait: clipboard reads happen at startup, on Android's
+    // clip-changed callback and on resume/focus, plus a short bounded retry
+    // of a denied resync read. Never a periodic poll.
     assert!(CLIPBOARD.contains("cvar.wait(requested)"));
-    assert!(!CLIPBOARD.contains("wait_timeout"));
+    assert!(CLIPBOARD.contains("Java_app_polarbear_ClipboardWatch_nativeClipChanged"));
+    assert!(CLIPBOARD.contains("DENIED_READ_RETRY_MS"));
     assert!(!CLIPBOARD.contains("thread::sleep"));
 
     // The compositor drains without Binder work and publishes to the inner

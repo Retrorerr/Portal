@@ -441,15 +441,20 @@ pub fn write_all<W: Write>(writer: &mut W, frame: &[u8]) -> io::Result<()> {
 
 /// Suppresses guest observations caused by applying a host update to KWin.
 /// Replacing a live `wl-copy` owner can briefly expose a clear selection
-/// before the new value, so clears are ignored while a text echo is pending.
+/// before the new value, and a clipboard manager (Klipper) may restore the
+/// value it held before. Both are ignored while the host echo is pending, so
+/// neither is sent back to Android as a user copy.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct HostEchoSuppressor {
     pending: Option<Option<String>>,
+    previous: Option<String>,
 }
 
 impl HostEchoSuppressor {
-    pub fn mark_host_update(&mut self, value: Option<&str>) {
+    /// `previous` is the broker value the host update replaces.
+    pub fn mark_host_update(&mut self, previous: Option<&str>, value: Option<&str>) {
         self.pending = Some(value.map(str::to_owned));
+        self.previous = previous.map(str::to_owned);
     }
 
     pub fn should_forward_guest_observation(&mut self, value: Option<&str>) -> bool {
@@ -459,12 +464,14 @@ impl HostEchoSuppressor {
         };
         if *expected == observed {
             self.pending = None;
+            self.previous = None;
             return false;
         }
-        if expected.is_some() && observed.is_none() {
+        if expected.is_some() && (observed.is_none() || observed == self.previous) {
             return false;
         }
         self.pending = None;
+        self.previous = None;
         true
     }
 }

@@ -161,14 +161,25 @@ fn broker_state_uses_generation_for_real_changes_and_rejects_empty_values() {
 #[test]
 fn host_echo_suppression_ignores_replacement_clear_and_applied_value() {
     let mut suppressor = HostEchoSuppressor::default();
-    suppressor.mark_host_update(Some("new host text"));
+    suppressor.mark_host_update(Some("old"), Some("new host text"));
     assert!(!suppressor.should_forward_guest_observation(None));
     assert!(!suppressor.should_forward_guest_observation(Some("new host text")));
     assert!(suppressor.should_forward_guest_observation(Some("real guest copy")));
 
-    suppressor.mark_host_update(None);
+    suppressor.mark_host_update(Some("new host text"), None);
     assert!(!suppressor.should_forward_guest_observation(None));
     assert!(suppressor.should_forward_guest_observation(Some("after clear")));
+}
+
+#[test]
+fn host_echo_suppression_ignores_a_restored_previous_value() {
+    let mut suppressor = HostEchoSuppressor::default();
+    suppressor.mark_host_update(Some("before"), Some("android copy"));
+    // Klipper restoring the replaced value is not a user copy.
+    assert!(!suppressor.should_forward_guest_observation(Some("before")));
+    assert!(!suppressor.should_forward_guest_observation(Some("android copy")));
+    // Once the echo landed, copying the old text again is real.
+    assert!(suppressor.should_forward_guest_observation(Some("before")));
 }
 
 #[test]

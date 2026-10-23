@@ -12,9 +12,10 @@ use std::{
     fmt,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Condvar, Mutex,
+        mpsc, Arc, Condvar, Mutex,
     },
     thread,
+    time::Duration,
 };
 use winit::event_loop::EventLoopProxy;
 use winit::platform::android::activity::AndroidApp;
@@ -84,8 +85,11 @@ fn read_text_inner<'local>(
         .map_err(|error| jni_error("get Android primary clip", error))?
         .l()
         .map_err(|error| jni_error("read Android primary clip", error))?;
+    // Android answers a denied read (the activity is not focused yet) with a
+    // null clip, indistinguishable from an empty clipboard. Treat it as
+    // unavailable: a clear manufactured from a denial would wipe the guest.
     if clip.is_null() {
-        return Ok(None);
+        return Err(ClipboardError("no readable Android clip".into()));
     }
 
     let item_count = env
@@ -94,7 +98,7 @@ fn read_text_inner<'local>(
         .i()
         .map_err(|error| jni_error("read Android clip item count", error))?;
     if item_count <= 0 {
-        return Ok(None);
+        return Err(ClipboardError("Android clip has no items".into()));
     }
 
     let item = env
@@ -108,7 +112,7 @@ fn read_text_inner<'local>(
         .l()
         .map_err(|error| jni_error("read Android clip item", error))?;
     if item.is_null() {
-        return Ok(None);
+        return Err(ClipboardError("Android clip item is null".into()));
     }
 
     let text = env
@@ -213,45 +217,77 @@ pub fn write_text(android_app: &AndroidApp, text: &str) -> Result<(), ClipboardE
 /// hands immutable bytes to a writer. This keeps a slow Android binder call or a large paste from
 /// stalling frame dispatch and presentation.
 ///
-/// Ordering: the worker reads once at startup and again only when resume or
-/// focus regain requests a resync, then queues external changes into the shared
-/// [`ExternalClipboardSync`] (the same host-testable state machine covered by
-/// `tests/clipboard_sync.rs`) and wakes the event loop immediately with the
-/// dedicated [`AppUserEvent::AndroidClipboardChanged`] event. The event loop
-/// drains and flushes before forwarding later keyboard/paste input, so the
-/// first Ctrl+V after returning from another app sees the fresh selection.
-/// `request_resync` wakes the worker early for one prompt read after resume
-/// or focus regain, because reads may be denied while backgrounded.
+/// Ordering: the worker reads once at startup, whenever Android reports a
+/// primary-clip change (`ClipboardWatch.kt`, delivered only while Portal is
+/// focused), and on resume / focus regain, then queues external changes into
+/// the shared [`ExternalClipboardSync`] (the same host-testable state machine
+/// covered by `tests/clipboard_sync.rs`) and wakes the event loop immediately
+/// with the dedicated [`AppUserEvent::AndroidClipboardChanged`] event. The
+/// event loop drains and flushes before forwarding later keyboard/paste
+/// input, so the first Ctrl+V after returning from another app sees the fresh
+/// selection. Android denies reads until its focus bookkeeping catches up
+/// with the window, so a denied resync read is retried a few times with a
+/// short backoff; otherwise the worker sleeps until the next signal.
 pub struct ClipboardBridge {
-    sync: Arc<Mutex<ExternalClipboardSync>>,
-    resync_signal: Arc<(Mutex<bool>, Condvar)>,
+    resync: ResyncHandle,
     stop: Arc<AtomicBool>,
     broker: Option<BrokerHandle>,
 }
 
+/// Wakes the Android read worker. Shared with the clip-changed JNI callback.
+#[derive(Clone)]
+struct ResyncHandle {
+    sync: Arc<Mutex<ExternalClipboardSync>>,
+    signal: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl ResyncHandle {
+    fn request(&self) {
+        if let Ok(mut tracker) = self.sync.lock() {
+            tracker.request_resync();
+        }
+        let (lock, cvar) = &*self.signal;
+        if let Ok(mut requested) = lock.lock() {
+            *requested = true;
+            cvar.notify_one();
+        }
+    }
+}
+
+static ACTIVE_RESYNC: Mutex<Option<ResyncHandle>> = Mutex::new(None);
+
+/// Delays between retries of a denied resync read.
+const DENIED_READ_RETRY_MS: [u64; 4] = [100, 250, 500, 1000];
+
 impl ClipboardBridge {
-    /// Start the Android -> Wayland polling worker.
+    /// Start the Android -> Wayland read worker and the guest -> Android writer.
     pub fn new(android_app: AndroidApp) -> Self {
         let sync = Arc::new(Mutex::new(ExternalClipboardSync::new()));
-        let resync_signal = Arc::new((Mutex::new(false), Condvar::new()));
+        let resync = ResyncHandle {
+            sync: Arc::clone(&sync),
+            signal: Arc::new((Mutex::new(false), Condvar::new())),
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let wake_proxy = event_loop_proxy();
-        let broker_android_app = android_app.clone();
-        let broker_sync = Arc::clone(&sync);
+        let guest_writes = spawn_guest_android_writer(android_app.clone(), Arc::clone(&sync));
         let on_guest_change: GuestClipboardCallback = Arc::new(move |value| {
-            spawn_guest_android_write(broker_android_app.clone(), Arc::clone(&broker_sync), value);
+            if let Ok(writes) = guest_writes.lock() {
+                let _ = writes.send(value);
+            }
         });
         let broker = clipboard_broker::start(Arc::clone(&stop), on_guest_change);
         spawn_android_poller(
             android_app.clone(),
-            Arc::clone(&sync),
+            sync,
             Arc::clone(&stop),
-            Arc::clone(&resync_signal),
+            Arc::clone(&resync.signal),
             wake_proxy,
         );
+        if let Ok(mut active) = ACTIVE_RESYNC.lock() {
+            *active = Some(resync.clone());
+        }
         Self {
-            sync,
-            resync_signal,
+            resync,
             stop,
             broker,
         }
@@ -280,7 +316,8 @@ impl ClipboardBridge {
     /// Non-blocking: copies already-queued values under a short mutex without
     /// Binder or FD work, so it is safe before input on the event-loop thread.
     pub fn drain_events(&self) -> Vec<Option<String>> {
-        self.sync
+        self.resync
+            .sync
             .lock()
             .map(|mut tracker| tracker.drain_pending())
             .unwrap_or_default()
@@ -292,42 +329,61 @@ impl ClipboardBridge {
     /// the worker early. The next successful read is evaluated promptly; an
     /// unchanged value queues nothing. Safe on the event-loop thread.
     pub fn request_resync(&self) {
-        if let Ok(mut tracker) = self.sync.lock() {
-            tracker.request_resync();
-        }
-        let (lock, cvar) = &*self.resync_signal;
-        if let Ok(mut requested) = lock.lock() {
-            *requested = true;
-            cvar.notify_one();
-        }
+        self.resync.request();
     }
 }
 
-fn spawn_guest_android_write(
+/// Android's `OnPrimaryClipChangedListener` fired (`ClipboardWatch.kt`).
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ClipboardWatch_nativeClipChanged(
+    _env: JNIEnv,
+    _class: JObject,
+) {
+    if let Some(resync) = ACTIVE_RESYNC.lock().ok().and_then(|active| active.clone()) {
+        log::debug!("clipdiag resync reason=clip-changed");
+        resync.request();
+    }
+}
+
+/// One writer thread applies guest copies to Android in order. Copies that
+/// arrive while a Binder write is in flight collapse to the newest one.
+fn spawn_guest_android_writer(
     android_app: AndroidApp,
     sync: Arc<Mutex<ExternalClipboardSync>>,
-    value: Option<String>,
-) {
+) -> Mutex<mpsc::Sender<String>> {
+    let (sender, receiver) = mpsc::channel::<String>();
     thread::spawn(move || {
-        if let Ok(mut tracker) = sync.lock() {
-            tracker.mark_guest_write(value.clone());
-        }
-        let text = value.as_deref().unwrap_or_default();
-        if let Err(error) = write_text(&android_app, text) {
-            log::warn!("Failed copying guest clipboard to Android: {error}");
+        while let Ok(mut text) = receiver.recv() {
+            while let Ok(newer) = receiver.try_recv() {
+                text = newer;
+            }
             if let Ok(mut tracker) = sync.lock() {
-                tracker.clear_echo_for(value);
+                tracker.mark_guest_write(Some(text.clone()));
+            }
+            if let Err(error) = write_text(&android_app, &text) {
+                log::warn!("Failed copying guest clipboard to Android: {error}");
+                if let Ok(mut tracker) = sync.lock() {
+                    tracker.clear_echo_for(Some(text));
+                }
             }
         }
     });
+    Mutex::new(sender)
 }
 
 impl Drop for ClipboardBridge {
     fn drop(&mut self) {
+        if let Ok(mut active) = ACTIVE_RESYNC.lock() {
+            if active
+                .as_ref()
+                .is_some_and(|handle| Arc::ptr_eq(&handle.signal, &self.resync.signal))
+            {
+                *active = None;
+            }
+        }
         self.stop.store(true, Ordering::Release);
-        // Wake the worker so it can observe `stop` without waiting out the
-        // full poll interval.
-        let (lock, cvar) = &*self.resync_signal;
+        // Wake the worker so it can observe `stop` immediately.
+        let (lock, cvar) = &*self.resync.signal;
         if let Ok(mut requested) = lock.lock() {
             *requested = true;
             cvar.notify_one();
@@ -344,17 +400,38 @@ fn spawn_android_poller(
 ) {
     thread::spawn(move || {
         let mut first_read = true;
+        // Index into DENIED_READ_RETRY_MS while a denied resync read is
+        // being retried; `None` sleeps until the next signal.
+        let mut retry: Option<usize> = None;
         loop {
             if !first_read {
                 let (lock, cvar) = &*resync_signal;
                 let Ok(mut requested) = lock.lock() else {
                     break;
                 };
-                while !*requested && !stop.load(Ordering::Acquire) {
-                    let Ok(next) = cvar.wait(requested) else {
-                        return;
-                    };
-                    requested = next;
+                match retry.and_then(|attempt| DENIED_READ_RETRY_MS.get(attempt)) {
+                    Some(&delay_ms) => {
+                        // A new signal ends the backoff early.
+                        let Ok((next, _)) = cvar.wait_timeout_while(
+                            requested,
+                            Duration::from_millis(delay_ms),
+                            |requested| !*requested && !stop.load(Ordering::Acquire),
+                        ) else {
+                            return;
+                        };
+                        requested = next;
+                    }
+                    None => {
+                        while !*requested && !stop.load(Ordering::Acquire) {
+                            let Ok(next) = cvar.wait(requested) else {
+                                return;
+                            };
+                            requested = next;
+                        }
+                    }
+                }
+                if *requested {
+                    retry = None;
                 }
                 *requested = false;
             } else {
@@ -367,19 +444,24 @@ fn spawn_android_poller(
             let observed = match read_text(&android_app) {
                 Ok(current) => Ok(current),
                 Err(error) => {
-                    // Clipboard access can be denied while Android's activity is backgrounded.
-                    // Resume/focus regain will request the next read.
+                    // Clipboard access is denied while Android's activity is
+                    // backgrounded and briefly after it regains focus.
                     log::debug!("Android clipboard read unavailable: {error}");
                     Err(())
                 }
             };
-            let (queued, pending_len) = sync
+            let (queued, pending_len, retry_denied) = sync
                 .lock()
                 .map(|mut tracker| {
                     let queued = tracker.observe_poll(observed);
-                    (queued, tracker.pending_len())
+                    (queued, tracker.pending_len(), tracker.needs_resync())
                 })
-                .unwrap_or((false, 0));
+                .unwrap_or((false, 0, false));
+            retry = if retry_denied {
+                Some(retry.map_or(0, |attempt| attempt + 1))
+            } else {
+                None
+            };
             log::debug!("clipdiag detect queued={queued} pending={pending_len}");
             if queued {
                 // Wake the event loop immediately with the dedicated event so

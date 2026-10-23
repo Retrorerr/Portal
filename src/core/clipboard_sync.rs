@@ -42,19 +42,23 @@ pub fn clip_preview(text: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
 }
-/// One-shot echo + change detector + pending queue for Android → Wayland.
+/// Guest writes whose echo may still be observed. Writes are serialized, so a
+/// handful covers a burst of copies landing between two Android reads.
+const MAX_PENDING_ECHOES: usize = 8;
+
+/// Echo + change detector + pending queue for Android → Wayland.
 ///
 /// `last_seen` tracks the last successfully observed Android value:
 /// - outer `None` = never observed (startup),
 /// - outer `Some(inner)` = last observed value (`inner == None` is cleared).
 ///
-/// `pending_echo` tracks a guest → Android write awaiting its echo:
-/// - outer `None` = no echo pending,
-/// - outer `Some(inner)` = suppress exactly one observation of `inner`.
+/// `pending_echoes` holds guest → Android writes, oldest first, whose echo
+/// has not been observed yet. Observing one consumes it and every older
+/// write (Android holds one value, so older writes were superseded).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ExternalClipboardSync {
     last_seen: Option<Option<String>>,
-    pending_echo: Option<Option<String>>,
+    pending_echoes: VecDeque<Option<String>>,
     resync_requested: bool,
     pending: VecDeque<Option<String>>,
 }
@@ -67,20 +71,28 @@ impl ExternalClipboardSync {
     /// Record a guest → Android write so its echo is suppressed exactly once.
     ///
     /// Empty text normalizes to a clear (`None`) to match the Binder read
-    /// path, which coerces empty to `None`.
+    /// path, which coerces empty to `None`. `last_seen` is left alone: a read
+    /// that raced ahead of this write still returns the previous value, which
+    /// must keep comparing equal instead of reverting the guest.
     pub fn mark_guest_write(&mut self, value: Option<String>) {
-        self.pending_echo = Some(normalize(value));
+        if self.pending_echoes.len() == MAX_PENDING_ECHOES {
+            self.pending_echoes.pop_front();
+        }
+        self.pending_echoes.push_back(normalize(value));
     }
 
-    /// Clear a pending echo only when it matches `value`.
+    /// Forget the newest pending echo when it matches `value`.
     ///
     /// Used when a guest → Android Binder write fails: the write did not
     /// land, so a matching echo must not suppress the next real observation.
-    /// A concurrent newer guest write is left untouched.
     pub fn clear_echo_for(&mut self, value: Option<String>) {
         let normalized = normalize(value);
-        if self.pending_echo.as_ref() == Some(&normalized) {
-            self.pending_echo = None;
+        if let Some(index) = self
+            .pending_echoes
+            .iter()
+            .rposition(|echo| *echo == normalized)
+        {
+            self.pending_echoes.remove(index);
         }
     }
 
@@ -130,11 +142,11 @@ impl ExternalClipboardSync {
         if self.resync_requested {
             self.resync_requested = false;
         }
-        // One-shot echo: consume exactly one matching observation, including
-        // a clear echo. A later legitimate copy of the same text is still
+        // Echo of our own write: consume it and every older write, which it
+        // superseded. A later legitimate copy of the same text is still
         // delivered because the marker is gone.
-        if self.pending_echo.as_ref() == Some(&current) {
-            self.pending_echo = None;
+        if let Some(index) = self.pending_echoes.iter().position(|echo| *echo == current) {
+            self.pending_echoes.drain(..=index);
             self.last_seen = Some(current);
             return false;
         }
@@ -145,8 +157,12 @@ impl ExternalClipboardSync {
                 self.last_seen = Some(current);
                 false
             }
+            // Unchanged, or a read that raced ahead of a pending guest write.
             Some(previous) if *previous == current => false,
             _ => {
+                // Something else replaced the clipboard, so none of our
+                // earlier writes can echo any more.
+                self.pending_echoes.clear();
                 self.last_seen = Some(current.clone());
                 self.pending.push_back(current);
                 true
@@ -227,6 +243,36 @@ mod tests {
         sync.clear_echo_for(Some("unsent".to_owned()));
         assert!(sync.observe_poll(Ok(Some("unsent".to_owned()))));
         assert_eq!(sync.drain_pending(), vec![Some("unsent".to_owned())]);
+    }
+
+    #[test]
+    fn burst_of_guest_writes_never_reverts_the_guest() {
+        let mut sync = ExternalClipboardSync::new();
+        assert!(sync.observe_poll(Ok(Some("old".to_owned()))));
+        sync.drain_pending();
+
+        sync.mark_guest_write(Some("a".to_owned()));
+        sync.mark_guest_write(Some("b".to_owned()));
+        // A read that raced ahead of both writes.
+        assert!(!sync.observe_poll(Ok(Some("old".to_owned()))));
+        // Intermediate and final echoes are consumed in order.
+        assert!(!sync.observe_poll(Ok(Some("a".to_owned()))));
+        assert!(!sync.observe_poll(Ok(Some("b".to_owned()))));
+        assert!(!sync.has_pending());
+        // Echo of "a" was consumed with "b"; a fresh copy of it is real.
+        assert!(sync.observe_poll(Ok(Some("a".to_owned()))));
+    }
+
+    #[test]
+    fn external_change_drops_stale_echoes() {
+        let mut sync = ExternalClipboardSync::new();
+        assert!(sync.observe_poll(Ok(Some("old".to_owned()))));
+        sync.drain_pending();
+
+        sync.mark_guest_write(Some("guest".to_owned()));
+        assert!(sync.observe_poll(Ok(Some("android".to_owned()))));
+        sync.drain_pending();
+        assert!(sync.observe_poll(Ok(Some("guest".to_owned()))));
     }
 
     #[test]

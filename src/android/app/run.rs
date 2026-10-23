@@ -1561,10 +1561,8 @@ fn anland_key(session: &crate::android::anland::AnlandSession, scancode: u32, pr
 /// - backspace runs / enter: layout-independent evdev keys (14 / 28);
 /// - Wayland text client focused: full-Unicode TEXT_INPUT to KWin's input
 ///   method (`commitText`), same destination as the bridge's commit_string;
-/// - otherwise (X11/unknown): ASCII via evdev keys (existing mapping),
-///   non-ASCII via Android clipboard + deferred Ctrl+V (the guest sync
-///   process serves it into the Wayland/X selection; benign on failure —
-///   text stays pasted-ready in the clipboard).
+/// - otherwise (X11/unknown): the IBus engine channel, with ASCII evdev
+///   keys as the degraded fallback. The Android clipboard is never used.
 /// Preedit has no backend channel (KWin exposes only commitText) and stays
 /// dropped; commits are never duplicated (exactly one branch runs).
 fn inject_committed_text_anland(

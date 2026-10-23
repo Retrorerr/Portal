@@ -19,7 +19,7 @@ use std::sync::{
 };
 use std::thread;
 
-pub type GuestClipboardCallback = Arc<dyn Fn(Option<String>) + Send + Sync + 'static>;
+pub type GuestClipboardCallback = Arc<dyn Fn(String) + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerEnvironment {
@@ -165,12 +165,13 @@ impl BrokerHandle {
         let Ok(mut state) = self.state.lock() else {
             return Ok(false);
         };
+        let previous = state.value().map(str::to_owned);
         let changed = state.apply(value)?;
         if !changed {
             return Ok(false);
         }
         if let Ok(mut suppressor) = self.host_echo.lock() {
-            suppressor.mark_host_update(value);
+            suppressor.mark_host_update(previous.as_deref(), value);
         }
 
         // Lock state before subscribers, matching the subscription snapshot
@@ -354,8 +355,10 @@ fn apply_guest_request(
         return Some(kind);
     }
     let changed = state.lock().ok()?.apply(value.as_deref()).ok()?;
-    if changed {
-        on_guest_change(value);
+    // A guest clear (the owning app exited, or a non-text copy) is recorded
+    // but never empties the Android clipboard.
+    if let (true, Some(text)) = (changed, value) {
+        on_guest_change(text);
     }
     Some(kind)
 }
