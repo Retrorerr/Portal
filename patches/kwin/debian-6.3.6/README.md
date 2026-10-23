@@ -1,9 +1,18 @@
 # Debian 13 KWin 6.3.6
 
-Apply `0001` (input provenance/lifecycle) and `0002` (QPainter buffer damage)
-to KWin v6.3.6 (`b8de4329447824b1b1e7a36b3a57acfd069f1423`), in order. Keep Debian's
+Apply `0001` (input provenance/lifecycle), `0002` (QPainter buffer damage) and
+`0003` (X11 popup grab dismissal, identical to Anland `0007`) to KWin v6.3.6
+(`b8de4329447824b1b1e7a36b3a57acfd069f1423`), in order. Keep Debian's
 `relax-interplasma-versioned-deps.patch` from the 6.3.6-1 source package when
 building against Debian 13's build dependencies.
+
+## X11 popup menus
+
+An X client's pointer grab only sees input on Xwayland surfaces, so a tap on
+the panel, the desktop or a Wayland app left X11 menus such as Steam's tray
+menu open. `0003` makes KWin deliver such a press to Xwayland as a click at the
+same position, and swallow it, while an override-redirect menu is mapped and an
+X client holds a pointer grab. See `../anland-6.3.6/README.md`.
 
 ## QPainter damage boundary
 

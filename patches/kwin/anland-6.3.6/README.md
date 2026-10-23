@@ -11,7 +11,7 @@ directory inside Debian 13 (trixie) on a native ARM64 runner.
 | --- | --- |
 | Debian KWin 6.3.6 | `kwin_6.3.6.orig.tar.xz`, SHA-256 `27f2205f06d58f1d1f480d2a94ae24022c2f95b9c1fdc5a549f8e143713fce12` |
 | lfdevs Debian packaging with the Anland backend | [lfdevs/kwin](https://github.com/lfdevs/kwin) tag `anland-5.13-debian-4_6.3.6-95`, commit `beea4c3d22f08100b1b3acda1bd502e87bb1a347` |
-| Portal patches | `0001-*.patch` to `0006-*.patch` here, appended to the lfdevs quilt series |
+| Portal patches | `0001-*.patch` to `0007-*.patch` here, appended to the lfdevs quilt series |
 
 The lfdevs tag is the source of the `kwin` 4:6.3.6-95 packages installed in
 Portal's guest (lfdevs/anland-termux release 5.13.3, pinned in
@@ -39,6 +39,12 @@ Portal's guest (lfdevs/anland-termux release 5.13.3, pinned in
   a zwp_locked_pointer_v1 lock (`OUTPUT_TYPE_SET_CONSUMER_VAR` 3 with
   `CONSUMER_VAR_CAPTURE_MOUSE` 1, as in upstream Anland), so games get raw
   relative mouse motion that does not stop at the screen edges.
+* `0007` closes X11 popup menus on presses outside Xwayland. An X client's
+  pointer grab only sees input on Xwayland surfaces, so a tap on the panel,
+  the desktop or a Wayland app left menus such as Steam's tray menu open.
+  While an override-redirect menu is mapped and an X client holds a pointer
+  grab, KWin delivers such a press to Xwayland as a click at the same
+  position and swallows it, as an X server grab would.
 
 The library is linked without `-Bsymbolic`, as Debian builds it, which
 `assets/guest-arm64/anland-damage.c` relies on to interpose KWin's repaint

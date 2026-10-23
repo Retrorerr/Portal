@@ -6,7 +6,7 @@ source_dir=$1
 patch_dir=$2
 test_source=$3
 build_dir=$4
-for fix in "$patch_dir"/0001-*.patch "$patch_dir"/0002-*.patch; do
+for fix in "$patch_dir"/0001-*.patch "$patch_dir"/0002-*.patch "$patch_dir"/0003-*.patch; do
     if patch -d "$source_dir" -p1 --dry-run --forward < "$fix" >/dev/null 2>&1; then
         patch -d "$source_dir" -p1 --forward < "$fix"
     elif ! patch -d "$source_dir" -p1 --dry-run --reverse < "$fix" >/dev/null 2>&1; then

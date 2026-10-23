@@ -1,0 +1,213 @@
+From 6b86d11764b129f09dd18d9a8de940f64a5f1a4d Mon Sep 17 00:00:00 2001
+From: Portal <masobazee@gmail.com>
+Date: Thu, 22 Oct 2026 08:40:07 +0100
+Subject: [PATCH] input: Dismiss X11 popup grabs on presses outside Xwayland
+
+An X11 popup menu grabs the X pointer, so on an X server any press
+outside the menu reaches it and closes it. Xwayland only receives input
+on its own surfaces, so a press on a Wayland surface (the panel, the
+desktop, a Wayland app) never reaches the grab: Steam's tray menu, and
+any other X11 menu, stays on screen until a press lands on an X window.
+
+While an override-redirect menu (popup, dropdown, combo box or untyped)
+is mapped and an X client holds a pointer grab, deliver presses on
+non-X11 surfaces to Xwayland as a click at the same position, through
+the menu's surface, then return the pointer to its window and swallow
+the press, as the X server would. Pointer, touch and tablet presses are
+handled. Without an active grab nothing changes, since the click would
+land on whatever X window is under it in the X stack.
+
+The filter lives in libkwin (input.cpp), not the Xwayland module, which
+is part of the kwin_wayland executable.
+---
+ src/input.cpp | 160 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 160 insertions(+)
+
+diff --git a/src/input.cpp b/src/input.cpp
+index c0faee3..f0cd584 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -78,6 +78,7 @@
+ #include "wayland/xdgshell.h"
+ #include <cmath>
+ #include <linux/input.h>
++#include <QSet>
+ 
+ using namespace std::literals;
+ 
+@@ -3055,6 +3056,160 @@ private:
+     }
+ };
+ 
++#if KWIN_BUILD_X11
++/*
++ * An X11 popup menu grabs the X pointer, so on a real X server any press outside it reaches the
++ * menu and dismisses it. Under Wayland, Xwayland only sees input on its own surfaces: a press on
++ * a Wayland surface (the panel, the desktop, a Wayland app) never reaches the grab, and the menu
++ * stays mapped. While an override-redirect menu is mapped and an X client holds a pointer grab,
++ * deliver such a press to Xwayland as a click at the same position, through the menu's surface,
++ * and swallow it, as the X server would.
++ */
++class XwaylandPopupGrabFilter : public QObject, public InputEventFilter
++{
++public:
++    explicit XwaylandPopupGrabFilter(QObject *parent)
++        : QObject(parent)
++        , InputEventFilter(InputFilterOrder::Popup)
++    {
++    }
++
++    bool pointerButton(PointerButtonEvent *event) override
++    {
++        if (event->state == PointerButtonState::Pressed) {
++            if (!forwardPress(event->position, event->nativeButton, event->timestamp)) {
++                return false;
++            }
++            m_buttons.insert(event->nativeButton);
++            return true;
++        }
++        return m_buttons.remove(event->nativeButton);
++    }
++
++    bool touchDown(qint32 id, const QPointF &pos, std::chrono::microseconds time) override
++    {
++        if (!forwardPress(pos, BTN_LEFT, time)) {
++            return false;
++        }
++        m_touches.insert(id);
++        return true;
++    }
++
++    bool touchMotion(qint32 id, const QPointF &, std::chrono::microseconds) override
++    {
++        return m_touches.contains(id);
++    }
++
++    bool touchUp(qint32 id, std::chrono::microseconds) override
++    {
++        return m_touches.remove(id);
++    }
++
++    bool touchCancel() override
++    {
++        m_touches.clear();
++        return false;
++    }
++
++    bool tabletToolTipEvent(TabletEvent *event) override
++    {
++        if (event->type() == QEvent::TabletPress) {
++            m_tabletTip = forwardPress(event->globalPosition(), BTN_LEFT, std::chrono::milliseconds(event->timestamp()));
++            return m_tabletTip;
++        }
++        const bool swallow = m_tabletTip;
++        m_tabletTip = false;
++        return swallow;
++    }
++
++private:
++    static X11Window *topmostMenu()
++    {
++        if (!workspace()) {
++            return nullptr;
++        }
++        const auto &stacking = workspace()->stackingOrder();
++        for (auto it = stacking.crbegin(); it != stacking.crend(); ++it) {
++            auto window = qobject_cast<X11Window *>(*it);
++            if (!window || !window->isUnmanaged() || window->isDeleted() || !window->surface() || !window->readyForPainting()) {
++                continue;
++            }
++            // Toolkits park hidden helper windows off screen.
++            if (!QRectF(workspace()->geometry()).intersects(window->frameGeometry())) {
++                continue;
++            }
++            // Untyped override-redirect windows are legacy menus (Tk, Java, Wine, ...).
++            const WindowType type = window->windowType();
++            if (type == WindowType::PopupMenu || type == WindowType::DropdownMenu
++                || type == WindowType::ComboBox || type == WindowType::Unknown) {
++                return window;
++            }
++        }
++        return nullptr;
++    }
++
++    static bool xPointerGrabbed()
++    {
++        xcb_connection_t *connection = kwinApp()->x11Connection();
++        if (!connection) {
++            return false;
++        }
++        const xcb_grab_pointer_cookie_t cookie = xcb_grab_pointer(connection, false, kwinApp()->x11RootWindow(), 0,
++                                                                  XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC,
++                                                                  XCB_WINDOW_NONE, XCB_CURSOR_NONE, XCB_CURRENT_TIME);
++        UniqueCPtr<xcb_grab_pointer_reply_t> reply(xcb_grab_pointer_reply(connection, cookie, nullptr));
++        if (!reply) {
++            return false;
++        }
++        if (reply->status == XCB_GRAB_STATUS_SUCCESS) {
++            xcb_ungrab_pointer(connection, XCB_CURRENT_TIME);
++            xcb_flush(connection);
++            return false;
++        }
++        return reply->status == XCB_GRAB_STATUS_ALREADY_GRABBED || reply->status == XCB_GRAB_STATUS_FROZEN;
++    }
++
++    bool forwardPress(const QPointF &pos, quint32 button, std::chrono::microseconds time)
++    {
++        X11Window *menu = topmostMenu();
++        if (!menu) {
++            return false;
++        }
++        // Presses on X11 windows reach Xwayland, and its grab, by themselves.
++        if (qobject_cast<X11Window *>(input()->findToplevel(pos))) {
++            return false;
++        }
++        // Without a grab the press would land on whatever X window lies under it in the X stack.
++        if (!xPointerGrabbed()) {
++            return false;
++        }
++
++        auto seat = waylandServer()->seat();
++        seat->setTimestamp(time);
++        seat->notifyPointerEnter(menu->surface(), pos, menu->inputTransformation());
++        seat->notifyPointerFrame();
++        seat->notifyPointerButton(button, PointerButtonState::Pressed);
++        seat->notifyPointerFrame();
++        seat->notifyPointerButton(button, PointerButtonState::Released);
++        seat->notifyPointerFrame();
++
++        // Give the pointer back to the window KWin has it on.
++        Window *focus = input()->pointer()->focus();
++        if (focus && focus->surface()) {
++            seat->notifyPointerEnter(focus->surface(), input()->pointer()->pos(), focus->inputTransformation());
++        } else {
++            seat->notifyPointerLeave();
++        }
++        seat->notifyPointerFrame();
++        return true;
++    }
++
++    QSet<quint32> m_buttons;
++    QSet<qint32> m_touches;
++    bool m_tabletTip = false;
++};
++#endif
++
+ void InputRedirection::setupInputFilters()
+ {
+     if (kwinApp()->session()->capabilities() & Session::Capability::SwitchTerminal) {
+@@ -3107,6 +3262,11 @@ void InputRedirection::setupInputFilters()
+     m_popupFilter = std::make_unique<PopupInputFilter>();
+     installInputEventFilter(m_popupFilter.get());
+ 
++#if KWIN_BUILD_X11
++    // Deleted with InputRedirection, as a child QObject.
++    installInputEventFilter(new XwaylandPopupGrabFilter(this));
++#endif
++
+     m_decorationFilter = std::make_unique<DecorationEventFilter>();
+     installInputEventFilter(m_decorationFilter.get());
+ 
+-- 
+2.56.0
+
