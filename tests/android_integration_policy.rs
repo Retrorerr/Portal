@@ -47,8 +47,6 @@ const PORTAL_RETURN_SCREEN_SOURCE: &str =
     include_str!("../src/android/kotlin/app/polarbear/setup/PortalReturnScreen.kt");
 const PORTAL_LAUNCH_TRANSITION_SOURCE: &str =
     include_str!("../src/android/kotlin/app/polarbear/setup/PortalLaunchTransition.kt");
-const XWAYLAND_SHA256SUMS_SOURCE: &str =
-    include_str!("../assets/xwayland-candidate/SHA256SUMS");
 const XWAYLAND_PORTAL_SHA256SUMS_SOURCE: &str =
     include_str!("../assets/xwayland-portal/SHA256SUMS");
 
@@ -767,21 +765,16 @@ fn input_method_bridge_and_fallback_policy() {
 
 #[test]
 fn xwayland_variant_selection_policy() {
-    // 1. Setup stages the Phase B candidate + xinput into their own dir
-    // (never /usr/bin, never the loader path) on every launch.
+    // 1. Setup stages xinput into its own dir (never /usr/bin, never the
+    // loader path) on every launch, and the retired 0005 candidate is gone.
     assert!(ANDROID_SETUP_SOURCE.contains("usr/local/lib/portal-xwayland"));
-    assert!(ANDROID_SETUP_SOURCE.contains("sync_xwayland_candidate_overlay"));
-    // 2. The staged candidate SHA is pinned identically in the guest-side
+    assert!(ANDROID_SETUP_SOURCE.contains("sync_xwayland_overlay"));
+    assert!(!KWIN_WRAPPER_SOURCE
+        .contains("b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d"));
+    // 2. Portal's default build (0006 leak and 0007 opaque-format fixes) is
+    // staged in its own dir, its SHA pinned identically in the guest-side
     // selection gate (the only check that enforces it) and the asset
     // manifest (transcription slips fail closed here, not on the tablet).
-    for pinned in [
-        "b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d",
-    ] {
-        assert!(KWIN_WRAPPER_SOURCE.contains(pinned));
-        assert!(XWAYLAND_SHA256SUMS_SOURCE.contains(pinned));
-    }
-    // 2b. Portal's default build (0006 leak and 0007 opaque-format fixes) is staged in its own dir and
-    // pinned the same way.
     assert!(ANDROID_SETUP_SOURCE.contains("usr/local/lib/portal-xwayland-default"));
     assert!(KWIN_WRAPPER_SOURCE.contains("xwayland_cand_dir=/usr/local/lib/portal-xwayland-default"));
     for pinned in ["f94c8d208efbe2690c21130feda006de9fe54bf673e662ff07629b885a189179"] {
@@ -929,7 +922,7 @@ fn anland_repair_revalidates_mesa_kwin_drmshim_firefox_and_session_contract() {
     assert!(ANDROID_SETUP_SOURCE.contains("KWIN_ANLAND_LIBRARY"));
     assert!(ANDROID_SETUP_SOURCE.contains("DRMSHIM_BINARY"));
     assert!(ANDROID_SETUP_SOURCE.contains("sync_kwin_anland_overlay_for_repair"));
-    assert!(ANDROID_SETUP_SOURCE.contains("bytes == KWIN_ANLAND_LIBRARY"));
+    assert!(ANDROID_SETUP_SOURCE.contains("KWIN_ANLAND_LIBRARY.matches_file(&anland_library)"));
     assert!(ANDROID_SETUP_SOURCE.contains("bytes == DRMSHIM_BINARY"));
     assert!(ANDROID_SETUP_SOURCE.contains("validate_firefox_anland_config"));
     for required in [

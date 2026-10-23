@@ -71,12 +71,17 @@ impl PRootRuntime {
 
     pub fn is_supported(android_app: &AndroidApp) -> bool {
         let context = get_application_context();
+        // The device is supported when either engine runs the probe: tawcroot
+        // (the default) first, then PRoot for kernels tawcroot cannot use.
+        // tawcroot's choice is cached for the process, so it must first be
+        // made here, after the probe binary exists.
         let supported = if Self::ensure_support_probe_rootfs(android_app).is_some() {
-            Self::try_proot_probe(
-                &context.data_dir,
-                &format!("/{}", SUPPORT_CHECK_BINARY),
-                &["--help"],
-            )
+            super::tawcroot::selected()
+                || Self::try_proot_probe(
+                    &context.data_dir,
+                    &format!("/{}", SUPPORT_CHECK_BINARY),
+                    &["--help"],
+                )
         } else {
             log::info!("Support probe asset missing or could not be extracted");
             false
@@ -89,7 +94,7 @@ impl PRootRuntime {
             // accepted.
             diagnostics::host_event(
                 "support-probe-failed",
-                "PRoot loader probe did not complete successfully; device cannot run the ARM64 guest",
+                "Neither tawcroot nor PRoot completed the loader probe; device cannot run the ARM64 guest",
             );
             log::error!("⚡️ Device Unsupported");
         }

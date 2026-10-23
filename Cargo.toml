@@ -103,6 +103,8 @@ zstd = { version = "0.13", default-features = false }
 
 [build-dependencies]
 cc = "1.2"
+sha2 = "0.10.6"
+xz2 = { version = "0.1.7", features = ["static"] }
 
 [patch.crates-io]
 smithay = { path = "patches/smithay" }

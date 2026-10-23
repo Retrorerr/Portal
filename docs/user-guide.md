@@ -47,7 +47,7 @@ Portal keeps its own KWin and Xwayland builds pinned so a package upgrade cannot
 
 Portal ships Mozilla's own Firefox from Mozilla's APT repository, so the launcher shows a single Firefox. Installs set up before 2.6 keep Debian's Firefox ESR installed, hidden from the menu, as a fallback; the `firefox-beta`, `firefox-devedition` and `firefox-nightly` channels install from the same repository. Portal applies the settings it needs for Android (GPU compositing on) to every Firefox under `/usr/lib`, at each launch and again after every `apt`/`dpkg` run, so a new install or upgrade needs nothing extra. **System Settings → Default Applications** chooses the default browser.
 
-Android's kernel has no user or PID namespaces, so PRoot emulates the parts browser sandboxes rely on. Chrome, Chromium, Electron apps and Firefox run with their own sandboxes on, as on a desktop Linux install, without `--no-sandbox`.
+Android's kernel has no user or PID namespaces, so Portal's guest engine emulates the parts browser sandboxes rely on. Chrome, Chromium, Electron apps and Firefox run with their own sandboxes on, as on a desktop Linux install, without `--no-sandbox`.
 
 ## Display and input
 

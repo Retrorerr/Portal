@@ -128,34 +128,29 @@ else
         fi
     fi
     # Project Anland XWayland variant selection. files/xwayland-variant
-    # arrives as LOCALDESKTOP_XWAYLAND_VARIANT ("portal", "candidate" or
-    # "stock"); /var/lib/localdesktop/xwayland-variant is the out-of-band
-    # test override (same pattern as kwin-variant above). "portal" is the
-    # pinned -91 build with Portal 0006 (no window-buffer leak), the app's
-    # default; "candidate" adds the 0005 touchpad patch. Without the env var
+    # arrives as LOCALDESKTOP_XWAYLAND_VARIANT ("portal" or "stock");
+    # /var/lib/localdesktop/xwayland-variant is the out-of-band test
+    # override (same pattern as kwin-variant above). "portal" is the pinned
+    # -91 build with Portal 0006/0007, the app's default. Without the env var
     # (older app), anything unrecognized, and any failed staging check, the
     # session uses stock and logs it. Stock keeps today's exact
     # PATH/environment: no wrapper binary, no extra processes.
     xwayland_variant=stock
     case "${LOCALDESKTOP_XWAYLAND_VARIANT:-}" in
-        portal|candidate|stock) xwayland_variant="$LOCALDESKTOP_XWAYLAND_VARIANT" ;;
+        portal|stock) xwayland_variant="$LOCALDESKTOP_XWAYLAND_VARIANT" ;;
     esac
     if [ -r /var/lib/localdesktop/xwayland-variant ]; then
         read -r xwayland_override < /var/lib/localdesktop/xwayland-variant
         case "$xwayland_override" in
-            portal|candidate|stock) xwayland_variant="$xwayland_override" ;;
+            portal|stock) xwayland_variant="$xwayland_override" ;;
             *)
-                printf 'xwayland_variant override=%q rejected (want portal|candidate|stock), keeping %s\n' \
+                printf 'xwayland_variant override=%q rejected (want portal|stock), keeping %s\n' \
                     "$xwayland_override" "$xwayland_variant" >> "$log_file"
                 ;;
         esac
     fi
     xwayland_bin=/usr/bin/Xwayland
     case "$xwayland_variant" in
-        candidate)
-            xwayland_cand_dir=/usr/local/lib/portal-xwayland
-            xwayland_cand_sha_expected="b91f55794942a9efd66300e352cea8c671cdb6ff0c3243a0cc176525cb96812d"
-            ;;
         portal)
             xwayland_cand_dir=/usr/local/lib/portal-xwayland-default
             xwayland_cand_sha_expected="f94c8d208efbe2690c21130feda006de9fe54bf673e662ff07629b885a189179"

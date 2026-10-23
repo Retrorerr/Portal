@@ -1,3 +1,4 @@
+use super::payload::{compressed_payload, CompressedPayload, GuestPayload};
 use super::process::ArchProcess;
 use crate::{
     android::{
@@ -235,23 +236,15 @@ const CLIPBOARD_SYNC: &str = include_str!("../../../assets/localdesktop-clipboar
 const CLIPBOARD_PUSH: &str = include_str!("../../../assets/localdesktop-clipboard-push.sh");
 const WL_COPY_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-copy");
 const WL_PASTE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/wl-paste");
-const KWIN_LIBRARY: &[u8] = include_bytes!("../../../assets/kwin-debian-arm64/libkwin.so.6.3.6");
+const KWIN_LIBRARY: CompressedPayload = compressed_payload!("kwin-debian-arm64/libkwin.so.6.3.6");
 /// Project Anland unified KWin library: on-device build of Debian KWin 6.3.6
 /// with the Anland backend plus the Portal Touchpad port (NaturalScroll /
 /// ScrollFactor over D-Bus + kcminputrc, Finger source, axis-stop). Served
 /// ONLY to Anland GPU sessions from `/usr/local/lib/portal-anland` so the
 /// QPainter overlay path is untouched; the stock distro libkwin is never
 /// modified. Synced idempotently on every launch (restart/reinstall persist).
-const KWIN_ANLAND_LIBRARY: &[u8] =
-    include_bytes!("../../../assets/kwin-anland-arm64/libkwin.so.6.3.6");
-/// Phase B XWayland touchpad-source candidate: CI build of pinned lfdevs
-/// 461772ae (2:24.1.6-91) plus Portal 0005 (package 2:24.1.6-91portal1),
-/// served ONLY from `/usr/local/lib/portal-xwayland` when the session
-/// explicitly selects `xwayland-variant=candidate`. `/usr/bin/Xwayland`
-/// (stock) is never overwritten; the KWin wrapper falls back to stock on
-/// any staging problem. Pins: `assets/xwayland-candidate/SHA256SUMS`.
-const XWAYLAND_CANDIDATE_BINARY: &[u8] =
-    include_bytes!("../../../assets/xwayland-candidate/Xwayland");
+const KWIN_ANLAND_LIBRARY: CompressedPayload =
+    compressed_payload!("kwin-anland-arm64/libkwin.so.6.3.6");
 /// Portal's default XWayland: pinned lfdevs 461772ae (2:24.1.6-91) plus
 /// Portal 0006 and 0007 (package 2:24.1.6-91portal3). 0006 stops the KGSL
 /// stale frame-callback recovery leaking a window-sized buffer each time it
@@ -261,7 +254,7 @@ const XWAYLAND_CANDIDATE_BINARY: &[u8] =
 /// from `/usr/local/lib/portal-xwayland-default`; `/usr/bin/Xwayland` stays
 /// stock and the wrapper falls back to it on any staging problem. Pins:
 /// `assets/xwayland-portal/SHA256SUMS`.
-const XWAYLAND_PORTAL_BINARY: &[u8] = include_bytes!("../../../assets/xwayland-portal/Xwayland");
+const XWAYLAND_PORTAL_BINARY: CompressedPayload = compressed_payload!("xwayland-portal/Xwayland");
 /// Portal's KPackage: Debian kf6-kpackage 6.13.0-1 plus
 /// `patches/kpackage/0001`, which stops Update jobs (every KDE Store
 /// install) running on the caller's thread. Without it System Settings
@@ -320,7 +313,7 @@ struct LibraryOverlay {
 }
 /// Stock Debian trixie arm64 xinput (diagnostic tool for the XI2 proof;
 /// same overlay staging, never in the default loader path).
-const XWAYLAND_XINPUT_BINARY: &[u8] = include_bytes!("../../../assets/xwayland-candidate/xinput");
+const XWAYLAND_XINPUT_BINARY: &[u8] = include_bytes!("../../../assets/xwayland-portal/xinput");
 /// Project Anland load-time stub: satisfies the lfdevs kwin_wayland binary's
 /// AnlandBackend reference when QPainter sessions run the overlay libkwin
 /// (which has no Anland backend). Preloaded ONLY in QPainter mode; traps if
@@ -341,7 +334,7 @@ const ANLAND_DAMAGE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/
 /// The layer's turnip plus the KGSL zero-timeout poll fix (polls used to
 /// wait for GPU idle, capping WebGPU). Bound over the layer's copy by
 /// `anland::session_binds`. Source: `assets/mesa-turnip/README.md`.
-const TURNIP_BINARY: &[u8] = include_bytes!("../../../assets/mesa-turnip/libvulkan_freedreno.so");
+const TURNIP_BINARY: CompressedPayload = compressed_payload!("mesa-turnip/libvulkan_freedreno.so");
 pub const TURNIP_FILE: &str = "portal-turnip/libvulkan_freedreno.so";
 /// Qt Wayland input coalescing for LibreOffice, which repaints inside every
 /// scroll/drag event and starved its own presents (3.7 -> 21 frames/s on a
@@ -2379,12 +2372,15 @@ fn sync_stackclean(fs_root: &Path) {
     }
 }
 
-fn write_guest_binary_result(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+fn write_guest_binary_result(
+    path: &Path,
+    contents: &(impl GuestPayload + ?Sized),
+) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let temporary = path.with_extension("portal-tmp");
-    fs::write(&temporary, contents)?;
+    super::payload::write_file(&temporary, contents)?;
     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))?;
     fs::File::open(&temporary)?.sync_all()?;
     fs::rename(&temporary, path)?;
@@ -3649,7 +3645,7 @@ fn validate_required_session_files(fs_root: &Path) -> anyhow::Result<()> {
     let kwin_dir = fs_root.join("usr/local/lib/portal");
     anyhow::ensure!(
         fs::metadata(kwin_dir.join("libkwin.so.6.3.6"))
-            .map(|metadata| metadata.len() == KWIN_LIBRARY.len() as u64)
+            .map(|metadata| metadata.len() == KWIN_LIBRARY.len)
             .unwrap_or(false),
         "Required Portal KWin overlay is incomplete"
     );
@@ -3667,7 +3663,7 @@ fn validate_required_session_files(fs_root: &Path) -> anyhow::Result<()> {
         let anland_dir = fs_root.join("usr/local/lib/portal-anland");
         anyhow::ensure!(
             fs::metadata(anland_dir.join("libkwin.so.6.3.6"))
-                .map(|metadata| metadata.len() == KWIN_ANLAND_LIBRARY.len() as u64)
+                .map(|metadata| metadata.len() == KWIN_ANLAND_LIBRARY.len)
                 .unwrap_or(false),
             "Required Anland KWin library is incomplete"
         );
@@ -3708,9 +3704,7 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
 
     let anland_library = fs_root.join("usr/local/lib/portal-anland/libkwin.so.6.3.6");
     anyhow::ensure!(
-        fs::read(&anland_library)
-            .map(|bytes| bytes == KWIN_ANLAND_LIBRARY)
-            .unwrap_or(false),
+        KWIN_ANLAND_LIBRARY.matches_file(&anland_library),
         "Anland KWin overlay does not match the pinned Portal asset"
     );
     let drmshim = fs_root.join("usr/local/lib/portal/drmshim.so");
@@ -3740,30 +3734,23 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
 /// matched to the byte count), so each copy carries a stamp of the embedded
 /// payload's hash. Hashing the embedded bytes is cheaper than reading the
 /// guest copy back on every launch.
-fn payload_is_current(target: &Path, payload: &[u8]) -> bool {
+fn payload_is_current(target: &Path, payload: &(impl GuestPayload + ?Sized)) -> bool {
     fs::metadata(target)
-        .map(|m| m.len() == payload.len() as u64)
+        .map(|m| m.len() == payload.size())
         .unwrap_or(false)
         && fs::read_to_string(payload_stamp_path(target))
-            .map(|stamp| stamp == payload_fingerprint(payload))
+            .map(|stamp| stamp == payload.fingerprint())
             .unwrap_or(false)
 }
 
 /// Record that `target` now holds `payload` (see `payload_is_current`).
-fn mark_payload_current(target: &Path, payload: &[u8]) {
-    let _ = fs::write(payload_stamp_path(target), payload_fingerprint(payload));
+fn mark_payload_current(target: &Path, payload: &(impl GuestPayload + ?Sized)) {
+    let _ = fs::write(payload_stamp_path(target), payload.fingerprint());
 }
 
 fn payload_stamp_path(target: &Path) -> PathBuf {
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     target.with_file_name(format!(".{name}.portal-stamp"))
-}
-
-fn payload_fingerprint(payload: &[u8]) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    payload.hash(&mut hasher);
-    format!("{}:{:016x}", payload.len(), hasher.finish())
 }
 
 /// Install Portal's ABI-matched Debian KWin overlay and migrate the
@@ -3781,12 +3768,12 @@ fn sync_kwin_overlay(fs_root: &Path) {
     let kwin_dir = fs_root.join("usr/local/lib/portal");
     let _ = fs::create_dir_all(&kwin_dir);
     let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
-    if !payload_is_current(&kwin_library, KWIN_LIBRARY) {
+    if !payload_is_current(&kwin_library, &KWIN_LIBRARY) {
         let kwin_temporary = kwin_library.with_extension("6.3.6.tmp");
-        if fs::write(&kwin_temporary, KWIN_LIBRARY).is_ok() {
+        if super::payload::write_file(&kwin_temporary, &KWIN_LIBRARY).is_ok() {
             let _ = fs::set_permissions(&kwin_temporary, fs::Permissions::from_mode(0o755));
             if fs::rename(&kwin_temporary, &kwin_library).is_ok() {
-                mark_payload_current(&kwin_library, KWIN_LIBRARY);
+                mark_payload_current(&kwin_library, &KWIN_LIBRARY);
             }
         }
     }
@@ -3838,9 +3825,9 @@ fn sync_kwin_overlay(fs_root: &Path) {
     // Patched turnip (see TURNIP_BINARY). Optional: without it the layer's
     // own turnip is bound.
     let turnip_path = Path::new(crate::core::config::APP_FILES_ROOT).join(TURNIP_FILE);
-    if !payload_is_current(&turnip_path, TURNIP_BINARY) {
-        match write_guest_binary_result(&turnip_path, TURNIP_BINARY) {
-            Ok(()) => mark_payload_current(&turnip_path, TURNIP_BINARY),
+    if !payload_is_current(&turnip_path, &TURNIP_BINARY) {
+        match write_guest_binary_result(&turnip_path, &TURNIP_BINARY) {
+            Ok(()) => mark_payload_current(&turnip_path, &TURNIP_BINARY),
             Err(error) => log::warn!("patched turnip not installed: {error:#}"),
         }
     }
@@ -3860,8 +3847,8 @@ fn sync_kwin_overlay(fs_root: &Path) {
     // Project Anland unified KWin library (Anland backend + Portal Touchpad).
     // Served from its own dir so the QPainter overlay above is never shadowed.
     sync_kwin_anland_overlay(fs_root);
-    // Phase B XWayland touchpad-source candidate (own dir, stock default).
-    sync_xwayland_candidate_overlay(fs_root);
+    // Portal XWayland and the xinput diagnostic (own dirs, stock fallback).
+    sync_xwayland_overlay(fs_root);
     sync_library_overlays(fs_root);
     sync_glew_library(fs_root);
 }
@@ -3969,15 +3956,13 @@ fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow:
     fs::create_dir_all(&kwin_dir)?;
     let kwin_library = kwin_dir.join("libkwin.so.6.3.6");
     let fresh = if verify_bytes {
-        fs::read(&kwin_library)
-            .map(|bytes| bytes == KWIN_ANLAND_LIBRARY)
-            .unwrap_or(false)
+        KWIN_ANLAND_LIBRARY.matches_file(&kwin_library)
     } else {
-        payload_is_current(&kwin_library, KWIN_ANLAND_LIBRARY)
+        payload_is_current(&kwin_library, &KWIN_ANLAND_LIBRARY)
     };
     if !fresh {
-        write_guest_binary_result(&kwin_library, KWIN_ANLAND_LIBRARY)?;
-        mark_payload_current(&kwin_library, KWIN_ANLAND_LIBRARY);
+        write_guest_binary_result(&kwin_library, &KWIN_ANLAND_LIBRARY)?;
+        mark_payload_current(&kwin_library, &KWIN_ANLAND_LIBRARY);
     }
     // Atomic symlink swap (temp + rename): KWin must never observe a
     // half-deployed soname chain if a launch races a previous update. This
@@ -4006,8 +3991,9 @@ fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow:
 }
 
 /// Stage Portal's default XWayland into `/usr/local/lib/portal-xwayland-default`
-/// and the touchpad-source candidate plus the xinput diagnostic into
-/// `/usr/local/lib/portal-xwayland` (NOT `/usr/bin`, NOT the default loader
+/// and the xinput diagnostic into `/usr/local/lib/portal-xwayland`, and
+/// remove the retired 0005 touchpad-source candidate build that older
+/// versions staged beside it (NOT `/usr/bin`, NOT the default loader
 /// path). Runs on every provisioning pass AND every session launch, so
 /// existing runtimes converge without re-provisioning.
 ///
@@ -4016,30 +4002,29 @@ fn sync_kwin_anland_overlay_inner(fs_root: &Path, verify_bytes: bool) -> anyhow:
 /// (falling back to stock otherwise).
 /// Sync is idempotent (size-freshness, atomic temp+rename, 0755) mirroring
 /// the KWin overlay above.
-fn sync_xwayland_candidate_overlay(fs_root: &Path) {
-    for (dir, name, payload) in [
+fn sync_xwayland_overlay(fs_root: &Path) {
+    let retired = fs_root.join("usr/local/lib/portal-xwayland/Xwayland");
+    let _ = fs::remove_file(payload_stamp_path(&retired));
+    let _ = fs::remove_file(retired);
+    let payloads: [(&str, &str, &dyn GuestPayload); 2] = [
         (
             "usr/local/lib/portal-xwayland-default",
             "Xwayland",
-            XWAYLAND_PORTAL_BINARY,
-        ),
-        (
-            "usr/local/lib/portal-xwayland",
-            "Xwayland",
-            XWAYLAND_CANDIDATE_BINARY,
+            &XWAYLAND_PORTAL_BINARY,
         ),
         (
             "usr/local/lib/portal-xwayland",
             "xinput",
-            XWAYLAND_XINPUT_BINARY,
+            &XWAYLAND_XINPUT_BINARY,
         ),
-    ] {
-        let candidate_dir = fs_root.join(dir);
-        let _ = fs::create_dir_all(&candidate_dir);
-        let target = candidate_dir.join(name);
+    ];
+    for (dir, name, payload) in payloads {
+        let staging_dir = fs_root.join(dir);
+        let _ = fs::create_dir_all(&staging_dir);
+        let target = staging_dir.join(name);
         if !payload_is_current(&target, payload) {
-            let tmp = candidate_dir.join(format!("{name}.tmp"));
-            if fs::write(&tmp, payload).is_ok() {
+            let tmp = staging_dir.join(format!("{name}.tmp"));
+            if super::payload::write_file(&tmp, payload).is_ok() {
                 let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755));
                 if fs::rename(&tmp, &target).is_ok() {
                     mark_payload_current(&target, payload);
@@ -6132,7 +6117,7 @@ pub fn setup_with_completion(
     let (sender, receiver) = mpsc::channel();
     let progress = Arc::new(Mutex::new(0));
 
-    // Before the PRoot probe, which would fail here too and blame the device.
+    // Before the engine probe, which would fail here too and blame the device.
     let files_dir = get_application_context().data_dir;
     if !crate::core::config::runs_in_primary_profile(&files_dir, Path::new(APP_FILES_ROOT)) {
         log::error!(
@@ -6147,8 +6132,8 @@ pub fn setup_with_completion(
         ));
     }
     if !ArchProcess::is_supported(&android_app) {
-        log::info!("PRoot support check failed, showing Device Unsupported page");
-        diagnostics::host_event("setup-unsupported", "PRoot support probe failed");
+        log::info!("Guest engine support check failed, showing Device Unsupported page");
+        diagnostics::host_event("setup-unsupported", "guest engine support probe failed");
         return PolarBearBackend::WebView(WebviewBackend::unsupported(
             android_app,
             "This device can't run Portal's Linux environment.",

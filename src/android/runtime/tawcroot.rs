@@ -1,13 +1,14 @@
-//! tawcroot, the opt-in guest engine.
+//! tawcroot, the default guest engine.
 //!
 //! `libtawcroot.so` (third_party/tawcroot, MIT) runs guest programs with a
 //! seccomp filter whose trapped syscalls are translated by a SIGSYS handler
 //! inside the guest process itself, instead of PRoot's ptrace round trip to
 //! a tracer process. Path syscalls cost a few microseconds instead of tens.
 //!
-//! It is chosen by writing `tawcroot` to `<files>/guest-engine`, checked once
-//! per app process: the choice never changes under a running session, and a
-//! device whose kernel cannot run the engine keeps PRoot. Both engines share
+//! It is used unless `<files>/guest-engine` says `proot`, checked once per
+//! app process: the choice never changes under a running session, and a
+//! device whose kernel cannot run the engine (no seccomp trap or memfd,
+//! roughly pre-Android 8) falls back to PRoot. Both engines share
 //! PRoot's fake-root records (`.proot-meta-file.*`), so ownership survives a
 //! switch; hardlinks made under tawcroot live in its own store
 //! (`<files>/tawcroot`) and read as dangling symlinks under PRoot.
@@ -40,7 +41,8 @@ pub fn selected() -> bool {
     *SELECTED.get_or_init(|| {
         let choice = fs::read_to_string(Path::new(config::APP_FILES_ROOT).join(ENGINE_CHOICE_FILE))
             .unwrap_or_default();
-        if choice.trim() != "tawcroot" {
+        if choice.trim() == "proot" {
+            diagnostics::host_event("engine-select", "engine=proot reason=guest-engine-file");
             return false;
         }
         let usable = kernel_supports_trap() && smoke_exec();

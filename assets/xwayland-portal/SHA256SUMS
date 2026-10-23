@@ -8,3 +8,6 @@
 # Staged to /usr/local/lib/portal-xwayland-default/ (never /usr/bin); the
 # KWin wrapper uses stock /usr/bin/Xwayland on any mismatch.
 f94c8d208efbe2690c21130feda006de9fe54bf673e662ff07629b885a189179  Xwayland
+# xinput: stock Debian trixie arm64 xinput_1.6.4-1+b3_arm64.deb, usr/bin/xinput
+# only (diagnostic for the XI2 touch proof), staged to /usr/local/lib/portal-xwayland/.
+e135bede216ce4a54af321f0c5f5acf42a710dd311bd7a9263edce3e97eb78d0  xinput

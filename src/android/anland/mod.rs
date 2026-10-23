@@ -370,15 +370,12 @@ pub fn software_gl_fallback_requested() -> bool {
 
 /// XWayland build selection. `Portal` (default) serves the pinned -91 build
 /// with Portal 0006 (no window-buffer leak in the KGSL frame-callback
-/// recovery) from `/usr/local/lib/portal-xwayland-default`; `Candidate` adds
-/// the 0005 touchpad-source patch from `/usr/local/lib/portal-xwayland`;
-/// `Stock` is the untouched `/usr/bin/Xwayland`, which the wrapper also uses
+/// recovery) from `/usr/local/lib/portal-xwayland-default`; `Stock` is the untouched `/usr/bin/Xwayland`, which the wrapper also uses
 /// whenever a staged build fails its SHA gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XwaylandVariant {
     Portal,
     Stock,
-    Candidate,
 }
 
 impl XwaylandVariant {
@@ -387,24 +384,22 @@ impl XwaylandVariant {
         match self {
             XwaylandVariant::Portal => "portal",
             XwaylandVariant::Stock => "stock",
-            XwaylandVariant::Candidate => "candidate",
         }
     }
 }
 
 /// Parse an xwayland-variant flag value (case-insensitive, trimmed): the
-/// words `stock` and `candidate` select those builds; anything else,
-/// including absent/unreadable, is `Portal`. Pure function for unit tests.
+/// word `stock` selects stock; anything else, including absent/unreadable
+/// and the retired `candidate`, is `Portal`. Pure function for unit tests.
 pub fn parse_xwayland_variant(raw: &str) -> XwaylandVariant {
     match raw.trim().to_ascii_lowercase().as_str() {
         "stock" => XwaylandVariant::Stock,
-        "candidate" => XwaylandVariant::Candidate,
         _ => XwaylandVariant::Portal,
     }
 }
 
-/// App-private flag file selecting the XWayland variant (content `stock` or
-/// `candidate`; absent or anything else means the Portal build).
+/// App-private flag file selecting the XWayland variant (content `stock`;
+/// absent or anything else means the Portal build).
 pub fn xwayland_variant_flag_path() -> std::path::PathBuf {
     std::path::Path::new(crate::core::config::APP_FILES_ROOT).join("xwayland-variant")
 }
@@ -417,7 +412,7 @@ pub fn xwayland_variant() -> XwaylandVariant {
         .map(|s| parse_xwayland_variant(&s))
         .unwrap_or(XwaylandVariant::Portal);
     log::info!(
-        "anland.xwayland={} (write 'stock' or 'candidate' to xwayland-variant to switch; wrapper SHA-gates staging)",
+        "anland.xwayland={} (write 'stock' to xwayland-variant to switch; wrapper SHA-gates staging)",
         variant.as_env()
     );
     variant
@@ -571,7 +566,10 @@ fn fake_drm_binds(files: &std::path::Path) -> Vec<crate::core::runtime::BindMoun
     let rdev = match std::fs::metadata(drm_nodes::KGSL_DEVICE) {
         Ok(meta) => meta.rdev(),
         Err(error) => {
-            log::info!("anland.drm-nodes skipped: {} unavailable ({error})", drm_nodes::KGSL_DEVICE);
+            log::info!(
+                "anland.drm-nodes skipped: {} unavailable ({error})",
+                drm_nodes::KGSL_DEVICE
+            );
             return Vec::new();
         }
     };

@@ -61,6 +61,7 @@ pub mod android {
         pub mod launch;
         pub mod mesa_layer;
         pub mod optional_apps;
+        pub mod payload;
         pub mod process;
         pub mod setup;
         pub mod system_updates;

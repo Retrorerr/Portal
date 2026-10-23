@@ -11,7 +11,7 @@ Android
    ├─ Smithay Wayland compositor
    ├─ Compose setup and recovery screens
    ├─ Android integration bridges
-   └─ PRoot supervisor
+   └─ guest engine (tawcroot; PRoot on kernels it can't use)
       └─ Debian 13 guest
          ├─ KDE Plasma 6 / KWin
          ├─ PipeWire and Pulse compatibility
@@ -34,7 +34,7 @@ Runtime images use A/B slots. A candidate slot can be assembled and validated wi
 
 ### 3. Desktop launch
 
-When provisioning is complete, Portal creates the Android/EGL renderer and Smithay state, publishes the Wayland socket to the guest, and starts the Plasma session under PRoot. KWin is a nested Wayland client of Portal's compositor.
+When provisioning is complete, Portal creates the Android/EGL renderer and Smithay state, publishes the Wayland socket to the guest, and starts the Plasma session under the guest engine: tawcroot by default, or PRoot when the kernel lacks what tawcroot needs (seccomp trapping, memfd) or `files/guest-engine` says `proot`. KWin is a nested Wayland client of Portal's compositor.
 
 Portal does not use X11 or VNC as its normal display transport. Xwayland exists inside the guest only for applications that do not support Wayland.
 
