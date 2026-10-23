@@ -141,12 +141,12 @@ Android (display · touch · keyboard · audio · clipboard · files)
 Portal app (Rust host + Compose screens)
    │  GPU frames: KWin → Mesa (freedreno / Turnip) → Android buffers
    │
-Debian 13 in PRoot (rootless)
+Debian 13 under tawcroot (rootless)
    │
 KDE Plasma 6 and your Linux apps
 ```
 
-Debian runs under a patched PRoot, so nothing needs root. Plasma's compositor (KWin) renders on the GPU through Mesa and hands finished frames straight to Android, with no copying and no VNC in between. A simpler Smithay-based renderer stays in as a fallback. Audio runs through PipeWire, with an Android AAudio output on the other end.
+Debian runs under tawcroot, Portal's rootless engine: it translates Linux file paths and permissions inside each process, so nothing needs root. Older kernels fall back to a patched PRoot. Plasma's compositor (KWin) renders on the GPU through Mesa and hands finished frames straight to Android, with no copying and no VNC in between. A simpler Smithay-based renderer stays in as a fallback. Audio runs through PipeWire, with an Android AAudio output on the other end.
 
 More detail: [architecture](docs/architecture.md), [Debian provisioning](docs/debian-provisioning.md), [user guide](docs/user-guide.md).
 
@@ -171,9 +171,10 @@ There's also an on-device Termux build: `bash scripts/build-termux.sh`.
 Before sending changes, run the host checks:
 
 ```bash
-cargo fmt --all -- --check
 cargo test --tests
 ```
+
+Format only the files you changed with `rustfmt`, since `cargo fmt --all` rewrites files you didn't touch.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the rest, and [SECURITY.md](SECURITY.md) for reporting security issues privately.
 
