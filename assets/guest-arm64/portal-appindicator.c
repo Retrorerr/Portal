@@ -21,7 +21,6 @@
 #include <stddef.h>
 
 #define RTLD_NOW 2
-#define RTLD_GLOBAL 0x100
 
 extern void *dlopen(const char *file, int mode);
 extern void *dlsym(void *handle, const char *symbol);
@@ -53,10 +52,14 @@ static struct {
     gpointer (*object_ref)(gpointer);
 } g;
 
+/* Local scope only: RTLD_GLOBAL would put GTK's libpng16 ahead of the copy
+ * statically linked (and exported) by friendsui.so, whose lazily bound png_*
+ * calls then hit libpng16 with friendsui's png_struct and crash Steam when it
+ * opens Settings. dlsym on the handles needs no global symbols. */
 static int load(void) {
     if (g.loaded) return g.loaded > 0;
-    void *gtk = dlopen("libgtk-x11-2.0.so.0", RTLD_NOW | RTLD_GLOBAL);
-    void *gobj = dlopen("libgobject-2.0.so.0", RTLD_NOW | RTLD_GLOBAL);
+    void *gtk = dlopen("libgtk-x11-2.0.so.0", RTLD_NOW);
+    void *gobj = dlopen("libgobject-2.0.so.0", RTLD_NOW);
     g.loaded = -1;
     if (!gtk || !gobj) return 0;
 #define SYM(field, lib, name) if (!(*(void **)&g.field = dlsym(lib, name))) return 0
