@@ -104,7 +104,7 @@ Pick Steam during setup and you get the ARM64 Steam client running natively.
 - x86 Linux games run through Box64 (Kerbal Space Program works, for example).
 - Windows games through Proton and FEX are early days, so expect hit and miss. Portal prefers Proton Experimental (ARM64) when it's installed.
 - Controllers connected to Android show up in Steam as Xbox controllers.
-- While Steam runs, a small handle at the top of the screen shows the on-screen controller (while a game is running) and opens the game panel, where you can edit the controller layout and set a frame-rate cap, per game if you like.
+- While Steam runs, a small handle at the top of the screen (drag it wherever you like) shows the on-screen controller (while a game is running) and opens the game panel, where you can edit the controller layout and set a frame-rate cap, per game if you like.
 
 ## Good to know
 

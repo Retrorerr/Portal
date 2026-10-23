@@ -59,9 +59,9 @@ When no external keyboard, mouse, or touchpad is connected, Portal can present P
 
 ## Games
 
-Pick Steam during setup or add it later from **Apps** (see above). Windows games run through Proton; Portal prefers **Proton Experimental (ARM64)** when it is installed.
+Pick Steam during setup or add it later from **Apps** (see above). Windows games run through Proton; Portal prefers **Proton Experimental (ARM64)** when it is installed. If no ARM64 Proton is installed yet, starting a Windows game opens Steam's install dialog for **Proton 11.0 (ARM64)**.
 
-While Steam runs, a small handle sits at the top of the screen. One side shows or hides the on-screen controller while a game is running; the other opens the game panel:
+While Steam runs, a small handle sits at the top of the screen; drag it anywhere and it stays there. One side shows or hides the on-screen controller while a game is running; the other opens the game panel:
 
 - **On-screen controller**: show it, set its opacity and size, and edit the layout. A layout can be shared by every game or kept for one game. The controller steps aside while a physical controller is connected unless you ask for it.
 - **Game settings**: the video memory Windows games are told the GPU has and a **Frame-rate cap** for steadier pacing and less heat. These can also be kept per game, and apply the next time the game starts.
