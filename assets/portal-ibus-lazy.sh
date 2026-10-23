@@ -20,6 +20,12 @@
         fi
         sleep 1
     done
+    # Setup installs the packages on a detached thread that can still be
+    # running as the session starts; pick the daemon up once it lands.
+    for _ in $(seq 1 120); do
+        command -v ibus-daemon >/dev/null 2>&1 && break
+        sleep 5
+    done
     command -v ibus-daemon >/dev/null 2>&1 || exit 0
     # --replace: a daemon left over from an earlier session would otherwise
     # keep serving this one's clients with its stale engine.

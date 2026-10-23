@@ -264,11 +264,13 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
             "LOCALDESKTOP_XWAYLAND_VARIANT".into(),
             xwayland_variant().as_env().to_string(),
         ),
-        // GTK input method: IBus. The Portal IBus engine bridges X11/GTK
-        // editable focus to the Android IME (real FocusIn/FocusOut, commit,
-        // delete, enter). Qt/Wayland clients are unaffected (QT_IM_MODULE
-        // unset keeps native Wayland text-input).
-        ("GTK_IM_MODULE".into(), "ibus".into()),
+        // GTK_IM_MODULE is deliberately unset. GTK then picks per display:
+        // native Wayland clients (Firefox) use text-input-v3 through KWin
+        // and portal-ime-bridge like Qt does, X11 clients get IBus (its
+        // locale default "*"), whose Portal engine bridges editable focus
+        // to the Android IME. "ibus" sent Wayland GTK through IBus too, so
+        // they had no keyboard whenever ibus-daemon was not up, and
+        // "wayland:ibus" crashes GTK 3 on X11 (verified on device).
         ("ANLAND_SOCKET".into(), guest_socket_path().into()),
         ("ANLAND".into(), "1".into()),
         ("ANLAND_SKIP_IMPLICIT_SYNC_WAIT".into(), "1".into()),
