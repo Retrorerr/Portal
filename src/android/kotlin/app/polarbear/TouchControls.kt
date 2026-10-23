@@ -37,9 +37,9 @@ import kotlin.math.min
 /**
  * On-screen controller and the quick game panel.
  *
- * While Steam runs, a small handle sits at the top of the screen: one side
- * shows or hides the controller (only while a game runs), the other opens
- * the game panel (controller options, layout editing and the settings
+ * While Steam runs, a small handle sits at the top of the screen (drag it
+ * anywhere; it remembers where): one side shows or hides the controller
+ * (only while a game runs), the other opens the game panel (controller options, layout editing and the settings
  * Portal's compatibility tools read at launch, see [app.polarbear.gaming.GameSettings]).
  *
  * The controller feeds the "touch pad" through the same evdev path as
@@ -57,6 +57,8 @@ object TouchControls : ControlHost {
     private const val PREF_HAPTICS = "haptics"
     private const val PREF_RUMBLE = "rumble"
     private const val PREF_ANALOG = "analog_triggers"
+    private const val PREF_HANDLE_X = "handle_x"
+    private const val PREF_HANDLE_Y = "handle_y"
     private const val POLL_MS = 2500L
 
     // Compose-observable state, read by the game panel and the edit bar.
@@ -91,7 +93,10 @@ object TouchControls : ControlHost {
     private val axes = FloatArray(10)
 
     private val rootLayoutListener = View.OnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
-        if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) placeAll()
+        if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
+            placeAll()
+            placeHandle()
+        }
     }
 
     private val deviceListener = object : InputManager.InputDeviceListener {
@@ -643,11 +648,12 @@ object TouchControls : ControlHost {
     private fun addHandle(host: PortalActivity, overlay: FrameLayout) {
         val density = host.resources.displayMetrics.density
         val view = HandleView(host)
+        // Placed by translation from the top-left corner, see [placeHandle].
         val params = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             (36f * density).toInt(),
-            Gravity.TOP or Gravity.CENTER_HORIZONTAL,
-        ).apply { topMargin = (8f * density).toInt() }
+            Gravity.TOP or Gravity.START,
+        )
         // Above the controls, below Portal's own screens and the panel.
         val index = views.values.maxOfOrNull { overlay.indexOfChild(it) }?.plus(1) ?: min(1, overlay.childCount)
         overlay.addView(view, index.coerceIn(0, overlay.childCount), params)
@@ -655,9 +661,41 @@ object TouchControls : ControlHost {
     }
 
     /**
-     * The top-of-screen handle: a controller segment (while a game runs)
-     * and a settings segment that opens the panel. Long-press also opens it.
+     * Put the handle where the user left it: its centre as a fraction of the
+     * overlay's width and its top as a fraction of the height, so it keeps its
+     * spot across rotation and folding. Unmoved, it sits top centre.
      */
+    private fun placeHandle() {
+        val view = handle ?: return
+        val overlay = root ?: return
+        if (view.dragging) return
+        val width = overlay.width.toFloat()
+        val height = overlay.height.toFloat()
+        if (width <= 0f || view.width <= 0) return
+        val density = overlay.resources.displayMetrics.density
+        val prefs = prefs(overlay.context)
+        val cx = prefs.getFloat(PREF_HANDLE_X, 0.5f) * width
+        val top = prefs.getFloat(PREF_HANDLE_Y, -1f).let { if (it < 0f) 8f * density else it * height }
+        view.translationX = (cx - view.width / 2f).coerceIn(0f, (width - view.width).coerceAtLeast(0f))
+        view.translationY = top.coerceIn(0f, (height - view.height).coerceAtLeast(0f))
+    }
+
+    private fun saveHandle(view: View) {
+        val overlay = root ?: return
+        if (overlay.width <= 0 || overlay.height <= 0) return
+        prefs(overlay.context).edit()
+            .putFloat(PREF_HANDLE_X, (view.translationX + view.width / 2f) / overlay.width)
+            .putFloat(PREF_HANDLE_Y, view.translationY / overlay.height)
+            .apply()
+    }
+
+    /**
+     * The top-of-screen handle: a controller segment (while a game runs)
+     * and a settings segment that opens the panel. Long-press also opens it;
+     * dragging moves it.
+     */
+    private const val IDLE_ALPHA = 0.82f
+
     @SuppressLint("ViewConstructor")
     private class HandleView(context: Context) : View(context) {
         private val density = context.resources.displayMetrics.density
@@ -676,8 +714,15 @@ object TouchControls : ControlHost {
         }
         private val dot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ControlView.withAlpha(ControlView.IVORY, 225) }
         private val rect = RectF()
+        private val slop = android.view.ViewConfiguration.get(context).scaledTouchSlop.toFloat()
         private var downX = 0f
+        private var downRawX = 0f
+        private var downRawY = 0f
+        private var startX = 0f
+        private var startY = 0f
         private var longPressed = false
+        var dragging = false
+            private set
         private val longPress = Runnable {
             longPressed = true
             performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
@@ -687,13 +732,18 @@ object TouchControls : ControlHost {
 
         init {
             contentDescription = "Game controls"
-            alpha = 0.82f
+            alpha = IDLE_ALPHA
         }
 
         private val segments: Int get() = if (gameRunning.value) 2 else 1
 
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
             setMeasuredDimension((segment * segments).toInt(), MeasureSpec.getSize(heightMeasureSpec))
+        }
+
+        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+            // Growing a segment keeps the handle's centre where it was.
+            if (w > 0) placeHandle()
         }
 
         /** Grow or shrink with the controller segment, and redraw. */
@@ -710,17 +760,50 @@ object TouchControls : ControlHost {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.x
+                    downRawX = event.rawX
+                    downRawY = event.rawY
+                    startX = translationX
+                    startY = translationY
                     longPressed = false
+                    dragging = false
                     postDelayed(longPress, 450L)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downRawX
+                    val dy = event.rawY - downRawY
+                    if (!dragging && !longPressed && dx * dx + dy * dy > slop * slop) {
+                        dragging = true
+                        removeCallbacks(longPress)
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                        animate().scaleX(1.12f).scaleY(1.12f).alpha(1f).setDuration(120L).start()
+                    }
+                    if (dragging) {
+                        val parentView = parent as? View
+                        val maxX = ((parentView?.width ?: 0) - width).toFloat().coerceAtLeast(0f)
+                        val maxY = ((parentView?.height ?: 0) - height).toFloat().coerceAtLeast(0f)
+                        translationX = (startX + dx).coerceIn(0f, maxX)
+                        translationY = (startY + dy).coerceIn(0f, maxY)
+                    }
                 }
                 MotionEvent.ACTION_UP -> {
                     removeCallbacks(longPress)
-                    if (!longPressed) {
+                    if (dragging) {
+                        dragging = false
+                        animate().scaleX(1f).scaleY(1f).alpha(IDLE_ALPHA).setDuration(160L).start()
+                        saveHandle(this)
+                    } else if (!longPressed) {
                         performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
                         if (segments == 2 && downX < segment) later { toggleController() } else later { openPanel() }
                     }
                 }
-                MotionEvent.ACTION_CANCEL -> removeCallbacks(longPress)
+                MotionEvent.ACTION_CANCEL -> {
+                    removeCallbacks(longPress)
+                    if (dragging) {
+                        dragging = false
+                        animate().scaleX(1f).scaleY(1f).alpha(IDLE_ALPHA).setDuration(160L).start()
+                        saveHandle(this)
+                    }
+                }
             }
             return true
         }

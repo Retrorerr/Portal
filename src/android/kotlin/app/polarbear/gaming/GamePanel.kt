@@ -2,10 +2,14 @@ package app.polarbear.gaming
 
 // The quick game panel and the controller edit bar: small Compose cards
 // over a running game, in the setup screens' visual language (charcoal
-// glass, ivory type, one orange accent). Controller state lives in
+// glass, ivory type, one orange accent), with rows grouped like a
+// settings list and Portal's own slim switches and sliders. Controller state lives in
 // TouchControls; game settings live in the files GameSettings writes.
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -14,10 +18,14 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,29 +37,36 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -61,7 +76,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.TouchControls
-import app.polarbear.setup.PanelButton
 import app.polarbear.setup.PortalColors
 import app.polarbear.setup.PortalPalette
 import app.polarbear.setup.components.PortalEmphasized
@@ -169,7 +183,7 @@ private fun PanelCard(palette: PortalPalette, maxHeight: Dp) {
             Column(Modifier.weight(1f)) {
                 Text(
                     text = gameName ?: if (gameRunning) "Game" else "Steam",
-                    fontSize = 17.sp,
+                    fontSize = 19.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = palette.textPrimary,
                     maxLines = 1,
@@ -181,128 +195,147 @@ private fun PanelCard(palette: PortalPalette, maxHeight: Dp) {
                         gameRunning -> "Running"
                         else -> "No game running · settings apply to the next one"
                     },
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     color = palette.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-            PanelButton(text = "Done", primary = false, palette = palette, onClick = { TouchControls.closePanel() })
+            Spacer(Modifier.width(12.dp))
+            QuietButton("Done", palette) { TouchControls.closePanel() }
         }
 
         SectionHeading("On-screen controller", palette)
-        ToggleRow(
-            title = "Show controller",
-            subtitle = when {
-                physicalPad && !visible -> "Hidden while a controller is connected"
-                physicalPad -> "Shown alongside your controller"
-                !gameRunning -> "Appears when a game starts"
-                else -> null
-            },
-            checked = visible,
-            palette = palette,
-            onChange = { TouchControls.toggleController() },
-        )
-        SliderRow(
-            title = "Opacity",
-            value = layout.opacity,
-            range = 0.15f..1f,
-            valueText = "${(layout.opacity * 100).roundToInt()}%",
-            palette = palette,
-            onChange = { TouchControls.updateLayout(layout.copy(opacity = it), persist = false) },
-            onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
-        )
-        SliderRow(
-            title = "Size",
-            value = layout.scale,
-            range = ControllerLayout.MIN_SCALE..ControllerLayout.MAX_SCALE,
-            valueText = "${(layout.scale * 100).roundToInt()}%",
-            palette = palette,
-            onChange = { TouchControls.updateLayout(layout.copy(scale = it), persist = false) },
-            onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
-        )
-        ToggleRow("Button vibration", "A tap you can feel on every press", haptics, palette) {
-            TouchControls.setHaptics(it)
-        }
-        ToggleRow("Rumble", "The tablet vibrates when a game rumbles", rumble, palette) {
-            TouchControls.setRumble(it)
-        }
-        ToggleRow("Analog triggers", "Press LT and RT lower down to press harder", analog, palette) {
-            TouchControls.setAnalogTriggers(it)
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            PanelButton(text = "Edit layout", primary = true, palette = palette, onClick = { TouchControls.startEditing() })
-            Text(
-                text = if (TouchControls.appLayout.value) "Using this game's own layout" else "Move, resize and hide controls",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                color = palette.textMuted,
+        Group {
+            ToggleRow(
+                title = "Show controller",
+                subtitle = when {
+                    physicalPad && !visible -> "Hidden while a controller is connected"
+                    physicalPad -> "Shown alongside your controller"
+                    !gameRunning -> "Appears when a game starts"
+                    else -> null
+                },
+                checked = visible,
+                palette = palette,
+                onChange = { TouchControls.toggleController() },
             )
+            GroupDivider()
+            SliderRow(
+                title = "Opacity",
+                value = layout.opacity,
+                range = 0.15f..1f,
+                valueText = "${(layout.opacity * 100).roundToInt()}%",
+                palette = palette,
+                onChange = { TouchControls.updateLayout(layout.copy(opacity = it), persist = false) },
+                onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
+            )
+            SliderRow(
+                title = "Size",
+                value = layout.scale,
+                range = ControllerLayout.MIN_SCALE..ControllerLayout.MAX_SCALE,
+                valueText = "${(layout.scale * 100).roundToInt()}%",
+                palette = palette,
+                onChange = { TouchControls.updateLayout(layout.copy(scale = it), persist = false) },
+                onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
+            )
+            GroupDivider()
+            NavRow(
+                title = "Edit layout",
+                subtitle = if (TouchControls.appLayout.value) "Using this game's own layout" else "Move, resize and hide controls",
+                palette = palette,
+            ) { TouchControls.startEditing() }
+        }
+
+        SectionHeading("Feel", palette)
+        Group {
+            ToggleRow("Button vibration", "A tap you can feel on every press", haptics, palette) {
+                TouchControls.setHaptics(it)
+            }
+            GroupDivider()
+            ToggleRow("Rumble", "The tablet vibrates when a game rumbles", rumble, palette) {
+                TouchControls.setRumble(it)
+            }
+            GroupDivider()
+            ToggleRow("Analog triggers", "Press LT and RT lower down to press harder", analog, palette) {
+                TouchControls.setAnalogTriggers(it)
+            }
         }
 
         SectionHeading("Game settings", palette)
-        val id = appId
-        if (id != null) {
-            ToggleRow(
-                title = "Only for this game",
-                subtitle = if (ownSettings) "${gameName ?: "This game"} keeps its own settings" else "Off: every game shares these settings",
-                checked = ownSettings,
+        Group {
+            val id = appId
+            if (id != null) {
+                ToggleRow(
+                    title = "Only for this game",
+                    subtitle = if (ownSettings) "${gameName ?: "This game"} keeps its own settings" else "Off: every game shares these settings",
+                    checked = ownSettings,
+                    palette = palette,
+                ) { own ->
+                    GameSettings.setAppConfig(context, id, own)
+                    ownSettings = own
+                }
+                GroupDivider()
+            }
+            OptionRow(
+                title = "Video memory",
+                subtitle = "What Windows games are told the GPU has",
+                options = listOf(2048, 3072, 4096, 6144, 8192),
+                selected = config.vramMb,
+                label = { "${it / 1024f}".removeSuffix(".0") + " GB" },
                 palette = palette,
-            ) { own ->
-                GameSettings.setAppConfig(context, id, own)
-                ownSettings = own
+            ) { update(config.copy(vramMb = it)) }
+            GroupDivider()
+            OptionRow(
+                title = "Frame-rate cap",
+                subtitle = "Steadier pacing and less heat (DirectX games)",
+                options = listOf(0, 30, 45, 60, 90, 120),
+                selected = config.fpsLimit,
+                label = { if (it == 0) "Off" else "$it" },
+                palette = palette,
+            ) { update(config.copy(fpsLimit = it)) }
+            GroupDivider()
+            ToggleRow("Frame-rate counter", "DXVK's FPS readout in the corner", config.hud, palette) {
+                update(config.copy(hud = it))
             }
         }
-        OptionRow(
-            title = "Video memory",
-            subtitle = "What Windows games are told the GPU has",
-            options = listOf(2048, 3072, 4096, 6144, 8192),
-            selected = config.vramMb,
-            label = { "${it / 1024f}".removeSuffix(".0") + " GB" },
-            palette = palette,
-        ) { update(config.copy(vramMb = it)) }
-        OptionRow(
-            title = "Frame-rate cap",
-            subtitle = "Steadier pacing and less heat (DirectX games)",
-            options = listOf(0, 30, 45, 60, 90, 120),
-            selected = config.fpsLimit,
-            label = { if (it == 0) "Off" else "$it" },
-            palette = palette,
-        ) { update(config.copy(fpsLimit = it)) }
-        OptionRow(
-            title = "Proton",
-            subtitle = "Which installed Proton for ARM64 runs Windows games",
-            options = listOf("", "stable", "experimental"),
-            selected = config.proton.takeIf { it == "stable" || it == "experimental" } ?: "",
-            label = {
-                when (it) {
-                    "stable" -> "Stable"
-                    "experimental" -> "Experimental"
-                    else -> "Newest"
-                }
-            },
-            palette = palette,
-        ) { update(config.copy(proton = it)) }
-        OptionRow(
-            title = "32-bit Windows code",
-            subtitle = "Translator for 32-bit games and launchers",
-            options = listOf("", "box64"),
-            selected = config.wow64,
-            label = { if (it == "box64") "Box64" else "FEX" },
-            palette = palette,
-        ) { update(config.copy(wow64 = it)) }
-        ToggleRow("FEX code cache", "Keep translated x86 code between runs for faster starts", config.fexCache, palette) {
-            update(config.copy(fexCache = it))
+
+        SectionHeading("Compatibility", palette)
+        Group {
+            OptionRow(
+                title = "Proton",
+                subtitle = "Which installed Proton for ARM64 runs Windows games",
+                options = listOf("", "stable", "experimental"),
+                selected = config.proton.takeIf { it == "stable" || it == "experimental" } ?: "",
+                label = {
+                    when (it) {
+                        "stable" -> "Stable"
+                        "experimental" -> "Experimental"
+                        else -> "Newest"
+                    }
+                },
+                palette = palette,
+            ) { update(config.copy(proton = it)) }
+            GroupDivider()
+            OptionRow(
+                title = "32-bit Windows code",
+                subtitle = "Translator for 32-bit games and launchers",
+                options = listOf("", "box64"),
+                selected = config.wow64,
+                label = { if (it == "box64") "Box64" else "FEX" },
+                palette = palette,
+            ) { update(config.copy(wow64 = it)) }
+            GroupDivider()
+            ToggleRow("FEX code cache", "Keep translated x86 code between runs for faster starts", config.fexCache, palette) {
+                update(config.copy(fexCache = it))
+            }
         }
-        ToggleRow("Frame-rate counter", "DXVK's FPS readout in the corner", config.hud, palette) {
-            update(config.copy(hud = it))
-        }
-        Spacer(Modifier.height(10.dp))
         Text(
             text = "Game settings apply the next time a game starts. A game's Steam launch options override them.",
+            modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 10.dp),
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
-            color = palette.textMuted,
+            color = palette.textMuted.copy(alpha = 0.7f),
             lineHeight = 15.sp,
         )
     }
@@ -342,21 +375,16 @@ fun EditBar() {
                     color = palette.textMuted,
                 )
             }
-            PanelButton(
-                text = if (confirmReset) "Tap to reset" else "Reset",
-                primary = false,
-                palette = palette,
-                onClick = {
-                    if (confirmReset) {
-                        confirmReset = false
-                        TouchControls.resetLayout()
-                    } else {
-                        confirmReset = true
-                    }
-                },
-            )
-            Spacer(Modifier.width(4.dp))
-            PanelButton(text = "Done", primary = true, palette = palette, onClick = { TouchControls.stopEditing() })
+            QuietButton(if (confirmReset) "Tap to reset" else "Reset", palette) {
+                if (confirmReset) {
+                    confirmReset = false
+                    TouchControls.resetLayout()
+                } else {
+                    confirmReset = true
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+            QuietButton("Done", palette, accent = true) { TouchControls.stopEditing() }
         }
         val control = selected
         if (control != null) {
@@ -370,12 +398,9 @@ fun EditBar() {
                     fontWeight = FontWeight.SemiBold,
                     color = palette.accent,
                 )
-                PanelButton(
-                    text = if (state.visible) "Hide" else "Show",
-                    primary = false,
-                    palette = palette,
-                    onClick = { TouchControls.setElementVisible(control, !state.visible) },
-                )
+                QuietButton(if (state.visible) "Hide" else "Show", palette) {
+                    TouchControls.setElementVisible(control, !state.visible)
+                }
             }
             SliderRow(
                 title = "${control.title} size",
@@ -422,17 +447,92 @@ fun EditBar() {
     }
 }
 
+/** Grouped rows: one soft inset surface per section, like a settings list. */
+private val GroupFill = Color(0x0FF1EBDD)
+private val GroupLine = Color(0x12F1EBDD)
+
+@Composable
+private fun Group(content: @Composable () -> Unit) {
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(GroupFill)
+            .border(1.dp, GroupLine, shape)
+            .padding(horizontal = 14.dp, vertical = 4.dp),
+    ) { content() }
+}
+
+@Composable
+private fun GroupDivider() {
+    Box(Modifier.fillMaxWidth().padding(vertical = 2.dp).height(1.dp).background(GroupLine))
+}
+
 @Composable
 private fun SectionHeading(text: String, palette: PortalPalette) {
     Text(
         text = text.uppercase(),
-        modifier = Modifier.padding(top = 18.dp, bottom = 4.dp),
-        color = palette.textSecondary.copy(alpha = 0.75f),
+        modifier = Modifier.padding(start = 4.dp, top = 20.dp, bottom = 8.dp),
+        color = palette.textMuted.copy(alpha = 0.8f),
         fontSize = 10.sp,
         fontWeight = FontWeight.SemiBold,
-        letterSpacing = 1.2.sp,
+        letterSpacing = 1.3.sp,
         maxLines = 1,
     )
+}
+
+@Composable
+private fun RowText(title: String, subtitle: String?, palette: PortalPalette, modifier: Modifier) {
+    Column(modifier) {
+        Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.textPrimary)
+        if (subtitle != null) {
+            Text(subtitle, fontSize = 11.5.sp, fontWeight = FontWeight.Normal, color = palette.textMuted, lineHeight = 15.sp)
+        }
+    }
+}
+
+/** A small, quiet pill for secondary actions (Done, Reset, Hide). */
+@Composable
+private fun QuietButton(text: String, palette: PortalPalette, accent: Boolean = false, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(50)
+    Box(
+        Modifier
+            .clip(shape)
+            .background(if (accent) palette.accent else Color(0x1AF1EBDD))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (accent) PortalColors.Charcoal else palette.textPrimary,
+        )
+    }
+}
+
+@Composable
+private fun NavRow(title: String, subtitle: String?, palette: PortalPalette, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RowText(title, subtitle, palette, Modifier.weight(1f).padding(end = 12.dp))
+        Canvas(Modifier.size(width = 8.dp, height = 14.dp)) {
+            val stroke = 1.8.dp.toPx()
+            val path = Path().apply {
+                moveTo(stroke, stroke)
+                lineTo(size.width - stroke, size.height / 2f)
+                lineTo(stroke, size.height - stroke)
+            }
+            drawPath(path, palette.textMuted, style = Stroke(stroke, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
+    }
 }
 
 @Composable
@@ -446,33 +546,39 @@ private fun ToggleRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 role = Role.Switch,
                 onClick = { onChange(!checked) },
             )
-            .padding(vertical = 6.dp),
+            .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.textPrimary)
-            if (subtitle != null) {
-                Text(subtitle, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = palette.textMuted, lineHeight = 14.sp)
-            }
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = PortalColors.Ivory,
-                checkedTrackColor = palette.accent,
-                checkedBorderColor = palette.accent,
-                uncheckedThumbColor = palette.textMuted,
-                uncheckedTrackColor = palette.trackFill,
-                uncheckedBorderColor = palette.textMuted.copy(alpha = 0.5f),
-            ),
+        RowText(title, subtitle, palette, Modifier.weight(1f).padding(end = 12.dp))
+        PortalSwitch(checked, palette)
+    }
+}
+
+/** A compact switch; the row around it takes the tap. */
+@Composable
+private fun PortalSwitch(checked: Boolean, palette: PortalPalette) {
+    val travel by animateDpAsState(if (checked) 18.dp else 0.dp, spring(dampingRatio = 0.8f, stiffness = 700f), label = "switch thumb")
+    val track by animateColorAsState(if (checked) palette.accent else Color(0x29F1EBDD), tween(160), label = "switch track")
+    Box(
+        Modifier
+            .size(width = 42.dp, height = 24.dp)
+            .clip(RoundedCornerShape(50))
+            .background(track)
+            .padding(3.dp),
+    ) {
+        Box(
+            Modifier
+                .offset(x = travel)
+                .size(18.dp)
+                .shadow(2.dp, CircleShape)
+                .clip(CircleShape)
+                .background(PortalColors.Ivory),
         )
     }
 }
@@ -487,23 +593,62 @@ private fun SliderRow(
     onChange: (Float) -> Unit,
     onFinished: () -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+    Column(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(title, modifier = Modifier.weight(1f), fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.textPrimary)
-            Text(valueText, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = palette.textMuted)
+            Text(valueText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = palette.textMuted)
         }
-        Slider(
-            value = value.coerceIn(range.start, range.endInclusive),
-            onValueChange = onChange,
-            onValueChangeFinished = onFinished,
-            valueRange = range,
-            modifier = Modifier.height(32.dp),
-            colors = SliderDefaults.colors(
-                thumbColor = PortalColors.Ivory,
-                activeTrackColor = palette.accent,
-                inactiveTrackColor = PortalColors.Ivory.copy(alpha = 0.14f),
-            ),
-        )
+        PortalSlider(value, range, palette, onChange, onFinished)
+    }
+}
+
+/** A slim slider: thin track, ivory knob; drag or tap anywhere along it. */
+@Composable
+private fun PortalSlider(
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    palette: PortalPalette,
+    onChange: (Float) -> Unit,
+    onFinished: () -> Unit,
+) {
+    val change by rememberUpdatedState(onChange)
+    val finished by rememberUpdatedState(onFinished)
+    val span = (range.endInclusive - range.start).coerceAtLeast(1e-6f)
+    val fraction = ((value - range.start) / span).coerceIn(0f, 1f)
+    val knob = 9.dp
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .height(30.dp)
+            .pointerInput(range) {
+                val radius = knob.toPx()
+                fun at(x: Float): Float {
+                    val usable = (size.width - radius * 2f).coerceAtLeast(1f)
+                    return range.start + ((x - radius) / usable).coerceIn(0f, 1f) * span
+                }
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    change(at(down.position.x))
+                    drag(down.id) {
+                        it.consume()
+                        change(at(it.position.x))
+                    }
+                    finished()
+                }
+            },
+    ) {
+        val radius = knob.toPx()
+        val thickness = 4.dp.toPx()
+        val cy = size.height / 2f
+        val start = radius
+        val end = size.width - radius
+        val x = start + (end - start) * fraction
+        val corner = CornerRadius(thickness / 2f)
+        drawRoundRect(Color(0x24F1EBDD), Offset(start, cy - thickness / 2f), Size(end - start, thickness), corner)
+        drawRoundRect(palette.accent, Offset(start, cy - thickness / 2f), Size(x - start, thickness), corner)
+        drawCircle(Color(0x55000000), radius + 1.5.dp.toPx(), Offset(x, cy + 1.dp.toPx()))
+        drawCircle(PortalColors.Ivory, radius, Offset(x, cy))
     }
 }
 
@@ -517,10 +662,9 @@ private fun <T> OptionRow(
     palette: PortalPalette,
     onSelect: (T) -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-        Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.textPrimary)
-        Text(subtitle, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = palette.textMuted)
-        Spacer(Modifier.height(6.dp))
+    Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+        RowText(title, subtitle, palette, Modifier)
+        Spacer(Modifier.height(8.dp))
         // A value set by hand in the file that the panel does not offer shows the first option.
         val current = if (selected in options) selected else options.first()
         SlidingSegmentedControl(
@@ -529,7 +673,7 @@ private fun <T> OptionRow(
             onSelect = onSelect,
             label = label,
             palette = palette,
-            height = 38.dp,
+            height = 36.dp,
         )
     }
 }
