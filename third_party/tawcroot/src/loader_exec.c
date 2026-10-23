@@ -152,6 +152,25 @@ long tawcroot_shebang_read(int fd, char *line, size_t cap,
 	return 0;
 }
 
+const char *tawcroot_foreign_elf_interp(int fd)
+{
+#if defined(__aarch64__)
+	uint8_t eh[20];
+	if (tawc_pread64(fd, eh, sizeof eh, 0) != (long)sizeof eh) return 0;
+	if (eh[0] != 0x7f || eh[1] != 'E' || eh[2] != 'L' || eh[3] != 'F' ||
+	    eh[4] != 2 /* ELFCLASS64 */ || eh[5] != 1 /* LSB */)
+		return 0;
+	unsigned type = eh[16] | (unsigned)eh[17] << 8;
+	unsigned machine = eh[18] | (unsigned)eh[19] << 8;
+	if (machine != TAWC_EM_X86_64 || (type != TAWC_ET_EXEC && type != TAWC_ET_DYN))
+		return 0;
+	return "/usr/bin/box64";
+#else
+	(void)fd;
+	return 0;
+#endif
+}
+
 /* Resolve a #! shebang chain. Rewrites `argv_out` in place the way the
  * kernel's binfmt_script does: drop the caller's argv[0], prepend
  * [interpreter, optional single shebang argument, script path]. The
@@ -182,8 +201,11 @@ static long resolve_shebangs(int initial_fd,
 		uint8_t hdr[2];
 		long n = tawc_pread64(bin_fd, hdr, 2, 0);
 		if (n < 0) { tawc_close(bin_fd); return n; }
+		const char *foreign = 0;
 		if (n < 2 || !(hdr[0] == '#' && hdr[1] == '!')) {
-			return bin_fd;  /* ELF or unknown — let parse_image classify */
+			foreign = tawcroot_foreign_elf_interp(bin_fd);
+			if (!foreign)
+				return bin_fd;  /* ELF or unknown — let parse_image classify */
 		}
 		if (depth >= TAWC_SHEBANG_MAX_DEPTH) {
 			tawc_close(bin_fd);
@@ -191,11 +213,13 @@ static long resolve_shebangs(int initial_fd,
 		}
 
 		static char line[TAWC_SHEBANG_BUF];
-		const char *interp;
-		const char *shebang_arg;
-		long pe = tawcroot_shebang_read(bin_fd, line, sizeof line,
-		                                &interp, &shebang_arg);
-		if (pe < 0) { tawc_close(bin_fd); return pe; }
+		const char *interp = foreign;
+		const char *shebang_arg = 0;
+		if (!foreign) {
+			long pe = tawcroot_shebang_read(bin_fd, line, sizeof line,
+			                                &interp, &shebang_arg);
+			if (pe < 0) { tawc_close(bin_fd); return pe; }
+		}
 
 		/* Level 0: the script path parameter. Deeper levels: the
 		 * previous interpreter (its path is what the previous

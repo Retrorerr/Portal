@@ -275,8 +275,11 @@ static long open_emulated_leaf(int dirfd, const char *path, int flags,
 			   flags & ~(O_CREAT | O_EXCL), mode);
 }
 
-/* An O_PATH|O_NOFOLLOW fd opened through a bind keeps the guest name
- * it was opened by (tawcroot_fd_name_note), for mounts onto it. */
+/* An O_PATH fd opened through a bind keeps the guest name it was
+ * opened by (tawcroot_fd_name_note), for mounts onto it. bubblewrap
+ * opens a bind's destination without O_NOFOLLOW; a file destination
+ * under an rbind of / (/newroot/usr/lib/os-release) otherwise read
+ * back as its rootfs alias, and the bind landed outside the sandbox. */
 static void note_fd_name(int fd, int dirfd, const char *gpath)
 {
 	TAWCROOT_PATH_SCRATCH_AUTO(s);
@@ -564,8 +567,7 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	/* See the O_CREAT retry above: the leaf turned out not to exist,
 	 * so the create the guest asked for would have been real — EROFS. */
 	if (erofs_creat_retry && fd == TAWC_ENOENT) return TAWC_EROFS;
-	if (fd >= 0 && (flags & O_PATH) && (flags & O_NOFOLLOW) &&
-	    t.fd != tawcroot_rootfs_fd)
+	if (fd >= 0 && (flags & O_PATH) && t.fd != tawcroot_rootfs_fd)
 		note_fd_name((int)fd, dirfd, gpath);
 	return fd;
 }
@@ -727,7 +729,11 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	long fe = fetch_guest_path(scratch, 0, gpath);
 	if (fe) return fe;
-	proc_exe_substitute(scratch, dirfd, scratch->buf[0]);
+	/* lstat must see the magic link itself: libstdc++'s
+	 * filesystem::read_symlink rejects a non-S_IFLNK lstat with EINVAL
+	 * (FEX's compat tool dies on it). readlinkat synthesizes the target. */
+	if (!(flags & AT_SYMLINK_NOFOLLOW))
+		proc_exe_substitute(scratch, dirfd, scratch->buf[0]);
 
 	{
 		const char *shm_name;
@@ -1012,6 +1018,9 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 				     TAWCROOT_PATH_SCRATCH_SIZE) > 0)
 		cls = scratch->buf[3];  /* /oldroot/proc/self/fd/N (bwrap) */
 	int link_cls = tawcroot_proc_link_classify(cls);
+	/* `cls` lives in scratch buffers the readlink below reuses. */
+	int link_self_fd = link_cls == TAWCROOT_PROC_LINK_FD
+		? tawcroot_proc_self_fd_num(cls) : -1;
 	if (link_cls == TAWCROOT_PROC_LINK_EXE_SELF &&
 	    tawcroot_guest_exe_path_len > 0) {
 		size_t len = tawcroot_guest_exe_path_len;
@@ -1157,7 +1166,12 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 	if (link_cls == TAWCROOT_PROC_LINK_FD && n > 0 &&
 	    readlink_scratch[0] == '/') {
 		char *guest = scratch->buf[2];
-		long gn = tawcroot_host_path_to_guest_abs(
+		/* The guest name this process opened the fd by, if kept: a
+		 * host path bound at several guest places has no single
+		 * reverse name (bubblewrap's /oldroot and /newroot). */
+		long gn = link_self_fd >= 0 ? tawcroot_fd_name_lookup(link_self_fd,
+				guest, TAWCROOT_PATH_SCRATCH_SIZE) : 0;
+		if (gn <= 0) gn = tawcroot_host_path_to_guest_abs(
 			readlink_scratch, (size_t)n,
 			guest, TAWCROOT_PATH_SCRATCH_SIZE);
 		if (gn > 0) {
@@ -2103,7 +2117,8 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	long fe = fetch_guest_path(scratch, 0, path);
 	if (fe) return fe;
-	proc_exe_substitute(scratch, dirfd, scratch->buf[0]);
+	if (!(flags & AT_SYMLINK_NOFOLLOW))  /* see handle_newfstatat */
+		proc_exe_substitute(scratch, dirfd, scratch->buf[0]);
 
 	{
 		const char *shm_name;

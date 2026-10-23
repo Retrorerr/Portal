@@ -245,7 +245,9 @@ int tawcroot_host_path_in_ro_bind(const char *host, size_t n)
 		if (!host_prefix_match(host, n, b->src, b->src_len)) continue;
 		if (b->src_len > best_pl) {
 			best_pl = b->src_len;
-			best_ro = b->read_only;
+			/* A link object is a guest file that has other names;
+			 * the store is read-only only to its own namespace. */
+			best_ro = b->read_only && !b->pinned;
 		}
 	}
 	return best_ro;
@@ -284,6 +286,7 @@ long tawcroot_path_route_to_guest(int base_fd, const char *suffix,
 static struct {
 	int      fd;
 	uint64_t dev, ino;
+	int      covered;  /* a bind was mounted onto `path` since */
 	char     path[256];
 } g_fdname[FDNAME_SLOTS];
 static uint32_t g_fdname_lock;
@@ -321,6 +324,7 @@ void tawcroot_fd_name_note(int fd, const char *guest_abs)
 	g_fdname[i].fd = fd;
 	g_fdname[i].dev = (uint64_t)st.st_dev;
 	g_fdname[i].ino = (uint64_t)st.st_ino;
+	g_fdname[i].covered = 0;
 	(void)tawc_str_copy(g_fdname[i].path, sizeof g_fdname[i].path, guest_abs);
 	__atomic_store_n(&g_fdname_lock, 0, __ATOMIC_RELEASE);
 }
@@ -332,15 +336,35 @@ static long fd_name_lookup(int fd, char *out, size_t out_cap)
 	unsigned i = (unsigned)fd % FDNAME_SLOTS;
 	while (__atomic_exchange_n(&g_fdname_lock, 1, __ATOMIC_ACQUIRE)) {}
 	int hit = g_fdname[i].path[0] && g_fdname[i].fd == fd;
+	int covered = 0;
 	if (hit) {
 		dev = g_fdname[i].dev;
 		ino = g_fdname[i].ino;
+		covered = g_fdname[i].covered;
 		(void)tawc_str_copy(path, sizeof path, g_fdname[i].path);
 	}
 	__atomic_store_n(&g_fdname_lock, 0, __ATOMIC_RELEASE);
-	if (!hit || !same_inode(fd, path, dev, ino)) return 0;
+	/* Once mounted over, the name leads to the bind's source; the fd
+	 * still names the place it was opened at, as with a kernel mount
+	 * (bubblewrap opens a bind's destination before mounting on it). */
+	if (!hit || !same_inode(fd, covered ? 0 : path, dev, ino)) return 0;
 	long n = tawc_str_copy(out, out_cap, path);
 	return n < 0 ? 0 : n;
+}
+
+/* A bind now sits on `guest_abs`: fds noted there keep that name. */
+static void fd_name_cover(const char *guest_abs)
+{
+	while (__atomic_exchange_n(&g_fdname_lock, 1, __ATOMIC_ACQUIRE)) {}
+	for (unsigned i = 0; i < FDNAME_SLOTS; i++)
+		if (g_fdname[i].path[0] && tawc_streq(g_fdname[i].path, guest_abs))
+			g_fdname[i].covered = 1;
+	__atomic_store_n(&g_fdname_lock, 0, __ATOMIC_RELEASE);
+}
+
+long tawcroot_fd_name_lookup(int fd, char *out, size_t out_cap)
+{
+	return fd_name_lookup(fd, out, out_cap);
 }
 
 long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap)
@@ -657,6 +681,7 @@ long tawcroot_path_bind_guest(const char *source, const char *target,
 	size_t before = tawcroot_n_binds;
 	e = tawcroot_path_add_bind(host, destination, read_only);
 	if (e < 0) return e;
+	fd_name_cover(destination);
 	if (recursive) replicate_below(src_guest, destination + 1, before);
 	return 0;
 }
@@ -1158,7 +1183,8 @@ int tawcroot_view_has_ro(void)
 {
 	if (tawcroot_root_ro) return 1;
 	for (size_t i = 0; i < tawcroot_n_binds; i++)
-		if (tawcroot_binds[i].active && tawcroot_binds[i].read_only)
+		if (tawcroot_binds[i].active && tawcroot_binds[i].read_only &&
+		    !tawcroot_binds[i].pinned)
 			return 1;
 	return 0;
 }

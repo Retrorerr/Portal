@@ -288,6 +288,8 @@ long tawcroot_proc_fd_to_host_path(int fd, char *out, size_t out_cap);
 long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap);
 /* Remember the guest name `fd` was opened by (see path.c). */
 void tawcroot_fd_name_note(int fd, const char *guest_abs);
+/* That name, while it still holds for `fd`; 0 if none. */
+long tawcroot_fd_name_lookup(int fd, char *out, size_t out_cap);
 
 /* Resolve a guest name without exposing a hardlink's store object. */
 long tawcroot_path_guest_name(const char *path, char *out, size_t out_cap);

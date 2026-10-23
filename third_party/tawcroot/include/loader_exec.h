@@ -50,6 +50,14 @@ extern "C" {
 long tawcroot_shebang_read(int fd, char *line, size_t cap,
                            const char **interp, const char **arg);
 
+/* binfmt_misc emulation: Debian's box64 package registers itself for
+ * x86-64 ELFs, but Android gives us no binfmt_misc, so an x86-64 program
+ * started from a script (or any execve) would ENOEXEC. Returns the
+ * interpreter path when `fd` is an x86-64 ET_EXEC/ET_DYN ELF on an
+ * aarch64 host, else NULL. The exec then proceeds like a shebang with no
+ * argument: argv = [interp, path, argv[1..]] (binfmt_misc without P). */
+const char *tawcroot_foreign_elf_interp(int fd);
+
 /* Production loader I/O vtable, defined in src/loader_io_prod.c. */
 extern const struct tawc_loader_io tawcroot_loader_io_prod;
 

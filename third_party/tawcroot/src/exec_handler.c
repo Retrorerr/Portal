@@ -104,16 +104,23 @@ static long classify_loadable(int fd, int depth, size_t *title_extra,
 	uint8_t magic[2];
 	long n = tawc_pread64(fd, magic, 2, 0);
 	if (n < 0) return n;
-	if (n < 2 || !(magic[0] == '#' && magic[1] == '!'))
-		return classify_elf(fd, img);
-
-	/* Shebang: parse the line, open the interpreter through the view,
-	 * require it executable, and recurse. */
 	char line[TAWC_SHEBANG_BUF];
-	const char *interp;
-	const char *sarg;
-	long pe = tawcroot_shebang_read(fd, line, sizeof line, &interp, &sarg);
-	if (pe < 0) return pe;
+	const char *interp = 0;
+	const char *sarg = 0;
+	if (n < 2 || !(magic[0] == '#' && magic[1] == '!')) {
+		/* A foreign-arch ELF runs under its binfmt interpreter;
+		 * without one installed it stays the kernel's ENOEXEC. */
+		interp = tawcroot_foreign_elf_interp(fd);
+		if (!interp) return classify_elf(fd, img);
+		long ifd = tawcroot_open_in_view(interp);
+		if (ifd < 0) return classify_elf(fd, img);
+		tawc_close((int)ifd);
+	} else {
+		/* Shebang: parse the line, open the interpreter through the
+		 * view, require it executable, and recurse. */
+		long pe = tawcroot_shebang_read(fd, line, sizeof line, &interp, &sarg);
+		if (pe < 0) return pe;
+	}
 	*title_extra += tawc_strlen(interp) + 1;
 	if (sarg) *title_extra += tawc_strlen(sarg) + 1;
 
