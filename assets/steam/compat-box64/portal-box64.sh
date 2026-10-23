@@ -45,8 +45,16 @@ message() {
 }
 
 # Drop Steam's runtime and emulator layers: each is "<entry point> ... --".
+# Remember which Steam Linux Runtime the game asked for (sniper, soldier).
+runtime=
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        */SteamLinuxRuntime_*/_v2-entry-point)
+            runtime=${1%/_v2-entry-point}
+            runtime=${runtime##*/SteamLinuxRuntime_}
+            while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+            [ "$#" -gt 0 ] && shift
+            ;;
         */_v2-entry-point|*/scout-on-soldier-entry-point-v2|*/fex-compat-tool|*/SteamLinuxRuntime*/run|*/run-in-*)
             while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
             [ "$#" -gt 0 ] && shift
@@ -111,9 +119,31 @@ for arg in "$@"; do
     fi
 done
 
+# Games built for a Steam Linux Runtime check that they run inside its
+# container (Source games' launch scripts: VERSION_CODENAME=sniper in
+# /etc/os-release). Portal runs them on Debian instead, so give the game's
+# process tree that runtime's identity through a bwrap overlay of
+# os-release; everything else is the guest's own tree.
+case "$runtime" in
+    sniper|soldier|medic|steamrt[0-9]*)
+        if command -v bwrap >/dev/null 2>&1; then
+            osr="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/portal-os-release-$runtime"
+            {
+                grep -v -e '^ID=' -e '^VERSION_CODENAME=' -e '^ID_LIKE=' /usr/lib/os-release
+                echo "ID=steamrt"
+                echo "ID_LIKE=debian"
+                echo "VERSION_CODENAME=$runtime"
+            } > "$osr.tmp" && mv "$osr.tmp" "$osr"
+            set -- bwrap --bind / / --dev-bind /dev /dev --ro-bind "$osr" /usr/lib/os-release -- "$@"
+            index=$((index + 11))
+        fi
+        ;;
+esac
+
 case "$kind" in
     aarch64|"")
-        # Native ARM64 build, or a script Box64 cannot start: run unchanged.
+        # Native ARM64 build, or a script: run unchanged (tawcroot hands an
+        # x86-64 binary the script starts to Box64, as binfmt_misc would).
         exec "$@"
         ;;
     i386)

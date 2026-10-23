@@ -80,7 +80,11 @@ esac
 if [ -z "$proton" ] || [ ! -f "$proton" ]; then
     case "$PORTAL_PROTON" in
         ""|experimental)
-            message "Proton for ARM64 is not installed yet.\n\nIn Steam, open Library, show Tools, and install \"Proton Experimental (ARM64)\" or \"Proton 11.0 (ARM64)\", then start the game again." ;;
+            # Steam does not pull Proton in for a custom tool (only
+            # require_tool_appid would, and that wraps it outside us), so
+            # open Steam's install dialog for Proton 11.0 (ARM64) ourselves.
+            steam steam://install/4628740 >/dev/null 2>&1 &
+            message "Proton for ARM64 is not installed yet. Portal opened Steam's install dialog for \"Proton 11.0 (ARM64)\".\n\nInstall it, then start the game again once the download finishes." ;;
         stable)
             message "No stable Proton for ARM64 is installed.\n\nIn Steam, open Library, show Tools, and install \"Proton 11.0 (ARM64)\". Or choose Newest for Proton in Portal's game panel (and drop PORTAL_PROTON=stable from the game's launch options, if it is there)." ;;
         *)
@@ -140,6 +144,29 @@ case "${PORTAL_FPS_LIMIT:-0}" in
         ;;
 esac
 [ "$PORTAL_HUD" = 1 ] && export DXVK_HUD="${DXVK_HUD:-fps}"
+
+# Ubisoft Connect's overlay inline-hooks the game's graphics DLLs with x86
+# code; Proton ARM64's DXVK/dxgi are ARM64EC, so the hooked entry point
+# raises SIGILL and the game reports "Corrupted installation (CODE 011)".
+# Keep the overlay off in this game's prefix (upc writes it back on).
+# Stopgap until FEX/Wine handle x86 hooks over ARM64EC code.
+if [ -n "$STEAM_COMPAT_DATA_PATH" ]; then
+    for upc in "$STEAM_COMPAT_DATA_PATH"/pfx/drive_c/users/*/AppData/Local/"Ubisoft Game Launcher"; do
+        [ -d "$upc" ] || continue
+        yaml="$upc/settings.yaml"
+        if [ -f "$yaml" ]; then
+            # upc writes CRLF line endings.
+            awk '
+                /^[^ ]/ { in_overlay = ($0 ~ /^overlay:\r?$/) }
+                in_overlay && $0 ~ /^  enabled: true\r?$/ { sub(/true/, "false") }
+                { print }
+            ' "$yaml" > "$yaml.portal-tmp" && mv "$yaml.portal-tmp" "$yaml"
+        elif [ -d "$STEAM_COMPAT_DATA_PATH/pfx/drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher" ]; then
+            printf 'overlay:\n  enabled: false\n' > "$yaml"
+        fi
+    done
+    unset upc yaml
+fi
 
 if [ "$PORTAL_WOW64" = box64 ]; then
     if [ -f /opt/box64/wowbox64.dll ]; then
