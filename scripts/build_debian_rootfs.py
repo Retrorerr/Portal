@@ -167,6 +167,13 @@ SEED_PACKAGES = [
     "zip",
     "zstd",
     "python3",  # Portal IME bridge
+    # Editable focus from Qt/X11 and GTK/X11 must reach the Android IME from
+    # the first session, without waiting for a background apt installation.
+    "ibus",
+    "gir1.2-ibus-1.0",
+    "python3-gi",
+    "libqt5gui5t64",  # Qt 5 IBus platform input context
+    "qt6-qpa-plugins",  # Qt 6 IBus platform input context
     "kdialog",
     # Recommends of the desktop packages above that a stock install would
     # have: RAR in Ark, PDF/PostScript thumbnails, GTK theming for X11 apps,

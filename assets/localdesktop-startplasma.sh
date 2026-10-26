@@ -25,6 +25,9 @@ export KDE_SESSION_VERSION=6
 export KDE_USE_SYSTEMD=0
 export PLASMA_USE_SYSTEMD=0
 export QT_WAYLAND_SHELL_INTEGRATION=xdg-shell
+# Shared policy for Qt/X11 editable-focus reporting and native Qt 6 Wayland
+# input. Synced on every launch, so existing installs receive the fix too.
+. /usr/local/lib/portal/input-method-env.sh
 # No udev in the guest: SDL (Steam, Proton, games) then finds Portal's
 # game pads by scanning and watching /dev/input.
 export SDL_JOYSTICK_DISABLE_UDEV=1
@@ -144,7 +147,7 @@ done
 # verbose session. Only the launch-relevant values are persisted.
 for name in HOME USER LOGNAME WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE XDG_SESSION_DESKTOP \
     XDG_CURRENT_DESKTOP DESKTOP_SESSION KDE_FULL_SESSION KDE_SESSION_VERSION \
-    KDE_USE_SYSTEMD PLASMA_USE_SYSTEMD \
+    KDE_USE_SYSTEMD PLASMA_USE_SYSTEMD QT_IM_MODULE QT_IM_MODULES \
     WAYLAND_DEBUG LOCALDESKTOP_CLIPBOARD_HOST LOCALDESKTOP_CLIPBOARD_PORT \
     ANLAND_SOCKET ANLAND ANLAND_NO_DRM_DEVICE MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER \
     FD_FORCE_KGSL FD_KGSL_ENABLE_DMABUF ANLAND_SKIP_IMPLICIT_SYNC_WAIT \

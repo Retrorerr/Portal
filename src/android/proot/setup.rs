@@ -1583,6 +1583,10 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/portal-ime-bridge"),
         PORTAL_IME_BRIDGE,
     );
+    write_executable(
+        &fs_root.join("usr/local/lib/portal/input-method-env.sh"),
+        include_str!("../../../assets/portal-input-method-env.sh"),
+    );
     // Project Anland X11/GTK input-method bridge: IBus engine routing X11
     // editable focus and host commits into GTK clients (proven: Firefox URL
     // bar/input/textarea/contenteditable, exact Unicode). Synced idempotently
@@ -3149,6 +3153,11 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     }
 
     sync_guest_network_config(fs_root);
+    // Existing installs also need dependency repair after an APK upgrade.
+    // Fresh setup owns apt in its ordered stages; never race those jobs.
+    if crate::core::provisioning::RuntimeArtifact::production().is_bootable(fs_root) {
+        provision_ibus_packages(fs_root);
+    }
     sync_android_timezone(fs_root);
     browser::repair_mozilla_profiles(fs_root);
     browser::sync_gecko_profiles(fs_root);
@@ -3717,6 +3726,7 @@ fn validate_anland_repair_state(fs_root: &Path) -> anyhow::Result<()> {
     for relative in [
         "usr/local/lib/localdesktop-crash-handler.so",
         "usr/local/bin/portal-ibus-engine",
+        "usr/local/lib/portal/input-method-env.sh",
         "usr/local/bin/portal-ibus-lazy",
         "usr/share/ibus/component/portal.xml",
         "usr/share/applications/portal-ime.desktop",
@@ -4247,35 +4257,48 @@ pub fn sync_guest_ssl_certificates(fs_root: &Path) {
     }
 }
 
-/// Best-effort detached provisioning of the IBus input-method packages.
-/// The Plasma autostart entry only ever starts an already-installed daemon
-/// (never apt-get, never a fixed sleep), so packages must exist BEFORE the
-/// session starts. Skipped entirely when the daemon is already installed or
-/// a previous run completed. Runs on a detached thread and must never block
-/// session startup: failures (e.g. offline) are logged and retried on a
-/// later launch, and the session degrades to evdev keys meanwhile.
+/// Repair the complete IBus bridge on older/partial images without blocking
+/// desktop startup. Fresh images include these dependencies. Check actual
+/// components rather than the old completion marker or daemon alone, so a
+/// missing binding/client plugin is repaired on the next launch too.
 fn provision_ibus_packages(fs_root: &Path) {
-    if fs_root.join("usr/bin/ibus-daemon").is_file() {
+    const REQUIRED: &[&str] = &[
+        "usr/bin/ibus-daemon",
+        "usr/bin/ibus",
+        "usr/lib/python3/dist-packages/gi/__init__.py",
+        "usr/lib/aarch64-linux-gnu/girepository-1.0/IBus-1.0.typelib",
+        "usr/lib/aarch64-linux-gnu/qt5/plugins/platforminputcontexts/libibusplatforminputcontextplugin.so",
+        "usr/lib/aarch64-linux-gnu/qt6/plugins/platforminputcontexts/libibusplatforminputcontextplugin.so",
+    ];
+    if REQUIRED.iter().all(|path| fs_root.join(path).is_file()) {
         return;
     }
-    const MARKER: &str = "var/lib/localdesktop/ibus-provisioned-v1";
-    if fs_root.join(MARKER).is_file() {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         return;
     }
-    std::thread::spawn(|| {
-        let output = ArchProcess {
-            command: "DEBIAN_FRONTEND=noninteractive apt-get update >>/tmp/portal-ibus-provision.log 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y ibus gir1.2-ibus-1.0 python3-gi >>/tmp/portal-ibus-provision.log 2>&1".into(),
-            user: None,
-            log: None,
+    let root = fs_root.to_path_buf();
+    std::thread::spawn(move || {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                RUNNING.store(false, Ordering::Release);
+            }
         }
-        .run();
-        let root = Path::new(PRODUCTION_FS_ROOT);
-        if output.status.success() && root.join("usr/bin/ibus-daemon").is_file() {
-            let _ = std::fs::write(root.join(MARKER), b"completed\n");
-            log::info!("IBus input-method packages provisioned pre-session");
+        let _reset = Reset;
+        let output = PRootRuntime::new(&root).execute(
+            ProcessSpec::new("DEBIAN_FRONTEND=noninteractive apt-get update >>/tmp/portal-ibus-provision.log 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y ibus gir1.2-ibus-1.0 python3-gi libqt5gui5t64 qt6-qpa-plugins >>/tmp/portal-ibus-provision.log 2>&1"),
+            None,
+            None,
+        );
+        if output.status.success() && REQUIRED.iter().all(|path| root.join(path).is_file()) {
+            log::info!("IBus input-method bridge dependencies ready");
         } else {
             log::warn!(
-                "IBus package provisioning deferred (status {:?}); X11/GTK input degrades to evdev keys until a later launch",
+                "IBus dependency repair deferred (status {:?}); retrying on a later launch",
                 output.status.code()
             );
         }

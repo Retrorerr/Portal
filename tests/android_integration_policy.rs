@@ -452,10 +452,9 @@ fn ibus_autostart_never_blocks_session_startup() {
     assert!(PORTAL_IBUS_LAZY_SOURCE.contains("exit 0"));
     assert!(!PORTAL_IBUS_LAZY_SOURCE.contains("apt-get"));
     assert!(!PORTAL_IBUS_LAZY_SOURCE.contains("sleep 4"));
-    // Setup provisions IBus packages pre-session (detached, marker-gated)
-    // and deploys the lazy launcher into the guest.
+    // Setup repairs missing IBus dependencies off the startup path and
+    // deploys the lazy launcher into the guest.
     assert!(ANDROID_SETUP_SOURCE.contains("provision_ibus_packages"));
-    assert!(ANDROID_SETUP_SOURCE.contains("ibus-provisioned-v1"));
     assert!(ANDROID_SETUP_SOURCE.contains("usr/local/bin/portal-ibus-lazy"));
     assert!(ANDROID_SETUP_SOURCE.contains("PORTAL_IBUS_LAZY"));
 }
