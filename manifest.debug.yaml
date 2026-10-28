@@ -49,6 +49,9 @@ android:
           # PortalActivity as well — this manifest value is defense in depth.
           window_soft_input_mode: adjustNothing
       services:
+        - name: app.polarbear.TransferService
+          foreground_service_type: dataSync
+          exported: false
         - name: app.polarbear.SetupService
           # Keeps first setup downloading while the user is in another app.
           foreground_service_type: dataSync

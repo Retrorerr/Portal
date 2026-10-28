@@ -1024,20 +1024,19 @@ impl PolarBearApp {
         // replaying setup() would turn a successful durable install into a
         // second, failure-prone setup pass.
         let android_app = self.frontend.android_app.clone();
-        let backend = match crate::android::proot::setup::build_committed_wayland_backend(
-            android_app,
-        ) {
-            Ok(backend) => backend,
-            Err(error) => {
-                log::error!(
+        let backend =
+            match crate::android::proot::setup::build_committed_wayland_backend(android_app) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    log::error!(
                     "Committed Portal installation could not build the Wayland backend: {error:#}"
                 );
-                self.enter_committed_install_runtime_error(
-                    "Portal is installed, but Plasma could not start. Tap Retry Plasma.",
-                );
-                return true;
-            }
-        };
+                    self.enter_committed_install_runtime_error(
+                        "Portal is installed, but Plasma could not start. Tap Retry Plasma.",
+                    );
+                    return true;
+                }
+            };
         self.backend = backend;
         let resume_failed = if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             !resume_wayland(backend, event_loop, &self.frontend.android_app)
@@ -1259,6 +1258,13 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             return;
         };
 
+        if _event == AppUserEvent::PortalControlsOpened {
+            if let Some(session) = backend.anland.as_ref() {
+                session.release_surface_inputs();
+            }
+            backend.release_guest_input();
+        }
+
         if let Some(show) = ime::take_visibility_request() {
             log::info!("Portal event loop: applying ime visibility request show={show}");
             let result = if show {
@@ -1381,6 +1387,25 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                         "Ignoring Anland window event while surface is suspended: {event:?}"
                     );
                 }
+                return;
+            }
+
+            // GameActivity may still have native events queued when Compose
+            // takes input. Do not re-press anything after overlay acquisition.
+            if compose_overlay::is_up()
+                && matches!(
+                    &event,
+                    WindowEvent::Touch(_)
+                        | WindowEvent::KeyboardInput { .. }
+                        | WindowEvent::MouseInput { .. }
+                        | WindowEvent::MouseWheel { .. }
+                        | WindowEvent::CursorMoved { .. }
+                        | WindowEvent::AndroidPointerMoved { .. }
+                        | WindowEvent::AndroidStylus { .. }
+                        | WindowEvent::AndroidTouchpadPinch { .. }
+                        | WindowEvent::Ime(_)
+                )
+            {
                 return;
             }
 

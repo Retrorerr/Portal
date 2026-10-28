@@ -41,6 +41,7 @@ pub mod android {
     pub mod clipboard;
     pub mod clipboard_broker;
     pub mod diagnostics;
+    pub mod file_transfer;
     pub mod gamepad;
     pub mod guest_procfs;
     pub mod ime;

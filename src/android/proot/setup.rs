@@ -1441,6 +1441,10 @@ fn supervise_plasmashell_autostart(original: &str) -> anyhow::Result<String> {
 /// configuration; the only system files it edits are the sudo-access ones
 /// described in `core::guest_sudo`.
 fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
+    write_executable(
+        &fs_root.join("usr/local/lib/portal/portal-file-transfer.py"),
+        include_str!("../../../assets/portal-file-transfer.py"),
+    );
     // The guest scripts are versioned assets so the classic startup contract,
     // KWin crash capture and graphical recovery UI cannot drift apart. The
     // launcher substitutes only the device-specific scale factor.

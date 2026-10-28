@@ -172,6 +172,10 @@ impl InputEvent {
         match self.ev_type {
             INPUT_TYPE_KEY => Some((b, a == INPUT_ACTION_DOWN)),
             INPUT_TYPE_POINTER_BUTTON => Some((a, b != 0)),
+            INPUT_TYPE_TOUCH if a != INPUT_ACTION_MOVE => Some((
+                i32::from_ne_bytes(self.payload[12..16].try_into().unwrap()),
+                a == INPUT_ACTION_DOWN,
+            )),
             _ => None,
         }
     }

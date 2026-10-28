@@ -51,6 +51,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.material3.Text
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -340,13 +342,14 @@ private fun ReturnRepairProgress(
 @Composable
 internal fun PortalReturnScreen(
     launchMarkModifier: Modifier,
+    sessionControls: Boolean = false,
     onReturnReady: () -> Unit = {},
     onRepairBlockedChanged: (Boolean) -> Unit = {},
 ) {
     val palette = resolvePalette(AppearanceMode.System)
     val veil = LocalPortalVeil.current
     SideEffect { veil.ink = palette.textPrimary }
-    var returnReady by remember { mutableStateOf(false) }
+    var returnReady by remember { mutableStateOf(sessionControls) }
     var repairRequested by remember { mutableStateOf(false) }
     var recoveryRequested by remember { mutableStateOf(false) }
     val repairState by ComposeOverlay.anlandRepairState()
@@ -368,13 +371,13 @@ internal fun PortalReturnScreen(
     val context = LocalContext.current
     // Decided once per screen: ticking a step off keeps the card (showing it
     // done) instead of yanking it away mid-read.
-    val checklistPending = remember { setupChecklistPending(context) }
-    val tipsPending = remember { !checklistPending && usageTipsPending(context) }
+    val checklistPending = remember { !sessionControls && setupChecklistPending(context) }
+    val tipsPending = remember { !sessionControls && !checklistPending && usageTipsPending(context) }
     LaunchedEffect(repairBlocked, updateBlocked) {
         currentRepairBlocked(repairBlocked || updateBlocked)
     }
     LaunchedEffect(Unit) {
-        delay(RETURN_READY_DELAY_MS)
+        if (!sessionControls) delay(RETURN_READY_DELAY_MS)
         returnReady = true
         Log.i(TAG, "return READY; starting ambient scatter and translucent veil prelude")
         currentReturnReady()
@@ -388,7 +391,8 @@ internal fun PortalReturnScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 32.dp),
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 32.dp, vertical = 24.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -398,47 +402,57 @@ internal fun PortalReturnScreen(
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Image(
-                    painter = portalMarkPainter(
-                        main = palette.logoMain,
-                        threshold = palette.logoThreshold,
-                    ),
-                    contentDescription = "Portal logo",
-                    modifier = Modifier.size(PortalDimens.LogoSize).then(launchMarkModifier),
-                )
-                Spacer(modifier = Modifier.height(20.dp))
-                Text(
-                    text = "Returning to Plasma",
-                    fontSize = PortalDimens.TitleSize,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.textPrimary,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                // The line settles from "restoring" to "ready" the moment the
-                // veil may be lifted, dissolving through a soft blur.
-                AnimatedContent(
-                    targetState = veil.eligible,
-                    transitionSpec = {
-                        (fadeIn(tween(420, delayMillis = 90, easing = PortalEmphasizedDecelerate)) +
-                            slideInVertically(tween(560, easing = PortalEmphasized)) { it / 2 })
-                            .togetherWith(
-                                fadeOut(tween(200, easing = PortalEmphasizedAccelerate)) +
-                                    slideOutVertically(tween(260, easing = PortalEmphasizedAccelerate)) { -it / 3 },
+                AnimatedVisibility(
+                    visible = ComposeOverlay.activePanel != "files",
+                    enter = expandVertically(tween(420, easing = PortalEmphasized)) +
+                        fadeIn(tween(300, delayMillis = 110, easing = PortalEmphasizedDecelerate)),
+                    exit = shrinkVertically(tween(420, easing = PortalEmphasized)) +
+                        fadeOut(tween(140, easing = PortalEmphasizedAccelerate)),
+                ) {
+                    Column(Modifier.dissolveBlur(this, radius = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Image(
+                            painter = portalMarkPainter(
+                                main = palette.logoMain,
+                                threshold = palette.logoThreshold,
+                            ),
+                            contentDescription = "Portal logo",
+                            modifier = Modifier.size(PortalDimens.LogoSize).then(launchMarkModifier),
+                        )
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Text(
+                            text = if (sessionControls) "Portal" else "Returning to Plasma",
+                            fontSize = PortalDimens.TitleSize,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.textPrimary,
+                            textAlign = TextAlign.Center,
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // The line settles from "restoring" to "ready" the moment the
+                        // veil may be lifted, dissolving through a soft blur.
+                        AnimatedContent(
+                            targetState = veil.eligible,
+                            transitionSpec = {
+                                (fadeIn(tween(420, delayMillis = 90, easing = PortalEmphasizedDecelerate)) +
+                                    slideInVertically(tween(560, easing = PortalEmphasized)) { it / 2 })
+                                    .togetherWith(
+                                        fadeOut(tween(200, easing = PortalEmphasizedAccelerate)) +
+                                            slideOutVertically(tween(260, easing = PortalEmphasizedAccelerate)) { -it / 3 },
+                                    )
+                                    .using(SizeTransform(clip = false))
+                            },
+                            contentAlignment = Alignment.Center,
+                            label = "return subtitle",
+                        ) { desktopReady ->
+                            Text(
+                                text = if (sessionControls) "Your desktop is running" else if (desktopReady) "Your desktop is ready" else "Restoring your desktop",
+                                modifier = Modifier.dissolveBlur(this, radius = 8.dp),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = palette.textMuted,
+                                textAlign = TextAlign.Center,
                             )
-                            .using(SizeTransform(clip = false))
-                    },
-                    contentAlignment = Alignment.Center,
-                    label = "return subtitle",
-                ) { desktopReady ->
-                    Text(
-                        text = if (desktopReady) "Your desktop is ready" else "Restoring your desktop",
-                        modifier = Modifier.dissolveBlur(this, radius = 8.dp),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.textMuted,
-                        textAlign = TextAlign.Center,
-                    )
+                        }
+                    }
                 }
                 ReturnAnlandAffordance(
                     phase = repairPhase,
@@ -459,18 +473,22 @@ internal fun PortalReturnScreen(
                 ReturnUpdatePanel(
                     palette = palette,
                     desktopReady = veil.eligible,
-                    suppressed = repairPhase != ReturnRepairPhase.Hidden,
+                    suppressed = repairPhase != ReturnRepairPhase.Hidden || ComposeOverlay.activePanel == "files",
                     onBlockedChanged = { updateBlocked = it },
+                    immediate = sessionControls,
                 )
                 // Optional apps can be added or removed after setup. Hidden
                 // while a repair or Debian upgrade owns the runtime.
                 ReturnAppsPanel(
                     palette = palette,
                     suppressed = repairPhase != ReturnRepairPhase.Hidden || updateBlocked,
+                    immediate = sessionControls,
                 )
                 // Installs from before the checklist existed, or that skipped
                 // a step, see it here until every step is done.
-                if (checklistPending) {
+                AnimatedVisibility(checklistPending && ComposeOverlay.activePanel == null,
+                    enter = expandVertically(tween(420, easing = PortalEmphasized)) + fadeIn(tween(300)),
+                    exit = shrinkVertically(tween(420, easing = PortalEmphasized)) + fadeOut(tween(140))) {
                     SetupChecklist(
                         palette = palette,
                         title = "Finish setting up Android",
@@ -481,7 +499,9 @@ internal fun PortalReturnScreen(
                 }
                 // Optional tips wait until the checklist is done, so the
                 // screen never stacks two cards.
-                if (tipsPending) {
+                AnimatedVisibility(tipsPending && ComposeOverlay.activePanel == null,
+                    enter = expandVertically(tween(420, easing = PortalEmphasized)) + fadeIn(tween(300)),
+                    exit = shrinkVertically(tween(420, easing = PortalEmphasized)) + fadeOut(tween(140))) {
                     UsageTips(
                         palette = palette,
                         modifier = Modifier

@@ -39,6 +39,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import app.polarbear.setup.PortalPalette
 
 private const val PREF_KEYS_DISMISSED = "tip_keyboard_service_dismissed"
+private const val PREF_CONTROLS_DISMISSED = "tip_portal_capsule_dismissed"
 private const val PREF_FILES_DISMISSED = "tip_all_files_dismissed"
 
 private enum class KeyServiceState { Off, NotRunning, On }
@@ -74,7 +75,7 @@ private fun allFilesGranted(): Boolean =
 /** Whether any tip still has something to offer, for the return screen. */
 fun usageTipsPending(context: Context): Boolean {
     val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    return (!prefs.getBoolean(PREF_KEYS_DISMISSED, false) && keyServiceState(context) != KeyServiceState.On) ||
+    return !prefs.getBoolean(PREF_CONTROLS_DISMISSED, false) || (!prefs.getBoolean(PREF_KEYS_DISMISSED, false) && keyServiceState(context) != KeyServiceState.On) ||
         (!prefs.getBoolean(PREF_FILES_DISMISSED, false) && !allFilesGranted())
 }
 
@@ -118,11 +119,12 @@ fun UsageTips(
     val keys = remember(resumes) { keyServiceState(context) }
     val filesGranted = remember(resumes) { allFilesGranted() }
     var keysDismissed by remember { mutableStateOf(prefs.getBoolean(PREF_KEYS_DISMISSED, false)) }
+    var controlsDismissed by remember { mutableStateOf(prefs.getBoolean(PREF_CONTROLS_DISMISSED, false)) }
     var filesDismissed by remember { mutableStateOf(prefs.getBoolean(PREF_FILES_DISMISSED, false)) }
     // Decided once: a tip completed while the card is up stays, showing done.
     val keysTip = remember { keyServiceState(context) != KeyServiceState.On }
     val filesTip = remember { !allFilesGranted() }
-    if ((!keysTip || keysDismissed) && (!filesTip || filesDismissed)) return
+    if (controlsDismissed && (!keysTip || keysDismissed) && (!filesTip || filesDismissed)) return
 
     val shape = RoundedCornerShape(24.dp)
     Column(
@@ -146,6 +148,22 @@ fun UsageTips(
             color = palette.textMuted,
         )
         var number = 0
+        if (!controlsDismissed) {
+            Spacer(Modifier.height(16.dp))
+            ChecklistStep(
+                number = ++number,
+                title = "Bring Portal back",
+                body = "Tap the floating Portal capsule to open your controls, apps and files. " +
+                    "Drag it wherever it suits you. Ctrl+Alt+P also opens Portal.",
+                state = StepState.Todo,
+                actionLabel = "Got it",
+                onAction = {
+                    controlsDismissed = true
+                    prefs.edit().putBoolean(PREF_CONTROLS_DISMISSED, true).apply()
+                },
+                palette = palette,
+            )
+        }
         if (keysTip && !keysDismissed) {
             Spacer(Modifier.height(16.dp))
             ChecklistStep(

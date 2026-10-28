@@ -3,18 +3,19 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+use crate::android::anland::AnlandKeySink;
 use crate::core::android_input::android_keycode_to_scancode;
 use jni::{
     objects::JObject,
     sys::{jboolean, jint, jlong, JNI_FALSE, JNI_TRUE},
     JNIEnv,
 };
-use crate::android::anland::AnlandKeySink;
 use winit::{event::ElementState, event_loop::EventLoopProxy};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppUserEvent {
     AccessibilityInputReady,
+    PortalControlsOpened,
     WaylandTraffic,
     /// An Android clipboard observation was queued. The worker never touches
     /// the render thread; this event only wakes the event loop so the queued
@@ -112,6 +113,25 @@ pub fn set_window_focused(focused: bool) {
         .lock()
         .expect("Failed to lock accessibility bridge");
     bridge.window_unfocused = !focused;
+}
+
+/// Release service-owned keys before Compose takes keyboard focus.
+pub fn release_service_keys() {
+    let mut bridge = bridge().lock().expect("accessibility bridge");
+    let held: Vec<_> = bridge.held_keys.drain().collect();
+    for key in held {
+        if let Some(scancode) = android_keycode_to_scancode(key.max(0) as u32) {
+            if let Some(sink) = bridge.anland_keys.as_ref() {
+                sink.send_key(scancode, false);
+            } else {
+                bridge.pending_events.push_back(AccessibilityKeyEvent {
+                    scancode,
+                    state: ElementState::Released,
+                    event_time_ms: 0,
+                });
+            }
+        }
+    }
 }
 
 pub fn drain_pending_events() -> Vec<AccessibilityKeyEvent> {

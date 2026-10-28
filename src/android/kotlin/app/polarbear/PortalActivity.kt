@@ -115,6 +115,9 @@ open class PortalActivity : GameActivity() {
         }
         super.onCreate(savedInstanceState)
         ComposeOverlay.attachContext(this)
+        SessionControls.attach(this)
+        FileTransfers.attach(this)
+        if (intent.getBooleanExtra("portal_open_files", false)) SessionControls.requestFiles(this)
         applyImmersive("onCreate")
         GamepadBridge.attach(this)
         ClipboardWatch.attach(this)
@@ -126,7 +129,7 @@ open class PortalActivity : GameActivity() {
     // GameActivity forwards only touch input to native code; controller
     // keys and sticks go to the guest's evdev pads before the view tree.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
-        dispatchMouseSideButton(event) || TouchControls.onBackKey(event) || GamepadBridge.dispatchKey(event) ||
+        SessionControls.onShortcut(event) || SessionControls.onBackKey(event) || dispatchMouseSideButton(event) || TouchControls.onBackKey(event) || GamepadBridge.dispatchKey(event) ||
             super.dispatchKeyEvent(event)
 
     /**
@@ -157,6 +160,9 @@ open class PortalActivity : GameActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        if (intent.getBooleanExtra("portal_open_files", false)) {
+            SessionControls.requestFiles(this)
+        }
         // Debug builds only: open the first-run stages on demand.
         //   adb shell am start -n app.polarbear/.PortalActivity --activity-single-top --ez portal_preview_setup true
         //   (add --es portal_preview_install ok|fail to play a scripted install)
@@ -209,6 +215,7 @@ open class PortalActivity : GameActivity() {
     }
 
     override fun onPause() {
+        SessionControls.reset()
         TouchControls.detach()
         AppUpdateInstaller.onActivityPaused(this)
         super.onPause()
@@ -239,6 +246,7 @@ open class PortalActivity : GameActivity() {
             // Android drops pointer capture with window focus; take it back
             // if the guest still holds its pointer lock.
             applyPointerCapture()
+            SessionControls.focused()
         }
     }
 
@@ -285,12 +293,14 @@ open class PortalActivity : GameActivity() {
     private fun applyPointerCapture() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val view = window.decorView
-        if (pointerCaptureWanted) {
+        if (pointerCaptureWanted && !ComposeOverlay.isShowing()) {
             if (hasWindowFocus() && !view.hasPointerCapture()) view.requestPointerCapture()
         } else if (view.hasPointerCapture()) {
             view.releasePointerCapture()
         }
     }
+
+    fun overlayInputChanged() { applyPointerCapture() }
 
     override fun onPointerCaptureChanged(hasCapture: Boolean) {
         super.onPointerCaptureChanged(hasCapture)

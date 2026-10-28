@@ -76,6 +76,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.constrainWidth
+import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.ComposeOverlay
@@ -100,31 +102,23 @@ private val AppsCardCorner = 24.dp
 internal fun ReturnAppsPanel(
     palette: PortalPalette,
     suppressed: Boolean,
+    immediate: Boolean = false,
 ) {
-    // Availability can change between launches (graphics mode), so the
-    // catalog is re-read whenever this screen is composed afresh.
-    val catalog = remember {
-        OptionalAppCatalog.refresh()
-        OPTIONAL_APPS
-    }
+    val catalog = remember { OptionalAppCatalog.refresh(); OPTIONAL_APPS }
     val states by ComposeOverlay.optionalAppsState()
     val icons by rememberAppIcons(catalog.map { it.id })
-    var expanded by rememberSaveable { mutableStateOf(false) }
-    var entered by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        delay(APPS_ENTRANCE_DELAY_MS)
-        entered = true
+    var entered by remember { mutableStateOf(immediate) }
+    LaunchedEffect(Unit) { if (!immediate) delay(APPS_ENTRANCE_DELAY_MS); entered = true }
+    LaunchedEffect(app.polarbear.FileTransfers.filesRequested) {
+        if (app.polarbear.FileTransfers.filesRequested) {
+            ComposeOverlay.activePanel = "files"
+            app.polarbear.FileTransfers.filesRequested = false
+        }
     }
-    val busy = states.values.count { it.busy }
-    val corner by animateDpAsState(
-        targetValue = if (expanded) AppsCardCorner else AppsCapsuleCorner,
-        animationSpec = tween(420, easing = PortalEmphasized),
-        label = "apps surface corner",
-    )
-    val shape = RoundedCornerShape(corner)
-
+    val panel = ComposeOverlay.activePanel
+    LaunchedEffect(panel) { if (panel == "files") app.polarbear.FileTransfers.open() }
     AnimatedVisibility(
-        visible = catalog.isNotEmpty() && !suppressed && entered,
+        visible = !suppressed && entered,
         enter = expandVertically(tween(420, easing = FastOutSlowInEasing), expandFrom = Alignment.Top) +
             fadeIn(tween(420, delayMillis = 60, easing = PortalEmphasizedDecelerate)) +
             slideInVertically(tween(560, easing = PortalEmphasized)) { it / 3 } +
@@ -132,51 +126,84 @@ internal fun ReturnAppsPanel(
         exit = fadeOut(tween(220, easing = PortalEmphasizedAccelerate)) +
             shrinkVertically(tween(420, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top),
     ) {
-        Box(
-            modifier = Modifier
-                .dissolveBlur(this, radius = 10.dp)
-                .padding(top = 14.dp),
-        ) {
-            AnimatedContent(
-                targetState = expanded,
-                modifier = Modifier
-                    .clip(shape)
-                    .background(Brush.verticalGradient(listOf(palette.surfaceTop, palette.surfaceBottom)))
-                    .border(1.dp, palette.surfaceBorder, shape),
-                transitionSpec = {
-                    (fadeIn(tween(300, delayMillis = 110, easing = PortalEmphasizedDecelerate)) +
-                        scaleIn(tween(420, easing = PortalEmphasized), initialScale = 0.985f))
-                        .togetherWith(fadeOut(tween(140, easing = PortalEmphasizedAccelerate)))
-                        .using(
-                            SizeTransform(clip = true) { _, _ ->
-                                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f)
-                            },
-                        )
-                },
-                contentAlignment = Alignment.TopCenter,
-                label = "apps surface",
-            ) { open ->
-                if (open) {
-                    AppsCard(
-                        catalog = catalog,
-                        states = states,
-                        icons = icons,
-                        palette = palette,
-                        onClose = { expanded = false },
-                    )
-                } else {
-                    AppsCapsule(
-                        catalog = catalog,
-                        states = states,
-                        icons = icons,
-                        busy = busy,
-                        palette = palette,
-                        onClick = { expanded = true },
-                    )
+        Column(Modifier.dissolveBlur(this, radius = 10.dp).widthIn(max = AppsCardWidth).padding(top = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            // Measure the retreating capsule first. Its animated width gives the
+            // growing surface space without overflowing a narrow window.
+            val gap by animateDpAsState(if (panel == null) 10.dp else 0.dp,
+                tween(420, easing = PortalEmphasized), label = "controls capsule spacing")
+            androidx.compose.ui.layout.Layout(content = {
+                SessionActionSlot(visible = panel != "files" && catalog.isNotEmpty()) {
+                    SessionActionSurface(panel == "apps", palette, "apps surface") { expanded ->
+                        if (expanded) AppsCard(catalog, states, icons, palette) { ComposeOverlay.activePanel = null }
+                        else AppsCapsule(catalog, states, icons, states.values.count { it.busy }, palette) {
+                            if (ComposeOverlay.activePanel == null) ComposeOverlay.activePanel = "apps"
+                        }
+                    }
                 }
+                SessionActionSlot(visible = panel != "apps") {
+                    SessionActionSurface(panel == "files", palette, "files surface") { expanded ->
+                        if (expanded) ReturnFilesPanel(palette) { ComposeOverlay.activePanel = null }
+                        else FilesCapsule(palette) { if (ComposeOverlay.activePanel == null) ComposeOverlay.activePanel = "files" }
+                    }
+                }
+            }) { children, constraints ->
+                val relaxed = constraints.copy(minWidth = 0, minHeight = 0)
+                val peerIndex = if (panel == "files") 0 else 1
+                val peer = children[peerIndex].measure(relaxed)
+                val spacing = gap.roundToPx().coerceAtMost((constraints.maxWidth - peer.width).coerceAtLeast(0))
+                val growing = children[1 - peerIndex].measure(relaxed.copy(
+                    maxWidth = (constraints.maxWidth - peer.width - spacing).coerceAtLeast(0)))
+                val left = if (peerIndex == 0) peer else growing
+                val right = if (peerIndex == 1) peer else growing
+                val width = constraints.constrainWidth(left.width + right.width + spacing)
+                layout(width, constraints.constrainHeight(maxOf(left.height, right.height))) {
+                    val x = (width - left.width - right.width - spacing) / 2
+                    left.placeRelative(x, 0)
+                    right.placeRelative(x + left.width + spacing, 0)
+                }
+            }
+            if (LocalPortalVeil.current.eligible) {
+                Spacer(Modifier.height(10.dp))
+                PanelButton("Return to desktop", false, palette) { ComposeOverlay.requestReturnToDesktop() }
             }
         }
     }
+}
+
+@Composable
+private fun SessionActionSlot(visible: Boolean, content: @Composable () -> Unit) {
+    // Keep one measurable per slot after AnimatedVisibility removes its content.
+    Box {
+        AnimatedVisibility(visible,
+            enter = androidx.compose.animation.expandHorizontally(tween(420, easing = PortalEmphasized)) +
+                fadeIn(tween(300, delayMillis = 110, easing = PortalEmphasizedDecelerate)),
+            exit = androidx.compose.animation.shrinkHorizontally(tween(420, easing = PortalEmphasized)) +
+                fadeOut(tween(140, easing = PortalEmphasizedAccelerate))) {
+            Box(Modifier.dissolveBlur(this, radius = 8.dp)) { content() }
+        }
+    }
+}
+
+/** The original Apps capsule-to-card transition, shared by Files. */
+@Composable
+private fun SessionActionSurface(expanded: Boolean, palette: PortalPalette, label: String,
+    content: @Composable androidx.compose.animation.AnimatedContentScope.(Boolean) -> Unit) {
+    val corner by animateDpAsState(if (expanded) AppsCardCorner else AppsCapsuleCorner,
+        tween(420, easing = PortalEmphasized), label = "$label corner")
+    val shape = RoundedCornerShape(corner)
+    AnimatedContent(targetState = expanded,
+        modifier = Modifier.clip(shape)
+            .background(Brush.verticalGradient(listOf(palette.surfaceTop, palette.surfaceBottom)))
+            .border(1.dp, palette.surfaceBorder, shape),
+        transitionSpec = {
+            (fadeIn(tween(300, delayMillis = 110, easing = PortalEmphasizedDecelerate)) +
+                scaleIn(tween(420, easing = PortalEmphasized), initialScale = 0.985f))
+                .togetherWith(fadeOut(tween(140, easing = PortalEmphasizedAccelerate)))
+                .using(SizeTransform(clip = true) { _, _ ->
+                    spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f)
+                })
+        }, contentAlignment = Alignment.TopCenter, label = label, content = content)
 }
 
 @Composable
@@ -209,7 +236,7 @@ private fun AppsCapsule(
     ) {
         // Installed apps lit, the rest resting nearly monochrome: the same
         // language as the setup picker's header.
-        catalog.take(6).forEach { app ->
+        catalog.take(if (androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 380) 3 else 6).forEach { app ->
             val icon = icons[app.id] ?: return@forEach
             val lit = states[app.id]?.installed == true
             Image(
@@ -275,7 +302,7 @@ private fun AppsCard(
         Spacer(Modifier.height(4.dp))
         Column(
             Modifier
-                .heightIn(max = 420.dp)
+                .heightIn(max = (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp - 300).coerceIn(100, 420).dp)
                 .verticalScroll(rememberScrollState()),
         ) {
             groupedOptionalApps(catalog).forEach { (label, apps) ->

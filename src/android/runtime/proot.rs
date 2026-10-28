@@ -237,7 +237,12 @@ where
             // first.
             Ok(0) if line.is_empty() => break,
             Ok(_) => {
-                if output.len() < MAX_CAPTURED_OUTPUT_BYTES {
+                let is_transfer_progress = command.contains("portal-file-transfer")
+                    && stream == "stderr"
+                    && serde_json::from_slice::<serde_json::Value>(&line)
+                        .ok()
+                        .is_some_and(|value| value.get("bytes").is_some());
+                if !is_transfer_progress && output.len() < MAX_CAPTURED_OUTPUT_BYTES {
                     let remaining = MAX_CAPTURED_OUTPUT_BYTES - output.len();
                     output.extend_from_slice(&line[..line.len().min(remaining)]);
                 }
@@ -253,12 +258,11 @@ where
                     text.truncate(end);
                     text.push_str("…<line truncated>");
                 }
-                diagnostics::guest_process_line(&command, &user, stream, &text);
-
-                if stream == "stdout" {
-                    if let Some(callback) = callback.as_ref() {
-                        callback(text.clone());
-                    }
+                if !command.contains("portal-file-transfer") {
+                    diagnostics::guest_process_line(&command, &user, stream, &text);
+                }
+                if let Some(callback) = callback.as_ref() {
+                    callback(text.clone());
                 }
 
                 if stream == "stderr" && !text.is_empty() {
@@ -347,6 +351,71 @@ impl LinuxRuntime for PRootRuntime {
         &self,
         spec: ProcessSpec,
         log: Option<LogCallback>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Output {
+        self.execute_with_streams(spec, None, None, log, None, cancel)
+    }
+
+    fn terminate(&self) {
+        log::info!("Terminating PRoot runtime at {}", self.rootfs.display());
+    }
+}
+
+/// PRoot keeps a `proot-<pid>-*` directory and a `prootshm-<pid>-*` socket in
+/// `PROOT_TMP_DIR` and removes them when it exits, which a kill (Android's
+/// way of ending Portal) skips. Remove those of PRoot processes that are
+/// gone, once per app process.
+fn remove_stale_proot_temporaries(directory: &Path) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(rest) = name
+                .strip_prefix("prootshm-")
+                .or_else(|| name.strip_prefix("proot-"))
+            else {
+                continue;
+            };
+            // PRoot names them "<prefix>-<pid>-XXXXXX", and prefixes such as
+            // "proot-tmpfs-" (emulated mounts) or "proot-ns-" carry dashes
+            // of their own: the pid is the field before the random suffix.
+            let is_pid =
+                |pid: &&str| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit());
+            let Some(pid) = rest
+                .rsplit('-')
+                .nth(1)
+                .filter(is_pid)
+                .or_else(|| rest.split('-').next().filter(is_pid))
+            else {
+                continue;
+            };
+            if Path::new("/proc").join(pid).exists() {
+                continue;
+            }
+            let path = entry.path();
+            let _ = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+        }
+    });
+}
+
+impl PRootRuntime {
+    /// Execute through the selected engine with binary stdin/stdout. Control
+    /// messages stay on stderr; binary output never reaches the line logger.
+    pub fn execute_with_streams(
+        &self,
+        spec: ProcessSpec,
+        input: Option<std::fs::File>,
+        output: Option<std::fs::File>,
+        log: Option<LogCallback>,
+        progress: Option<LogCallback>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Output {
         let context = get_application_context();
@@ -598,11 +667,22 @@ impl LinuxRuntime for PRootRuntime {
                 .arg(&run_command);
         }
 
-        let mut child = process
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("Failed to run command");
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(input) = input {
+            process.stdin(Stdio::from(input));
+        }
+        process.stdout(output.map(Stdio::from).unwrap_or_else(Stdio::piped));
+        process.stderr(Stdio::piped());
+        let mut child = match process.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return Output {
+                    status: std::process::ExitStatus::from_raw(126 << 8),
+                    stdout: Vec::new(),
+                    stderr: error.to_string().into_bytes(),
+                }
+            }
+        };
 
         #[cfg(target_os = "android")]
         let process_group = {
@@ -611,12 +691,14 @@ impl LinuxRuntime for PRootRuntime {
             (group == child_pid && group > 1).then_some(group)
         };
 
-        let stdout = child.stdout.take().expect("stdout was not piped");
+        let stdout = child.stdout.take();
         let stderr = child.stderr.take().expect("stderr was not piped");
         #[cfg(target_os = "android")]
         {
-            if let Err(error) = set_nonblocking(&stdout) {
-                log::warn!("Failed to make guest stdout nonblocking: {error}");
+            if let Some(stdout) = &stdout {
+                if let Err(error) = set_nonblocking(stdout) {
+                    log::warn!("Failed to make guest stdout nonblocking: {error}");
+                }
             }
             if let Err(error) = set_nonblocking(&stderr) {
                 log::warn!("Failed to make guest stderr nonblocking: {error}");
@@ -628,6 +710,9 @@ impl LinuxRuntime for PRootRuntime {
         let stdout_callback = log;
         let stdout_stop = reader_stop.clone();
         let stdout_thread = thread::spawn(move || {
+            let Some(stdout) = stdout else {
+                return Vec::new();
+            };
             drain_stream(
                 stdout,
                 stdout_command,
@@ -647,7 +732,7 @@ impl LinuxRuntime for PRootRuntime {
                 stderr_command,
                 stderr_user,
                 "stderr",
-                None,
+                progress,
                 stderr_stop,
             )
         });
@@ -763,53 +848,4 @@ impl LinuxRuntime for PRootRuntime {
             stderr,
         }
     }
-
-    fn terminate(&self) {
-        log::info!("Terminating PRoot runtime at {}", self.rootfs.display());
-    }
-}
-
-/// PRoot keeps a `proot-<pid>-*` directory and a `prootshm-<pid>-*` socket in
-/// `PROOT_TMP_DIR` and removes them when it exits, which a kill (Android's
-/// way of ending Portal) skips. Remove those of PRoot processes that are
-/// gone, once per app process.
-fn remove_stale_proot_temporaries(directory: &Path) {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let Ok(entries) = fs::read_dir(directory) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            let Some(rest) = name
-                .strip_prefix("prootshm-")
-                .or_else(|| name.strip_prefix("proot-"))
-            else {
-                continue;
-            };
-            // PRoot names them "<prefix>-<pid>-XXXXXX", and prefixes such as
-            // "proot-tmpfs-" (emulated mounts) or "proot-ns-" carry dashes
-            // of their own: the pid is the field before the random suffix.
-            let is_pid =
-                |pid: &&str| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit());
-            let Some(pid) = rest
-                .rsplit('-')
-                .nth(1)
-                .filter(is_pid)
-                .or_else(|| rest.split('-').next().filter(is_pid))
-            else {
-                continue;
-            };
-            if Path::new("/proc").join(pid).exists() {
-                continue;
-            }
-            let path = entry.path();
-            let _ = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                fs::remove_dir_all(&path)
-            } else {
-                fs::remove_file(&path)
-            };
-        }
-    });
 }

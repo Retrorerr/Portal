@@ -19,12 +19,42 @@ When setup completes, Portal starts KDE Plasma 6 on its native Wayland composito
 
 ## Updates and optional apps
 
-When you switch back to Portal from another Android app, the screen that restores your desktop also shows what is waiting:
+Portal's return screen, and the veil you can recall over the running desktop, show what is waiting:
 
 - **Updates** covers Portal itself, its graphics driver layer, ChatGPT and Debian packages. Tap the capsule to see the list, then **Update**. The first time Portal updates itself, Android asks you to let Portal install apps; after that, Android asks to install the new version and closes Portal to finish. Nothing appears when everything is current.
 - **Apps** lists the optional apps from setup, such as Steam. Add or remove any of them at any time; installs carry on beside the running desktop.
 
 Portal 2.4.x predates the updater, so install the current version once by hand from the [latest release](https://github.com/Retrorerr/Portal/releases/latest). Later versions arrive in the app.
+
+## Transferring files
+
+Tap the floating **Portal** capsule to bring the controls over your running
+desktop. Drag the capsule to move it; its position is remembered and kept inside
+the screen after rotation or resizing. It shows transfer progress while files
+are being copied, and adds game controls when Steam or a game is running.
+**Ctrl+Alt+P** also opens the controls; accessibility tools can use
+**Open Portal controls**. Swipe up or choose **Return to desktop** to leave.
+
+Open **Files**, beside **Apps**:
+
+- **Add files** opens Android's file picker. Choose one file or a batch to copy
+  into Linux **Downloads**.
+- **Save files** opens a compact desktop file chooser, starting in Downloads.
+  Select files, then choose **Save to Android**. Android asks where to save
+  them. A batch uses Android's destination-folder picker; Android restricts
+  some destinations, including the top-level Downloads folder. Save a single
+  file to choose Downloads through the normal save dialog.
+- You can also drag files from a compatible Android app onto the open Files
+  window. Bringing an external drag into Portal opens Files automatically.
+
+Transfers continue when you lift the veil or switch apps. Open **Details** for
+individual progress, cancellation, and retry. Copies never remove the originals
+or replace an existing Linux file; duplicate names receive a number. An
+interrupted transfer must be retried. If Android has withdrawn access to its
+source, choose that file again.
+
+Files and batches are supported; put a folder in a ZIP archive before copying
+it. No All files access permission or permanent shared folder is needed.
 
 ## Installing software
 

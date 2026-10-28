@@ -140,6 +140,7 @@ internal fun ReturnUpdatePanel(
     desktopReady: Boolean,
     suppressed: Boolean,
     onBlockedChanged: (Boolean) -> Unit,
+    immediate: Boolean = false,
 ) {
     val state by ComposeOverlay.systemUpdateState()
     val context = LocalContext.current
@@ -151,7 +152,7 @@ internal fun ReturnUpdatePanel(
     var askPermission by rememberSaveable { mutableStateOf(false) }
     var visitedSettings by rememberSaveable { mutableStateOf(false) }
     var includedApp by rememberSaveable { mutableStateOf(false) }
-    var entered by remember { mutableStateOf(false) }
+    var entered by remember { mutableStateOf(immediate) }
     var lowBattery by remember { mutableStateOf(false) }
     val currentBlocked by rememberUpdatedState(onBlockedChanged)
 
@@ -180,7 +181,7 @@ internal fun ReturnUpdatePanel(
     }
     LaunchedEffect(phase) { currentBlocked(phase == UpdatePanelPhase.Running) }
     LaunchedEffect(Unit) {
-        delay(UPDATE_ENTRANCE_DELAY_MS)
+        if (!immediate) delay(UPDATE_ENTRANCE_DELAY_MS)
         entered = true
     }
     // Only Debian and the driver risk a half-finished system; Android swaps

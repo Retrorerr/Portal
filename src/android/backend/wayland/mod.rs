@@ -18,7 +18,9 @@ pub use output_state::{read_kwin_output_scale, sync_kwin_output_scale, write_gue
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
-pub use event_handler::{dispatch_wayland, handle, log_presentation_state, poll_anland_convergence};
+pub use event_handler::{
+    dispatch_wayland, handle, log_presentation_state, poll_anland_convergence,
+};
 pub use socket_watcher::WaylandSocketWatcher;
 pub use winit_backend::{
     bind, AndroidFrameTimestampSample, AndroidFrameTimestampSupport, WinitGraphicsBackend,
@@ -248,6 +250,12 @@ impl WaylandBackend {
 
     /// Release any synthesized pointer grab and clear pending presentation state on suspend.
     pub fn suspend_input_and_presentation(&mut self) {
+        self.release_guest_input();
+        self.pending_kwin_presentation = None;
+    }
+
+    /// Let an Android overlay take input without disturbing presentation.
+    pub fn release_guest_input(&mut self) {
         if self.native_touch_active {
             let touch = self.compositor.touch.clone();
             touch.cancel(&mut self.compositor.state);
@@ -301,7 +309,6 @@ impl WaylandBackend {
                 |_, _, _| smithay::input::keyboard::FilterResult::Forward,
             );
         }
-        self.pending_kwin_presentation = None;
         self.key_counter = 0;
     }
 }

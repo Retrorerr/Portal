@@ -35,6 +35,8 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
 import app.polarbear.setup.InstallPlan
@@ -246,6 +248,22 @@ object ComposeOverlay {
     // host, same transition, same veil — only the content screen differs.
     // Decided fresh by each show() / showReturn() call.
     private var returnMode = false
+    var sessionMode = false; private set
+    private val activePanelState = mutableStateOf<String?>(null)
+    var activePanel: String?
+        get() = activePanelState.value
+        set(value) { activePanelState.value = value; SessionControls.overlayChanged() }
+    fun desktopIsReady() = desktopReadyLatched.get()
+    fun controlsVisible() = isShowing() && (sessionMode || returnMode && desktopReadyLatched.get())
+    private val dismissSignal = mutableStateOf(0)
+
+    fun requestReturnToDesktop() {
+        if (desktopReadyLatched.get()) dismissSignal.value++
+    }
+    fun backFromControls() {
+        if (activePanel == "files" && FileTransfers.back()) return
+        if (activePanel != null) activePanel = null else requestReturnToDesktop()
+    }
 
     /**
      * Show the fullscreen overlay. Fire-and-forget: success or failure is
@@ -263,6 +281,9 @@ object ComposeOverlay {
      */
     @JvmStatic fun showReturn(activity: Activity) {
         activity.runOnUiThread { doShow(activity, returnMode = true) }
+    }
+    @JvmStatic fun showSession(activity: Activity) {
+        activity.runOnUiThread { doShow(activity, returnMode = true, sessionMode = true) }
     }
 
     /** System-splash gate: true once an app-owned frame (or the fallback path) exists. */
@@ -291,8 +312,10 @@ object ComposeOverlay {
         if (ready && changed) {
             Log.i(TAG, "native desktop READY latched; Compose overlay remains attached")
         }
+        android.os.Handler(android.os.Looper.getMainLooper()).post { SessionControls.desktopReadyChanged(ready) }
         composeView?.post {
             desktopReadyState.value = desktopReadyLatched.get()
+            SessionControls.overlayChanged()
             // Recover the intended Ready translucency after an underlying
             // runtime error temporarily restored the safety charcoal.
             if (ready && readyPreludeActive.get()) {
@@ -623,7 +646,7 @@ object ComposeOverlay {
         }
     }
 
-    private fun doShow(activity: Activity, returnMode: Boolean) {
+    private fun doShow(activity: Activity, returnMode: Boolean, sessionMode: Boolean = false) {
         // A recovery dismissal may have been requested before a queued show
         // runnable reached the UI thread. Consume it rather than attaching a
         // new veil after the runtime error page was selected.
@@ -656,13 +679,15 @@ object ComposeOverlay {
             removalRequested.set(false)
             readyPreludeActive.set(false)
             this.returnMode = returnMode
+            this.sessionMode = sessionMode
+            dismissSignal.value = 0
             val frame = FrameLayout(activity).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
                 // Same charcoal as the splash and the setup UI from pixel one.
-                setBackgroundColor(PORTAL_CHARCOAL)
+                setBackgroundColor(if (sessionMode) 0x00000000 else PORTAL_CHARCOAL)
                 isClickable = true
                 isFocusable = true
                 isFocusableInTouchMode = true
@@ -677,7 +702,7 @@ object ComposeOverlay {
             // decor (real AppCompatActivity owners); nothing is tagged here.
             view.setContent {
                 PortalLaunchTransition(
-                    playIntro = !launchIntroResolved,
+                    playIntro = !sessionMode && !launchIntroResolved,
                     splashRemoved = systemSplashRemovedState.value,
                     desktopReady = desktopReadyState.value,
                     onContentPreDraw = { markFirstFrameReady() },
@@ -696,6 +721,8 @@ object ComposeOverlay {
                     onRevealCommitted = { acknowledgeRevealCommitted() },
                     onRevealFinished = { removeNow() },
                     isReturn = returnMode,
+                    sessionControls = sessionMode,
+                    dismissSignal = dismissSignal.value,
                 )
             }
             // Sibling above the native SurfaceView in the SAME window: no
@@ -708,8 +735,10 @@ object ComposeOverlay {
                 ),
             )
             frame.addView(view)
+            view.requestFocus()
             container = frame
             composeView = view
+            SessionControls.overlayChanged()
             (activity as? PortalActivity)?.let { portal ->
                 portal.setOverlayHighRefresh(true)
                 // Android 15 votes per drawing View: the Compose view's
@@ -756,6 +785,8 @@ object ComposeOverlay {
             (frame?.parent as? ViewGroup)?.removeView(frame)
             container = null
             composeView = null
+            sessionMode = false
+            SessionControls.overlayChanged()
             readyPreludeActive.set(false)
             returnMode = false
             recoveryDismissRequested.set(false)
@@ -792,6 +823,8 @@ object ComposeOverlay {
             (container?.context as? PortalActivity)?.setOverlayHighRefresh(false)
             container = null
             composeView = null
+            sessionMode = false
+            SessionControls.overlayChanged()
             readyPreludeActive.set(false)
             returnMode = false
             recoveryDismissRequested.set(false)

@@ -1,10 +1,6 @@
 package app.polarbear
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.RectF
 import android.hardware.input.InputManager
 import android.os.Build
 import android.os.Handler
@@ -16,7 +12,6 @@ import android.util.Log
 import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -37,10 +32,8 @@ import kotlin.math.min
 /**
  * On-screen controller and the quick game panel.
  *
- * While Steam runs, a small handle sits at the top of the screen (drag it
- * anywhere; it remembers where): one side shows or hides the controller
- * (only while a game runs), the other opens the game panel (controller options, layout editing and the settings
- * Portal's compatibility tools read at launch, see [app.polarbear.gaming.GameSettings]).
+ * A small Portal capsule recalls the session controls. It remembers where
+ * it is dragged and adds controller and game options only when relevant.
  *
  * The controller feeds the "touch pad" through the same evdev path as
  * physical controllers ([GamepadBridge.touchPad]) and steps aside while a
@@ -82,7 +75,7 @@ object TouchControls : ControlHost {
     private val scanner = Executors.newSingleThreadExecutor { Thread(it, "touch-controls-scan").apply { isDaemon = true } }
     private var activity: PortalActivity? = null
     private var root: FrameLayout? = null
-    private var handle: HandleView? = null
+    private var handle: PortalCapsuleView? = null
     private var editBar: ComposeView? = null
     private var panel: ComposeView? = null
     private val views = LinkedHashMap<Control, ControlView>()
@@ -132,6 +125,7 @@ object TouchControls : ControlHost {
         }
         physicalPad.value = physicalPadConnected(host)
         reloadLayout(force = true)
+        refresh(host)
         main.removeCallbacks(poll)
         main.post(poll)
     }
@@ -288,10 +282,9 @@ object TouchControls : ControlHost {
             overlay.addOnLayoutChangeListener(rootLayoutListener)
         }
         syncControls()
-        val wantHandle = (steamRunning.value || gameRunning.value) && !editingState.value && panel == null
+        val wantHandle = ComposeOverlay.desktopIsReady() && !editingState.value && panel == null
         if (wantHandle && handle == null) addHandle(host, overlay)
         if (!wantHandle && handle != null) removeView(handle).also { handle = null }
-        handle?.update()
         if (editingState.value && editBar == null) addEditBar(host, overlay)
         if (!editingState.value && editBar != null) removeView(editBar).also { editBar = null }
     }
@@ -624,6 +617,8 @@ object TouchControls : ControlHost {
         editBar = view
     }
 
+    fun overlayChanged() { activity?.let(::refresh) }
+
     /** Back closes the panel or finishes editing before reaching the guest. */
     fun onBackKey(event: KeyEvent): Boolean {
         if (event.keyCode != KeyEvent.KEYCODE_BACK) return false
@@ -646,38 +641,28 @@ object TouchControls : ControlHost {
     }?.takeIf { it.hasVibrator() }
 
     private fun addHandle(host: PortalActivity, overlay: FrameLayout) {
-        val density = host.resources.displayMetrics.density
-        val view = HandleView(host)
-        // Placed by translation from the top-left corner, see [placeHandle].
-        val params = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            (36f * density).toInt(),
-            Gravity.TOP or Gravity.START,
+        val view = PortalCapsuleView(host,
+            onPositionChanged = { saveHandle(it) },
+            onSizeChanged = { placeHandle() },
+            onOpen = { files -> later {
+                if (files) SessionControls.requestFiles(host) else SessionControls.open(host)
+            } },
+            onGameOptions = { later { openPanel() } },
+            onToggleController = { later { toggleController() } },
         )
-        // Above the controls, below Portal's own screens and the panel.
         val index = views.values.maxOfOrNull { overlay.indexOfChild(it) }?.plus(1) ?: min(1, overlay.childCount)
-        overlay.addView(view, index.coerceIn(0, overlay.childCount), params)
         handle = view
+        overlay.addView(view, index.coerceIn(0, overlay.childCount), FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
     }
 
-    /**
-     * Put the handle where the user left it: its centre as a fraction of the
-     * overlay's width and its top as a fraction of the height, so it keeps its
-     * spot across rotation and folding. Unmoved, it sits top centre.
-     */
     private fun placeHandle() {
         val view = handle ?: return
-        val overlay = root ?: return
         if (view.dragging) return
-        val width = overlay.width.toFloat()
-        val height = overlay.height.toFloat()
-        if (width <= 0f || view.width <= 0) return
-        val density = overlay.resources.displayMetrics.density
-        val prefs = prefs(overlay.context)
-        val cx = prefs.getFloat(PREF_HANDLE_X, 0.5f) * width
-        val top = prefs.getFloat(PREF_HANDLE_Y, -1f).let { if (it < 0f) 8f * density else it * height }
-        view.translationX = (cx - view.width / 2f).coerceIn(0f, (width - view.width).coerceAtLeast(0f))
-        view.translationY = top.coerceIn(0f, (height - view.height).coerceAtLeast(0f))
+        val overlay = root ?: return
+        if (overlay.width <= 0 || view.width <= 0) return
+        val preferences = prefs(overlay.context)
+        view.place(preferences.getFloat(PREF_HANDLE_X, 0.5f), preferences.getFloat(PREF_HANDLE_Y, -1f))
     }
 
     private fun saveHandle(view: View) {
@@ -687,159 +672,5 @@ object TouchControls : ControlHost {
             .putFloat(PREF_HANDLE_X, (view.translationX + view.width / 2f) / overlay.width)
             .putFloat(PREF_HANDLE_Y, view.translationY / overlay.height)
             .apply()
-    }
-
-    /**
-     * The top-of-screen handle: a controller segment (while a game runs)
-     * and a settings segment that opens the panel. Long-press also opens it;
-     * dragging moves it.
-     */
-    private const val IDLE_ALPHA = 0.82f
-
-    @SuppressLint("ViewConstructor")
-    private class HandleView(context: Context) : View(context) {
-        private val density = context.resources.displayMetrics.density
-        private val segment = 46f * density
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ControlView.withAlpha(ControlView.CHARCOAL, 170) }
-        private val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 1f * density
-            color = ControlView.withAlpha(ControlView.IVORY, 52)
-        }
-        private val ink = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 1.8f * density
-            strokeCap = Paint.Cap.ROUND
-            color = ControlView.withAlpha(ControlView.IVORY, 225)
-        }
-        private val dot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ControlView.withAlpha(ControlView.IVORY, 225) }
-        private val rect = RectF()
-        private val slop = android.view.ViewConfiguration.get(context).scaledTouchSlop.toFloat()
-        private var downX = 0f
-        private var downRawX = 0f
-        private var downRawY = 0f
-        private var startX = 0f
-        private var startY = 0f
-        private var longPressed = false
-        var dragging = false
-            private set
-        private val longPress = Runnable {
-            longPressed = true
-            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
-            later { openPanel() }
-        }
-        private var shownSegments = 0
-
-        init {
-            contentDescription = "Game controls"
-            alpha = IDLE_ALPHA
-        }
-
-        private val segments: Int get() = if (gameRunning.value) 2 else 1
-
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            setMeasuredDimension((segment * segments).toInt(), MeasureSpec.getSize(heightMeasureSpec))
-        }
-
-        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-            // Growing a segment keeps the handle's centre where it was.
-            if (w > 0) placeHandle()
-        }
-
-        /** Grow or shrink with the controller segment, and redraw. */
-        fun update() {
-            if (shownSegments != segments) {
-                shownSegments = segments
-                requestLayout()
-            }
-            invalidate()
-        }
-
-        @SuppressLint("ClickableViewAccessibility")
-        override fun onTouchEvent(event: MotionEvent): Boolean {
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    downX = event.x
-                    downRawX = event.rawX
-                    downRawY = event.rawY
-                    startX = translationX
-                    startY = translationY
-                    longPressed = false
-                    dragging = false
-                    postDelayed(longPress, 450L)
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = event.rawX - downRawX
-                    val dy = event.rawY - downRawY
-                    if (!dragging && !longPressed && dx * dx + dy * dy > slop * slop) {
-                        dragging = true
-                        removeCallbacks(longPress)
-                        parent?.requestDisallowInterceptTouchEvent(true)
-                        animate().scaleX(1.12f).scaleY(1.12f).alpha(1f).setDuration(120L).start()
-                    }
-                    if (dragging) {
-                        val parentView = parent as? View
-                        val maxX = ((parentView?.width ?: 0) - width).toFloat().coerceAtLeast(0f)
-                        val maxY = ((parentView?.height ?: 0) - height).toFloat().coerceAtLeast(0f)
-                        translationX = (startX + dx).coerceIn(0f, maxX)
-                        translationY = (startY + dy).coerceIn(0f, maxY)
-                    }
-                }
-                MotionEvent.ACTION_UP -> {
-                    removeCallbacks(longPress)
-                    if (dragging) {
-                        dragging = false
-                        animate().scaleX(1f).scaleY(1f).alpha(IDLE_ALPHA).setDuration(160L).start()
-                        saveHandle(this)
-                    } else if (!longPressed) {
-                        performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                        if (segments == 2 && downX < segment) later { toggleController() } else later { openPanel() }
-                    }
-                }
-                MotionEvent.ACTION_CANCEL -> {
-                    removeCallbacks(longPress)
-                    if (dragging) {
-                        dragging = false
-                        animate().scaleX(1f).scaleY(1f).alpha(IDLE_ALPHA).setDuration(160L).start()
-                        saveHandle(this)
-                    }
-                }
-            }
-            return true
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            val w = width.toFloat()
-            val h = height.toFloat()
-            rect.set(0.5f * density, 0.5f * density, w - 0.5f * density, h - 0.5f * density)
-            canvas.drawRoundRect(rect, h / 2f, h / 2f, fill)
-            canvas.drawRoundRect(rect, h / 2f, h / 2f, border)
-            var cx = segment / 2f
-            val cy = h / 2f
-            if (segments == 2) {
-                // Controller outline: body plus two stick dots, orange while shown.
-                val color = if (controllerVisible) ControlView.ORANGE else ControlView.withAlpha(ControlView.IVORY, 225)
-                ink.color = color
-                dot.color = color
-                val bw = segment * 0.5f
-                val bh = h * 0.36f
-                rect.set(cx - bw / 2f, cy - bh / 2f, cx + bw / 2f, cy + bh / 2f)
-                canvas.drawRoundRect(rect, bh / 2f, bh / 2f, ink)
-                canvas.drawCircle(cx - bw * 0.22f, cy, bh * 0.14f, dot)
-                canvas.drawCircle(cx + bw * 0.22f, cy, bh * 0.14f, dot)
-                ink.color = ControlView.withAlpha(ControlView.IVORY, 60)
-                canvas.drawLine(segment, h * 0.28f, segment, h * 0.72f, ink)
-                cx += segment
-            }
-            // Settings: three slider lines with knobs.
-            ink.color = ControlView.withAlpha(ControlView.IVORY, 225)
-            dot.color = ControlView.withAlpha(ControlView.IVORY, 225)
-            val half = segment * 0.2f
-            for ((row, knob) in listOf(-1 to 0.45f, 0 to -0.4f, 1 to 0.15f)) {
-                val y = cy + row * h * 0.17f
-                canvas.drawLine(cx - half, y, cx + half, y, ink)
-                canvas.drawCircle(cx + knob * half, y, 2.6f * density, dot)
-            }
-        }
     }
 }

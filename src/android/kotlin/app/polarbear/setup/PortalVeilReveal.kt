@@ -107,6 +107,8 @@ internal fun PortalRevealVeil(
     modifier: Modifier = Modifier,
     onCommitted: () -> Unit,
     onFinished: () -> Unit,
+    enterFromAbove: Boolean = false,
+    dismissSignal: Int = 0,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val density = LocalDensity.current
@@ -116,6 +118,11 @@ internal fun PortalRevealVeil(
     var displacement by motion::gesture
     var effectStrength by remember { mutableFloatStateOf(0f) }
     val animationScope = rememberCoroutineScope()
+    val entrance = remember { Animatable(if (enterFromAbove) 1f else 0f) }
+    LaunchedEffect(Unit) {
+        if (enterFromAbove && ValueAnimator.areAnimatorsEnabled()) entrance.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+        else entrance.snapTo(0f)
+    }
     val settleJob = remember { arrayOfNulls<Job>(1) }
     val commitInFlight = remember { booleanArrayOf(false) }
     val currentCommitted by rememberUpdatedState(onCommitted)
@@ -239,6 +246,13 @@ internal fun PortalRevealVeil(
             displacement = fullHeight
             commitInFlight[0] = false
             currentFinished()
+        }
+    }
+
+    LaunchedEffect(dismissSignal, eligible) {
+        if (dismissSignal > 0 && eligible && !commitInFlight[0] && motion.height > 0f) {
+            settleJob[0]?.cancel(); hintJob[0]?.cancel()
+            commitReveal(motion.height, 0f)
         }
     }
 
@@ -381,6 +395,7 @@ internal fun PortalRevealVeil(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .graphicsLayer { translationY = -size.height * entrance.value }
                     .then(motionLayer)
                     .then(modifier),
             ) {

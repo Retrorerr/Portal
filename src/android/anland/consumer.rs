@@ -93,9 +93,14 @@ const HIGH_RATE_QUEUE_MHZ: u32 = 140_000;
 /// deadline is comfortable, so the extra slot would only add a frame of
 /// latency (measured 14.5 ms -> 22 ms queue->present) and ~32 MB.
 fn window_buffer_count(min_undequeued: i32, refresh_mhz: u32) -> usize {
-    let slack = tuning_value("slack")
-        .map(|v| v as i32)
-        .unwrap_or(if refresh_mhz >= HIGH_RATE_QUEUE_MHZ { 3 } else { 2 });
+    let slack =
+        tuning_value("slack")
+            .map(|v| v as i32)
+            .unwrap_or(if refresh_mhz >= HIGH_RATE_QUEUE_MHZ {
+                3
+            } else {
+                2
+            });
     (min_undequeued + slack).clamp(3, MAX_BUFS as i32) as usize
 }
 
@@ -254,7 +259,9 @@ struct Inner {
 fn kick(inner: &Arc<Inner>, burst_ms: u64) {
     let until = sys::now_ns().wrapping_add(burst_ms.wrapping_mul(1_000_000));
     inner.demand_until_ns.fetch_max(until, Ordering::AcqRel);
-    inner.high_refresh_until_ns.fetch_max(until, Ordering::AcqRel);
+    inner
+        .high_refresh_until_ns
+        .fetch_max(until, Ordering::AcqRel);
     let _ = sys::eventfd_write(&inner.wake, 1);
 }
 
@@ -311,7 +318,11 @@ fn install_window(inner: &Arc<Inner>, window: *mut c_void) -> Result<(), String>
 }
 
 fn remove_window(inner: &Arc<Inner>) -> Option<*mut c_void> {
-    inner.window.lock().ok().and_then(|mut window| window.take())
+    inner
+        .window
+        .lock()
+        .ok()
+        .and_then(|mut window| window.take())
 }
 
 fn release_window(inner: &Arc<Inner>) {
@@ -639,11 +650,15 @@ impl AnlandSession {
         // BufferQueue without another launch() call.
         if let Err(error) = collect_buffers(&inner, total, w, h) {
             self.suspend_surface();
-            return Err(format!("collect buffers after Android surface resume: {error}"));
+            return Err(format!(
+                "collect buffers after Android surface resume: {error}"
+            ));
         }
         if let Err(error) = deposit_generation(&inner) {
             self.suspend_surface();
-            return Err(format!("deposit Anland generation after surface resume: {error}"));
+            return Err(format!(
+                "deposit Anland generation after surface resume: {error}"
+            ));
         }
         if let Err(error) = self.start_surface_threads() {
             self.suspend_surface();
@@ -659,7 +674,7 @@ impl AnlandSession {
         Ok((w, h))
     }
 
-    fn release_surface_inputs(&self) {
+    pub fn release_surface_inputs(&self) {
         if !self.inner.window_live.load(Ordering::Acquire) {
             return;
         }
@@ -668,11 +683,14 @@ impl AnlandSession {
         for (kind, code) in held {
             let release = if kind == INPUT_TYPE_KEY {
                 InputEvent::key(INPUT_ACTION_UP, code)
+            } else if kind == INPUT_TYPE_TOUCH {
+                InputEvent::touch(INPUT_ACTION_UP, 0.0, 0.0, code)
             } else {
                 InputEvent::pointer_button(code as u32, false)
             };
             self.send_input(&release);
         }
+        self.send_input(&InputEvent::touch_frame());
     }
 
     /// Retire only the current Android presentation surface. This is
@@ -801,7 +819,11 @@ pub struct AnlandKeySink(Arc<Inner>);
 
 impl AnlandKeySink {
     pub fn send_key(&self, scancode: u32, pressed: bool) {
-        let action = if pressed { INPUT_ACTION_DOWN } else { INPUT_ACTION_UP };
+        let action = if pressed {
+            INPUT_ACTION_DOWN
+        } else {
+            INPUT_ACTION_UP
+        };
         send_input_inner(&self.0, &InputEvent::key(action, scancode as i32));
     }
 }
@@ -823,14 +845,15 @@ fn send_wheel_inner(inner: &Arc<Inner>, axis: u32, value: f32) {
         return;
     };
     if clicks != 0.0 {
-        send_input_inner(inner, &InputEvent::pointer_axis(axis, clicks, clicks as i32));
+        send_input_inner(
+            inner,
+            &InputEvent::pointer_axis(axis, clicks, clicks as i32),
+        );
     }
 }
 
 fn send_input_inner(inner: &Arc<Inner>, ev: &InputEvent) {
-    if !inner.running.load(Ordering::Acquire)
-        || !inner.window_live.load(Ordering::Acquire)
-    {
+    if !inner.running.load(Ordering::Acquire) || !inner.window_live.load(Ordering::Acquire) {
         return;
     }
     if inner.rebind_active.load(Ordering::Acquire) {
@@ -880,9 +903,7 @@ impl AnlandSession {
     /// a jump) reports zero delta, never a spike.
     pub fn send_pointer_motion(&self, x: f32, y: f32) {
         let inner = &self.inner;
-        if !inner.running.load(Ordering::Acquire)
-            || !inner.window_live.load(Ordering::Acquire)
-        {
+        if !inner.running.load(Ordering::Acquire) || !inner.window_live.load(Ordering::Acquire) {
             return;
         }
         if inner.rebind_active.load(Ordering::Acquire) {
@@ -926,9 +947,7 @@ impl AnlandSession {
             return false;
         }
         let inner = &self.inner;
-        if !inner.running.load(Ordering::Acquire)
-            || !inner.window_live.load(Ordering::Acquire)
-        {
+        if !inner.running.load(Ordering::Acquire) || !inner.window_live.load(Ordering::Acquire) {
             return false;
         }
         if inner.rebind_active.load(Ordering::Acquire) {
@@ -1099,11 +1118,14 @@ impl AnlandSession {
         for (kind, code) in held {
             let release = if kind == INPUT_TYPE_KEY {
                 InputEvent::key(INPUT_ACTION_UP, code)
+            } else if kind == INPUT_TYPE_TOUCH {
+                InputEvent::touch(INPUT_ACTION_UP, 0.0, 0.0, code)
             } else {
                 InputEvent::pointer_button(code as u32, false)
             };
             self.send_input(&release);
         }
+        self.send_input(&InputEvent::touch_frame());
         let mut request = inner.rebind_request.lock().unwrap();
         inner.rebind_active.store(true, Ordering::Release);
         *request = Some((w, h, gen));
@@ -1180,10 +1202,7 @@ impl AnlandSession {
         }
         let min_undequeued = unsafe { inner.anw.query_min_undequeued(window) }
             .map_err(|e| format!("ANativeWindow query min-undequeued after resize: {e}"))?;
-        let total = window_buffer_count(
-            min_undequeued,
-            inner.refresh_mhz.load(Ordering::Acquire),
-        );
+        let total = window_buffer_count(min_undequeued, inner.refresh_mhz.load(Ordering::Acquire));
         let r = unsafe { inner.anw.set_buffer_count(window, total) };
         if r != 0 {
             return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
@@ -1481,9 +1500,7 @@ fn enter_fallback(inner: &Arc<Inner>, expected: u64, reason: &str) {
 fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receiver<u64>) {
     // Wait for the broker to serve our generation (producer picked up fds).
     loop {
-        if !inner.running.load(Ordering::Acquire)
-            || !inner.window_live.load(Ordering::Acquire)
-        {
+        if !inner.running.load(Ordering::Acquire) || !inner.window_live.load(Ordering::Acquire) {
             return;
         }
         match attach_rx.recv_timeout(Duration::from_millis(200)) {
@@ -1627,7 +1644,10 @@ fn spawn_damage_listener(
     let socket = match std::os::unix::net::UnixDatagram::bind(&path) {
         Ok(socket) => socket,
         Err(error) => {
-            log::warn!("anland.damage listener unavailable ({}): {error}", path.display());
+            log::warn!(
+                "anland.damage listener unavailable ({}): {error}",
+                path.display()
+            );
             return None;
         }
     };
@@ -1708,7 +1728,9 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
         }
         last_hint_ns = now;
         if now.wrapping_sub(streak_start_ns) >= DAMAGE_STREAK_HIGH_REFRESH_NS {
-            inner.high_refresh_until_ns.fetch_max(until, Ordering::AcqRel);
+            inner
+                .high_refresh_until_ns
+                .fetch_max(until, Ordering::AcqRel);
         }
     }
     log::info!("anland.damage listener stopped hints={hints}");
@@ -2032,11 +2054,7 @@ fn render_loop(inner: Arc<Inner>) {
             }
         }
         // refresh_done: 5s poll on our fence dup, then non-blocking recvmsg.
-        let rfence = refresh_done(
-            &inner,
-            cur_fence.as_ref(),
-            cur_gen,
-        );
+        let rfence = refresh_done(&inner, cur_fence.as_ref(), cur_gen);
         if rfence == FENCE_LOST {
             if producer_expected() {
                 log::warn!(
@@ -2205,8 +2223,8 @@ fn log_fps_window(
     let skip_pct = skips * 100 / (frames + skips).max(1);
     let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
     // KWin repaint requests per second: the rate guest content changes.
-    let hint_hz = inner.damage_hints.swap(0, Ordering::Relaxed) as f64 * 1_000_000_000.0
-        / elapsed_ns as f64;
+    let hint_hz =
+        inner.damage_hints.swap(0, Ordering::Relaxed) as f64 * 1_000_000_000.0 / elapsed_ns as f64;
     log::info!(
         "anland.fps hz={hz:.1} hint_hz={hint_hz:.1} comp_avg_us={avg_us} comp_max_us={} acq_avg_us={acq_avg_us} acq_max_us={} acq_ready_pct={acq_ready_pct} skip_pct={skip_pct} acquire_stalls={} demanding={demanding}",
         *win_comp_max_us,
@@ -2228,11 +2246,7 @@ const FENCE_LOST: i32 = -2;
 
 /// Wait for the producer's render-done message; return its fence fd (>=0),
 /// -1 for ready-now, or FENCE_LOST when the generation died.
-fn refresh_done(
-    inner: &Arc<Inner>,
-    fence: Option<&OwnedFd>,
-    generation: u64,
-) -> i32 {
+fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, generation: u64) -> i32 {
     let Some(fence) = fence else { return -1 };
     // Emergency software fallback only: cold sessions (nothing ever queued)
     // get a long interruptible budget, because tearing down the generation
@@ -2322,9 +2336,7 @@ fn event_loop(inner: Arc<Inner>) {
     // Generation whose data socket hung up; its fd stays POLLHUP until the
     // render side replaces the generation, so re-polling it would spin.
     let mut dead_gen: u64 = 0;
-    while inner.running.load(Ordering::Acquire)
-        && inner.window_live.load(Ordering::Acquire)
-    {
+    while inner.running.load(Ordering::Acquire) && inner.window_live.load(Ordering::Acquire) {
         let gen_id = inner
             .gen
             .lock()

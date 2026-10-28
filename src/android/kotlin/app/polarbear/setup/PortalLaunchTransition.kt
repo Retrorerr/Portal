@@ -84,6 +84,8 @@ fun PortalLaunchTransition(
     // content while retaining the exact launch intro and every path below —
     // READY prelude, scatter, translucency, veil, swipe and handoff.
     isReturn: Boolean = false,
+    sessionControls: Boolean = false,
+    dismissSignal: Int = 0,
 ) {
     val view = LocalView.current
     val context = LocalContext.current
@@ -93,13 +95,13 @@ fun PortalLaunchTransition(
     // veil cannot lift because the Return screen, which signals ready, has not
     // been shown yet. Decided once per launch, so ticking the setting off in
     // Settings never yanks the screen away mid-read.
-    val gateNeeded = remember { isReturn && setupPrepareNeeded(context) }
+    val gateNeeded = remember { isReturn && !sessionControls && setupPrepareNeeded(context) }
     var gateCleared by rememberSaveable { mutableStateOf(false) }
     var resolved by rememberSaveable { mutableStateOf(!playIntro || Build.VERSION.SDK_INT < 33) }
     var ready by remember { mutableStateOf(false) }
     var rootBounds by remember { mutableStateOf(Rect.Zero) }
     var destinationBounds by remember { mutableStateOf(Rect.Zero) }
-    var setupReady by remember { mutableStateOf(false) }
+    var setupReady by remember { mutableStateOf(sessionControls) }
     var returnRepairBlocked by remember { mutableStateOf(false) }
     val clock = remember { Animatable(0f) }
     val currentPreDraw by rememberUpdatedState(onContentPreDraw)
@@ -204,6 +206,8 @@ fun PortalLaunchTransition(
             .then(guard),
         onCommitted = onRevealCommitted,
         onFinished = onRevealFinished,
+        enterFromAbove = sessionControls,
+        dismissSignal = dismissSignal,
     ) {
         // Keep this call at the same composition slot before/during/after intro:
         // no second screen, second fade, duplicated state or persistent capture.
@@ -233,6 +237,7 @@ fun PortalLaunchTransition(
             } else if (isReturn) {
                 PortalReturnScreen(
                     launchMarkModifier = launchMarkModifier,
+                    sessionControls = sessionControls,
                     onReturnReady = { setupReady = true },
                     onRepairBlockedChanged = { returnRepairBlocked = it },
                 )

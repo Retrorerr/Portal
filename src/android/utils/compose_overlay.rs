@@ -155,12 +155,7 @@ fn overlay_class<'local>(
     activity: &JObject,
 ) -> jni::errors::Result<JClass<'local>> {
     let loader = env
-        .call_method(
-            activity,
-            "getClassLoader",
-            "()Ljava/lang/ClassLoader;",
-            &[],
-        )?
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
         .l()?;
     let name = env.new_string(OVERLAY_DOTTED_CLASS)?;
     let class = env
@@ -372,6 +367,26 @@ pub fn show_compose_return(android_app: &AndroidApp) {
     show_compose_overlay_with(android_app, "showReturn");
 }
 
+/// Recall controls only over an authoritative, already-presented desktop.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SessionControls_nativeOpen(
+    _env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jboolean {
+    if !DESKTOP_READY.load(Ordering::Acquire) || !is_hidden() {
+        return 0;
+    }
+    let Some(app) = cached_app().lock().ok().and_then(|app| app.clone()) else {
+        return 0;
+    };
+    crate::android::accessibility::release_service_keys();
+    if let Some(proxy) = crate::android::accessibility::event_loop_proxy() {
+        let _ = proxy.send_event(crate::android::accessibility::AppUserEvent::PortalControlsOpened);
+    }
+    show_compose_overlay_with(&app, "showSession");
+    1
+}
+
 fn show_compose_overlay_with(android_app: &AndroidApp, method: &str) {
     if state() != OverlayState::Hidden {
         // Re-show during Dismissing (e.g. a runtime failure inside the fade)
@@ -425,7 +440,7 @@ fn show_compose_overlay_with(android_app: &AndroidApp, method: &str) {
     }
     crate::android::proot::setup::publish_current_install_state(android_app);
     publish_current_anland_repair_state(android_app);
-    if method == "showReturn" {
+    if matches!(method, "showReturn" | "showSession") {
         crate::android::proot::system_updates::publish_current(android_app);
         crate::android::proot::optional_apps::publish_current(android_app);
     }
@@ -444,7 +459,11 @@ pub fn publish_system_update_state(
     let progress = snapshot.progress as i32;
     let message = snapshot.message.clone();
     let total = snapshot.updates.len() as i32;
-    let security = snapshot.updates.iter().filter(|update| update.security).count() as i32;
+    let security = snapshot
+        .updates
+        .iter()
+        .filter(|update| update.security)
+        .count() as i32;
     let interrupted = snapshot.interrupted;
     let packages = snapshot
         .updates
@@ -792,7 +811,9 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeBeginSystemUpdate
     _class: JObject,
     include_app: jni::sys::jboolean,
 ) -> jni::sys::jboolean {
-    u8::from(crate::android::proot::system_updates::begin_update(include_app != 0))
+    u8::from(crate::android::proot::system_updates::begin_update(
+        include_app != 0,
+    ))
 }
 
 /// JNI callback from `AppUpdateInstaller` when an install session ends:
@@ -847,7 +868,10 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRequestOptionalAp
             return 0;
         }
     };
-    u8::from(crate::android::proot::optional_apps::request(&app_id, install != 0))
+    u8::from(crate::android::proot::optional_apps::request(
+        &app_id,
+        install != 0,
+    ))
 }
 
 /// JNI bridge for the explicit existing-install Anland graphics repair. The
