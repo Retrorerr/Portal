@@ -153,7 +153,7 @@ fun UsageTips(
             ChecklistStep(
                 number = ++number,
                 title = "Bring Portal back",
-                body = "Tap Portal at the screen edge to open its labelled controls. " +
+                body = "Tap the icon at the screen edge to open Portal’s labelled controls. " +
                     "Drag it to either edge; it remembers the position. Ctrl+Alt+P opens the veil directly.",
                 state = StepState.Todo,
                 actionLabel = "Got it",

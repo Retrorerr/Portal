@@ -42,5 +42,10 @@ fun main() {
     check(clipped.first.y <= area.bottom-24 && clipped.first.y >= area.top+24)
     val tiny=UtilityMenuGeometry.dock(UtilityMenuGeometry.Area(0f,0f,80f,30f),true,100f,1f)
     check(tiny.y in 0f..30f)
+    check(UtilitySuggestion.forContext(false,false,false) == UtilitySuggestion.Veil)
+    check(UtilitySuggestion.forContext(false,false,true) == UtilitySuggestion.Files)
+    check(UtilitySuggestion.forContext(false,true,true) == UtilitySuggestion.Gaming)
+    check(UtilitySuggestion.forContext(true,true,true) == UtilitySuggestion.Keyboard)
+    check(UtilitySuggestion.forContext(true,false,false) == UtilitySuggestion.Keyboard)
     println("Utility docking momentum, menu spacing, insets, text scaling and compact layout checks passed")
 }

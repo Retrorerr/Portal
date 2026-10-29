@@ -23,7 +23,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
@@ -39,11 +38,11 @@ private data class UtilityAction(val id: String, val title: String, val glyph: P
 
 @Composable
 internal fun UtilityRoundtable(
-    ready: Boolean, page: UtilityPage, anchor: () -> Offset, area: UtilityMenuGeometry.Area,
+    ready: Boolean, page: UtilityPage, presentationId: Int, anchor: () -> Offset, area: UtilityMenuGeometry.Area,
     dockRight: Boolean, dragging: Boolean, directPosition: Boolean = dragging,
     onHub: () -> Unit, onAction: (String) -> Unit, onBack: () -> Unit, onOutside: () -> Unit,
     onHubBounds: (android.graphics.RectF) -> Unit, onActionBounds: (String, android.graphics.RectF) -> Unit = { _, _ -> },
-    onAnimating: (Boolean) -> Unit = {}, onSettled: (UtilityPage) -> Unit,
+    onAnimating: (Boolean) -> Unit = {}, onSettled: (UtilityPage,Int) -> Unit,
 ) {
     if (!ready) return
     val palette = resolvePalette(AppearanceMode.System)
@@ -51,6 +50,14 @@ internal fun UtilityRoundtable(
     val active = FileTransfers.items.count { it.phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling) }
     val failed = FileTransfers.items.asReversed().distinctBy { it.kind to it.source }
         .any { it.phase in setOf(TransferPhase.Failed, TransferPhase.Interrupted) }
+    val suggestion = UtilitySuggestion.forContext(SessionControls.textInputFocused.value,
+        TouchControls.steamRunning.value || TouchControls.gameRunning.value, active > 0 || failed)
+    val suggestedGlyph = when (suggestion) {
+        UtilitySuggestion.Keyboard -> PortalGlyph.Keyboard
+        UtilitySuggestion.Gaming -> PortalGlyph.Options
+        UtilitySuggestion.Files -> PortalGlyph.Files
+        UtilitySuggestion.Veil -> PortalGlyph.Veil
+    }
     val actions = buildList {
         add(UtilityAction("veil", "Portal veil", PortalGlyph.Veil))
         add(UtilityAction("files", "Files", PortalGlyph.Files, if (active > 0) "$active copying" else if (failed) "Needs attention" else ""))
@@ -66,6 +73,16 @@ internal fun UtilityRoundtable(
     val radial by animateFloatAsState(radialTarget,spring(dampingRatio = 1f,stiffness = 380f),label = "responsive roundtable")
     var surfaceResizing by remember { mutableStateOf(false) }
     val transition = updateTransition(page, label = "utility presentation")
+    val dockCaptureBounds = remember { android.graphics.RectF() }
+    val moving = { page != UtilityPage.Dock || dragging || directPosition || transition.isRunning || surfaceResizing }
+    val frost = rememberUtilityFrost(ready,
+        crop = {
+            if (moving() || dockCaptureBounds.isEmpty) null
+            else androidx.compose.ui.geometry.Rect(dockCaptureBounds.left,dockCaptureBounds.top,dockCaptureBounds.right,dockCaptureBounds.bottom)
+        },moving = moving)
+    val hasFrost by remember(frost) { derivedStateOf { frost.current != null } }
+    val surfaceBase by animateColorAsState(palette.background.copy(alpha = if (hasFrost) PortalFrostStyle.tint(palette.isDark) else 0.96f),
+        tween(320,easing = PortalEmphasized),label = "utility glass tint")
     val centering by transition.animateFloat(transitionSpec = { spring(dampingRatio = 0.88f, stiffness = 230f) }, label = "utility travel") {
         if (it == UtilityPage.Dock) 0f else 1f
     }
@@ -100,10 +117,10 @@ internal fun UtilityRoundtable(
             .distinctUntilChanged().collect { currentAnimating(it) }
     }
     val currentSettled by rememberUpdatedState(onSettled)
-    LaunchedEffect(transition.currentState, transition.targetState, transition.isRunning, dragging, directPosition, arrival.isRunning, surfaceResizing) {
-        if (!transition.isRunning && transition.currentState == transition.targetState && !dragging && !directPosition && !arrival.isRunning && arrival.value == 1f && !surfaceResizing) currentSettled(transition.currentState)
+    LaunchedEffect(presentationId, transition.currentState, transition.targetState, transition.isRunning, dragging, directPosition, arrival.isRunning, surfaceResizing) {
+        if (!transition.isRunning && transition.currentState == transition.targetState && !dragging && !directPosition && !arrival.isRunning && arrival.value == 1f && !surfaceResizing) currentSettled(transition.currentState,presentationId)
     }
-    Box(Modifier.fillMaxSize().pointerInput(page) {
+    Box(Modifier.fillMaxSize().recordUtilityFrost(frost).pointerInput(page) {
         detectTapGestures { if (page != UtilityPage.Dock) onOutside() }
     }) {
         actions.forEach { action ->
@@ -112,7 +129,7 @@ internal fun UtilityRoundtable(
                 val target = geometry.offsets.getOrNull(index)?.let { Offset(it.x,it.y) } ?: Offset.Zero
                 val orbit by animateOffsetAsState(target,spring(dampingRatio = 0.88f,stiffness = 300f),label = "${action.id} orbit")
                 val present by animateFloatAsState(if (action.available) 1f else 0f,spring(dampingRatio = 1f,stiffness = 380f),label = "${action.id} availability")
-                UtilityBubble(action, palette, page == UtilityPage.Menu && action.available && !geometry.compact,
+                UtilityBubble(action, palette, frost, page == UtilityPage.Menu && action.available && !geometry.compact,
                     Modifier.offset {
                         val tileCenter = center() + orbit*menuReveal*radial
                         IntOffset((tileCenter.x-geometry.tileWidth/2).roundToInt(), (tileCenter.y-geometry.tileHeight/2).roundToInt())
@@ -147,16 +164,20 @@ internal fun UtilityRoundtable(
                     shadowElevation = elevation.value.toPx()
                     this.shape = RoundedCornerShape(corner.value); clip = true
                     ambientShadowColor = palette.pillShadow; spotShadowColor = palette.pillShadow
-                }.background(palette.background.copy(alpha = 0.96f))
+                }.utilityFrost(frost).background(surfaceBase)
                     .background(Brush.verticalGradient(listOf(palette.surfaceTop,palette.surfaceBottom)))
                     .border(1.dp,palette.surfaceBorder,shape)
-                    .onGloballyPositioned { if (page != UtilityPage.Keyboard && !(page == UtilityPage.Menu && geometry.compact)) onHubBounds(it.unclippedRect()) },
+                    .onGloballyPositioned {
+                        val bounds = it.unclippedRect()
+                        if (page == UtilityPage.Dock) dockCaptureBounds.set(bounds)
+                        if (page != UtilityPage.Keyboard && !(page == UtilityPage.Menu && geometry.compact)) onHubBounds(bounds)
+                    },
             ) { (shown, compact) ->
                 when {
                     shown == UtilityPage.Keyboard -> UtilityKeyboardPreview(palette,
                         with(density) { (area.width-24*density.density).coerceAtLeast(120*density.density).toDp() },
                         with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() }, onBack)
-                    shown == UtilityPage.Menu && compact -> CompactRoundtable(actions,palette,
+                    shown == UtilityPage.Menu && compact -> CompactRoundtable(actions,palette,frost,
                         with(density) { (area.width-24*density.density).coerceAtLeast(120*density.density).toDp() },
                         with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() },
                         onHub,onAction,onHubBounds,onActionBounds)
@@ -176,14 +197,26 @@ internal fun UtilityRoundtable(
                             .hoverable(interaction)
                             .clickable(interactionSource = interaction, indication = null, enabled = page == shown && LocalUtilityContentActive.current, role = Role.Button,
                                 onClickLabel = if (docked) "Open Portal menu" else "Close Portal menu", onClick = onHub)
-                            .semantics { contentDescription = if (docked) "Open Portal menu" else "Close Portal menu" },
+                            .semantics {
+                                contentDescription = if (docked) "Open Portal menu" else "Close Portal menu"
+                                if (docked) stateDescription = when (suggestion) {
+                                    UtilitySuggestion.Keyboard -> "Keyboard suggested"
+                                    UtilitySuggestion.Gaming -> "Game options suggested"
+                                    UtilitySuggestion.Files -> "Files suggested"
+                                    UtilitySuggestion.Veil -> "Portal veil suggested"
+                                }
+                            },
                             contentAlignment = Alignment.Center) {
-                            if (docked) Text("Portal",Modifier.graphicsLayer { translationX = labelInset.toPx() },
-                                color = palette.textPrimary,fontSize = 12.sp,fontWeight = FontWeight.Medium)
-                            else Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                PortalIcon(PortalGlyph.Close,palette.textPrimary,size = 16.dp)
-                                Text("Close",color = palette.textMuted,fontSize = 10.sp)
+                            if (docked) AnimatedContent(suggestedGlyph,
+                                modifier = Modifier.graphicsLayer { translationX = labelInset.toPx() },
+                                transitionSpec = {
+                                    (fadeIn(tween(260,delayMillis = 60,easing = PortalEmphasizedDecelerate)) +
+                                        scaleIn(tween(320,easing = PortalEmphasized),initialScale = 0.92f))
+                                        .togetherWith(fadeOut(tween(140,easing = PortalEmphasizedAccelerate)))
+                                },label = "suggested utility") { glyph ->
+                                PortalIcon(glyph,palette.textPrimary,size = 20.dp)
                             }
+                            else PortalIcon(PortalGlyph.Close,palette.textPrimary,size = 20.dp)
                         }
                     }
                 }
@@ -207,17 +240,20 @@ private fun androidx.compose.ui.layout.LayoutCoordinates.unclippedRect(): androi
 }
 
 @Composable
-private fun UtilityBubble(action: UtilityAction,palette: PortalPalette,enabled: Boolean,modifier: Modifier = Modifier,onClick: () -> Unit) {
+private fun UtilityBubble(action: UtilityAction,palette: PortalPalette,frost: UtilityFrost,enabled: Boolean,modifier: Modifier = Modifier,onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.91f else 1f,spring(dampingRatio = 0.82f,stiffness = 650f),label = "bubble press")
     val fill by animateColorAsState(if (pressed) palette.selectionHighlight else palette.surfaceTop,tween(180, easing = PortalEmphasized), label = "bubble fill")
+    val hasFrost by remember(frost) { derivedStateOf { frost.current != null } }
+    val base by animateColorAsState(palette.background.copy(alpha = if (hasFrost) PortalFrostStyle.tint(palette.isDark) else 0.96f),
+        tween(320,easing = PortalEmphasized),label = "bubble glass tint")
     BoxWithConstraints(modifier.graphicsLayer { scaleX = scale; scaleY = scale }
         .semantics(mergeDescendants = true) { contentDescription = action.title + if (action.detail.isNotEmpty()) ", ${action.detail}" else "" },
         contentAlignment = Alignment.Center) {
         val diameter = minOf(maxWidth,(88+48*(LocalDensity.current.fontScale-1f).coerceAtLeast(0f)).dp)
         Column(Modifier.size(diameter).shadow(6.dp,CircleShape,ambientColor = palette.pillShadow,spotColor = palette.pillShadow)
-            .clip(CircleShape).background(palette.background.copy(alpha = 0.96f)).background(fill)
+            .clip(CircleShape).utilityFrost(frost).background(base).background(fill)
             .border(1.dp,palette.surfaceBorder,CircleShape)
             .clickable(interactionSource = interaction,indication = null,enabled = enabled,role = Role.Button,onClick = onClick)
             .padding(8.dp),horizontalAlignment = Alignment.CenterHorizontally,
@@ -240,7 +276,7 @@ private fun UtilityBubble(action: UtilityAction,palette: PortalPalette,enabled: 
 }
 
 @Composable
-private fun CompactRoundtable(actions: List<UtilityAction>,palette: PortalPalette,width: Dp,height: Dp,
+private fun CompactRoundtable(actions: List<UtilityAction>,palette: PortalPalette,frost: UtilityFrost,width: Dp,height: Dp,
     onClose: () -> Unit,onAction: (String)->Unit,onHubBounds: (android.graphics.RectF)->Unit,onBounds: (String,android.graphics.RectF)->Unit) {
     val tile = (88+48*(LocalDensity.current.fontScale-1f).coerceAtLeast(0f)).dp
     val columns = if (width < tile*2+48.dp) 1 else 2
@@ -260,7 +296,7 @@ private fun CompactRoundtable(actions: List<UtilityAction>,palette: PortalPalett
                 ids.chunked(columns).forEach { row -> Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.SpaceEvenly) {
                     row.forEach { id ->
                         val action = actions.first { it.id == id }
-                        UtilityBubble(action,palette,action.available && LocalUtilityContentActive.current,Modifier.weight(1f).heightIn(min = tile+12.dp)
+                        UtilityBubble(action,palette,frost,action.available && LocalUtilityContentActive.current,Modifier.weight(1f).heightIn(min = tile+12.dp)
                             .onGloballyPositioned { if (action.available) onBounds(id,it.unclippedRect()) }) { onAction(id) }
                     }
                 } }

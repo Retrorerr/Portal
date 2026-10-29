@@ -6,13 +6,17 @@ import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.View
 import androidx.core.view.ViewCompat
+import androidx.compose.runtime.mutableStateOf
 import java.lang.ref.WeakReference
 
 /** All recall entry points converge on the native overlay readiness gate. */
 object SessionControls {
     @JvmStatic private external fun nativeOpen(): Boolean
     @JvmStatic private external fun nativeUtilityInput(open: Boolean): Boolean
+    @JvmStatic private external fun nativeTextInputActive(): Boolean
+    val textInputFocused = mutableStateOf(false)
     @Volatile private var utilityVisible = false
+    private var utilityOwner: Any? = null
     private var activity = WeakReference<PortalActivity>(null)
     private var shortcutHeld = false
     private var pendingFiles = false
@@ -20,11 +24,21 @@ object SessionControls {
 
     fun attach(host: PortalActivity) {
         activity = WeakReference(host)
+        refreshTextInput()
         host.overlayHost().importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         backCallback = object : androidx.activity.OnBackPressedCallback(false) {
             override fun handleOnBackPressed() { if (utilityVisible) TouchControls.closeUtilityMenu() else ComposeOverlay.backFromControls() }
         }.also { host.onBackPressedDispatcher.addCallback(host, it) }
         ViewCompat.addAccessibilityAction(host.overlayHost(), "Open Portal controls") { _, _ -> open(host) }
+    }
+
+    /** The guest focus signal includes fields used with a physical keyboard. */
+    @JvmStatic fun refreshTextInput() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { refreshTextInput() }
+            return
+        }
+        textInputFocused.value = nativeTextInputActive()
     }
 
     fun requestFiles(host: PortalActivity) = requestPanel(host, "files")
@@ -36,13 +50,24 @@ object SessionControls {
         else if (!ComposeOverlay.isShowing()) open(host)
     }
     @JvmStatic fun isUtilityVisible() = utilityVisible
-    fun setUtilityVisible(visible: Boolean): Boolean {
-        if (visible == utilityVisible) return true
-        if (!nativeUtilityInput(visible) && visible) return false
+    fun acquireUtility(owner: Any): Boolean {
+        if (utilityOwner === owner) return true
+        if (!nativeUtilityInput(true)) return false
+        utilityOwner = owner
+        publishUtilityVisible(true)
+        return true
+    }
+    fun releaseUtility(owner: Any): Boolean {
+        if (utilityOwner !== owner) return false
+        utilityOwner = null
+        nativeUtilityInput(false)
+        publishUtilityVisible(false)
+        return true
+    }
+    private fun publishUtilityVisible(visible: Boolean) {
         utilityVisible = visible
         backCallback?.isEnabled = visible || ComposeOverlay.controlsVisible()
         activity.get()?.overlayInputChanged()
-        return true
     }
     fun desktopReadyChanged(ready: Boolean) {
         if (ready) activity.get()?.let(::finishPendingFiles)

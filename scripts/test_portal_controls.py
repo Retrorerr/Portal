@@ -31,6 +31,7 @@ with tempfile.TemporaryDirectory(prefix="portal-controls-") as output:
         "-no-stdlib", "-no-reflect", "-classpath", stdlib, "-d", output,
         str(root / "src/android/kotlin/app/polarbear/CapsulePosition.kt"),
         str(root / "src/android/kotlin/app/polarbear/UtilityMenuGeometry.kt"),
+        str(root / "src/android/kotlin/app/polarbear/UtilitySuggestion.kt"),
         str(root / "tests/kotlin/CapsulePositionTest.kt"),
     ], check=True)
     subprocess.run(["java", "-cp", output + os.pathsep + stdlib, "app.polarbear.CapsulePositionTestKt"], check=True)

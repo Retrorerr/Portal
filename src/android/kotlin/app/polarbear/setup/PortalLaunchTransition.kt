@@ -207,6 +207,7 @@ fun PortalLaunchTransition(
         onCommitted = onRevealCommitted,
         onFinished = onRevealFinished,
         enterFromAbove = sessionControls,
+        hintPaused = app.polarbear.ComposeOverlay.activePanel != null,
         dismissSignal = dismissSignal,
     ) {
         // Keep this call at the same composition slot before/during/after intro:

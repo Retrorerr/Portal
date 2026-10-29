@@ -31,10 +31,12 @@ public final class PortalFilesInstrumentation extends Instrumentation {
     private long activeDragDown;
     private boolean dragInProgress;
     private boolean motionOnly;
+    private boolean uiOnly;
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         motionOnly = arguments != null && Boolean.parseBoolean(arguments.getString("motionOnly", "false"));
+        uiOnly = arguments != null && Boolean.parseBoolean(arguments.getString("uiOnly", "false"));
         start();
     }
 
@@ -46,7 +48,16 @@ public final class PortalFilesInstrumentation extends Instrumentation {
     }
     private void onMain(Runnable action) { runOnMainSync(action); }
     private void status(String text) {
+        if (prefix != null) try (FileOutputStream file = new FileOutputStream(new File(getTargetContext().getCacheDir(),prefix+"-checks.log"),true)) {
+            file.write((text+"\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.io.IOException error) { throw new RuntimeException("Could not record device check",error); }
         Bundle result = new Bundle(); result.putString("stream", text + "\n"); sendStatus(0, result);
+    }
+    @Override public void finish(int code, Bundle result) {
+        if (prefix != null) try (FileOutputStream file = new FileOutputStream(new File(getTargetContext().getCacheDir(),prefix+"-result.txt"))) {
+            file.write(("code="+code+"\n"+result.getString("stream","")).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.io.IOException error) { result.putString("stream",result.getString("stream","")+"\nCould not persist result: "+error); }
+        super.finish(code,result);
     }
     private boolean showing() throws Exception { return (Boolean) overlay.getMethod("isShowing").invoke(null); }
     private void waitShowing(boolean expected) throws Exception {
@@ -139,6 +150,215 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         throw new AssertionError(state.toString());
     }
     private View capsuleView() { return findCapsule(activity.getWindow().getDecorView()); }
+    private void collectSemantics(View view, String needle, java.util.List<android.graphics.Rect> found) throws Exception {
+        if (view.getClass().getSimpleName().equals("AndroidComposeView")) {
+            Object owner = view.getClass().getMethod("getSemanticsOwner").invoke(view);
+            Object node = owner.getClass().getMethod("getRootSemanticsNode").invoke(owner);
+            int[] origin = new int[2]; view.getLocationOnScreen(origin);
+            collectSemanticsNode(node, needle.replace(" ", ""), origin, found);
+        } else if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int i=0; i<group.getChildCount(); i++) collectSemantics(group.getChildAt(i), needle, found);
+        }
+    }
+    private void collectSemanticsNode(Object node, String needle, int[] origin, java.util.List<android.graphics.Rect> found) throws Exception {
+        String config = node.getClass().getMethod("getConfig").invoke(node).toString().replace(" ", "");
+        if (config.contains(needle)) {
+            Object rect = node.getClass().getMethod("getBoundsInRoot").invoke(node);
+            Class<?> type = rect.getClass();
+            android.graphics.Rect bounds = new android.graphics.Rect(
+                Math.round((Float) type.getMethod("getLeft").invoke(rect))+origin[0],
+                Math.round((Float) type.getMethod("getTop").invoke(rect))+origin[1],
+                Math.round((Float) type.getMethod("getRight").invoke(rect))+origin[0],
+                Math.round((Float) type.getMethod("getBottom").invoke(rect))+origin[1]);
+            if (!bounds.isEmpty()) found.add(bounds);
+        }
+        for (Object child : (java.util.List<?>) node.getClass().getMethod("getChildren").invoke(node))
+            collectSemanticsNode(child, needle, origin, found);
+    }
+    private android.graphics.Rect semanticBounds(String... needles) throws Exception {
+        long deadline = SystemClock.uptimeMillis()+5000;
+        while (SystemClock.uptimeMillis()<deadline) {
+            java.util.List<android.graphics.Rect> matches = new java.util.ArrayList<>();
+            onMain(() -> { try { for (String needle : needles) collectSemantics(activity.getWindow().getDecorView(), needle, matches); }
+                catch (Exception e) { throw new RuntimeException(e); } });
+            if (!matches.isEmpty()) return matches.get(matches.size()-1);
+            SystemClock.sleep(50);
+        }
+        throw new AssertionError("Missing visible semantics: " + java.util.Arrays.toString(needles));
+    }
+    private void setState(Class<?> owner, String getter, boolean value) throws Exception {
+        Object state = invoke(owner, getter);
+        Class<?> mutable = getTargetContext().getClassLoader().loadClass("androidx.compose.runtime.MutableState");
+        mutable.getMethod("setValue", Object.class).invoke(state, value);
+    }
+    private boolean boolState(Class<?> owner, String getter) throws Exception {
+        Object state = invoke(owner, getter);
+        Class<?> immutable = getTargetContext().getClassLoader().loadClass("androidx.compose.runtime.State");
+        return (Boolean) immutable.getMethod("getValue").invoke(state);
+    }
+    private void testContextIcons() throws Exception {
+        Class<?> controls = getTargetContext().getClassLoader().loadClass("app.polarbear.TouchControls");
+        Class<?> session = getTargetContext().getClassLoader().loadClass("app.polarbear.SessionControls");
+        java.lang.reflect.Field handlerField = controls.getDeclaredField("main"), pollField = controls.getDeclaredField("poll");
+        handlerField.setAccessible(true); pollField.setAccessible(true);
+        android.os.Handler handler = (android.os.Handler) handlerField.get(controls.getField("INSTANCE").get(null));
+        Runnable poll = (Runnable) pollField.get(controls.getField("INSTANCE").get(null));
+        handler.removeCallbacks(poll);
+        boolean focus = boolState(session,"getTextInputFocused"), steam = boolState(controls,"getSteamRunning"), game = boolState(controls,"getGameRunning");
+        try {
+            onMain(() -> { try { setState(session,"getTextInputFocused",false); setState(controls,"getSteamRunning",true); }
+                catch (Exception e) { throw new RuntimeException(e); } });
+            semanticBounds("Game options suggested");
+            onMain(() -> { try { setState(session,"getTextInputFocused",true); }
+                catch (Exception e) { throw new RuntimeException(e); } });
+            semanticBounds("Keyboard suggested");
+            onMain(() -> { try { setState(session,"getTextInputFocused",false); setState(controls,"getSteamRunning",false); setState(controls,"getGameRunning",false); }
+                catch (Exception e) { throw new RuntimeException(e); } });
+            semanticBounds("Portal veil suggested","Files suggested");
+        } finally {
+            onMain(() -> { try { setState(session,"getTextInputFocused",focus); setState(controls,"getSteamRunning",steam); setState(controls,"getGameRunning",game); }
+                catch (Exception e) { throw new RuntimeException(e); } });
+            handler.post(poll);
+        }
+        status("Context icons and keyboard priority passed without changing menu behaviour");
+    }
+    private void testUtilityInputOwnership() throws Exception {
+        Class<?> session = getTargetContext().getClassLoader().loadClass("app.polarbear.SessionControls");
+        Class<?> page = getTargetContext().getClassLoader().loadClass("app.polarbear.UtilityPage");
+        Object dock = java.util.Arrays.stream(page.getEnumConstants()).filter(v -> v.toString().equals("Dock")).findFirst().get();
+        openMenu();
+        onMain(() -> { try {
+            View view = capsuleView();
+            java.lang.reflect.Field id = view.getClass().getDeclaredField("presentationId$delegate"); id.setAccessible(true);
+            Class<?> integerState = getTargetContext().getClassLoader().loadClass("androidx.compose.runtime.IntState");
+            int current = (Integer) integerState.getMethod("getIntValue").invoke(id.get(view));
+            Method settled = view.getClass().getDeclaredMethod("onPresentationSettled",page,int.class); settled.setAccessible(true);
+            // Deliver both a prior completion and a completion for the wrong
+            // page. Neither may release a visible menu's pointer ownership.
+            settled.invoke(view,dock,current-1);
+            settled.invoke(view,dock,current);
+            check((Boolean) session.getMethod("isUtilityVisible").invoke(null),"Stale close completion released menu input");
+            java.lang.reflect.Field token = view.getClass().getDeclaredField("inputOwner"); token.setAccessible(true);
+            Object owner = token.get(view), previous = new Object(), instance = session.getField("INSTANCE").get(null);
+            check((Boolean) session.getMethod("acquireUtility",Object.class).invoke(instance,previous),"Could not acquire test menu owner");
+            check((Boolean) session.getMethod("acquireUtility",Object.class).invoke(instance,owner),"Could not restore current menu owner");
+            check(!(Boolean) session.getMethod("releaseUtility",Object.class).invoke(instance,previous),"A retired owner released current menu input");
+            check((Boolean) session.getMethod("isUtilityVisible").invoke(null),"Owner replacement lost menu input");
+        } catch (Exception e) { throw new RuntimeException(e); } });
+        for (int cycle=0;cycle<8;cycle++) {
+            onMain(() -> { try {
+                View view=capsuleView();
+                view.getClass().getMethod("dismiss").invoke(view);
+                view.getClass().getMethod("reveal").invoke(view);
+            } catch (Exception e) { throw new RuntimeException(e); } });
+            SystemClock.sleep(cycle%2==0 ? 16 : 80);
+            check((Boolean) session.getMethod("isUtilityVisible").invoke(null),"Rapid reopen lost menu input");
+        }
+        waitUtility("Menu");
+        tap(utilityBounds("keyboard")); waitUtility("Keyboard");
+        check((Boolean) session.getMethod("isUtilityVisible").invoke(null),"Keyboard lost menu input");
+        escapeUtility(); waitUtility("Menu"); escapeUtility(); waitUtility("Dock");
+        check(!(Boolean) session.getMethod("isUtilityVisible").invoke(null),"Docked menu kept desktop input blocked");
+        openMenu();
+        onMain(() -> {
+            View view = capsuleView();
+            android.view.ViewGroup parent = (android.view.ViewGroup) view.getParent();
+            int index = parent.indexOfChild(view); android.view.ViewGroup.LayoutParams params = view.getLayoutParams();
+            parent.removeView(view); parent.addView(view,index,params);
+        });
+        waitUtility("Dock");
+        check(!(Boolean) session.getMethod("isUtilityVisible").invoke(null),"Reattached control retained a hidden menu's input");
+        openMenu(); tap(utilityBounds("keyboard")); waitUtility("Keyboard");
+        escapeUtility(); waitUtility("Menu"); escapeUtility(); waitUtility("Dock");
+        status("Stale completion, retired-owner release, rapid reopen and actual keyboard taps preserved input ownership");
+        status("Detached and reattached controls reset presentation and remained responsive");
+    }
+    private void testOutsideDismissal() throws Exception {
+        for (String panel : new String[]{"files","apps"}) {
+            onMain(() -> { try { overlay.getMethod("setActivePanel",String.class).invoke(overlay.getField("INSTANCE").get(null),panel); }
+                catch (Exception e) { throw new RuntimeException(e); } });
+            SystemClock.sleep(900);
+            String label = panel.equals("files") ? "Files" : "Apps";
+            android.graphics.Rect before = semanticBounds(label);
+            SystemClock.sleep(2400);
+            android.graphics.Rect after = semanticBounds(label);
+            check(Math.abs(before.top-after.top)<=1, "The open panel moved with the veil's idle hint");
+            tap(after);
+            check(panel.equals(invoke(overlay,"getActivePanel")), "An inside tap collapsed the card");
+            long insideDown = SystemClock.uptimeMillis();
+            singleTouch(insideDown,MotionEvent.ACTION_DOWN,after.centerX(),after.centerY());
+            float density = activity.getResources().getDisplayMetrics().density;
+            for (int step=1;step<=5;step++) {
+                singleTouch(insideDown,MotionEvent.ACTION_MOVE,after.centerX(),after.centerY()-step*5*density);
+                SystemClock.sleep(30);
+            }
+            singleTouch(insideDown,MotionEvent.ACTION_UP,after.centerX(),after.centerY()-25*density);
+            check(panel.equals(invoke(overlay,"getActivePanel")) && showing(), "Scrolling inside the card changed the veil");
+            final android.graphics.Rect outside = new android.graphics.Rect();
+            onMain(() -> {
+                View root = activity.getWindow().getDecorView(); int[] origin = new int[2]; root.getLocationOnScreen(origin);
+                int x = origin[0]+Math.round(8*activity.getResources().getDisplayMetrics().density), y = origin[1]+root.getHeight()/2;
+                outside.set(x,y,x+1,y+1);
+            });
+            long canceledDown = SystemClock.uptimeMillis();
+            singleTouch(canceledDown,MotionEvent.ACTION_DOWN,outside.centerX(),outside.centerY());
+            singleTouch(canceledDown,MotionEvent.ACTION_CANCEL,outside.centerX(),outside.centerY());
+            check(panel.equals(invoke(overlay,"getActivePanel")), "A canceled outside touch collapsed the card");
+            tap(outside); SystemClock.sleep(600);
+            check(invoke(overlay,"getActivePanel")==null, "Outside tap did not collapse " + panel);
+            check(showing(), "Outside tap dismissed the whole veil");
+        }
+        status("Inside taps, outside dismissal and paused veil breathing passed for Apps and Files");
+    }
+    private void testGuestTextSuggestion() throws Exception {
+        Class<?> session = getTargetContext().getClassLoader().loadClass("app.polarbear.SessionControls");
+        Method focused = session.getDeclaredMethod("nativeTextInputActive"); focused.setAccessible(true);
+        if ((Boolean) focused.invoke(null)) {
+            semanticBounds("Keyboard suggested");
+            status("Existing guest text focus produces the keyboard suggestion");
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        sendKeySync(new KeyEvent(now,now,KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_ALT_LEFT,0));
+        sendKeySync(new KeyEvent(now,now+1,KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_SPACE,0,KeyEvent.META_ALT_ON));
+        sendKeySync(new KeyEvent(now,now+2,KeyEvent.ACTION_UP,KeyEvent.KEYCODE_SPACE,0,KeyEvent.META_ALT_ON));
+        sendKeySync(new KeyEvent(now,now+3,KeyEvent.ACTION_UP,KeyEvent.KEYCODE_ALT_LEFT,0));
+        try {
+            long deadline=SystemClock.uptimeMillis()+10000;
+            while (!(Boolean) focused.invoke(null) && SystemClock.uptimeMillis()<deadline) SystemClock.sleep(50);
+            check((Boolean) focused.invoke(null),"KRunner did not report guest text focus");
+            semanticBounds("Keyboard suggested");
+            openMenu();
+            Class<?> bridge = getTargetContext().getClassLoader().loadClass("app.polarbear.SoftKeyboardBridge");
+            Method wants = bridge.getDeclaredMethod("nativeWantsSoftKeyboard"); wants.setAccessible(true);
+            check(!(Boolean) wants.invoke(null),"Guest keyboard remained eligible over Portal controls");
+            java.lang.reflect.Field editor = bridge.getDeclaredField("editor"); editor.setAccessible(true);
+            long hiddenDeadline = SystemClock.uptimeMillis()+5000;
+            while (SystemClock.uptimeMillis()<hiddenDeadline) {
+                View input = (View) editor.get(null);
+                if (input == null || input.getVisibility()!=View.VISIBLE) break;
+                SystemClock.sleep(50);
+            }
+            View input = (View) editor.get(null);
+            check(input == null || input.getVisibility()!=View.VISIBLE,"Guest keyboard editor covered the utility menu");
+            // Repeat a delayed guest show request, as can happen during an app-focus race.
+            bridge.getMethod("show",Activity.class).invoke(null,activity);
+            SystemClock.sleep(300);
+            input = (View) editor.get(null);
+            check(input == null || input.getVisibility()!=View.VISIBLE,"Delayed guest focus reopened the keyboard over controls");
+            check((Boolean) focused.invoke(null),"Opening controls discarded the real guest text focus");
+            escapeUtility(); waitUtility("Dock");
+        } finally {
+            for (int attempt=0;attempt<3;attempt++) {
+                sendKeyDownUpSync(KeyEvent.KEYCODE_ESCAPE); SystemClock.sleep(250);
+                if (!(Boolean) focused.invoke(null)) break;
+            }
+        }
+        check(!(Boolean) focused.invoke(null),"Guest text focus did not clear after closing KRunner");
+        status("Real guest text-field focus and keyboard suggestion passed");
+        status("Guest keyboard and delayed focus requests stayed behind Portal controls");
+    }
     private void waitUtility(String expected) throws Exception {
         long deadline = SystemClock.uptimeMillis()+10000;
         java.util.concurrent.atomic.AtomicBoolean ready = new java.util.concurrent.atomic.AtomicBoolean();
@@ -661,13 +881,25 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             onMain(() -> { try { invoke(overlay, "requestReturnToDesktop"); } catch (Exception e) { throw new RuntimeException(e); } });
             waitShowing(false);
             testCapsuleDrag();
+            testContextIcons();
+            testGuestTextSuggestion();
+            testUtilityInputOwnership();
             testRoundtable();
+            if (uiOnly) {
+                openCapsule(); waitShowing(true); SystemClock.sleep(700);
+                testOutsideDismissal();
+                testFileBrowserMotion();
+                result.putString("stream", "Portal contextual controls and outside-tap checks passed\nFixture prefix: " + prefix + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             testResponsiveUtility();
             profileUtilityMotion();
             long now = SystemClock.uptimeMillis();
             sendKeySync(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_P, 0, KeyEvent.META_CTRL_ON | KeyEvent.META_ALT_ON));
             sendKeySync(new KeyEvent(now, now + 1, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_P, 0, KeyEvent.META_CTRL_ON | KeyEvent.META_ALT_ON));
             waitShowing(true); status("Keyboard recall passed on device");
+            testOutsideDismissal();
             for (int cycle = 0; cycle < 3; cycle++) {
                 for (String panel : new String[] { "apps", null, "files", null }) {
                     onMain(() -> { try { overlay.getMethod("setActivePanel", String.class).invoke(overlay.getField("INSTANCE").get(null), panel); }

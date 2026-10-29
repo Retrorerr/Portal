@@ -572,7 +572,9 @@ pub fn cancel_pointer(id: u64) {
 }
 
 fn wants_soft_keyboard() -> bool {
-    is_wayland_text_input_active() && !is_hardware_keyboard_present()
+    is_wayland_text_input_active()
+        && !is_hardware_keyboard_present()
+        && !crate::android::utils::compose_overlay::input_is_blocked()
 }
 
 /// Clear any queued commits after a surface loss or focus transition.
@@ -680,6 +682,15 @@ pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeWantsSoftKeyb
     _bridge: JObject,
 ) -> jni::sys::jboolean {
     wants_soft_keyboard() as jni::sys::jboolean
+}
+
+/// The utility tab follows guest text focus independently of Android IME visibility.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SessionControls_nativeTextInputActive(
+    _env: JNIEnv,
+    _controls: JObject,
+) -> jni::sys::jboolean {
+    is_wayland_text_input_active() as jni::sys::jboolean
 }
 
 /// JNI callback from Android's InputDeviceListener. Device classification is

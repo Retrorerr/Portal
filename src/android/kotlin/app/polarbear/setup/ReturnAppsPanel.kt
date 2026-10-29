@@ -276,7 +276,10 @@ private fun AppsCard(
     // The card scrolls, so swipes that start on it must not lift the veil.
     val veil = LocalPortalVeil.current
     val exclusionKey = remember { Any() }
-    DisposableEffect(veil) { onDispose { veil.gestureExclusions.remove(exclusionKey) } }
+    DisposableEffect(veil) { onDispose {
+        veil.gestureExclusions.remove(exclusionKey)
+        veil.removePanel(exclusionKey)
+    } }
     LaunchedEffect(confirming) {
         if (confirming != null) {
             delay(CONFIRM_WINDOW_MS)
@@ -287,7 +290,11 @@ private fun AppsCard(
         modifier = Modifier
             .widthIn(max = AppsCardWidth)
             .fillMaxWidth()
-            .onGloballyPositioned { veil.gestureExclusions[exclusionKey] = it.boundsInRoot() }
+            .onGloballyPositioned {
+                val bounds = it.boundsInRoot()
+                veil.gestureExclusions[exclusionKey] = bounds
+                if (ComposeOverlay.activePanel == "apps") veil.placePanel(exclusionKey,"apps",bounds)
+            }
             .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {

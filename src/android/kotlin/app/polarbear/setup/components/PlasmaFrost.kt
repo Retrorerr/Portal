@@ -37,8 +37,6 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.asImageBitmap
@@ -60,12 +58,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 private const val TAG = "PortalFrost"
-private const val SNAPSHOT_DIVISOR = 6
 private const val REFRESH_MS = 140L
-
-// Blur radii in snapshot pixels (x6 on screen).
-private const val STRONG_BLUR = 11f
-private const val LIGHT_BLUR = 2.5f
 
 /**
  * A low-resolution live copy of the native desktop, refreshed while [active].
@@ -99,8 +92,8 @@ fun rememberPlasmaSnapshot(active: Boolean): State<ImageBitmap?> {
                 delay(REFRESH_MS * 4)
                 continue
             }
-            val width = surface.width / SNAPSHOT_DIVISOR
-            val height = surface.height / SNAPSHOT_DIVISOR
+            val width = surface.width / PortalFrostStyle.SnapshotDivisor
+            val height = surface.height / PortalFrostStyle.SnapshotDivisor
             if (width >= 8 && height >= 8 && surface.holder.surface?.isValid == true) {
                 val existing = buffers[index]
                 val bitmap = if (existing != null && existing.width == width && existing.height == height) {
@@ -135,7 +128,7 @@ fun rememberPlasmaSnapshot(active: Boolean): State<ImageBitmap?> {
     return snapshot
 }
 
-private fun findDesktopSurface(root: View): SurfaceView? {
+internal fun findDesktopSurface(root: View): SurfaceView? {
     if (root is SurfaceView) return root
     if (root is ViewGroup) {
         for (i in 0 until root.childCount) {
@@ -159,12 +152,10 @@ fun PlasmaFrostBackdrop(
     val strong = rememberGraphicsLayer()
     val light = rememberGraphicsLayer()
     val lightMasked = rememberGraphicsLayer()
-    val strongEffect = remember { BlurEffect(STRONG_BLUR, STRONG_BLUR, TileMode.Clamp) }
-    val lightEffect = remember { BlurEffect(LIGHT_BLUR, LIGHT_BLUR, TileMode.Clamp) }
+    val strongEffect = remember { BlurEffect(PortalFrostStyle.StrongBlur, PortalFrostStyle.StrongBlur, TileMode.Clamp) }
+    val lightEffect = remember { BlurEffect(PortalFrostStyle.LightBlur, PortalFrostStyle.LightBlur, TileMode.Clamp) }
     // Gentle vibrancy: blurred colour reads as light through glass, not mud.
-    val vibrancy = remember {
-        ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(1.35f) })
-    }
+    val vibrancy = PortalFrostStyle.vibrancy
     val softBandPx = with(LocalDensity.current) { 56.dp.toPx() }
     Canvas(Modifier.fillMaxSize()) {
         val image = snapshot() ?: return@Canvas
@@ -173,7 +164,7 @@ fun PlasmaFrostBackdrop(
         val imageSize = IntSize(image.width, image.height)
         val sx = size.width / image.width
         val sy = size.height / image.height
-        val lift = veil.lift
+        val lift = veil.backdropLift
 
         strong.renderEffect = strongEffect
         strong.record(size = imageSize) { drawImage(image, colorFilter = vibrancy) }

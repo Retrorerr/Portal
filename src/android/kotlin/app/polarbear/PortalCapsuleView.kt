@@ -32,7 +32,7 @@ internal class PortalCapsuleView(
 ) : FrameLayout(context) {
     private val density get() = resources.displayMetrics.density
     private val slop get() = ViewConfiguration.get(context).scaledTouchSlop
-    private val scope = CoroutineScope(AndroidUiDispatcher.Main + SupervisorJob())
+    private var scope = CoroutineScope(AndroidUiDispatcher.Main + SupervisorJob())
     private val anchor = Animatable(Offset.Zero, Offset.VectorConverter)
     private var settle: Job? = null
     private var tracker: VelocityTracker? = null
@@ -42,6 +42,8 @@ internal class PortalCapsuleView(
     private var dragEligible = false
     private var touchOwned = false
     private var settledPage: UtilityPage? = null
+    private val inputOwner = Any()
+    private var presentationId by mutableIntStateOf(0)
     private var pendingAction: (() -> Unit)? = null
     private var dragPoint by mutableStateOf(Offset.Zero)
     private var freeMotion by mutableStateOf(false)
@@ -55,7 +57,7 @@ internal class PortalCapsuleView(
     private var hubBounds = android.graphics.RectF()
     private val composition = ComposeView(context).apply {
         setContent { app.polarbear.setup.components.PortalUiDensity {
-            UtilityRoundtable(ready, page, { if (dragging) dragPoint else anchor.value }, area,
+            UtilityRoundtable(ready, page, presentationId, { if (dragging) dragPoint else anchor.value }, area,
                 dockRight, dragging, directPosition = freeMotion,
                 onHub = { if (page == UtilityPage.Dock) reveal() else dismiss() },
                 onAction = { action -> when (action) {
@@ -66,20 +68,20 @@ internal class PortalCapsuleView(
                     else -> handoff { onOpen(null) }
                 } },
                 onBack = { changePage(UtilityPage.Menu) }, onOutside = { dismiss() },
-                onAnimating = { updateFrameRate(it || SessionControls.isUtilityVisible()) },
-                onHubBounds = { hubBounds = it }, onActionBounds = { id, rect -> actionBounds[id] = rect }, onSettled = { settled ->
-                    settledPage = settled
-                    if (settled == UtilityPage.Dock && !dragging) {
-                        val action = pendingAction.also { pendingAction = null }
-                        if (action != null) action() else releaseInput()
-                    }
-                })
+                onAnimating = { if (isAttachedToWindow) updateFrameRate(it || SessionControls.isUtilityVisible()) },
+                onHubBounds = { hubBounds = it }, onActionBounds = { id, rect -> actionBounds[id] = rect },
+                onSettled = ::onPresentationSettled)
         } }
     }
     init {
         clipChildren = false; clipToPadding = false
         addView(composition, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets -> post { onSizeChanged() }; insets }
+    }
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (!scope.isActive) scope = CoroutineScope(AndroidUiDispatcher.Main + SupervisorJob())
+        post { if (isAttachedToWindow) onSizeChanged() }
     }
     private fun updateArea() {
         val insets = ViewCompat.getRootWindowInsets(this)
@@ -113,29 +115,43 @@ internal class PortalCapsuleView(
         if (!dragging) onSizeChanged()
     }
     private fun changePage(next: UtilityPage) {
+        if (next != UtilityPage.Dock && !SessionControls.acquireUtility(inputOwner)) return
         pendingAction = null
-        settledPage = null
-        if (next != UtilityPage.Dock && !SessionControls.setUtilityVisible(true)) return
         freeMotion = false
-        page = next
+        requestPage(next)
         if (next != UtilityPage.Dock) composition.requestFocus()
+    }
+    private fun requestPage(next: UtilityPage) {
+        presentationId++
+        settledPage = null
+        page = next
+    }
+    private fun onPresentationSettled(settled: UtilityPage, request: Int) {
+        // An old Dock completion can arrive after a new Menu request, even
+        // before Compose has observed that request. It owns no later input.
+        if (!isAttachedToWindow || request != presentationId || settled != page || dragging || freeMotion) return
+        settledPage = settled
+        if (settled == UtilityPage.Dock) {
+            val action = pendingAction.also { pendingAction = null }
+            try { action?.invoke() } finally { releaseInput() }
+        }
     }
     fun reveal() { changePage(UtilityPage.Menu) }
     fun dismiss(): Boolean {
-        if (!SessionControls.isUtilityVisible()) return false
+        if (page == UtilityPage.Dock) return false
         pendingAction = null
-        page = if (page == UtilityPage.Keyboard) UtilityPage.Menu else UtilityPage.Dock
+        requestPage(if (page == UtilityPage.Keyboard) UtilityPage.Menu else UtilityPage.Dock)
         return true
     }
     fun openVeil() { handoff { onOpen(null) } }
     private fun handoff(action: () -> Unit) {
         pendingAction = action
-        page = UtilityPage.Dock
+        requestPage(UtilityPage.Dock)
     }
     private fun releaseInput() {
-        SessionControls.setUtilityVisible(false)
+        val released = SessionControls.releaseUtility(inputOwner)
         composition.clearFocus()
-        updateFrameRate(false)
+        if (released || !SessionControls.isUtilityVisible()) updateFrameRate(false)
     }
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         if (!SessionControls.isUtilityVisible() && !hubBounds.contains(event.x,event.y)) return false
@@ -202,7 +218,6 @@ internal class PortalCapsuleView(
                             initialVelocity = velocity.let { Offset(it.x.coerceIn(-2400*density,2400*density),it.y.coerceIn(-2000*density,2000*density)) })
                         freeMotion = false
                         onPositionChanged(if (dockRight) 1f else 0f, anchor.value.y/height.coerceAtLeast(1))
-                        if (page == UtilityPage.Dock && pendingAction == null) releaseInput()
                     }
                 }
                 parent?.requestDisallowInterceptTouchEvent(false)
@@ -222,7 +237,14 @@ internal class PortalCapsuleView(
         }
     }
     override fun onDetachedFromWindow() {
-        settle?.cancel(); recycleTracker(); scope.cancel(); releaseInput(); dragging = false
+        settle?.cancel(); settle = null
+        recycleTracker(); scope.cancel()
+        pendingAction = null
+        requestPage(UtilityPage.Dock)
+        ready = false; dragging = false; freeMotion = false; touchOwned = false
+        dragEligible = false; chord = false
+        hubBounds.setEmpty(); actionBounds.clear()
+        releaseInput()
         super.onDetachedFromWindow()
     }
 }

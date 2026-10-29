@@ -112,6 +112,7 @@ internal fun PortalRevealVeil(
     onCommitted: () -> Unit,
     onFinished: () -> Unit,
     enterFromAbove: Boolean = false,
+    hintPaused: Boolean = false,
     dismissSignal: Int = 0,
     content: @Composable BoxScope.() -> Unit,
 ) {
@@ -124,7 +125,7 @@ internal fun PortalRevealVeil(
     val animationScope = rememberCoroutineScope()
     val entrance = remember { Animatable(if (enterFromAbove) 1f else 0f) }
     LaunchedEffect(Unit) {
-        if (enterFromAbove && ValueAnimator.areAnimatorsEnabled()) entrance.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+        if (enterFromAbove && ValueAnimator.areAnimatorsEnabled()) entrance.animateTo(0f, tween(620, easing = androidx.compose.animation.core.CubicBezierEasing(0.32f,0f,0.18f,1f)))
         else entrance.snapTo(0f)
     }
     val settleJob = remember { arrayOfNulls<Job>(1) }
@@ -134,7 +135,10 @@ internal fun PortalRevealVeil(
     val hintJob = remember { arrayOfNulls<Job>(1) }
     val lastTouchMs = remember { longArrayOf(0L) }
     var sweepKey by remember { mutableIntStateOf(0) }
-    SideEffect { motion.eligible = eligible }
+    SideEffect {
+        motion.eligible = eligible
+        motion.recallFraction = { entrance.value }
+    }
 
     LaunchedEffect(eligible) {
         if (eligible) {
@@ -149,8 +153,17 @@ internal fun PortalRevealVeil(
         }
     }
 
-    LaunchedEffect(eligible) {
-        if (!eligible || !ValueAnimator.areAnimatorsEnabled()) return@LaunchedEffect
+    LaunchedEffect(eligible, hintPaused) {
+        if (!eligible) return@LaunchedEffect
+        if (hintPaused) {
+            hintJob[0]?.cancel()
+            hintJob[0] = null
+            if (ValueAnimator.areAnimatorsEnabled()) {
+                Animatable(motion.hint).animateTo(0f,tween(280,easing = PortalEmphasizedDecelerate)) { motion.hint = value }
+            } else motion.hint = 0f
+            return@LaunchedEffect
+        }
+        if (!ValueAnimator.areAnimatorsEnabled()) return@LaunchedEffect
         val hintPx = with(density) { HINT_LIFT.toPx() }
         delay(HINT_FIRST_DELAY_MS)
         while (isActive) {

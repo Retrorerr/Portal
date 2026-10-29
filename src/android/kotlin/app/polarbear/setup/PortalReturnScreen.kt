@@ -382,7 +382,7 @@ internal fun PortalReturnScreen(
         Log.i(TAG, "return READY; starting ambient scatter and translucent veil prelude")
         currentReturnReady()
     }
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize().dismissPortalPanelOutside(veil)) {
         PortalAmbientBackground(
             palette = palette,
             cardBounds = { Rect.Zero },

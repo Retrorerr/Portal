@@ -102,6 +102,22 @@ class PortalVeilMotion {
      */
     val gestureExclusions = HashMap<Any, Rect>()
 
+    /** Current expanded Apps/Files card, in root coordinates. */
+    var panelKey: String? = null; private set
+    var panelBounds = Rect.Zero; private set
+    private var panelOwner: Any? = null
+
+    fun placePanel(owner: Any, key: String, bounds: Rect) {
+        panelOwner = owner; panelKey = key; panelBounds = bounds
+    }
+    fun removePanel(owner: Any) {
+        if (panelOwner === owner) { panelOwner = null; panelKey = null; panelBounds = Rect.Zero }
+    }
+
+    internal var recallFraction: () -> Float = { 0f }
+    /** Includes recall travel so the glass stays aligned during descent too. */
+    val backdropLift: Float get() = lift + height * recallFraction()
+
     fun excludes(local: Offset): Boolean {
         val point = local + shellOrigin
         return gestureExclusions.values.any { it.contains(point) }

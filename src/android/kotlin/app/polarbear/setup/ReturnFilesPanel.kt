@@ -79,6 +79,7 @@ internal fun ReturnFilesPanel(palette: PortalPalette, onClose: () -> Unit) {
     val height = (LocalConfiguration.current.screenHeightDp - 300).coerceIn(140, 420).dp
     DisposableEffect(veil) { onDispose {
         veil.gestureExclusions.remove(key)
+        veil.removePanel(key)
         FileTransfers.dropBounds = android.graphics.RectF()
     } }
     LaunchedEffect(choosing) { if (choosing) FileTransfers.dropBounds = android.graphics.RectF() }
@@ -87,6 +88,7 @@ internal fun ReturnFilesPanel(palette: PortalPalette, onClose: () -> Unit) {
         .onGloballyPositioned {
             val bounds = it.boundsInRoot()
             veil.gestureExclusions[key] = bounds
+            if (app.polarbear.ComposeOverlay.activePanel == "files") veil.placePanel(key,"files",bounds)
             if (!FileTransfers.savingFiles) FileTransfers.dropBounds =
                 android.graphics.RectF(bounds.left, bounds.top, bounds.right, bounds.bottom)
         }
@@ -186,11 +188,6 @@ private fun SaveFileChooser(palette: PortalPalette, maxHeight: androidx.compose.
                 exit = androidx.compose.animation.shrinkHorizontally(spring(dampingRatio = 1f,stiffness = 380f)) + fadeOut(tween(140))) {
                 PanelButton("Home",false,palette,enabled = !current.loading,onClick = FileTransfers::home)
             }
-        }
-        AnimatedVisibility(current.loading,
-            enter = expandVertically(tween(220,easing = PortalEmphasized)) + fadeIn(tween(180)),
-            exit = shrinkVertically(tween(220,easing = PortalEmphasized)) + fadeOut(tween(140))) {
-            LinearProgressIndicator(Modifier.fillMaxWidth(),color = palette.accent,trackColor = palette.trackFill)
         }
         AnimatedContent(current.error,transitionSpec = { fadeIn(tween(260,delayMillis = 70)).togetherWith(fadeOut(tween(120)))
             .using(SizeTransform(clip = true) { _, _ -> spring(dampingRatio = 1f,stiffness = 380f) }) },label = "folder error") { error ->

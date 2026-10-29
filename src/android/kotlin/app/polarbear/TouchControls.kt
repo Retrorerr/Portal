@@ -656,10 +656,7 @@ object TouchControls : ControlHost {
         val view = PortalCapsuleView(host,
             onPositionChanged = { x, y -> saveHandle(x,y) },
             onSizeChanged = { placeHandle() },
-            onOpen = { panel -> later {
-                SessionControls.requestPanel(host, panel)
-                SessionControls.setUtilityVisible(false)
-            } },
+            onOpen = { panel -> SessionControls.requestPanel(host,panel) },
             onGameOptions = { later { openPanel() } },
             onToggleController = { later { toggleController() } },
         )

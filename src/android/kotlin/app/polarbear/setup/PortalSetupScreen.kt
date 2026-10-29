@@ -127,6 +127,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.util.lerp
 import app.polarbear.setup.components.LocalPortalVeil
 import app.polarbear.setup.components.PlasmaFrostBackdrop
+import app.polarbear.setup.components.PortalFrostStyle
 import app.polarbear.setup.components.PortalEmphasized
 import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
@@ -145,11 +146,6 @@ import kotlin.math.roundToInt
 
 private const val PREVIEW_TAG = "PortalComposeSetup"
 private const val READY_BACKGROUND_ALPHA = 0.83f
-// Veil tint over the live desktop frost: enough ground for ivory (dark) or
-// charcoal (light) text on any wallpaper, light enough to read as glass.
-private const val FROST_TINT_DARK = 0.64f
-private const val FROST_TINT_LIGHT = 0.70f
-
 internal enum class SetupPhase { Configure, Installing, Failed, Ready }
 
 // Official Portal aperture geometry (assets/portal-icon-foreground.svg),
@@ -819,7 +815,7 @@ internal fun PortalAmbientBackground(
             frost.snapTo(target)
         }
     }
-    val tint = if (palette.isDark) FROST_TINT_DARK else FROST_TINT_LIGHT
+    val tint = PortalFrostStyle.tint(palette.isDark)
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()

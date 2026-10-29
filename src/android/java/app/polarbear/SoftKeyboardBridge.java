@@ -254,7 +254,14 @@ public final class SoftKeyboardBridge {
                     Log.w(TAG, "SoftKeyboardBridge.show() runOnUiThread ignored: activity is finishing/destroyed");
                     return;
                 }
+                SessionControls.refreshTextInput();
                 final BridgeEditText input = ensureEditor(activity);
+                // A queued guest-focus request may arrive after Portal controls opened.
+                // Keep the guest focus signal, but never cover native controls with its IME.
+                if (!nativeWantsSoftKeyboard()) {
+                    hide(activity);
+                    return;
+                }
                 if (hasPhysicalKeyboard()) {
                     Log.i(TAG, "Physical keyboard present; suppressing soft input");
                     hide(activity);
@@ -289,6 +296,7 @@ public final class SoftKeyboardBridge {
         activity.runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                SessionControls.refreshTextInput();
                 BridgeEditText input = editor;
                 if (input == null) {
                     return;
@@ -447,6 +455,10 @@ public final class SoftKeyboardBridge {
 
         void showSoftInputIfPending() {
             if (!pendingShow || getVisibility() != View.VISIBLE) {
+                return;
+            }
+            if (!nativeWantsSoftKeyboard()) {
+                pendingShow = false;
                 return;
             }
             if (!isFocused() && !requestFocus()) {

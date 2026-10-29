@@ -1263,6 +1263,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 session.release_surface_inputs();
             }
             backend.release_guest_input();
+            if let Err(error) = ime::hide(&backend.android_app) {
+                log::warn!("Could not hide guest keyboard for Portal controls: {error}");
+            }
         }
 
         if let Some(show) = ime::take_visibility_request() {
