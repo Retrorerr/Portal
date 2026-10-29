@@ -1,5 +1,8 @@
 package app.polarbear.setup
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
@@ -61,7 +64,7 @@ internal fun FilesCapsule(palette: PortalPalette, onClick: () -> Unit) {
         .padding(horizontal = 14.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         FileGlyph(palette.textPrimary, folder = true)
-        Text(if (FileTransfers.busy) "Copying files…" else "Files", color = palette.textPrimary,
+        Text("Files", color = palette.textPrimary,
             fontSize = 13.sp, fontWeight = FontWeight.Medium)
         Text("›", color = palette.textMuted, fontSize = 16.sp)
     }
@@ -71,27 +74,31 @@ internal fun FilesCapsule(palette: PortalPalette, onClick: () -> Unit) {
 internal fun ReturnFilesPanel(palette: PortalPalette, onClose: () -> Unit) {
     val veil = LocalPortalVeil.current
     val key = remember { Any() }
+    val dropFill by animateColorAsState(if (FileTransfers.dragInside && !FileTransfers.savingFiles) palette.accent.copy(alpha = 0.09f) else Color.Transparent, tween(220,easing = PortalEmphasized),label = "file drop highlight")
     val choosing = FileTransfers.savingFiles
-    val height = (LocalConfiguration.current.screenHeightDp - 160).coerceIn(180, 480).dp
+    val height = (LocalConfiguration.current.screenHeightDp - 300).coerceIn(140, 420).dp
     DisposableEffect(veil) { onDispose {
         veil.gestureExclusions.remove(key)
         FileTransfers.dropBounds = android.graphics.RectF()
     } }
     LaunchedEffect(choosing) { if (choosing) FileTransfers.dropBounds = android.graphics.RectF() }
     Column(Modifier.widthIn(max = 360.dp).fillMaxWidth().heightIn(max = height)
+        .verticalScroll(rememberScrollState())
         .onGloballyPositioned {
             val bounds = it.boundsInRoot()
             veil.gestureExclusions[key] = bounds
             if (!FileTransfers.savingFiles) FileTransfers.dropBounds =
                 android.graphics.RectF(bounds.left, bounds.top, bounds.right, bounds.bottom)
         }
-        .background(if (FileTransfers.dragInside && !choosing) palette.accent.copy(alpha = 0.09f) else Color.Transparent)
+        .background(dropFill)
         .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(start = 4.dp)) {
                 Text("Files", color = palette.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                Text(if (FileTransfers.dragInside) "Release to add to Downloads" else "Between Android and your desktop",
-                    color = palette.textMuted, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                AnimatedContent(if (FileTransfers.dragInside) "Release to add to ${FileTransfers.importLabel}" else "Between Android and your desktop",
+                    transitionSpec = { fadeIn(tween(260,delayMillis = 70)).togetherWith(fadeOut(tween(120))) },label = "files instruction") { label ->
+                    Text(label,color = palette.textMuted,fontSize = 11.sp,fontWeight = FontWeight.Medium)
+                }
             }
             PanelButton(if (choosing) "Cancel" else "Done", false, palette) {
                 if (choosing) FileTransfers.closeSave() else onClose()
@@ -105,34 +112,49 @@ internal fun ReturnFilesPanel(palette: PortalPalette, onClose: () -> Unit) {
                     .using(SizeTransform(clip = true) { _, _ -> spring(
                         dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f) })
             }, label = "files chooser") { selection ->
-            if (selection) SaveFileChooser(palette, height - 90.dp)
-            else Column(Modifier.verticalScroll(rememberScrollState())) {
-                FileAction("Add files", "Copy from Android into Downloads", palette,
+            if (selection) SaveFileChooser(palette, (height - 90.dp).coerceAtLeast(180.dp))
+            else Column {
+                FileAction("Add files", "Copy from Android into ${FileTransfers.importLabel}", palette, PortalGlyph.Import,
                     enabled = FileTransfers.importDirectory.isNotEmpty(), onClick = FileTransfers::chooseFiles)
-                FileAction("Save files", "Choose desktop files to save to Android", palette,
+                FileAction("Save files", "Choose desktop files to save to Android", palette, PortalGlyph.Export,
                     enabled = FileTransfers.importDirectory.isNotEmpty(), onClick = FileTransfers::beginSave)
-                if (FileTransfers.importDirectory.isEmpty() && FileTransfers.message == null) {
+                AnimatedVisibility(FileTransfers.importDirectory.isEmpty() && FileTransfers.message == null,
+                    enter = expandVertically(tween(420,easing = PortalEmphasized)) + fadeIn(tween(220)),
+                    exit = shrinkVertically(tween(420,easing = PortalEmphasized)) + fadeOut(tween(140))) {
                     Text("Opening desktop files…", Modifier.padding(4.dp), color = palette.textMuted, fontSize = 11.sp)
                 }
-                TransferStatus(palette)
+                AnimatedVisibility(FileTransfers.items.isNotEmpty(),
+                    enter = expandVertically(tween(420,easing = PortalEmphasized)) + fadeIn(tween(300,delayMillis = 80)),
+                    exit = shrinkVertically(tween(420,easing = PortalEmphasized)) + fadeOut(tween(140))) {
+                    Column(Modifier.dissolveBlur(this,radius = 6.dp)) { TransferStatus(palette) }
+                }
             }
         }
-        FileTransfers.message?.let {
-            Text(it, Modifier.padding(horizontal = 4.dp, vertical = 8.dp), color = palette.accent, fontSize = 12.sp)
-            if (FileTransfers.importDirectory.isEmpty()) PanelButton("Retry", false, palette, onClick = FileTransfers::open)
+        AnimatedContent(FileTransfers.message,
+            transitionSpec = { fadeIn(tween(280,delayMillis = 80)).togetherWith(fadeOut(tween(140)))
+                .using(SizeTransform(clip = true) { _, _ -> spring(dampingRatio = 1f,stiffness = 380f) }) },label = "file feedback") { message ->
+            Column {
+                if (message != null) {
+                    Text(message,Modifier.padding(horizontal = 4.dp,vertical = 8.dp),color = palette.accent,fontSize = 12.sp)
+                    if (FileTransfers.importDirectory.isEmpty()) PanelButton("Retry",false,palette,onClick = FileTransfers::open)
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun FileAction(title: String, subtitle: String, palette: PortalPalette, enabled: Boolean, onClick: () -> Unit) {
+private fun FileAction(title: String, subtitle: String, palette: PortalPalette, glyph: PortalGlyph, enabled: Boolean, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.98f else 1f, tween(110), label = "file action press")
+    val scale by animateFloatAsState(if (pressed) 0.975f else 1f, tween(110), label = "file action press")
+    val opacity by animateFloatAsState(if (enabled) 1f else 0.45f,tween(220,easing = PortalEmphasized),label = "file action enabled")
     Row(Modifier.fillMaxWidth().heightIn(min = 64.dp)
-        .graphicsLayer { scaleX = scale; scaleY = scale; alpha = if (enabled) 1f else 0.45f }
+        .graphicsLayer { scaleX = scale; scaleY = scale; alpha = opacity }
         .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
         .padding(horizontal = 4.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        PortalIcon(glyph,palette.textMuted,size = 18.dp)
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(title, color = palette.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text(subtitle, color = palette.textSecondary, fontSize = 11.sp)
@@ -144,36 +166,59 @@ private fun FileAction(title: String, subtitle: String, palette: PortalPalette, 
 
 @Composable
 private fun SaveFileChooser(palette: PortalPalette, maxHeight: androidx.compose.ui.unit.Dp) {
-    val folder = FileTransfers.folder
-    Column(Modifier.fillMaxWidth().heightIn(max = maxHeight), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    val current = FileTransfers.folder
+    var lastFolder by remember { mutableStateOf(current) }
+    if (!current.loading) lastFolder = current
+    val folder = if (current.loading) lastFolder else current
+    Column(Modifier.fillMaxWidth().heightIn(max = maxHeight),verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (folder.name != ".") Box(Modifier.semantics(mergeDescendants = true) { contentDescription = "Parent folder" }) {
-                PanelButton("‹", false, palette, enabled = !folder.loading) { FileTransfers.browse(folder.parent) }
+            AnimatedVisibility(folder.name != ".",
+                enter = androidx.compose.animation.expandHorizontally(spring(dampingRatio = 1f,stiffness = 380f)) + fadeIn(tween(240)),
+                exit = androidx.compose.animation.shrinkHorizontally(spring(dampingRatio = 1f,stiffness = 380f)) + fadeOut(tween(140))) {
+                PanelButton("Parent",false,palette,enabled = !current.loading) { FileTransfers.browse(folder.parent) }
             }
-            Text(if (folder.name == ".") "Home" else folder.name, Modifier.weight(1f),
-                color = palette.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (folder.name != ".") PanelButton("Home", false, palette, enabled = !folder.loading, onClick = FileTransfers::home)
+            AnimatedContent(if (folder.name == ".") "Home" else folder.name,
+                modifier = Modifier.weight(1f),transitionSpec = { fadeIn(tween(280,delayMillis = 80)).togetherWith(fadeOut(tween(140))) },label = "folder path") { name ->
+                Text(name,color = palette.textPrimary,fontSize = 13.sp,fontWeight = FontWeight.Medium,maxLines = 1,overflow = TextOverflow.Ellipsis)
+            }
+            AnimatedVisibility(folder.name != ".",
+                enter = androidx.compose.animation.expandHorizontally(spring(dampingRatio = 1f,stiffness = 380f)) + fadeIn(tween(240)),
+                exit = androidx.compose.animation.shrinkHorizontally(spring(dampingRatio = 1f,stiffness = 380f)) + fadeOut(tween(140))) {
+                PanelButton("Home",false,palette,enabled = !current.loading,onClick = FileTransfers::home)
+            }
         }
-        if (folder.loading) LinearProgressIndicator(Modifier.fillMaxWidth(), color = palette.accent, trackColor = palette.trackFill)
-        folder.error?.let {
-            Text(it, color = palette.accent, fontSize = 12.sp)
-            PanelButton("Retry", false, palette) { FileTransfers.browse(folder.id) }
+        AnimatedVisibility(current.loading,
+            enter = expandVertically(tween(220,easing = PortalEmphasized)) + fadeIn(tween(180)),
+            exit = shrinkVertically(tween(220,easing = PortalEmphasized)) + fadeOut(tween(140))) {
+            LinearProgressIndicator(Modifier.fillMaxWidth(),color = palette.accent,trackColor = palette.trackFill)
         }
-        if (!folder.loading && folder.error == null && folder.entries.isEmpty()) {
-            Text("This folder is empty", Modifier.padding(vertical = 20.dp), color = palette.textMuted, fontSize = 12.sp)
-        }
-        LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false)) {
-            items(folder.entries, key = { it.id }) { entry -> GuestFileRow(entry, palette, enabled = !folder.loading) }
-            if (folder.more) item { PanelButton("More files", false, palette, enabled = !folder.loading) {
-                FileTransfers.browse(folder.id, append = true)
+        AnimatedContent(current.error,transitionSpec = { fadeIn(tween(260,delayMillis = 70)).togetherWith(fadeOut(tween(120)))
+            .using(SizeTransform(clip = true) { _, _ -> spring(dampingRatio = 1f,stiffness = 380f) }) },label = "folder error") { error ->
+            Column { if (error != null) {
+                Text(error,color = palette.accent,fontSize = 12.sp)
+                PanelButton("Retry",false,palette) { FileTransfers.browse(current.id) }
             } }
         }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (FileTransfers.selected.isEmpty()) "Choose files to save" else "${FileTransfers.selected.size} selected",
-                Modifier.weight(1f), color = palette.textMuted, fontSize = 11.sp)
-            PanelButton("Save to Android", true, palette, enabled = FileTransfers.selected.isNotEmpty() && !folder.loading,
-                onClick = FileTransfers::saveSelection)
+        AnimatedContent(folder,contentKey = { it.id },modifier = Modifier.weight(1f,fill = false),
+            transitionSpec = { (fadeIn(tween(300,delayMillis = 90,easing = PortalEmphasizedDecelerate)) + slideInHorizontally(tween(420,easing = PortalEmphasized)) { it/18 })
+                .togetherWith(fadeOut(tween(140,easing = PortalEmphasizedAccelerate)) + slideOutHorizontally(tween(280,easing = PortalEmphasized)) { -it/24 })
+                .using(SizeTransform(clip = true) { _, _ -> spring(dampingRatio = 1f,stiffness = 380f) }) },label = "folder contents") { shown ->
+            if (shown.entries.isEmpty() && shown.error == null) Text(if (current.loading) "Opening folder…" else "This folder is empty",Modifier.padding(vertical = 20.dp),color = palette.textMuted,fontSize = 12.sp)
+            else LazyColumn(Modifier.fillMaxWidth()) {
+                items(shown.entries,key = { it.id }) { entry ->
+                    Box(Modifier.animateItem(fadeInSpec = tween(260),placementSpec = spring(dampingRatio = 1f,stiffness = 380f),fadeOutSpec = tween(140))) {
+                        GuestFileRow(entry,palette,enabled = !current.loading && current.id == shown.id)
+                    }
+                }
+                if (shown.more) item { PanelButton("More files",false,palette,enabled = !current.loading) { FileTransfers.browse(shown.id,append = true) } }
+            }
+        }
+        Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) {
+            AnimatedContent(if (FileTransfers.selected.isEmpty()) "Choose files to save" else "${FileTransfers.selected.size} selected",
+                modifier = Modifier.weight(1f),transitionSpec = { fadeIn(tween(220)).togetherWith(fadeOut(tween(120))) },label = "file selection count") { label ->
+                Text(label,color = palette.textMuted,fontSize = 11.sp)
+            }
+            PanelButton("Save to Android",true,palette,enabled = FileTransfers.selected.isNotEmpty() && !current.loading,onClick = FileTransfers::saveSelection)
         }
     }
 }
@@ -181,12 +226,15 @@ private fun SaveFileChooser(palette: PortalPalette, maxHeight: androidx.compose.
 @Composable
 private fun GuestFileRow(entry: GuestFile, palette: PortalPalette, enabled: Boolean) {
     val selected = entry.id in FileTransfers.selected
+    val tint by animateColorAsState(if (selected) palette.accent else palette.textMuted,tween(200,easing = PortalEmphasized),label = "file selection ink")
+    val fill by animateColorAsState(if (selected) palette.selectionHighlight else Color.Transparent,tween(220,easing = PortalEmphasized),label = "file selection fill")
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+        .background(fill,androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
         .then(if (entry.directory) Modifier.clickable(enabled = enabled, role = Role.Button) { FileTransfers.browse(entry.id) }
             else Modifier.toggleable(value = selected, enabled = enabled, role = Role.Checkbox) { FileTransfers.toggle(entry) })
         .padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FileGlyph(if (selected) palette.accent else palette.textMuted, entry.directory)
+        FileGlyph(tint, entry.directory)
         Column(Modifier.weight(1f)) {
             Text(entry.name, color = palette.textPrimary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (!entry.directory) Text(formatBytes(entry.size), color = palette.textMuted, fontSize = 10.sp)
@@ -202,9 +250,10 @@ private fun TransferStatus(palette: PortalPalette) {
     // A successful retry replaces the old failure in this presentation. Keep
     // simultaneous active copies distinct, including intentional duplicates.
     val history = FileTransfers.items
+    val latestAttempt = history.withIndex().filter { it.value.phase != TransferPhase.Canceled }
+        .associate { (it.value.kind to it.value.source) to it.index }
     val items = history.filterIndexed { index, item ->
-        item.phase !in setOf(TransferPhase.Failed, TransferPhase.Interrupted) ||
-            history.drop(index + 1).none { it.kind == item.kind && it.source == item.source && it.phase != TransferPhase.Canceled }
+        item.phase !in setOf(TransferPhase.Failed,TransferPhase.Interrupted) || latestAttempt[item.kind to item.source] == index
     }
     if (items.isEmpty()) return
     var details by remember { mutableStateOf(false) }
@@ -218,21 +267,25 @@ private fun TransferStatus(palette: PortalPalette) {
         else -> "Transfer canceled"
     }
     Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(status, Modifier.weight(1f), color = palette.textMuted, fontSize = 11.sp)
+        AnimatedContent(status,modifier = Modifier.weight(1f),transitionSpec = { fadeIn(tween(260,delayMillis = 70)).togetherWith(fadeOut(tween(140))) },label = "transfer summary") { label ->
+            Text(label,color = palette.textMuted,fontSize = 11.sp)
+        }
         PanelButton(if (details) "Hide" else "Details", false, palette) { details = !details }
     }
-    if (active.isNotEmpty()) {
+    AnimatedVisibility(active.isNotEmpty(),enter = expandVertically(tween(260)) + fadeIn(tween(220)),exit = shrinkVertically(tween(300)) + fadeOut(tween(140))) {
         val running = active.firstOrNull { it.phase == TransferPhase.Running }
+        val progress by animateFloatAsState(if (running != null && running.total > 0) (running.bytes.toDouble()/running.total).toFloat().coerceIn(0f,1f) else 0f,
+            spring(dampingRatio = 1f,stiffness = 180f),label = "file copy progress")
         if (running != null && running.total > 0) LinearProgressIndicator(
-            progress = { (running.bytes.toDouble() / running.total).toFloat().coerceIn(0f, 1f) },
+            progress = { progress },
             modifier = Modifier.fillMaxWidth(), color = palette.accent, trackColor = palette.trackFill)
         else LinearProgressIndicator(Modifier.fillMaxWidth(), color = palette.accent, trackColor = palette.trackFill)
     }
     AnimatedVisibility(details,
         enter = expandVertically(tween(420, easing = PortalEmphasized)) + fadeIn(tween(300, delayMillis = 110)),
         exit = shrinkVertically(tween(420, easing = PortalEmphasized)) + fadeOut(tween(140))) {
-        Column(Modifier.dissolveBlur(this, radius = 8.dp)) {
-            (active + failed + items.takeLast(5)).distinctBy { it.id }.forEach { item ->
+        LazyColumn(Modifier.dissolveBlur(this, radius = 8.dp).fillMaxWidth().heightIn(max = 180.dp)) {
+            this.items((active + failed + items.takeLast(5)).distinctBy { it.id },key = { it.id }) { item ->
                 Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                     Text(item.name, color = palette.textPrimary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Row(verticalAlignment = Alignment.CenterVertically) {

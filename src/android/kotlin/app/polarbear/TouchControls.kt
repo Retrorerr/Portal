@@ -573,7 +573,7 @@ object TouchControls : ControlHost {
         if (panel != null) return
         panelClosing.value = false
         val view = ComposeView(host).apply {
-            setContent { GamePanel(onClosed = { closePanel(immediately = true) }) }
+            setContent { app.polarbear.setup.components.PortalUiDensity { GamePanel(onClosed = { closePanel(immediately = true) }) } }
         }
         overlay.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         panel = view
@@ -605,7 +605,7 @@ object TouchControls : ControlHost {
     }
 
     private fun addEditBar(host: PortalActivity, overlay: FrameLayout) {
-        val view = ComposeView(host).apply { setContent { EditBar() } }
+        val view = ComposeView(host).apply { setContent { app.polarbear.setup.components.PortalUiDensity { EditBar() } } }
         overlay.addView(
             view,
             FrameLayout.LayoutParams(
@@ -619,8 +619,20 @@ object TouchControls : ControlHost {
 
     fun overlayChanged() { activity?.let(::refresh) }
 
+    fun closeUtilityMenu(): Boolean = handle?.dismiss() ?: false
+    fun openVeilFromUtility() { handle?.openVeil() }
+    fun dispatchUtilityKey(event: KeyEvent): Boolean {
+        if (!SessionControls.isUtilityVisible()) return false
+        if (event.keyCode in setOf(KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_POWER)) return false
+        if (event.keyCode == KeyEvent.KEYCODE_BACK || event.keyCode == KeyEvent.KEYCODE_ESCAPE) {
+            if (event.action == KeyEvent.ACTION_UP) closeUtilityMenu()
+        } else handle?.dispatchKeyEvent(event)
+        return true
+    }
+
     /** Back closes the panel or finishes editing before reaching the guest. */
     fun onBackKey(event: KeyEvent): Boolean {
+        if (dispatchUtilityKey(event)) return true
         if (event.keyCode != KeyEvent.KEYCODE_BACK) return false
         if (panel == null && !editingState.value) return false
         if (event.action == KeyEvent.ACTION_UP) {
@@ -642,10 +654,11 @@ object TouchControls : ControlHost {
 
     private fun addHandle(host: PortalActivity, overlay: FrameLayout) {
         val view = PortalCapsuleView(host,
-            onPositionChanged = { saveHandle(it) },
+            onPositionChanged = { x, y -> saveHandle(x,y) },
             onSizeChanged = { placeHandle() },
-            onOpen = { files -> later {
-                if (files) SessionControls.requestFiles(host) else SessionControls.open(host)
+            onOpen = { panel -> later {
+                SessionControls.requestPanel(host, panel)
+                SessionControls.setUtilityVisible(false)
             } },
             onGameOptions = { later { openPanel() } },
             onToggleController = { later { toggleController() } },
@@ -653,7 +666,7 @@ object TouchControls : ControlHost {
         val index = views.values.maxOfOrNull { overlay.indexOfChild(it) }?.plus(1) ?: min(1, overlay.childCount)
         handle = view
         overlay.addView(view, index.coerceIn(0, overlay.childCount), FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.TOP or Gravity.START))
     }
 
     private fun placeHandle() {
@@ -665,12 +678,12 @@ object TouchControls : ControlHost {
         view.place(preferences.getFloat(PREF_HANDLE_X, 0.5f), preferences.getFloat(PREF_HANDLE_Y, -1f))
     }
 
-    private fun saveHandle(view: View) {
+    private fun saveHandle(x: Float, y: Float) {
         val overlay = root ?: return
         if (overlay.width <= 0 || overlay.height <= 0) return
         prefs(overlay.context).edit()
-            .putFloat(PREF_HANDLE_X, (view.translationX + view.width / 2f) / overlay.width)
-            .putFloat(PREF_HANDLE_Y, view.translationY / overlay.height)
+            .putFloat(PREF_HANDLE_X, x)
+            .putFloat(PREF_HANDLE_Y, y)
             .apply()
     }
 }

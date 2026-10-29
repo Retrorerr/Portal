@@ -33,7 +33,7 @@ public class KeyboardAccessibilityService extends AccessibilityService {
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
         if (SessionControls.onShortcut(event)) return true;
-        if (ComposeOverlay.isShowing()) return super.onKeyEvent(event);
+        if (ComposeOverlay.isShowing() || SessionControls.isUtilityVisible()) return super.onKeyEvent(event);
         if (isMouseSideButton(event)) {
             // Android turns mouse side buttons into Back/Forward keys; let
             // them through so PortalActivity sends them as mouse buttons.

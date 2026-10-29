@@ -39,7 +39,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import app.polarbear.setup.PortalPalette
 
 private const val PREF_KEYS_DISMISSED = "tip_keyboard_service_dismissed"
-private const val PREF_CONTROLS_DISMISSED = "tip_portal_capsule_dismissed"
+private const val PREF_CONTROLS_DISMISSED = "tip_portal_roundtable_dismissed"
 private const val PREF_FILES_DISMISSED = "tip_all_files_dismissed"
 
 private enum class KeyServiceState { Off, NotRunning, On }
@@ -153,8 +153,8 @@ fun UsageTips(
             ChecklistStep(
                 number = ++number,
                 title = "Bring Portal back",
-                body = "Tap the floating Portal capsule to open your controls, apps and files. " +
-                    "Drag it wherever it suits you. Ctrl+Alt+P also opens Portal.",
+                body = "Tap Portal at the screen edge to open its labelled controls. " +
+                    "Drag it to either edge; it remembers the position. Ctrl+Alt+P opens the veil directly.",
                 state = StepState.Todo,
                 actionLabel = "Got it",
                 onAction = {

@@ -5,6 +5,10 @@ package app.polarbear.setup
 // Dark is the primary target; light stays coherent. Appearance follows the
 // Android system theme unless the user picks Dark/Light for preview.
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import app.polarbear.setup.components.PortalEmphasized
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -123,11 +127,40 @@ object PortalColors {
 @Composable
 fun resolvePalette(mode: AppearanceMode): PortalPalette {
     val systemDark = isSystemInDarkTheme()
-    return when (mode) {
+    val target = when (mode) {
         AppearanceMode.Dark -> PortalColors.dark()
         AppearanceMode.Light -> PortalColors.light()
         AppearanceMode.System -> if (systemDark) PortalColors.dark() else PortalColors.light()
     }
+    return target.copy(
+        background = animateColorAsState(target.background, tween(360, easing = PortalEmphasized), label = "theme background").value,
+        surfaceTop = animateColorAsState(target.surfaceTop, tween(360, easing = PortalEmphasized), label = "theme surfaceTop").value,
+        surfaceBottom = animateColorAsState(target.surfaceBottom, tween(360, easing = PortalEmphasized), label = "theme surfaceBottom").value,
+        surfaceBorder = animateColorAsState(target.surfaceBorder, tween(360, easing = PortalEmphasized), label = "theme surfaceBorder").value,
+        surfaceShadow = animateColorAsState(target.surfaceShadow, tween(360, easing = PortalEmphasized), label = "theme surfaceShadow").value,
+        textPrimary = animateColorAsState(target.textPrimary, tween(360, easing = PortalEmphasized), label = "theme textPrimary").value,
+        textSecondary = animateColorAsState(target.textSecondary, tween(360, easing = PortalEmphasized), label = "theme textSecondary").value,
+        textMuted = animateColorAsState(target.textMuted, tween(360, easing = PortalEmphasized), label = "theme textMuted").value,
+        trackFill = animateColorAsState(target.trackFill, tween(360, easing = PortalEmphasized), label = "theme trackFill").value,
+        selectionPill = animateColorAsState(target.selectionPill, tween(360, easing = PortalEmphasized), label = "theme selectionPill").value,
+        selectionHighlight = animateColorAsState(target.selectionHighlight, tween(360, easing = PortalEmphasized), label = "theme selectionHighlight").value,
+        selectionText = animateColorAsState(target.selectionText, tween(360, easing = PortalEmphasized), label = "theme selectionText").value,
+        optionText = animateColorAsState(target.optionText, tween(360, easing = PortalEmphasized), label = "theme optionText").value,
+        accent = animateColorAsState(target.accent, tween(360, easing = PortalEmphasized), label = "theme accent").value,
+        accentSoft = animateColorAsState(target.accentSoft, tween(360, easing = PortalEmphasized), label = "theme accentSoft").value,
+        buttonInterior = animateColorAsState(target.buttonInterior, tween(360, easing = PortalEmphasized), label = "theme buttonInterior").value,
+        buttonOutline = animateColorAsState(target.buttonOutline, tween(360, easing = PortalEmphasized), label = "theme buttonOutline").value,
+        glow = animateColorAsState(target.glow, tween(360, easing = PortalEmphasized), label = "theme glow").value,
+        scrim = animateColorAsState(target.scrim, tween(360, easing = PortalEmphasized), label = "theme scrim").value,
+        arcIvory = animateColorAsState(target.arcIvory, tween(360, easing = PortalEmphasized), label = "theme arcIvory").value,
+        arcOrange = animateColorAsState(target.arcOrange, tween(360, easing = PortalEmphasized), label = "theme arcOrange").value,
+        logoMain = animateColorAsState(target.logoMain, tween(360, easing = PortalEmphasized), label = "theme logoMain").value,
+        logoThreshold = animateColorAsState(target.logoThreshold, tween(360, easing = PortalEmphasized), label = "theme logoThreshold").value,
+        fragmentInk = animateColorAsState(target.fragmentInk, tween(360, easing = PortalEmphasized), label = "theme fragmentInk").value,
+        pillShadow = animateColorAsState(target.pillShadow, tween(360, easing = PortalEmphasized), label = "theme pillShadow").value,
+        fragmentGain = animateFloatAsState(target.fragmentGain, tween(360, easing = PortalEmphasized), label = "theme fragment gain").value,
+        thresholdGain = animateFloatAsState(target.thresholdGain, tween(360, easing = PortalEmphasized), label = "theme threshold gain").value,
+    )
 }
 
 object PortalDimens {

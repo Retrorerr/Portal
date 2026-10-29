@@ -131,7 +131,7 @@ internal fun ReturnAppsPanel(
             // Measure the retreating capsule first. Its animated width gives the
             // growing surface space without overflowing a narrow window.
             val gap by animateDpAsState(if (panel == null) 10.dp else 0.dp,
-                tween(420, easing = PortalEmphasized), label = "controls capsule spacing")
+                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f), label = "controls capsule spacing")
             androidx.compose.ui.layout.Layout(content = {
                 SessionActionSlot(visible = panel != "files" && catalog.isNotEmpty()) {
                     SessionActionSurface(panel == "apps", palette, "apps surface") { expanded ->
@@ -150,10 +150,12 @@ internal fun ReturnAppsPanel(
             }) { children, constraints ->
                 val relaxed = constraints.copy(minWidth = 0, minHeight = 0)
                 val peerIndex = if (panel == "files") 0 else 1
+                // Both cards see their final available width throughout the
+                // morph. Re-constraining against a retreating peer restarts
+                // their size spring every frame and makes Files feel sticky.
                 val peer = children[peerIndex].measure(relaxed)
-                val spacing = gap.roundToPx().coerceAtMost((constraints.maxWidth - peer.width).coerceAtLeast(0))
-                val growing = children[1 - peerIndex].measure(relaxed.copy(
-                    maxWidth = (constraints.maxWidth - peer.width - spacing).coerceAtLeast(0)))
+                val spacing = gap.roundToPx()
+                val growing = children[1 - peerIndex].measure(relaxed)
                 val left = if (peerIndex == 0) peer else growing
                 val right = if (peerIndex == 1) peer else growing
                 val width = constraints.constrainWidth(left.width + right.width + spacing)
@@ -163,10 +165,7 @@ internal fun ReturnAppsPanel(
                     right.placeRelative(x + left.width + spacing, 0)
                 }
             }
-            if (LocalPortalVeil.current.eligible) {
-                Spacer(Modifier.height(10.dp))
-                PanelButton("Return to desktop", false, palette) { ComposeOverlay.requestReturnToDesktop() }
-            }
+
         }
     }
 }
@@ -176,9 +175,9 @@ private fun SessionActionSlot(visible: Boolean, content: @Composable () -> Unit)
     // Keep one measurable per slot after AnimatedVisibility removes its content.
     Box {
         AnimatedVisibility(visible,
-            enter = androidx.compose.animation.expandHorizontally(tween(420, easing = PortalEmphasized)) +
+            enter = androidx.compose.animation.expandHorizontally(spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f)) +
                 fadeIn(tween(300, delayMillis = 110, easing = PortalEmphasizedDecelerate)),
-            exit = androidx.compose.animation.shrinkHorizontally(tween(420, easing = PortalEmphasized)) +
+            exit = androidx.compose.animation.shrinkHorizontally(spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f)) +
                 fadeOut(tween(140, easing = PortalEmphasizedAccelerate))) {
             Box(Modifier.dissolveBlur(this, radius = 8.dp)) { content() }
         }
@@ -236,7 +235,11 @@ private fun AppsCapsule(
     ) {
         // Installed apps lit, the rest resting nearly monochrome: the same
         // language as the setup picker's header.
-        catalog.take(if (androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 380) 3 else 6).forEach { app ->
+        catalog.take(when {
+            androidx.compose.ui.platform.LocalDensity.current.fontScale >= 1.6f -> 0
+            androidx.compose.ui.platform.LocalDensity.current.fontScale >= 1.2f || androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 420 -> 3
+            else -> 6
+        }).forEach { app ->
             val icon = icons[app.id] ?: return@forEach
             val lit = states[app.id]?.installed == true
             Image(
@@ -251,7 +254,7 @@ private fun AppsCapsule(
         }
         Spacer(Modifier.width(8.dp))
         Text(
-            text = if (busy > 0) "Installing apps…" else "Apps",
+            text = "Apps",
             fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
             color = palette.textPrimary.copy(alpha = 0.92f),
@@ -414,12 +417,14 @@ private fun AppActionPill(text: String, primary: Boolean, palette: PortalPalette
             .padding(horizontal = 14.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = if (primary) PortalColors.Charcoal else palette.textMuted,
-        )
+        AnimatedContent(text, transitionSpec = {
+            fadeIn(tween(260, delayMillis = 70, easing = PortalEmphasizedDecelerate))
+                .togetherWith(fadeOut(tween(120, easing = PortalEmphasizedAccelerate)))
+                .using(SizeTransform(clip = false) { _, _ -> spring(dampingRatio = 1f, stiffness = 380f) })
+        }, label = "app action label") { label ->
+            Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                color = if (primary) PortalColors.Charcoal else palette.textMuted)
+        }
     }
 }
 

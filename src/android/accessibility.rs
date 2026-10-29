@@ -157,7 +157,8 @@ fn should_ignore_keycode(key_code: jint) -> bool {
 }
 
 fn enqueue_key_event(action: jint, key_code: jint, scan_code: jint, event_time_ms: jlong) -> bool {
-    if should_ignore_keycode(key_code) {
+    if should_ignore_keycode(key_code) || crate::android::utils::compose_overlay::input_is_blocked()
+    {
         return false;
     }
 

@@ -1392,7 +1392,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
 
             // GameActivity may still have native events queued when Compose
             // takes input. Do not re-press anything after overlay acquisition.
-            if compose_overlay::is_up()
+            if compose_overlay::input_is_blocked()
                 && matches!(
                     &event,
                     WindowEvent::Touch(_)

@@ -315,9 +315,9 @@ private fun PrepareHero(
     }
 }
 
-private const val RING_DOTS = 12
+private const val RING_SEGMENTS = 12
 
-/** A dot's opacity as Android culls it: gone in a beat, back a little later. */
+/** A segment's opacity as Android culls it: gone in a beat, back a little later. */
 private fun cullLife(f: Float): Float = when {
     f < 0.30f -> 1f
     f < 0.42f -> 1f - (f - 0.30f) / 0.12f
@@ -326,7 +326,7 @@ private fun cullLife(f: Float): Float = when {
 }
 
 /**
- * Twelve processes circle a heartbeat while Android culls them one by one;
+ * Twelve process segments surround the desktop while Android culls them one by one;
  * with the setting on they close ranks into a whole, glowing ring and a tick
  * draws itself in the middle.
  */
@@ -355,31 +355,24 @@ private fun ProcessRing(
     )
     val cull by clock.animateFloat(
         initialValue = 0f,
-        targetValue = RING_DOTS.toFloat(),
-        animationSpec = infiniteRepeatable(tween(RING_DOTS * 1400, easing = LinearEasing)),
+        targetValue = RING_SEGMENTS.toFloat(),
+        animationSpec = infiniteRepeatable(tween(RING_SEGMENTS * 1400, easing = LinearEasing)),
         label = "ring cull",
-    )
-    val beat by clock.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(2400, easing = LinearEasing)),
-        label = "ring beat",
     )
     val description = if (done) "Child process restrictions are off" else "Android is ending background processes"
     Canvas(modifier.semantics { contentDescription = description }) {
         val c = center
         val stroke = size.minDimension * 0.07f
         val radius = size.minDimension / 2f - stroke * 2.2f
-        val step = 360f / RING_DOTS
-        val pulse = 0.5f + 0.5f * sin(beat * 2f * PI.toFloat())
-        val victim = cull.toInt() % RING_DOTS
+        val step = 360f / RING_SEGMENTS
+        val victim = cull.toInt() % RING_SEGMENTS
         val f = cull - cull.toInt()
 
         if (settled > 0.01f) {
             val halo = radius * 1.55f
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(palette.glow.copy(alpha = (0.26f + 0.08f * pulse) * settled), Color.Transparent),
+                    colors = listOf(palette.glow.copy(alpha = 0.26f * settled), Color.Transparent),
                     center = c,
                     radius = halo,
                 ),
@@ -388,11 +381,11 @@ private fun ProcessRing(
             )
         }
 
-        for (i in 0 until RING_DOTS) {
+        for (i in 0 until RING_SEGMENTS) {
             val life = if (i == victim) cullLife(f) else 1f
             val alive = life + (1f - life) * settled
             val kill = (1f - life) * (1f - settled)
-            val sweep = lerp(1f, step + 0.6f, settled)
+            val sweep = lerp(9f, step + 0.6f, settled)
             val angle = i * step - 90f + spin * (1f - settled)
             val base = lerpColor(palette.textPrimary.copy(alpha = 0.78f), palette.accent, kill)
             val color = lerpColor(base, palette.accent, settled)
@@ -405,27 +398,16 @@ private fun ProcessRing(
                 size = Size(radius * 2f, radius * 2f),
                 style = Stroke(stroke, cap = StrokeCap.Round),
             )
-            if (i == victim && settled < 0.5f && f in 0.30f..0.62f) {
-                val t = (f - 0.30f) / 0.32f
-                val rad = Math.toRadians(angle.toDouble())
-                drawCircle(
-                    color = palette.accent.copy(alpha = (1f - t) * 0.7f * (1f - settled * 2f)),
-                    radius = stroke * (0.7f + 2.4f * t),
-                    center = Offset(c.x + radius * cos(rad).toFloat(), c.y + radius * sin(rad).toFloat()),
-                    style = Stroke(1.dp.toPx()),
-                )
-            }
         }
 
-        // The desktop itself: a heartbeat that gives way to the tick.
-        val heart = 1f - settled
-        if (heart > 0.01f) {
-            drawCircle(
-                color = palette.accent.copy(alpha = (0.12f + 0.10f * pulse) * heart),
-                radius = radius * 0.46f * (1f + 0.07f * pulse),
-                center = c,
-            )
-            drawCircle(color = palette.accent.copy(alpha = 0.9f * heart), radius = radius * 0.13f, center = c)
+        // A monitor outline represents the desktop, with no live indicator.
+        val desktop = 1f-settled
+        if (desktop > 0.01f) {
+            drawRoundRect(palette.textPrimary.copy(alpha = 0.8f*desktop),
+                Offset(c.x-radius*0.43f,c.y-radius*0.34f), Size(radius*0.86f,radius*0.56f),
+                androidx.compose.ui.geometry.CornerRadius(radius*0.06f), style = Stroke(stroke*0.65f))
+            drawLine(palette.textPrimary.copy(alpha = 0.8f*desktop),Offset(c.x,c.y+radius*0.22f),Offset(c.x,c.y+radius*0.40f),stroke*0.65f,StrokeCap.Round)
+            drawLine(palette.textPrimary.copy(alpha = 0.8f*desktop),Offset(c.x-radius*0.20f,c.y+radius*0.40f),Offset(c.x+radius*0.20f,c.y+radius*0.40f),stroke*0.65f,StrokeCap.Round)
         }
         if (check > 0.01f) {
             val tick = Path().apply {

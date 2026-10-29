@@ -1,0 +1,270 @@
+package app.polarbear
+
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.*
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.*
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.*
+import app.polarbear.setup.*
+import app.polarbear.setup.components.*
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlin.math.roundToInt
+
+private data class UtilityAction(val id: String, val title: String, val glyph: PortalGlyph, val detail: String = "", val available: Boolean = true)
+
+@Composable
+internal fun UtilityRoundtable(
+    ready: Boolean, page: UtilityPage, anchor: () -> Offset, area: UtilityMenuGeometry.Area,
+    dockRight: Boolean, dragging: Boolean, directPosition: Boolean = dragging,
+    onHub: () -> Unit, onAction: (String) -> Unit, onBack: () -> Unit, onOutside: () -> Unit,
+    onHubBounds: (android.graphics.RectF) -> Unit, onActionBounds: (String, android.graphics.RectF) -> Unit = { _, _ -> },
+    onAnimating: (Boolean) -> Unit = {}, onSettled: (UtilityPage) -> Unit,
+) {
+    if (!ready) return
+    val palette = resolvePalette(AppearanceMode.System)
+    val density = LocalDensity.current
+    val active = FileTransfers.items.count { it.phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling) }
+    val failed = FileTransfers.items.asReversed().distinctBy { it.kind to it.source }
+        .any { it.phase in setOf(TransferPhase.Failed, TransferPhase.Interrupted) }
+    val actions = buildList {
+        add(UtilityAction("veil", "Portal veil", PortalGlyph.Veil))
+        add(UtilityAction("files", "Files", PortalGlyph.Files, if (active > 0) "$active copying" else if (failed) "Needs attention" else ""))
+        add(UtilityAction("apps", "Apps", PortalGlyph.Apps))
+        add(UtilityAction("keyboard", "Keyboard", PortalGlyph.Keyboard, "Preview"))
+        add(UtilityAction("game", "Game options", PortalGlyph.Options, available = TouchControls.steamRunning.value || TouchControls.gameRunning.value))
+        add(UtilityAction("controller", if (TouchControls.controllerVisible) "Hide controls" else "Show controls", PortalGlyph.Controller, available = TouchControls.gameRunning.value))
+    }
+    val available = actions.filter { it.available }
+    val geometryAnchor = remember(page,area,dockRight,density.density,density.fontScale) { anchor() }
+    val geometry = UtilityMenuGeometry.menu(area, UtilityMenuGeometry.Point(geometryAnchor.x,geometryAnchor.y), available.size, density.density, density.fontScale)
+    val radialTarget = if (geometry.compact) 0f else 1f
+    val radial by animateFloatAsState(radialTarget,spring(dampingRatio = 1f,stiffness = 380f),label = "responsive roundtable")
+    var surfaceResizing by remember { mutableStateOf(false) }
+    val transition = updateTransition(page, label = "utility presentation")
+    val centering by transition.animateFloat(transitionSpec = { spring(dampingRatio = 0.88f, stiffness = 230f) }, label = "utility travel") {
+        if (it == UtilityPage.Dock) 0f else 1f
+    }
+    val menuReveal by transition.animateFloat(transitionSpec = { spring(dampingRatio = 0.88f, stiffness = 300f) }, label = "bubble orbit") {
+        if (it == UtilityPage.Menu) 1f else 0f
+    }
+    val targetCenter = if (page == UtilityPage.Keyboard) Offset((area.left+area.right)/2,(area.top+area.bottom)/2)
+        else Offset(geometry.center.x,geometry.center.y)
+    val menuCenter by animateOffsetAsState(targetCenter, spring(dampingRatio = 0.88f, stiffness = 230f), label = "utility viewport")
+    // Read motion in placement/layer blocks. Rebuilding the controls on every
+    // animation frame needlessly competes with the running desktop for UI time.
+    val center = {
+        val position = anchor()
+        if (directPosition) position else position + (menuCenter-position)*centering
+    }
+    val arrival = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { arrival.animateTo(1f, tween(520, easing = PortalEmphasizedDecelerate)) }
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val focused by interaction.collectIsFocusedAsState()
+    var resting by remember { mutableStateOf(false) }
+    LaunchedEffect(page, dragging, hovered, focused) {
+        resting = false
+        if (page == UtilityPage.Dock && !dragging && !hovered && !focused) { delay(2200); resting = true }
+    }
+    val opacityTarget = if (resting && page == UtilityPage.Dock) 0.48f else 1f
+    val opacity by animateFloatAsState(opacityTarget, tween(620, easing = PortalEmphasized), label = "parked tab ink")
+    val lift by animateFloatAsState(if (dragging) 1.045f else 1f, spring(dampingRatio = 0.86f, stiffness = 400f), label = "utility weight")
+    val currentAnimating by rememberUpdatedState(onAnimating)
+    LaunchedEffect(transition, opacityTarget, radialTarget, dragging, directPosition, surfaceResizing) {
+        snapshotFlow { transition.isRunning || arrival.isRunning || opacity != opacityTarget || radial != radialTarget || dragging || directPosition || surfaceResizing }
+            .distinctUntilChanged().collect { currentAnimating(it) }
+    }
+    val currentSettled by rememberUpdatedState(onSettled)
+    LaunchedEffect(transition.currentState, transition.targetState, transition.isRunning, dragging, directPosition, arrival.isRunning, surfaceResizing) {
+        if (!transition.isRunning && transition.currentState == transition.targetState && !dragging && !directPosition && !arrival.isRunning && arrival.value == 1f && !surfaceResizing) currentSettled(transition.currentState)
+    }
+    Box(Modifier.fillMaxSize().pointerInput(page) {
+        detectTapGestures { if (page != UtilityPage.Dock) onOutside() }
+    }) {
+        actions.forEach { action ->
+            key(action.id) {
+                val index = available.indexOfFirst { it.id == action.id }
+                val target = geometry.offsets.getOrNull(index)?.let { Offset(it.x,it.y) } ?: Offset.Zero
+                val orbit by animateOffsetAsState(target,spring(dampingRatio = 0.88f,stiffness = 300f),label = "${action.id} orbit")
+                val present by animateFloatAsState(if (action.available) 1f else 0f,spring(dampingRatio = 1f,stiffness = 380f),label = "${action.id} availability")
+                UtilityBubble(action, palette, page == UtilityPage.Menu && action.available && !geometry.compact,
+                    Modifier.offset {
+                        val tileCenter = center() + orbit*menuReveal*radial
+                        IntOffset((tileCenter.x-geometry.tileWidth/2).roundToInt(), (tileCenter.y-geometry.tileHeight/2).roundToInt())
+                    }
+                        .width(with(density) { geometry.tileWidth.toDp() }).height(with(density) { geometry.tileHeight.toDp() })
+                        .graphicsLayer {
+                            alpha = menuReveal.coerceIn(0f,1f)*arrival.value*present*radial
+                            val scale = 0.35f+0.65f*menuReveal.coerceIn(0f,1f)*present*radial
+                            scaleX = scale; scaleY = scale
+                        }
+                        .then(if (page != UtilityPage.Menu || !action.available || geometry.compact) Modifier.clearAndSetSemantics {} else Modifier)
+                        .onGloballyPositioned { if (page == UtilityPage.Menu && action.available && !geometry.compact) onActionBounds(action.id,it.unclippedRect()) },
+                    onClick = { onAction(action.id) })
+            }
+        }
+        val corner = animateDpAsState(when (page) { UtilityPage.Dock -> (24+8*(density.fontScale-1f).coerceAtLeast(0f)).dp; UtilityPage.Menu -> if (geometry.compact) 26.dp else (32+6*(density.fontScale-1f).coerceAtLeast(0f)).dp; UtilityPage.Keyboard -> 24.dp },
+            tween(420, easing = PortalEmphasized), label = "utility surface corner")
+        val elevation = animateDpAsState(if (page == UtilityPage.Dock) 3.dp else 12.dp, tween(420, easing = PortalEmphasized), label = "utility lift")
+        val shape = remember {
+            object : Shape {
+                override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline =
+                    RoundedCornerShape(corner.value).createOutline(size,layoutDirection,density)
+            }
+        }
+        Layout(content = {
+            UtilitySurfaceContent(page to (page == UtilityPage.Menu && geometry.compact),
+                prepareKeyboard = page == UtilityPage.Menu && !transition.isRunning && !surfaceResizing,
+                onResizing = { surfaceResizing = it },
+                modifier = Modifier.graphicsLayer {
+                    alpha = arrival.value * opacity
+                    scaleX = lift; scaleY = lift
+                    shadowElevation = elevation.value.toPx()
+                    this.shape = RoundedCornerShape(corner.value); clip = true
+                    ambientShadowColor = palette.pillShadow; spotShadowColor = palette.pillShadow
+                }.background(palette.background.copy(alpha = 0.96f))
+                    .background(Brush.verticalGradient(listOf(palette.surfaceTop,palette.surfaceBottom)))
+                    .border(1.dp,palette.surfaceBorder,shape)
+                    .onGloballyPositioned { if (page != UtilityPage.Keyboard && !(page == UtilityPage.Menu && geometry.compact)) onHubBounds(it.unclippedRect()) },
+            ) { (shown, compact) ->
+                when {
+                    shown == UtilityPage.Keyboard -> UtilityKeyboardPreview(palette,
+                        with(density) { (area.width-24*density.density).coerceAtLeast(120*density.density).toDp() },
+                        with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() }, onBack)
+                    shown == UtilityPage.Menu && compact -> CompactRoundtable(actions,palette,
+                        with(density) { (area.width-24*density.density).coerceAtLeast(120*density.density).toDp() },
+                        with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() },
+                        onHub,onAction,onHubBounds,onActionBounds)
+                    else -> {
+                        val docked = shown == UtilityPage.Dock
+                        val pressed by interaction.collectIsPressedAsState()
+                        val press by animateFloatAsState(if (pressed) 0.94f else 1f, spring(dampingRatio = 0.85f, stiffness = 650f), label = "utility hub press")
+                        val dockWidth = (72+36*(density.fontScale-1f).coerceAtLeast(0f)).dp
+                        val dockHeight = (48+16*(density.fontScale-1f).coerceAtLeast(0f)).dp
+                        val hub = (64+12*(density.fontScale-1f).coerceAtLeast(0f)).dp
+                        val hiddenEdge = dockWidth/2-20.dp
+                        val labelInset by animateDpAsState(
+                            if (!docked || dragging) 0.dp else if (dockRight) -hiddenEdge/2 else hiddenEdge/2,
+                            spring(dampingRatio = 0.9f,stiffness = 420f),label = "tab label docking")
+                        Box(Modifier.size(width = if (docked) dockWidth else hub, height = if (docked) dockHeight else hub)
+                            .graphicsLayer { scaleX = press; scaleY = press }
+                            .hoverable(interaction)
+                            .clickable(interactionSource = interaction, indication = null, enabled = page == shown && LocalUtilityContentActive.current, role = Role.Button,
+                                onClickLabel = if (docked) "Open Portal menu" else "Close Portal menu", onClick = onHub)
+                            .semantics { contentDescription = if (docked) "Open Portal menu" else "Close Portal menu" },
+                            contentAlignment = Alignment.Center) {
+                            if (docked) Text("Portal",Modifier.graphicsLayer { translationX = labelInset.toPx() },
+                                color = palette.textPrimary,fontSize = 12.sp,fontWeight = FontWeight.Medium)
+                            else Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                PortalIcon(PortalGlyph.Close,palette.textPrimary,size = 16.dp)
+                                Text("Close",color = palette.textMuted,fontSize = 10.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }, modifier = Modifier.fillMaxSize()) { children, constraints ->
+            val child = children.single().measure(Constraints(maxWidth = (area.width-24*density.density).toInt().coerceAtLeast(1),
+                maxHeight = (area.height-24*density.density).toInt().coerceAtLeast(1)))
+            layout(constraints.maxWidth,constraints.maxHeight) {
+                val arrivalShift = (1f-arrival.value)*18*density.density*(if (dockRight) 1 else -1)
+                val position = center()
+                child.place((position.x-child.width/2+arrivalShift).roundToInt(),(position.y-child.height/2).roundToInt())
+            }
+        }
+    }
+}
+
+private fun androidx.compose.ui.layout.LayoutCoordinates.unclippedRect(): android.graphics.RectF {
+    val a = localToRoot(Offset.Zero)
+    val b = localToRoot(Offset(size.width.toFloat(),size.height.toFloat()))
+    return android.graphics.RectF(minOf(a.x,b.x),minOf(a.y,b.y),maxOf(a.x,b.x),maxOf(a.y,b.y))
+}
+
+@Composable
+private fun UtilityBubble(action: UtilityAction,palette: PortalPalette,enabled: Boolean,modifier: Modifier = Modifier,onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.91f else 1f,spring(dampingRatio = 0.82f,stiffness = 650f),label = "bubble press")
+    val fill by animateColorAsState(if (pressed) palette.selectionHighlight else palette.surfaceTop,tween(180, easing = PortalEmphasized), label = "bubble fill")
+    BoxWithConstraints(modifier.graphicsLayer { scaleX = scale; scaleY = scale }
+        .semantics(mergeDescendants = true) { contentDescription = action.title + if (action.detail.isNotEmpty()) ", ${action.detail}" else "" },
+        contentAlignment = Alignment.Center) {
+        val diameter = minOf(maxWidth,(88+48*(LocalDensity.current.fontScale-1f).coerceAtLeast(0f)).dp)
+        Column(Modifier.size(diameter).shadow(6.dp,CircleShape,ambientColor = palette.pillShadow,spotColor = palette.pillShadow)
+            .clip(CircleShape).background(palette.background.copy(alpha = 0.96f)).background(fill)
+            .border(1.dp,palette.surfaceBorder,CircleShape)
+            .clickable(interactionSource = interaction,indication = null,enabled = enabled,role = Role.Button,onClick = onClick)
+            .padding(8.dp),horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp,Alignment.CenterVertically)) {
+            PortalIcon(action.glyph,palette.textPrimary,size = 20.dp)
+            AnimatedContent(action.title,
+                transitionSpec = { fadeIn(tween(240,delayMillis = 70)).togetherWith(fadeOut(tween(120))) },label = "bubble label") { label ->
+                Text(label,color = palette.textPrimary,fontSize = 11.sp,fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,lineHeight = 14.sp,maxLines = 2)
+            }
+            AnimatedVisibility(action.detail.isNotEmpty(),
+                enter = expandVertically(spring(dampingRatio = 1f,stiffness = 380f)) + fadeIn(tween(220)),
+                exit = shrinkVertically(spring(dampingRatio = 1f,stiffness = 380f)) + fadeOut(tween(120))) {
+                AnimatedContent(action.detail,transitionSpec = { fadeIn(tween(220)).togetherWith(fadeOut(tween(120))) },label = "bubble detail") { detail ->
+                    Text(detail,color = palette.textMuted,fontSize = 9.sp,textAlign = TextAlign.Center,lineHeight = 12.sp,maxLines = 2)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactRoundtable(actions: List<UtilityAction>,palette: PortalPalette,width: Dp,height: Dp,
+    onClose: () -> Unit,onAction: (String)->Unit,onHubBounds: (android.graphics.RectF)->Unit,onBounds: (String,android.graphics.RectF)->Unit) {
+    val tile = (88+48*(LocalDensity.current.fontScale-1f).coerceAtLeast(0f)).dp
+    val columns = if (width < tile*2+48.dp) 1 else 2
+    Column(Modifier.widthIn(max = 360.dp).width(width).heightIn(max = height).verticalScroll(rememberScrollState(),enabled = LocalUtilityContentActive.current).padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Portal controls",Modifier.weight(1f),color = palette.textPrimary,fontSize = 15.sp,fontWeight = FontWeight.SemiBold)
+            Box(Modifier.onGloballyPositioned { onHubBounds(it.unclippedRect()) }) {
+                PanelButton("Close",false,palette,enabled = LocalUtilityContentActive.current,onClick = onClose)
+            }
+        }
+        AnimatedContent(actions.filter { it.available }.map { it.id },
+            transitionSpec = { fadeIn(tween(300,delayMillis = 100,easing = PortalEmphasizedDecelerate))
+                .togetherWith(fadeOut(tween(140,easing = PortalEmphasizedAccelerate)))
+                .using(SizeTransform(clip = true) { _, _ -> spring(dampingRatio = 1f,stiffness = 380f) }) },
+            label = "compact controls") { ids ->
+            Column(Modifier.padding(top = 8.dp),verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ids.chunked(columns).forEach { row -> Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.SpaceEvenly) {
+                    row.forEach { id ->
+                        val action = actions.first { it.id == id }
+                        UtilityBubble(action,palette,action.available && LocalUtilityContentActive.current,Modifier.weight(1f).heightIn(min = tile+12.dp)
+                            .onGloballyPositioned { if (action.available) onBounds(id,it.unclippedRect()) }) { onAction(id) }
+                    }
+                } }
+            }
+        }
+    }
+}

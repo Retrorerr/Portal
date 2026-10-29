@@ -365,11 +365,6 @@ private fun InstallLogLine(
         animationSpec = tween(480, easing = PortalEmphasized),
         label = "log line strength",
     )
-    val dot by animateFloatAsState(
-        targetValue = if (current) 0.8f else 0f,
-        animationSpec = tween(420, easing = PortalEmphasized),
-        label = "log line dot",
-    )
     val tone by animatedTint(
         target = if (current) palette.textPrimary else palette.textSecondary,
         durationMillis = 480,
@@ -391,9 +386,7 @@ private fun InstallLogLine(
             },
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Canvas(Modifier.size(5.dp)) {
-            if (dot > 0.01f) drawCircle(PortalColors.Orange.copy(alpha = dot))
-        }
+        Text("›", color = palette.accent.copy(alpha = strength), fontSize = 10.sp)
         Spacer(Modifier.width(8.dp))
         Text(
             text = text,

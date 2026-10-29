@@ -831,16 +831,21 @@ internal fun PanelButton(
         animationSpec = tween(110),
         label = "update button press",
     )
+    val opacity by animateFloatAsState(if (enabled) 1f else 0.4f, tween(220, easing = PortalEmphasized), label = "button enabled")
+    val fill by androidx.compose.animation.animateColorAsState(if (primary) palette.accent else palette.accent.copy(alpha = 0f),
+        tween(220, easing = PortalEmphasized), label = "button fill")
+    val ink by androidx.compose.animation.animateColorAsState(if (primary) PortalColors.Charcoal else palette.textMuted,
+        tween(220, easing = PortalEmphasized), label = "button ink")
     val shape = RoundedCornerShape(50)
     Box(
         modifier = Modifier
             .graphicsLayer {
                 scaleX = pressScale
                 scaleY = pressScale
-                alpha = if (enabled) 1f else 0.4f
+                alpha = opacity
             }
             .clip(shape)
-            .then(if (primary) Modifier.background(palette.accent) else Modifier)
+            .background(fill)
             .clickable(
                 interactionSource = tap,
                 indication = null,
@@ -851,12 +856,13 @@ internal fun PanelButton(
             .padding(horizontal = 18.dp, vertical = 9.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = text,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = if (primary) PortalColors.Charcoal else palette.textMuted,
-        )
+        AnimatedContent(text, transitionSpec = {
+            fadeIn(tween(220, delayMillis = 60, easing = PortalEmphasizedDecelerate))
+                .togetherWith(fadeOut(tween(120, easing = PortalEmphasizedAccelerate)))
+                .using(SizeTransform(clip = false) { _, _ -> spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f) })
+        }, label = "button label") { label ->
+            Text(label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = ink)
+        }
     }
 }
 

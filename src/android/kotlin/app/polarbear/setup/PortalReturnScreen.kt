@@ -402,57 +402,47 @@ internal fun PortalReturnScreen(
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                AnimatedVisibility(
-                    visible = ComposeOverlay.activePanel != "files",
-                    enter = expandVertically(tween(420, easing = PortalEmphasized)) +
-                        fadeIn(tween(300, delayMillis = 110, easing = PortalEmphasizedDecelerate)),
-                    exit = shrinkVertically(tween(420, easing = PortalEmphasized)) +
-                        fadeOut(tween(140, easing = PortalEmphasizedAccelerate)),
-                ) {
-                    Column(Modifier.dissolveBlur(this, radius = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Image(
-                            painter = portalMarkPainter(
-                                main = palette.logoMain,
-                                threshold = palette.logoThreshold,
-                            ),
-                            contentDescription = "Portal logo",
-                            modifier = Modifier.size(PortalDimens.LogoSize).then(launchMarkModifier),
-                        )
-                        Spacer(modifier = Modifier.height(20.dp))
-                        Text(
-                            text = if (sessionControls) "Portal" else "Returning to Plasma",
-                            fontSize = PortalDimens.TitleSize,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.textPrimary,
-                            textAlign = TextAlign.Center,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        // The line settles from "restoring" to "ready" the moment the
-                        // veil may be lifted, dissolving through a soft blur.
-                        AnimatedContent(
-                            targetState = veil.eligible,
-                            transitionSpec = {
-                                (fadeIn(tween(420, delayMillis = 90, easing = PortalEmphasizedDecelerate)) +
-                                    slideInVertically(tween(560, easing = PortalEmphasized)) { it / 2 })
-                                    .togetherWith(
-                                        fadeOut(tween(200, easing = PortalEmphasizedAccelerate)) +
-                                            slideOutVertically(tween(260, easing = PortalEmphasizedAccelerate)) { -it / 3 },
-                                    )
-                                    .using(SizeTransform(clip = false))
-                            },
-                            contentAlignment = Alignment.Center,
-                            label = "return subtitle",
-                        ) { desktopReady ->
-                            Text(
-                                text = if (sessionControls) "Your desktop is running" else if (desktopReady) "Your desktop is ready" else "Restoring your desktop",
-                                modifier = Modifier.dissolveBlur(this, radius = 8.dp),
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = palette.textMuted,
-                                textAlign = TextAlign.Center,
+                Image(
+                    painter = portalMarkPainter(
+                        main = palette.logoMain,
+                        threshold = palette.logoThreshold,
+                    ),
+                    contentDescription = "Portal logo",
+                    modifier = Modifier.size(PortalDimens.LogoSize).then(launchMarkModifier),
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+                Text(
+                    text = if (sessionControls) "Portal" else "Returning to Plasma",
+                    fontSize = PortalDimens.TitleSize,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.textPrimary,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                // The line settles from "restoring" to "ready" the moment the
+                // veil may be lifted, dissolving through a soft blur.
+                AnimatedContent(
+                    targetState = veil.eligible,
+                    transitionSpec = {
+                        (fadeIn(tween(420, delayMillis = 90, easing = PortalEmphasizedDecelerate)) +
+                            slideInVertically(tween(560, easing = PortalEmphasized)) { it / 2 })
+                            .togetherWith(
+                                fadeOut(tween(200, easing = PortalEmphasizedAccelerate)) +
+                                    slideOutVertically(tween(260, easing = PortalEmphasizedAccelerate)) { -it / 3 },
                             )
-                        }
-                    }
+                            .using(SizeTransform(clip = false))
+                    },
+                    contentAlignment = Alignment.Center,
+                    label = "return subtitle",
+                ) { desktopReady ->
+                    Text(
+                        text = if (sessionControls) "Your desktop is running" else if (desktopReady) "Your desktop is ready" else "Restoring your desktop",
+                        modifier = Modifier.dissolveBlur(this, radius = 8.dp),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.textMuted,
+                        textAlign = TextAlign.Center,
+                    )
                 }
                 ReturnAnlandAffordance(
                     phase = repairPhase,
@@ -473,7 +463,7 @@ internal fun PortalReturnScreen(
                 ReturnUpdatePanel(
                     palette = palette,
                     desktopReady = veil.eligible,
-                    suppressed = repairPhase != ReturnRepairPhase.Hidden || ComposeOverlay.activePanel == "files",
+                    suppressed = repairPhase != ReturnRepairPhase.Hidden,
                     onBlockedChanged = { updateBlocked = it },
                     immediate = sessionControls,
                 )

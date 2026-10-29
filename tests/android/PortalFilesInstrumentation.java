@@ -30,8 +30,13 @@ public final class PortalFilesInstrumentation extends Instrumentation {
     private String prefix;
     private long activeDragDown;
     private boolean dragInProgress;
+    private boolean motionOnly;
 
-    @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); start(); }
+    @Override public void onCreate(Bundle arguments) {
+        super.onCreate(arguments);
+        motionOnly = arguments != null && Boolean.parseBoolean(arguments.getString("motionOnly", "false"));
+        start();
+    }
 
     private void check(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
@@ -115,7 +120,12 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             final android.graphics.Rect bounds = new android.graphics.Rect();
             onMain(() -> {
                 View capsule = findCapsule(activity.getWindow().getDecorView());
-                if (capsule != null) capsule.getGlobalVisibleRect(bounds);
+                if (capsule != null) { try {
+                    java.lang.reflect.Field hit = capsule.getClass().getDeclaredField("hubBounds"); hit.setAccessible(true);
+                    android.graphics.RectF rect = (android.graphics.RectF) hit.get(capsule);
+                    rect.round(bounds);
+                    int[] origin = new int[2]; capsule.getLocationOnScreen(origin); bounds.offset(origin[0],origin[1]);
+                } catch (Exception e) { throw new RuntimeException(e); } }
             });
             if (!bounds.isEmpty()) return bounds;
             SystemClock.sleep(100);
@@ -128,13 +138,175 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         }
         throw new AssertionError(state.toString());
     }
-    private void openCapsule() throws Exception {
-        android.graphics.Rect bounds = capsuleBounds();
-        long down = SystemClock.uptimeMillis();
-        singleTouch(down, MotionEvent.ACTION_DOWN, bounds.centerX(), bounds.centerY());
-        singleTouch(down, MotionEvent.ACTION_UP, bounds.centerX(), bounds.centerY());
+    private View capsuleView() { return findCapsule(activity.getWindow().getDecorView()); }
+    private void waitUtility(String expected) throws Exception {
+        long deadline = SystemClock.uptimeMillis()+10000;
+        java.util.concurrent.atomic.AtomicBoolean ready = new java.util.concurrent.atomic.AtomicBoolean();
+        while (!ready.get() && SystemClock.uptimeMillis()<deadline) {
+            onMain(() -> { try {
+                View view = capsuleView();
+                if (view != null) {
+                    java.lang.reflect.Field state = view.getClass().getDeclaredField("settledPage"); state.setAccessible(true);
+                    Object page = state.get(view); ready.set(page != null && page.toString().equals(expected));
+                }
+            } catch (Exception e) { throw new RuntimeException(e); } });
+            if (!ready.get()) SystemClock.sleep(50);
+        }
+        check(ready.get(), "Utility did not settle to " + expected);
+    }
+    private android.graphics.Rect utilityBounds(String action) throws Exception {
+        final android.graphics.Rect bounds = new android.graphics.Rect();
+        onMain(() -> { try {
+            View view = capsuleView();
+            java.lang.reflect.Field field = view.getClass().getDeclaredField("actionBounds"); field.setAccessible(true);
+            android.graphics.RectF rect = (android.graphics.RectF) ((java.util.Map<?,?>) field.get(view)).get(action);
+            if (rect != null) { rect.round(bounds); int[] origin = new int[2]; view.getLocationOnScreen(origin); bounds.offset(origin[0],origin[1]); }
+        } catch (Exception e) { throw new RuntimeException(e); } });
+        check(!bounds.isEmpty(), "No laid-out utility action: " + action); return bounds;
+    }
+    private void tap(android.graphics.Rect bounds) {
+        long down=SystemClock.uptimeMillis();
+        singleTouch(down,MotionEvent.ACTION_DOWN,bounds.centerX(),bounds.centerY());
+        singleTouch(down,MotionEvent.ACTION_UP,bounds.centerX(),bounds.centerY());
+    }
+    private void capture(String suffix) throws Exception {
+        android.graphics.Bitmap bitmap = getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES).takeScreenshot();
+        check(bitmap != null, "Could not capture utility UI");
+        try (FileOutputStream file = new FileOutputStream(new File(getTargetContext().getCacheDir(),prefix+suffix+".png"))) {
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,file);
+        } finally { bitmap.recycle(); }
+    }
+    private void openMenu() throws Exception { tap(capsuleBounds()); waitUtility("Menu"); }
+    private void openCapsule() throws Exception { openMenu(); tap(utilityBounds("veil")); }
+    private void testRoundtable() throws Exception {
+        openMenu();
+        for (String action : new String[] { "veil","files","apps","keyboard" }) {
+            android.graphics.Rect bounds = utilityBounds(action);
+            check(bounds.left>=0 && bounds.top>=0 && bounds.right<=activity.getWindow().getDecorView().getWidth(), "Bubble left the viewport");
+        }
+        capture("-roundtable");
+        tap(utilityBounds("keyboard")); waitUtility("Keyboard"); capture("-keyboard");
+        check(!showing(), "Keyboard preview restarted or covered the guest with the veil");
+        long now=SystemClock.uptimeMillis();
+        sendKeySync(new KeyEvent(now,now,KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_ESCAPE,0));
+        sendKeySync(new KeyEvent(now,now+1,KeyEvent.ACTION_UP,KeyEvent.KEYCODE_ESCAPE,0));
+        waitUtility("Menu");
+        now=SystemClock.uptimeMillis();
+        sendKeySync(new KeyEvent(now,now,KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_ESCAPE,0));
+        sendKeySync(new KeyEvent(now,now+1,KeyEvent.ACTION_UP,KeyEvent.KEYCODE_ESCAPE,0));
+        waitUtility("Dock");
+        check(!showing(), "Dismissing the utility opened the veil");
+        status("Labelled utility roundtable, keyboard preview, nested Escape and guest preservation passed");
+    }
+    private String shellText(String command) throws Exception {
+        try (ParcelFileDescriptor descriptor = getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES).executeShellCommand(command);
+             java.io.InputStream input = new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
+             java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
+            byte[] block = new byte[8192]; int count;
+            while ((count=input.read(block))!=-1) output.write(block,0,count);
+            return output.toString("UTF-8").trim();
+        }
+    }
+    private Object utilityArea() throws Exception {
+        java.util.concurrent.atomic.AtomicReference<Object> result = new java.util.concurrent.atomic.AtomicReference<>();
+        onMain(() -> { try {
+            View view=capsuleView(); java.lang.reflect.Field f=view.getClass().getDeclaredField("area$delegate"); f.setAccessible(true);
+            Class<?> state=getTargetContext().getClassLoader().loadClass("androidx.compose.runtime.State");
+            result.set(state.getMethod("getValue").invoke(f.get(view)));
+        } catch (Exception e) { throw new RuntimeException(e); } });
+        return result.get();
+    }
+    private void setUtilityArea(Object value) {
+        onMain(() -> { try {
+            View view=capsuleView(); java.lang.reflect.Field f=view.getClass().getDeclaredField("area$delegate"); f.setAccessible(true);
+            Class<?> state=getTargetContext().getClassLoader().loadClass("androidx.compose.runtime.MutableState");
+            state.getMethod("setValue",Object.class).invoke(f.get(view),value);
+        } catch (Exception e) { throw new RuntimeException(e); } });
+    }
+    private Object compactArea(float heightDp) throws Exception {
+        float d=activity.getResources().getDisplayMetrics().density;
+        Class<?> area=getTargetContext().getClassLoader().loadClass("app.polarbear.UtilityMenuGeometry$Area");
+        return area.getConstructor(float.class,float.class,float.class,float.class).newInstance(40*d,40*d,360*d,(40+heightDp)*d);
+    }
+    private void escapeUtility() {
+        long now=SystemClock.uptimeMillis();
+        sendKeySync(new KeyEvent(now,now,KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_ESCAPE,0));
+        sendKeySync(new KeyEvent(now,now+1,KeyEvent.ACTION_UP,KeyEvent.KEYCODE_ESCAPE,0));
+    }
+    private void testResponsiveUtility() throws Exception {
+        String originalFont=shellText("settings get system font_scale");
+        String originalNight=shellText("cmd uimode night");
+        String night=originalNight.substring(originalNight.indexOf(':')+1).trim().split("\\s+")[0];
+        check(java.util.Arrays.asList("yes","no","auto","custom").contains(night),"Unrecognized night-mode setting");
+        check(originalFont.equals("null") || originalFont.matches("[0-9]+(\\.[0-9]+)?"),"Unrecognized text size");
+        openMenu(); Object originalArea=utilityArea();
+        try {
+            setUtilityArea(compactArea(360)); SystemClock.sleep(1400); capture("-compact");
+            for (String action:new String[]{"veil","files","apps","keyboard"}) check(!utilityBounds(action).isEmpty(),"Compact action missing");
+            shellText("settings put system font_scale 1.6"); SystemClock.sleep(1300);
+            setUtilityArea(compactArea(700)); SystemClock.sleep(1400); capture("-large-text");
+            shellText("cmd uimode night no"); SystemClock.sleep(1300);
+            setUtilityArea(compactArea(700)); SystemClock.sleep(1400); capture("-light-large-text");
+            check(!showing(),"Responsive utility checks restarted or opened the veil");
+        } finally {
+            shellText(originalFont.equals("null") ? "settings delete system font_scale" : "settings put system font_scale "+originalFont);
+            shellText("cmd uimode night "+night);
+            SystemClock.sleep(1300); setUtilityArea(originalArea); SystemClock.sleep(1300);
+        }
+        escapeUtility(); waitUtility("Dock");
+        status("Compact controls, large text and light theme passed; original settings restored");
+    }
+    private void profileUtilityMotion() throws Exception {
+        for (int pass=0;pass<(motionOnly ? 12 : 4);pass++) {
+            if (pass==1) shellText("dumpsys gfxinfo app.polarbear reset");
+            openMenu(); tap(utilityBounds("keyboard")); waitUtility("Keyboard");
+            escapeUtility(); waitUtility("Menu"); escapeUtility(); waitUtility("Dock");
+        }
+        try (FileOutputStream output=new FileOutputStream(new File(getTargetContext().getCacheDir(),prefix+"-utility-gfxinfo.txt"))) {
+            output.write(shellText("dumpsys gfxinfo app.polarbear").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        status("Recorded warm roundtable and keyboard motion frame data");
+    }
+    private Object waitFolderReady() throws Exception {
+        long deadline = SystemClock.uptimeMillis() + 15000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            Object folder = invoke(transfers, "getFolder");
+            if (!(Boolean) folder.getClass().getMethod("getLoading").invoke(folder) &&
+                    !((String) folder.getClass().getMethod("getId").invoke(folder)).isEmpty()) {
+                check(folder.getClass().getMethod("getError").invoke(folder) == null, "File browser failed to load");
+                return folder;
+            }
+            SystemClock.sleep(50);
+        }
+        throw new AssertionError("File browser did not settle");
+    }
+    private void testFileBrowserMotion() throws Exception {
+        onMain(() -> { try {
+            overlay.getMethod("setActivePanel", String.class).invoke(overlay.getField("INSTANCE").get(null), "files");
+            invoke(transfers, "beginSave");
+        } catch (Exception e) { throw new RuntimeException(e); } });
+        try {
+            waitFolderReady(); SystemClock.sleep(700); capture("-chooser-large");
+            onMain(() -> { try { invoke(transfers, "home"); } catch (Exception e) { throw new RuntimeException(e); } });
+            Object home = waitFolderReady();
+            check(home.getClass().getMethod("getName").invoke(home).equals("."), "Home navigation left the home directory");
+            SystemClock.sleep(700); capture("-chooser-home-large");
+            String downloads = (String) invoke(transfers, "getImportDirectory");
+            onMain(() -> { try {
+                transfers.getMethod("browse", String.class, boolean.class, boolean.class)
+                    .invoke(transfers.getField("INSTANCE").get(null), downloads, false, false);
+            } catch (Exception e) { throw new RuntimeException(e); } });
+            waitFolderReady();
+        } finally {
+            onMain(() -> { try { invoke(transfers, "closeSave"); } catch (Exception e) { throw new RuntimeException(e); } });
+        }
+        status("Large-text file browser and Home/Downloads navigation passed");
     }
     private void testCapsuleDrag() throws Exception {
+        android.content.SharedPreferences preferences = getTargetContext().getSharedPreferences("portal_touch_controls", 0);
+        boolean hadX = preferences.contains("handle_x"), hadY = preferences.contains("handle_y");
+        float savedX = preferences.getFloat("handle_x", 0.5f), savedY = preferences.getFloat("handle_y", -1f);
+        try {
         android.graphics.Rect original = capsuleBounds();
         float density = activity.getResources().getDisplayMetrics().density;
         long down = SystemClock.uptimeMillis();
@@ -144,16 +316,28 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             SystemClock.sleep(16);
         }
         singleTouch(down, MotionEvent.ACTION_UP, original.centerX() + 60 * density, original.centerY() + 60 * density);
-        SystemClock.sleep(300);
+        SystemClock.sleep(1200);
         check(!showing(), "Dragging accidentally opened the veil");
         android.graphics.Rect moved = capsuleBounds();
-        check(moved.centerY() > original.centerY() + 30 * density, "Capsule did not follow the drag");
+        check(moved.centerY() > original.centerY() + 30 * density, "Capsule did not coast with the drag");
         openCapsule(); waitShowing(true);
         onMain(() -> { try { invoke(overlay, "requestReturnToDesktop"); } catch (Exception e) { throw new RuntimeException(e); } });
         waitShowing(false);
         android.graphics.Rect restored = capsuleBounds();
         check(Math.abs(restored.centerY() - moved.centerY()) < 3 * density, "Reopening lost capsule position");
         status("Capsule dragging, click cancellation and position restoration passed");
+        } finally {
+            android.content.SharedPreferences.Editor editor = preferences.edit();
+            if (hadX) editor.putFloat("handle_x", savedX); else editor.remove("handle_x");
+            if (hadY) editor.putFloat("handle_y", savedY); else editor.remove("handle_y");
+            editor.commit();
+            onMain(() -> { try {
+                Class<?> controls = getTargetContext().getClassLoader().loadClass("app.polarbear.TouchControls");
+                Method place = controls.getDeclaredMethod("placeHandle"); place.setAccessible(true);
+                place.invoke(controls.getField("INSTANCE").get(null));
+            } catch (Exception e) { throw new RuntimeException(e); } });
+            SystemClock.sleep(800);
+        }
     }
     private android.view.accessibility.AccessibilityNodeInfo findDescription(android.view.accessibility.AccessibilityNodeInfo node, String text) {
         if (node.getContentDescription() != null && text.equals(node.getContentDescription().toString())) return node;
@@ -463,12 +647,23 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             waitShowing(true);
             onMain(() -> { try { invoke(overlay, "requestReturnToDesktop"); } catch (Exception e) { throw new RuntimeException(e); } });
             waitShowing(false);
+            if (motionOnly) {
+                status("Motion profile ready");
+                SystemClock.sleep(2000);
+                profileUtilityMotion();
+                result.putString("stream", "Portal motion checks passed\nFixture prefix: " + prefix + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             openCapsule(); waitShowing(true);
             check((Boolean) invoke(overlay, "getSessionMode"), "Capsule did not open session controls");
-            status("Floating capsule tap recalled the session controls");
+            status("Utility roundtable recalled the session controls");
             onMain(() -> { try { invoke(overlay, "requestReturnToDesktop"); } catch (Exception e) { throw new RuntimeException(e); } });
             waitShowing(false);
             testCapsuleDrag();
+            testRoundtable();
+            testResponsiveUtility();
+            profileUtilityMotion();
             long now = SystemClock.uptimeMillis();
             sendKeySync(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_P, 0, KeyEvent.META_CTRL_ON | KeyEvent.META_ALT_ON));
             sendKeySync(new KeyEvent(now, now + 1, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_P, 0, KeyEvent.META_CTRL_ON | KeyEvent.META_ALT_ON));
@@ -482,6 +677,32 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             }
             SystemClock.sleep(600);
             status("Apps/Files capsule morphs and rapid open/close transitions passed");
+            for (String panel : new String[] { "files", "apps" }) {
+                onMain(() -> { try { overlay.getMethod("setActivePanel", String.class).invoke(overlay.getField("INSTANCE").get(null), panel); }
+                    catch (Exception e) { throw new RuntimeException(e); } });
+                SystemClock.sleep(800);
+                capture("-" + panel + "-card");
+            }
+            String originalFont = shellText("settings get system font_scale");
+            String originalNight = shellText("cmd uimode night").split(":")[1].trim().split("\\s+")[0];
+            try {
+                shellText("settings put system font_scale 1.6");
+                shellText("cmd uimode night no");
+                SystemClock.sleep(1300);
+                for (String panel : new String[] { "files", "apps" }) {
+                    onMain(() -> { try { overlay.getMethod("setActivePanel", String.class).invoke(overlay.getField("INSTANCE").get(null), panel); }
+                        catch (Exception e) { throw new RuntimeException(e); } });
+                    SystemClock.sleep(800);
+                    capture("-" + panel + "-light-large");
+                }
+                testFileBrowserMotion();
+            } finally {
+                shellText(originalFont.equals("null") ? "settings delete system font_scale" : "settings put system font_scale " + originalFont);
+                shellText("cmd uimode night " + originalNight);
+                SystemClock.sleep(1300);
+            }
+            onMain(() -> { try { overlay.getMethod("setActivePanel", String.class).invoke(overlay.getField("INSTANCE").get(null), new Object[] { null }); }
+                catch (Exception e) { throw new RuntimeException(e); } });
 
             String downloads = operation(new JSONObject().put("action", "defaults")).getString("downloads");
             File source = new File(getTargetContext().getCacheDir(), prefix + "-source");

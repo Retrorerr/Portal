@@ -95,6 +95,34 @@ pub fn is_up() -> bool {
     matches!(state(), OverlayState::Showing | OverlayState::Visible)
 }
 
+static UTILITY_INPUT: AtomicBool = AtomicBool::new(false);
+
+/// A floating utility menu owns input without changing the desktop surface.
+pub fn input_is_blocked() -> bool {
+    is_up() || UTILITY_INPUT.load(Ordering::Acquire)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SessionControls_nativeUtilityInput(
+    _env: JNIEnv,
+    _class: JObject,
+    open: jni::sys::jboolean,
+) -> jni::sys::jboolean {
+    let open = open != 0;
+    if open && (!DESKTOP_READY.load(Ordering::Acquire) || !is_hidden()) {
+        return 0;
+    }
+    UTILITY_INPUT.store(open, Ordering::Release);
+    if open {
+        crate::android::accessibility::release_service_keys();
+        if let Some(proxy) = crate::android::accessibility::event_loop_proxy() {
+            let _ =
+                proxy.send_event(crate::android::accessibility::AppUserEvent::PortalControlsOpened);
+        }
+    }
+    1
+}
+
 /// Whether the overlay hierarchy is fully gone. This is the only state in
 /// which resume/recovery paths may act as if no overlay exists; in
 /// particular `Dismissing` still counts as present.

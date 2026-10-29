@@ -129,7 +129,7 @@ open class PortalActivity : GameActivity() {
     // GameActivity forwards only touch input to native code; controller
     // keys and sticks go to the guest's evdev pads before the view tree.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
-        SessionControls.onShortcut(event) || SessionControls.onBackKey(event) || dispatchMouseSideButton(event) || TouchControls.onBackKey(event) || GamepadBridge.dispatchKey(event) ||
+        SessionControls.onShortcut(event) || SessionControls.onBackKey(event) || TouchControls.dispatchUtilityKey(event) || dispatchMouseSideButton(event) || TouchControls.onBackKey(event) || GamepadBridge.dispatchKey(event) ||
             super.dispatchKeyEvent(event)
 
     /**
@@ -293,7 +293,7 @@ open class PortalActivity : GameActivity() {
     private fun applyPointerCapture() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val view = window.decorView
-        if (pointerCaptureWanted && !ComposeOverlay.isShowing()) {
+        if (pointerCaptureWanted && !ComposeOverlay.isShowing() && !SessionControls.isUtilityVisible()) {
             if (hasWindowFocus() && !view.hasPointerCapture()) view.requestPointerCapture()
         } else if (view.hasPointerCapture()) {
             view.releasePointerCapture()
@@ -424,11 +424,16 @@ open class PortalActivity : GameActivity() {
         applyHighRefresh()
     }
 
+    fun setUtilityHighRefresh(enable: Boolean) {
+        utilityHighRefresh = enable
+        applyHighRefresh()
+    }
+    private var utilityHighRefresh = false
     private var desktopHighRefresh = false
     private var overlayHighRefresh = false
 
     private fun applyHighRefresh() {
-        val enable = desktopHighRefresh || overlayHighRefresh
+        val enable = desktopHighRefresh || overlayHighRefresh || utilityHighRefresh
         try {
             val modeId = if (enable) highRefreshModeId() else 0
             val attributes = window.attributes

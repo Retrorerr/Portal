@@ -638,7 +638,7 @@ object ComposeOverlay {
         }
     }
 
-    private fun requestFrameRate(view: View, rate: Float) {
+    internal fun requestFrameRate(view: View, rate: Float) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) return
         view.requestedFrameRate = rate
         if (view is ViewGroup) {
@@ -700,7 +700,7 @@ object ComposeOverlay {
             }
             // Lifecycle/SavedState/ViewModel owners resolve from the window
             // decor (real AppCompatActivity owners); nothing is tagged here.
-            view.setContent {
+            view.setContent { app.polarbear.setup.components.PortalUiDensity {
                 PortalLaunchTransition(
                     playIntro = !sessionMode && !launchIntroResolved,
                     splashRemoved = systemSplashRemovedState.value,
@@ -724,7 +724,7 @@ object ComposeOverlay {
                     sessionControls = sessionMode,
                     dismissSignal = dismissSignal.value,
                 )
-            }
+            } }
             // Sibling above the native SurfaceView in the SAME window: no
             // second window is created and the SurfaceView is untouched.
             host.addView(

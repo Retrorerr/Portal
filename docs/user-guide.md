@@ -28,12 +28,17 @@ Portal 2.4.x predates the updater, so install the current version once by hand f
 
 ## Transferring files
 
-Tap the floating **Portal** capsule to bring the controls over your running
-desktop. Drag the capsule to move it; its position is remembered and kept inside
-the screen after rotation or resizing. It shows transfer progress while files
-are being copied, and adds game controls when Steam or a game is running.
-**Ctrl+Alt+P** also opens the controls; accessibility tools can use
-**Open Portal controls**. Swipe up or choose **Return to desktop** to leave.
+Tap the **Portal** tab at the screen edge to open its labelled controls. The
+bubbles open the Portal veil, Files, Apps, or the keyboard preview. Game options
+and on-screen controls appear while Steam or a game is running. The keyboard is
+an interactive layout preview; it does not send keys to the desktop yet.
+
+Drag the tab to move it. It coasts briefly, settles against the nearest edge,
+and remembers its position. It becomes quieter while you use the desktop.
+**Ctrl+Alt+P** opens the veil directly; accessibility tools can use
+**Open Portal controls**. **Escape**, **Back**, or a tap outside
+closes the utility menu; from the keyboard preview, they return to its controls.
+Swipe up or activate the bottom veil affordance to return to the desktop.
 
 Open **Files**, beside **Apps**:
 

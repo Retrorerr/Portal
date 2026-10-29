@@ -13,11 +13,15 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -422,7 +426,12 @@ internal fun PortalRevealVeil(
                             translationY = -fade * affordanceRisePx
                         },
                 ) {
-                    PortalHomeGestureAffordance(ink = motion.ink, sweepKey = sweepKey)
+                    PortalHomeGestureAffordance(ink = motion.ink, sweepKey = sweepKey) {
+                        if (!commitInFlight[0] && motion.height > 0f) {
+                            settleJob[0]?.cancel(); hintJob[0]?.cancel(); motion.hint = 0f
+                            commitReveal(motion.height,0f)
+                        }
+                    }
                 }
             }
         }
@@ -447,7 +456,10 @@ internal fun effectStrengthFor(upwardVelocityPx: Float, density: Float): Float {
 }
 
 @Composable
-private fun PortalHomeGestureAffordance(ink: Color, sweepKey: Int) {
+private fun PortalHomeGestureAffordance(ink: Color, sweepKey: Int, onEnter: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.96f else 1f, spring(dampingRatio = 0.86f, stiffness = 550f), label = "veil affordance press")
     val sweep = remember { Animatable(0f) }
     val sweepLayer = rememberPortalAffordanceSweepLayer { sweep.value }
 
@@ -467,6 +479,10 @@ private fun PortalHomeGestureAffordance(ink: Color, sweepKey: Int) {
         modifier = Modifier
             .navigationBarsPadding()
             .padding(bottom = 16.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clickable(interactionSource = interaction, indication = null, role = androidx.compose.ui.semantics.Role.Button,
+                onClickLabel = "Enter Portal", onClick = onEnter)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
             .then(sweepLayer),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
