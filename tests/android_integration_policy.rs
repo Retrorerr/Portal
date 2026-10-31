@@ -527,7 +527,7 @@ fn anland_session_forces_wayland_qpa_for_plasma_clients() {
     // xcb, fail to start, and plasma_session waits forever for
     // org.kde.ksmserver. DISPLAY stays set for XWayland/Firefox (X11).
     // Wayland must come first; xcb is only the fallback for Qt5 apps.
-    assert!(STARTPLASMA_SOURCE.contains("QT_QPA_PLATFORM=\"wayland;xcb\""));
+    assert!(STARTPLASMA_SOURCE.contains("QT_QPA_PLATFORM=\"${QT_QPA_PLATFORM-wayland;xcb}\""));
 }
 
 #[test]

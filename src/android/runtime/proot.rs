@@ -615,6 +615,32 @@ impl PRootRuntime {
         if tawcroot {
             process.arg("--");
         }
+        // Debug tooling must enter the same engine/rootfs/graphics mounts as
+        // the desktop. Reconstructing these in Python silently tested PRoot
+        // as root against a tawcroot session and stock (software) Mesa.
+        #[cfg(feature = "portal-debug")]
+        if spec.system_services {
+            let record = serde_json::json!({
+                "version": 1,
+                "host_pid": std::process::id(),
+                "engine": if tawcroot { "tawcroot" } else { "proot" },
+                "rootfs": self.rootfs,
+                "user": user,
+                "program": process.get_program().to_string_lossy(),
+                "args": process.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                "env": process.get_envs().filter_map(|(key, value)| value.map(|value| (
+                    key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned()
+                ))).collect::<std::collections::BTreeMap<_, _>>(),
+            });
+            let directory = context.data_dir.join("diagnostics");
+            let temporary = directory.join("guest-launch.json.tmp");
+            let saved = fs::create_dir_all(&directory)
+                .and_then(|()| fs::write(&temporary, record.to_string()))
+                .and_then(|()| fs::rename(&temporary, directory.join("guest-launch.json")));
+            if let Err(error) = saved {
+                log::warn!("Debug guest launch record unavailable: {error}");
+            }
+        }
         process.arg("/usr/bin/env").arg("-i");
         if user == "root" {
             process.arg("HOME=/root");

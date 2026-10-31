@@ -1292,7 +1292,23 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             }
         }
 
-        for event in accessibility::drain_pending_events() {
+        let virtual_key = if let AppUserEvent::DesktopKey { scancode, down } = _event {
+            Some(accessibility::AccessibilityKeyEvent {
+                scancode,
+                state: if down {
+                    ElementState::Pressed
+                } else {
+                    ElementState::Released
+                },
+                event_time_ms: 0,
+            })
+        } else {
+            None
+        };
+        for event in accessibility::drain_pending_events()
+            .into_iter()
+            .chain(virtual_key)
+        {
             // Keys queued just before the Anland sink was registered.
             if let Some(session) = backend.anland.as_ref() {
                 anland_key(

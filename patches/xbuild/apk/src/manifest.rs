@@ -143,6 +143,9 @@ pub struct Service {
     #[serde(rename(serialize = "meta-data"))]
     #[serde(default)]
     pub meta_data: Vec<MetaData>,
+    #[serde(rename(serialize = "property"))]
+    #[serde(default)]
+    pub properties: Vec<Property>,
     #[serde(rename(serialize = "intent-filter"))]
     #[serde(default)]
     pub intent_filters: Vec<IntentFilter>,
@@ -239,6 +242,18 @@ pub struct MetaData {
     pub resource: Option<String>,
 }
 
+/// Android service property (distinct from meta-data, including specialUse FGS declarations).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Property {
+    #[serde(rename(serialize = "android:name"))]
+    pub name: String,
+    #[serde(rename(serialize = "android:value"))]
+    pub value: Option<String>,
+    #[serde(rename(serialize = "android:resource"))]
+    pub resource: Option<String>,
+}
+
 /// Android [uses-feature element](https://developer.android.com/guide/topics/manifest/uses-feature-element).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -304,4 +319,57 @@ pub struct Sdk {
 
 fn default_namespace() -> String {
     "http://schemas.android.com/apk/res/android".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serializes_service_properties_separately_from_metadata() {
+        let mut manifest = AndroidManifest::default();
+        manifest.application.services.push(Service {
+            name: Some("app.polarbear.SessionService".into()),
+            exported: Some(false),
+            foreground_service_type: Some("specialUse".into()),
+            properties: vec![Property {
+                name: "android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE".into(),
+                value: Some("Desktop IPC & network connections".into()),
+                resource: None,
+            }],
+            meta_data: vec![MetaData {
+                name: "independent-metadata".into(),
+                value: Some("retained".into()),
+                resource: None,
+            }],
+            ..Service::default()
+        });
+        let xml = manifest.to_string();
+        let document = roxmltree::Document::parse(&xml).unwrap();
+        let namespace = "http://schemas.android.com/apk/res/android";
+        let service = document
+            .descendants()
+            .find(|node| node.has_tag_name("service"))
+            .unwrap();
+        assert_eq!(
+            service.attribute((namespace, "foregroundServiceType")),
+            Some("specialUse")
+        );
+        assert_eq!(service.attribute((namespace, "exported")), Some("false"));
+        let property = service
+            .children()
+            .find(|node| node.has_tag_name("property"))
+            .unwrap();
+        assert_eq!(
+            property.attribute((namespace, "name")),
+            Some("android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE")
+        );
+        assert_eq!(
+            property.attribute((namespace, "value")),
+            Some("Desktop IPC & network connections")
+        );
+        assert!(service
+            .children()
+            .any(|node| node.has_tag_name("meta-data")));
+    }
 }

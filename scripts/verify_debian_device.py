@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import subprocess
+from guest_exec import Session
 
 PACKAGE = "app.polarbear"
 FILES = f"/data/data/{PACKAGE}/files"
@@ -26,17 +27,9 @@ def shell(serial, args):
     return subprocess.check_output(["adb", "-s", serial, "shell", shlex.join(args)], text=True)
 
 def guest(serial, command):
-    package = shell(serial, ["dumpsys", "package", PACKAGE])
-    lib = re.search(r"codePath=(\S+)", package).group(1) + "/lib/arm64"
-    root = FILES + "/runtime-B"
-    args = [f"{lib}/libproot.so", "-r", root, "-w", "/", "-0", "--link2symlink", "--sysvipc",
-        "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", f"{root}/tmp:/dev/shm",
-        "/usr/bin/env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/root", "LANG=C.UTF-8",
-        "LD_PRELOAD=/usr/local/lib/localdesktop-crash-handler.so",
-        "/bin/sh", "-c", command]
-    invocation = ("export PROOT_LOADER=" + shlex.quote(lib + "/libproot_loader.so") +
-        "; export PROOT_TMP_DIR=" + shlex.quote(FILES) + "; exec " + shlex.join(args))
-    return shell(serial, ["run-as", PACKAGE, "sh", "-c", invocation])
+    result = Session.connect(serial).run(command, capture_output=True, text=True)
+    result.check_returncode()
+    return result.stdout
 
 def verify(serial):
     state = shell(serial, ["run-as", PACKAGE, "sh", "-c",

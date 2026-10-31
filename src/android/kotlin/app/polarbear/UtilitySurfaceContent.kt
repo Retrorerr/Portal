@@ -19,11 +19,17 @@ internal val LocalUtilityContentActive = compositionLocalOf { true }
 @Composable
 internal fun UtilitySurfaceContent(
     target: Pair<UtilityPage,Boolean>, prepareKeyboard: Boolean, modifier: Modifier = Modifier, onResizing: (Boolean) -> Unit = {},
+    onTargetSize: (UtilityPage, IntSize) -> Unit = { _, _ -> },
     content: @Composable (Pair<UtilityPage,Boolean>) -> Unit,
 ) {
     var keyboardCreated by remember { mutableStateOf(false) }
-    if (prepareKeyboard || target.first == UtilityPage.Keyboard) keyboardCreated = true
-    val states = remember { listOf(UtilityPage.Dock to false,UtilityPage.Menu to false,UtilityPage.Menu to true,UtilityPage.Keyboard to false) }
+    var gamingCreated by remember { mutableStateOf(false) }
+    LaunchedEffect(prepareKeyboard, target.first) {
+        if (prepareKeyboard || target.first == UtilityPage.Keyboard) keyboardCreated = true
+        if (target.first == UtilityPage.Gaming) gamingCreated = true
+    }
+    val states = remember { listOf(UtilityPage.Dock to false,UtilityPage.Menu to false,UtilityPage.Menu to true,
+        UtilityPage.Keyboard to false,UtilityPage.Gaming to false) }
     var wanted by remember { mutableStateOf(IntSize.Zero) }
     var measuredSize by remember { mutableStateOf(IntSize.Zero) }
     val resizing = wanted != measuredSize
@@ -37,13 +43,15 @@ internal fun UtilitySurfaceContent(
                 label = "utility ${state.first} content")
             opacities[index] = alpha
             val scale by animateFloatAsState(if (selected) 1f else 0.985f,tween(420,easing = PortalEmphasized),label = "utility content settle")
-            CompositionLocalProvider(LocalUtilityContentActive provides selected) {
+            val interactive by remember(selected, resizing) { derivedStateOf { selected && !resizing && alpha.value > 0.98f } }
+            CompositionLocalProvider(LocalUtilityContentActive provides interactive) {
                 Box(Modifier.graphicsLayer { this.alpha = alpha.value; scaleX = scale; scaleY = scale }
                     // Publish keyboard targets after the window reaches them.
                     // Enumerating every moving key each frame causes stalls
                     // with Android accessibility services connected.
                     .then(if (!selected || resizing) Modifier.clearAndSetSemantics {} else Modifier)) {
-                    if (state.first != UtilityPage.Keyboard || keyboardCreated) content(state)
+                    if ((state.first != UtilityPage.Keyboard || keyboardCreated || target.first == UtilityPage.Keyboard) &&
+                        (state.first != UtilityPage.Gaming || gamingCreated || target.first == UtilityPage.Gaming)) content(state)
                 }
             }
         } }
@@ -51,6 +59,7 @@ internal fun UtilitySurfaceContent(
         val measured = children.map { it.measure(constraints.copy(minWidth = 0,minHeight = 0)) }
         val selected = measured[states.indexOf(target)]
         wanted = IntSize(selected.width,selected.height)
+        onTargetSize(target.first, wanted)
         layout(selected.width,selected.height) {
             measured.forEachIndexed { index,item ->
                 // Unplaced retained pages draw nothing, take no input and

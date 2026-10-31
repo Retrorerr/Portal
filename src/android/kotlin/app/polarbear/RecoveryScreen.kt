@@ -123,11 +123,13 @@ object RecoveryScreen {
             }
             val view = ComposeView(activity).apply {
                 setContent {
-                    PortalRecoveryScreen(
-                        state = state.value,
-                        onRetry = ::retryPlasma,
-                        onExport = ::exportDiagnostics,
-                    )
+                    app.polarbear.setup.PortalTheme {
+                        PortalRecoveryScreen(
+                            state = state.value,
+                            onRetry = ::retryPlasma,
+                            onExport = ::exportDiagnostics,
+                        )
+                    }
                 }
             }
             frame.addView(

@@ -10,9 +10,16 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import app.polarbear.setup.components.PortalEmphasized
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -161,6 +168,63 @@ fun resolvePalette(mode: AppearanceMode): PortalPalette {
         fragmentGain = animateFloatAsState(target.fragmentGain, tween(360, easing = PortalEmphasized), label = "theme fragment gain").value,
         thresholdGain = animateFloatAsState(target.thresholdGain, tween(360, easing = PortalEmphasized), label = "theme threshold gain").value,
     )
+}
+
+/**
+ * The one Compose root theme. Every Portal composition (setup/return overlay,
+ * recovery, utility glass, game panels and previews) enters through this, so
+ * a Material3 control can never fall back to the framework's purple scheme on
+ * one screen while the rest of Portal is charcoal and orange. Text keeps its
+ * pre-theme line-height behaviour: screens size their own type explicitly.
+ */
+@Composable
+internal fun PortalTheme(
+    mode: AppearanceMode = AppearanceMode.System,
+    content: @Composable () -> Unit,
+) {
+    val palette = resolvePalette(mode)
+    val colors = if (palette.isDark) {
+        darkColorScheme(
+            primary = palette.accent,
+            onPrimary = palette.background,
+            secondary = palette.accent,
+            onSecondary = palette.background,
+            background = palette.background,
+            onBackground = palette.textPrimary,
+            surface = palette.background,
+            onSurface = palette.textPrimary,
+            surfaceVariant = palette.background,
+            onSurfaceVariant = palette.textMuted,
+            outline = palette.surfaceBorder,
+            error = Color(0xFFFF6B5E),
+            onError = palette.background,
+            scrim = Color.Black,
+        )
+    } else {
+        lightColorScheme(
+            primary = palette.accent,
+            onPrimary = Color.White,
+            secondary = palette.accent,
+            onSecondary = palette.background,
+            background = palette.background,
+            onBackground = palette.textPrimary,
+            surface = palette.background,
+            onSurface = palette.textPrimary,
+            surfaceVariant = palette.background,
+            onSurfaceVariant = palette.textMuted,
+            outline = palette.surfaceBorder,
+            error = Color(0xFFB3261E),
+            onError = Color.White,
+            scrim = palette.background,
+        )
+    }
+    MaterialTheme(colorScheme = colors) {
+        CompositionLocalProvider(
+            LocalContentColor provides palette.textPrimary,
+            LocalTextStyle provides TextStyle.Default,
+            content = content,
+        )
+    }
 }
 
 object PortalDimens {

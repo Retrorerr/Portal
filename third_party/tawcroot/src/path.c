@@ -895,6 +895,7 @@ long tawcroot_path_add_bind(const char *src_host, const char *dst_guest,
 	if (tawcroot_n_binds >= TAWCROOT_MAX_BINDS) return TAWC_ENOSPC;
 	struct tawcroot_bind *b = &tawcroot_binds[tawcroot_n_binds];
 	if (tawc_strlen(src_host) >= sizeof b->src) return TAWC_ENAMETOOLONG;
+	b->exec_src[0] = 0;
 
 	/* Normalize dst through the lexical fold so it matches folded
 	 * suffixes at lookup time — a dst with a trailing '/', '//' runs,
@@ -923,6 +924,18 @@ long tawcroot_path_add_bind(const char *src_host, const char *dst_guest,
 	int is_file = fd == TAWC_ENOTDIR;
 	if (is_file) fd = tawc_openat(AT_FDCWD, src_host, O_PATH | O_CLOEXEC, 0);
 	if (fd < 0) return fd;
+	if (!is_file && tawc_starts_with(src_host, "/proc/")) {
+		const char *p = src_host + 6;
+		const char *digits = p;
+		while (*p >= '0' && *p <= '9') ++p;
+		if (p > digits && tawc_starts_with(p, "/fd/")) {
+			p += 4;
+			digits = p;
+			while (*p >= '0' && *p <= '9') ++p;
+			if (p > digits && *p == 0)
+				(void)tawc_str_copy(b->exec_src, sizeof b->exec_src, src_host);
+		}
+	}
 	b->leaf[0] = 0;
 	long pn = tawcroot_proc_fd_to_host_path((int)fd, b->src, sizeof b->src);
 	if (pn < 0) {

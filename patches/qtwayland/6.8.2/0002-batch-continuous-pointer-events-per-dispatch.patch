@@ -1,0 +1,365 @@
+--- a/src/client/qwaylandwindow.cpp
++++ b/src/client/qwaylandwindow.cpp
+@@ -19,6 +19,8 @@
+ #include "qwaylandshellintegration_p.h"
+ #include "qwaylandviewport_p.h"
+ 
++#include <memory>
++#include <utility>
+ #include <QtCore/QFileInfo>
+ #include <QtCore/QPointer>
+ #include <QtCore/QRegularExpression>
+@@ -40,6 +42,48 @@
+ using namespace Qt::StringLiterals;
+ 
+ namespace QtWaylandClient {
++
++namespace {
++int pointerBatchDepth = 0;
++bool deliveringPointerBatch = false;
++struct HeldPointerEvent {
++    QPointer<QWaylandWindow> window;
++    QPointer<QWaylandInputDevice> input;
++    std::unique_ptr<QWaylandPointerEvent> event;
++} heldPointer;
++
++bool canMergePointer(const QWaylandPointerEvent &a, const QWaylandPointerEvent &b)
++{
++    if (a.type != b.type || a.surface != b.surface || a.modifiers != b.modifiers
++            || a.buttons != b.buttons || a.button != b.button || a.source != b.source
++            || a.phase != b.phase || a.inverted != b.inverted)
++        return false;
++    // Opposite deltas are separate actions, not a zero-distance scroll.
++    return a.pixelDelta.x() * qint64(b.pixelDelta.x()) >= 0
++        && a.pixelDelta.y() * qint64(b.pixelDelta.y()) >= 0
++        && a.angleDelta.x() * qint64(b.angleDelta.x()) >= 0
++        && a.angleDelta.y() * qint64(b.angleDelta.y()) >= 0;
++}
++}
++
++void flushPointerEventBatch()
++{
++    HeldPointerEvent event = std::move(heldPointer);
++    heldPointer = {};
++    if (!event.window || !event.input || !event.event)
++        return;
++    const bool previous = std::exchange(deliveringPointerBatch, true);
++    event.window->handleMouse(event.input, *event.event);
++    deliveringPointerBatch = previous;
++}
++
++void beginPointerEventBatch() { ++pointerBatchDepth; }
++void endPointerEventBatch()
++{
++    Q_ASSERT(pointerBatchDepth > 0);
++    if (--pointerBatchDepth == 0)
++        flushPointerEventBatch();
++}
+ 
+ Q_LOGGING_CATEGORY(lcWaylandBackingstore, "qt.qpa.wayland.backingstore")
+ 
+@@ -1189,6 +1233,31 @@
+ 
+ void QWaylandWindow::handleMouse(QWaylandInputDevice *inputDevice, const QWaylandPointerEvent &e)
+ {
++    if (!deliveringPointerBatch) {
++        const bool continuous = e.type == QEvent::MouseMove
++            || (e.type == QEvent::Wheel && (e.phase == Qt::ScrollUpdate || e.phase == Qt::NoScrollPhase));
++        if (pointerBatchDepth && continuous
++                && QCoreApplication::testAttribute(Qt::AA_CompressHighFrequencyEvents)) {
++            if (heldPointer.event && (heldPointer.window != this || heldPointer.input != inputDevice
++                    || !canMergePointer(*heldPointer.event, e)))
++                flushPointerEventBatch();
++            if (heldPointer.event && e.type == QEvent::Wheel) {
++                const QPoint pixels = heldPointer.event->pixelDelta + e.pixelDelta;
++                const QPoint angles = heldPointer.event->angleDelta + e.angleDelta;
++                *heldPointer.event = e;
++                heldPointer.event->pixelDelta = pixels;
++                heldPointer.event->angleDelta = angles;
++            } else {
++                heldPointer.window = this;
++                heldPointer.input = inputDevice;
++                heldPointer.event = std::make_unique<QWaylandPointerEvent>(e);
++            }
++            return;
++        }
++        // Press/release, enter/leave and scroll begin/end are barriers.
++        flushPointerEventBatch();
++    }
++
+     // There's currently no way to get info about the actual hardware device in use.
+     // At least we get the correct seat.
+     const QPointingDevice *device = QPointingDevice::primaryPointingDevice(inputDevice->seatname());
+--- a/src/client/qwaylandwindow_p.h
++++ b/src/client/qwaylandwindow_p.h
+@@ -42,6 +42,11 @@
+ QT_BEGIN_NAMESPACE
+ 
+ namespace QtWaylandClient {
++// Complete pointer events are compressed only inside one dispatch burst.
++// No private class layout or existing exported symbol changes.
++Q_WAYLANDCLIENT_EXPORT void beginPointerEventBatch();
++Q_WAYLANDCLIENT_EXPORT void endPointerEventBatch();
++Q_WAYLANDCLIENT_EXPORT void flushPointerEventBatch();
+ 
+ Q_DECLARE_LOGGING_CATEGORY(lcWaylandBackingstore)
+ 
+--- a/src/client/qwaylandinputdevice.cpp
++++ b/src/client/qwaylandinputdevice.cpp
+@@ -1193,6 +1193,7 @@
+ 
+ void QWaylandInputDevice::Keyboard::keyboard_enter(uint32_t time, struct wl_surface *surface, struct wl_array *keys)
+ {
++    flushPointerEventBatch();
+     Q_UNUSED(time);
+     Q_UNUSED(keys);
+ 
+@@ -1219,6 +1220,7 @@
+ 
+ void QWaylandInputDevice::Keyboard::keyboard_leave(uint32_t time, struct wl_surface *surface)
+ {
++    flushPointerEventBatch();
+     Q_UNUSED(time);
+ 
+     if (!surface) {
+@@ -1245,6 +1247,7 @@
+                                               quint32 nativeVirtualKey, quint32 nativeModifiers,
+                                               const QString &text, bool autorepeat, ushort count)
+ {
++    flushPointerEventBatch();
+     QPlatformInputContext *inputContext = QGuiApplicationPrivate::platformIntegration()->inputContext();
+     bool filtered = false;
+ 
+@@ -1349,6 +1352,7 @@
+                                              uint32_t mods_locked,
+                                              uint32_t group)
+ {
++    flushPointerEventBatch();
+     Q_UNUSED(serial);
+ #if QT_CONFIG(xkbcommon)
+     if (mXkbState)
+@@ -1377,6 +1381,7 @@
+                                      wl_fixed_t x,
+                                      wl_fixed_t y)
+ {
++    flushPointerEventBatch();
+     if (!surface)
+         return;
+ 
+@@ -1394,6 +1399,7 @@
+ 
+ void QWaylandInputDevice::Touch::touch_up(uint32_t serial, uint32_t time, int32_t id)
+ {
++    flushPointerEventBatch();
+     Q_UNUSED(serial);
+     mParent->mTime = time;
+     mParent->handleTouchPoint(id, QEventPoint::Released);
+@@ -1414,6 +1420,7 @@
+ 
+ void QWaylandInputDevice::Touch::touch_motion(uint32_t time, int32_t id, wl_fixed_t x, wl_fixed_t y)
+ {
++    flushPointerEventBatch();
+     QPointF position(wl_fixed_to_double(x), wl_fixed_to_double(y));
+     mParent->mTime = time;
+     mParent->handleTouchPoint(id, QEventPoint::Updated, position);
+@@ -1421,6 +1428,7 @@
+ 
+ void QWaylandInputDevice::Touch::touch_cancel()
+ {
++    flushPointerEventBatch();
+     mPendingTouchPoints.clear();
+ 
+     QWaylandTouchExtension *touchExt = mParent->mQDisplay->touchExtension();
+--- a/src/client/qwaylanddisplay.cpp
++++ b/src/client/qwaylanddisplay.cpp
+@@ -502,7 +502,9 @@
+ 
+ void QWaylandDisplay::flushRequests()
+ {
++    beginPointerEventBatch();
+     m_eventThread->readAndDispatchEvents();
++    endPointerEventBatch();
+ }
+ 
+ // We have to wait until we have an eventDispatcher before creating the eventThread,
+--- a/src/client/qwaylandtabletv2.cpp
++++ b/src/client/qwaylandtabletv2.cpp
+@@ -194,6 +194,7 @@
+ 
+ void QWaylandTabletSeatV2::zwp_tablet_seat_v2_tablet_added(zwp_tablet_v2 *id)
+ {
++    flushPointerEventBatch();
+     auto *tablet = new QWaylandTabletV2(id, m_seat->seatname());
+     qCDebug(lcQpaInputDevices) << "seat" << this << id << "has tablet" << tablet;
+     tablet->setParent(this);
+@@ -203,6 +204,7 @@
+ 
+ void QWaylandTabletSeatV2::zwp_tablet_seat_v2_tool_added(zwp_tablet_tool_v2 *id)
+ {
++    flushPointerEventBatch();
+     qDeleteAll(m_deadTools);
+     auto *tool = new QWaylandTabletToolV2(this, id);
+     if (m_tablets.size() == 1) {
+@@ -222,6 +224,7 @@
+ 
+ void QWaylandTabletSeatV2::zwp_tablet_seat_v2_pad_added(zwp_tablet_pad_v2 *id)
+ {
++    flushPointerEventBatch();
+     auto *pad = new QWaylandTabletPadV2(id);
+     if (m_tablets.size() == 1) {
+         pad->setParent(m_tablets.first());
+@@ -319,6 +322,7 @@
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_type(uint32_t tool_type)
+ {
++    flushPointerEventBatch();
+     QPointingDevicePrivate *d = QPointingDevicePrivate::get(this);
+ 
+     switch (tool_type) {
+@@ -363,18 +367,21 @@
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_hardware_serial(uint32_t hardware_serial_hi, uint32_t hardware_serial_lo)
+ {
++    flushPointerEventBatch();
+     QPointingDevicePrivate *d = QPointingDevicePrivate::get(this);
+     d->uniqueId = QPointingDeviceUniqueId::fromNumericId((quint64(hardware_serial_hi) << 32) + hardware_serial_lo);
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_hardware_id_wacom(uint32_t hardware_id_hi, uint32_t hardware_id_lo)
+ {
++    flushPointerEventBatch();
+     QPointingDevicePrivate *d = QPointingDevicePrivate::get(this);
+     d->systemId = (quint64(hardware_id_hi) << 32) + hardware_id_lo;
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_capability(uint32_t capability)
+ {
++    flushPointerEventBatch();
+     QPointingDevicePrivate *d = QPointingDevicePrivate::get(this);
+     switch (capability) {
+     case capability_tilt:
+@@ -404,16 +411,19 @@
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_done()
+ {
++    flushPointerEventBatch();
+     QWindowSystemInterface::registerInputDevice(this);
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_removed()
+ {
++    flushPointerEventBatch();
+     m_tabletSeat->toolRemoved(this);
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_proximity_in(uint32_t serial, zwp_tablet_v2 *tablet, wl_surface *surface)
+ {
++    flushPointerEventBatch();
+     Q_UNUSED(tablet);
+ 
+     m_tabletSeat->seat()->mSerial = serial;
+@@ -434,12 +444,14 @@
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_proximity_out()
+ {
++    flushPointerEventBatch();
+     m_pending.enteredSurface = false;
+     m_pending.proximitySurface = nullptr;
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_down(uint32_t serial)
+ {
++    flushPointerEventBatch();
+     m_pending.down = true;
+ 
+     m_tabletSeat->seat()->mSerial = serial;
+@@ -454,38 +466,45 @@
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_up()
+ {
++    flushPointerEventBatch();
+     m_pending.down = false;
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_motion(wl_fixed_t x, wl_fixed_t y)
+ {
++    flushPointerEventBatch();
+     m_pending.surfacePosition = QPointF(wl_fixed_to_double(x), wl_fixed_to_double(y));
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_pressure(uint32_t pressure)
+ {
++    flushPointerEventBatch();
+     const int maxPressure = 65535;
+     m_pending.pressure = qreal(pressure)/maxPressure;
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_distance(uint32_t distance)
+ {
++    flushPointerEventBatch();
+     m_pending.distance = distance;
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_tilt(wl_fixed_t tilt_x, wl_fixed_t tilt_y)
+ {
++    flushPointerEventBatch();
+     m_pending.xTilt = wl_fixed_to_double(tilt_x);
+     m_pending.yTilt = wl_fixed_to_double(tilt_y);
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_rotation(wl_fixed_t degrees)
+ {
++    flushPointerEventBatch();
+     m_pending.rotation = wl_fixed_to_double(degrees);
+ }
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_slider(int32_t position)
+ {
++    flushPointerEventBatch();
+     m_pending.slider = qreal(position) / 65535;
+ }
+ 
+@@ -502,6 +521,7 @@
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_button(uint32_t serial, uint32_t button, uint32_t state)
+ {
++    flushPointerEventBatch();
+     m_tabletSeat->seat()->mSerial = serial;
+ 
+     QPointingDevicePrivate *d = QPointingDevicePrivate::get(this);
+@@ -520,6 +540,7 @@
+ 
+ void QWaylandTabletToolV2::zwp_tablet_tool_v2_frame(uint32_t time)
+ {
++    flushPointerEventBatch();
+     if (!m_pending.proximitySurface) {
+         if (m_applied.enteredSurface) {
+             // leaving proximity
+@@ -607,23 +628,27 @@
+ 
+ void QWaylandTabletPadV2::zwp_tablet_pad_v2_path(const QString &path)
+ {
++    flushPointerEventBatch();
+     QPointingDevicePrivate *d = QPointingDevicePrivate::get(this);
+     d->busId = path;
+ }
+ 
+ void QWaylandTabletPadV2::zwp_tablet_pad_v2_buttons(uint32_t buttons)
+ {
++    flushPointerEventBatch();
+     QPointingDevicePrivate *d = QPointingDevicePrivate::get(this);
+     d->buttonCount = buttons;
+ }
+ 
+ void QWaylandTabletPadV2::zwp_tablet_pad_v2_done()
+ {
++    flushPointerEventBatch();
+     QWindowSystemInterface::registerInputDevice(this);
+ }
+ 
+ void QWaylandTabletPadV2::zwp_tablet_pad_v2_removed()
+ {
++    flushPointerEventBatch();
+     delete this;
+ }
+ 

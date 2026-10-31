@@ -143,6 +143,15 @@ SEED_PACKAGES = [
     "ffmpegthumbs",
     "kimageformat6-plugins",
     "qt6-image-formats-plugins",
+    # Native Qt 5 apps need the QPA plugin, not just libQt5WaylandClient.
+    # Keep in sync with core::guest_compat for existing-install upgrades.
+    "qtwayland5",
+    "qt6-wayland",
+    "qt5-image-formats-plugins",
+    "qt6-svg-plugins",
+    "libqt5svg5",
+    "libxkbcommon-x11-0",
+    "libxcb-cursor0",
     # Plasma addons, window management, help & docs
     "plasma-dataengines-addons",
     "plasma-calendar-addons",

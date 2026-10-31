@@ -43,6 +43,8 @@ internal fun UtilityRoundtable(
     onHub: () -> Unit, onAction: (String) -> Unit, onBack: () -> Unit, onOutside: () -> Unit,
     onHubBounds: (android.graphics.RectF) -> Unit, onActionBounds: (String, android.graphics.RectF) -> Unit = { _, _ -> },
     onAnimating: (Boolean) -> Unit = {}, onSettled: (UtilityPage,Int) -> Unit,
+    onKeyboardBounds: (android.graphics.RectF) -> Unit = {},
+    onEditController: () -> Unit = {},
 ) {
     if (!ready) return
     val palette = resolvePalette(AppearanceMode.System)
@@ -62,8 +64,8 @@ internal fun UtilityRoundtable(
         add(UtilityAction("veil", "Portal veil", PortalGlyph.Veil))
         add(UtilityAction("files", "Files", PortalGlyph.Files, if (active > 0) "$active copying" else if (failed) "Needs attention" else ""))
         add(UtilityAction("apps", "Apps", PortalGlyph.Apps))
-        add(UtilityAction("keyboard", "Keyboard", PortalGlyph.Keyboard, "Preview"))
-        add(UtilityAction("game", "Game options", PortalGlyph.Options, available = TouchControls.steamRunning.value || TouchControls.gameRunning.value))
+        add(UtilityAction("keyboard", "Keyboard", PortalGlyph.Keyboard))
+        add(UtilityAction("game", "Game settings", PortalGlyph.Options))
         add(UtilityAction("controller", if (TouchControls.controllerVisible) "Hide controls" else "Show controls", PortalGlyph.Controller, available = TouchControls.gameRunning.value))
     }
     val available = actions.filter { it.available }
@@ -72,31 +74,46 @@ internal fun UtilityRoundtable(
     val radialTarget = if (geometry.compact) 0f else 1f
     val radial by animateFloatAsState(radialTarget,spring(dampingRatio = 1f,stiffness = 380f),label = "responsive roundtable")
     var surfaceResizing by remember { mutableStateOf(false) }
+    val keyboardScope = rememberCoroutineScope()
+    val keyboardMotion = remember { UtilityKeyboardMotion(keyboardScope) }
+    SideEffect { keyboardMotion.updateArea(area, density.density) }
+    LaunchedEffect(page) { keyboardMotion.stop() }
     val transition = updateTransition(page, label = "utility presentation")
     val dockCaptureBounds = remember { android.graphics.RectF() }
-    val moving = { page != UtilityPage.Dock || dragging || directPosition || transition.isRunning || surfaceResizing }
+    val keyboardCaptureBounds = remember { android.graphics.RectF() }
+    val moving = { dragging || directPosition || transition.isRunning || surfaceResizing || keyboardMotion.isMoving }
     val frost = rememberUtilityFrost(ready,
         crop = {
-            if (moving() || dockCaptureBounds.isEmpty) null
+            if (page == UtilityPage.Keyboard && !moving() && !keyboardCaptureBounds.isEmpty)
+                androidx.compose.ui.geometry.Rect(keyboardCaptureBounds.left,keyboardCaptureBounds.top,keyboardCaptureBounds.right,keyboardCaptureBounds.bottom)
+            else if (page != UtilityPage.Dock || moving() || dockCaptureBounds.isEmpty) null
             else androidx.compose.ui.geometry.Rect(dockCaptureBounds.left,dockCaptureBounds.top,dockCaptureBounds.right,dockCaptureBounds.bottom)
         },moving = moving)
     val hasFrost by remember(frost) { derivedStateOf { frost.current != null } }
     val surfaceBase by animateColorAsState(palette.background.copy(alpha = if (hasFrost) PortalFrostStyle.tint(palette.isDark) else 0.96f),
         tween(320,easing = PortalEmphasized),label = "utility glass tint")
-    val centering by transition.animateFloat(transitionSpec = { spring(dampingRatio = 0.88f, stiffness = 230f) }, label = "utility travel") {
+    val centering by transition.animateFloat(transitionSpec = { spring(dampingRatio = 1f, stiffness = 230f) }, label = "utility travel") {
         if (it == UtilityPage.Dock) 0f else 1f
+    }
+    val keyboardTravel by transition.animateFloat(transitionSpec = { spring(dampingRatio = 1f, stiffness = 230f) }, label = "keyboard travel") {
+        if (it == UtilityPage.Keyboard) 1f else 0f
+    }
+    val gamingTravel by transition.animateFloat(transitionSpec = { spring(dampingRatio = 1f, stiffness = 230f) }, label = "game settings travel") {
+        if (it == UtilityPage.Gaming) 1f else 0f
     }
     val menuReveal by transition.animateFloat(transitionSpec = { spring(dampingRatio = 0.88f, stiffness = 300f) }, label = "bubble orbit") {
         if (it == UtilityPage.Menu) 1f else 0f
     }
-    val targetCenter = if (page == UtilityPage.Keyboard) Offset((area.left+area.right)/2,(area.top+area.bottom)/2)
-        else Offset(geometry.center.x,geometry.center.y)
+    val targetCenter = Offset(geometry.center.x,geometry.center.y)
     val menuCenter by animateOffsetAsState(targetCenter, spring(dampingRatio = 0.88f, stiffness = 230f), label = "utility viewport")
     // Read motion in placement/layer blocks. Rebuilding the controls on every
     // animation frame needlessly competes with the running desktop for UI time.
     val center = {
         val position = anchor()
-        if (directPosition) position else position + (menuCenter-position)*centering
+        val gamingCenter = Offset((area.left + area.right) / 2, (area.top + area.bottom) / 2)
+        if (directPosition) position else position * (1f - centering) +
+            menuCenter * (centering - keyboardTravel - gamingTravel) +
+            keyboardMotion.center() * keyboardTravel + gamingCenter * gamingTravel
     }
     val arrival = remember { Animatable(0f) }
     LaunchedEffect(Unit) { arrival.animateTo(1f, tween(520, easing = PortalEmphasizedDecelerate)) }
@@ -110,10 +127,10 @@ internal fun UtilityRoundtable(
     }
     val opacityTarget = if (resting && page == UtilityPage.Dock) 0.48f else 1f
     val opacity by animateFloatAsState(opacityTarget, tween(620, easing = PortalEmphasized), label = "parked tab ink")
-    val lift by animateFloatAsState(if (dragging) 1.045f else 1f, spring(dampingRatio = 0.86f, stiffness = 400f), label = "utility weight")
+    val lift by animateFloatAsState(if (dragging) 1.045f else if (keyboardMotion.dragging) 1.006f else 1f, spring(dampingRatio = 0.86f, stiffness = 400f), label = "utility weight")
     val currentAnimating by rememberUpdatedState(onAnimating)
     LaunchedEffect(transition, opacityTarget, radialTarget, dragging, directPosition, surfaceResizing) {
-        snapshotFlow { transition.isRunning || arrival.isRunning || opacity != opacityTarget || radial != radialTarget || dragging || directPosition || surfaceResizing }
+        snapshotFlow { transition.isRunning || arrival.isRunning || opacity != opacityTarget || radial != radialTarget || dragging || directPosition || surfaceResizing || keyboardMotion.isMoving }
             .distinctUntilChanged().collect { currentAnimating(it) }
     }
     val currentSettled by rememberUpdatedState(onSettled)
@@ -121,8 +138,13 @@ internal fun UtilityRoundtable(
         if (!transition.isRunning && transition.currentState == transition.targetState && !dragging && !directPosition && !arrival.isRunning && arrival.value == 1f && !surfaceResizing) currentSettled(transition.currentState,presentationId)
     }
     Box(Modifier.fillMaxSize().recordUtilityFrost(frost).pointerInput(page) {
-        detectTapGestures { if (page != UtilityPage.Dock) onOutside() }
+        detectTapGestures {
+            if (page == UtilityPage.Menu) onOutside()
+            else if (page == UtilityPage.Gaming) onBack()
+        }
     }) {
+        Box(Modifier.fillMaxSize().graphicsLayer { alpha = gamingTravel.coerceIn(0f, 1f) }
+            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.18f)))
         actions.forEach { action ->
             key(action.id) {
                 val index = available.indexOfFirst { it.id == action.id }
@@ -145,7 +167,7 @@ internal fun UtilityRoundtable(
                     onClick = { onAction(action.id) })
             }
         }
-        val corner = animateDpAsState(when (page) { UtilityPage.Dock -> (24+8*(density.fontScale-1f).coerceAtLeast(0f)).dp; UtilityPage.Menu -> if (geometry.compact) 26.dp else (32+6*(density.fontScale-1f).coerceAtLeast(0f)).dp; UtilityPage.Keyboard -> 24.dp },
+        val corner = animateDpAsState(when (page) { UtilityPage.Dock -> (24+8*(density.fontScale-1f).coerceAtLeast(0f)).dp; UtilityPage.Menu -> if (geometry.compact) 26.dp else (32+6*(density.fontScale-1f).coerceAtLeast(0f)).dp; UtilityPage.Keyboard -> 18.dp; UtilityPage.Gaming -> 24.dp },
             tween(420, easing = PortalEmphasized), label = "utility surface corner")
         val elevation = animateDpAsState(if (page == UtilityPage.Dock) 3.dp else 12.dp, tween(420, easing = PortalEmphasized), label = "utility lift")
         val shape = remember {
@@ -158,6 +180,7 @@ internal fun UtilityRoundtable(
             UtilitySurfaceContent(page to (page == UtilityPage.Menu && geometry.compact),
                 prepareKeyboard = page == UtilityPage.Menu && !transition.isRunning && !surfaceResizing,
                 onResizing = { surfaceResizing = it },
+                onTargetSize = { shown, size -> if (shown == UtilityPage.Keyboard) keyboardMotion.resize(size) },
                 modifier = Modifier.graphicsLayer {
                     alpha = arrival.value * opacity
                     scaleX = lift; scaleY = lift
@@ -169,14 +192,20 @@ internal fun UtilityRoundtable(
                     .border(1.dp,palette.surfaceBorder,shape)
                     .onGloballyPositioned {
                         val bounds = it.unclippedRect()
+                        if (page == UtilityPage.Keyboard) { keyboardCaptureBounds.set(bounds); onKeyboardBounds(bounds) }
                         if (page == UtilityPage.Dock) dockCaptureBounds.set(bounds)
-                        if (page != UtilityPage.Keyboard && !(page == UtilityPage.Menu && geometry.compact)) onHubBounds(bounds)
+                        if (page == UtilityPage.Dock || page == UtilityPage.Menu && !geometry.compact) onHubBounds(bounds)
                     },
             ) { (shown, compact) ->
                 when {
-                    shown == UtilityPage.Keyboard -> UtilityKeyboardPreview(palette,
+                    shown == UtilityPage.Keyboard -> UtilityKeyboard(palette,
                         with(density) { (area.width-24*density.density).coerceAtLeast(120*density.density).toDp() },
-                        with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() }, onBack)
+                        with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() }, onBack,
+                        grip = keyboardMotion.grip(page == UtilityPage.Keyboard && LocalUtilityContentActive.current))
+                    shown == UtilityPage.Gaming -> app.polarbear.gaming.GameSettingsContent(palette,
+                        with(density) { (area.width-24*density.density).coerceAtLeast(1f).toDp() },
+                        with(density) { (area.height-24*density.density).coerceAtLeast(1f).toDp() },
+                        onBack = onBack, onEditController = onEditController)
                     shown == UtilityPage.Menu && compact -> CompactRoundtable(actions,palette,frost,
                         with(density) { (area.width-24*density.density).coerceAtLeast(120*density.density).toDp() },
                         with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() },

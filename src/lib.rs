@@ -8,6 +8,7 @@ pub mod core {
     pub mod coordinate_transform;
     pub mod drm_nodes;
     pub mod guest_browser;
+    pub mod guest_compat;
     pub mod guest_procfs;
     pub mod guest_locale;
     pub mod guest_sudo;

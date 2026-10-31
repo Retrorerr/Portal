@@ -31,9 +31,22 @@ Portal 2.4.x predates the updater, so install the current version once by hand f
 Tap the tab at the screen edge to open Portal's labelled controls. Its icon
 suggests the keyboard when a text field is focused, game options while Steam
 or a game is running, Files during a transfer, and the veil otherwise. The
-bubbles open the Portal veil, Files, Apps, or the keyboard preview. Game options
-and on-screen controls appear while Steam or a game is running. The keyboard is
-an interactive layout preview; it does not send keys to the desktop yet.
+bubbles open the Portal veil, Files, Apps, the desktop keyboard, or Game settings.
+The controller toggle appears while a game is running.
+
+The desktop keyboard sends real keys to Linux, including shortcuts. Esc, Tab,
+Ctrl, Alt, Super and arrows are always available. Tap **#+=** for punctuation,
+then **ABC** to return to letters. Tap **123** for the number pad and tap it
+again to return. Tap **+** to unfold F1–F12, navigation, system keys and common
+shortcuts beneath the typing rows; **−** folds them away. Tap a modifier
+once to arm it for the next key, twice to lock it, and again to release it;
+you can also hold modifiers while pressing another key. Holding a key uses
+the desktop's normal key repeat. Drag the small strip at the keyboard's bottom
+to move it; it coasts and settles within the screen. The surrounding desktop
+remains interactive. The keyboard adapts to rotation and smaller windows;
+extra rows scroll vertically when space is limited. **×** or Android **Back**
+returns to Portal controls and releases held keys. Key positions follow the
+desktop's XKB layout (the printed letter and symbol legends use US QWERTY).
 
 Drag the tab to move it. It coasts briefly, settles against the nearest edge,
 and remembers its position. It becomes quieter while you use the desktop.
@@ -41,10 +54,15 @@ Its frosted surfaces follow the windows underneath, with the same glass
 treatment as the veil.
 **Ctrl+Alt+P** opens the veil directly; accessibility tools can use
 **Open Portal controls**. **Escape**, **Back**, or a tap outside
-closes the utility menu; from the keyboard preview, they return to its controls.
+closes the utility menu. With the desktop keyboard open, Escape reaches Linux
+and Back returns to Portal controls.
 Swipe up or activate the bottom veil affordance to return to the desktop.
 Tap outside an expanded Apps or Files card to collapse it. The veil's idle
 motion pauses while either card is open.
+
+A quiet **Your desktop is running** notification keeps the Linux session active
+when Portal is in the background. Tap it to return. Logging out or closing
+Portal ends the session and removes the notification.
 
 Open **Files**, beside **Apps**:
 
@@ -102,7 +120,9 @@ When no external keyboard, mouse, or touchpad is connected, Portal can present P
 
 Pick Steam during setup or add it later from **Apps** (see above). Windows games run through Proton; Portal prefers **Proton Experimental (ARM64)** when it is installed. If no ARM64 Proton is installed yet, starting a Windows game opens Steam's install dialog for **Proton 11.0 (ARM64)**.
 
-While Steam runs, a small handle sits at the top of the screen; drag it anywhere and it stays there. One side shows or hides the on-screen controller while a game is running; the other opens the game panel:
+Open **Game settings** from the Portal pill. The pill expands into the settings
+screen; **Done** or **Back** returns to its menu. Settings are available before
+launching a game, and the controller toggle appears in the menu while a game runs:
 
 - **On-screen controller**: show it, set its opacity and size, and edit the layout. A layout can be shared by every game or kept for one game. The controller steps aside while a physical controller is connected unless you ask for it.
 - **Game settings**: the video memory Windows games are told the GPU has and a **Frame-rate cap** for steadier pacing and less heat. These can also be kept per game, and apply the next time the game starts.

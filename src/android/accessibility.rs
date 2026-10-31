@@ -16,6 +16,12 @@ use winit::{event::ElementState, event_loop::EventLoopProxy};
 pub enum AppUserEvent {
     AccessibilityInputReady,
     PortalControlsOpened,
+    /// Virtual keyboard edges share event ordering with the controls-release
+    /// barrier; unrelated frame/traffic wakes cannot drain them early.
+    DesktopKey {
+        scancode: u32,
+        down: bool,
+    },
     WaylandTraffic,
     /// An Android clipboard observation was queued. The worker never touches
     /// the render thread; this event only wakes the event loop so the queued
@@ -50,6 +56,7 @@ struct AccessibilityBridgeState {
     /// Android key codes whose press went to the guest. Their release is
     /// still forwarded after focus moves, so no guest key is left held down.
     held_keys: HashSet<jint>,
+    virtual_keys: HashSet<u32>,
     /// GPU (Anland) sessions take keys straight from the service's binder
     /// thread; KWin is fed by the session, not by Smithay's keyboard.
     anland_keys: Option<AnlandKeySink>,
@@ -94,6 +101,7 @@ pub fn set_runtime_active(active: bool) {
     if !active {
         bridge.pending_events.clear();
         bridge.held_keys.clear();
+        bridge.virtual_keys.clear();
         bridge.anland_keys = None;
     }
 }
@@ -113,6 +121,54 @@ pub fn set_window_focused(focused: bool) {
         .lock()
         .expect("Failed to lock accessibility bridge");
     bridge.window_unfocused = !focused;
+    drop(bridge);
+    if !focused {
+        release_virtual_keys();
+    }
+}
+
+/// Send edges as ordered events, rather than a queue drained by any wake.
+fn queue_virtual_key(bridge: &mut AccessibilityBridgeState, scancode: u32, down: bool) {
+    if let Some(proxy) = bridge.proxy.as_ref() {
+        let _ = proxy.send_event(AppUserEvent::DesktopKey { scancode, down });
+    }
+}
+
+pub fn release_virtual_keys() {
+    let mut bridge = bridge().lock().expect("virtual keyboard bridge");
+    let keys: Vec<_> = bridge.virtual_keys.drain().collect();
+    for code in keys {
+        queue_virtual_key(&mut bridge, code, false);
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SessionControls_nativeDesktopKey(
+    _env: JNIEnv,
+    _class: JObject,
+    code: jint,
+    down: jboolean,
+) {
+    if !(1..=127).contains(&code) {
+        return;
+    }
+    let mut bridge = bridge().lock().expect("virtual keyboard bridge");
+    let code = code as u32;
+    let down = down != 0;
+    if down {
+        if !bridge.runtime_active
+            || bridge.proxy.is_none()
+            || bridge.window_unfocused
+            || !crate::android::utils::compose_overlay::utility_keyboard_active()
+            || crate::android::utils::compose_overlay::is_up()
+            || !bridge.virtual_keys.insert(code)
+        {
+            return;
+        }
+    } else if !bridge.virtual_keys.remove(&code) {
+        return;
+    }
+    queue_virtual_key(&mut bridge, code, down);
 }
 
 /// Release service-owned keys before Compose takes keyboard focus.

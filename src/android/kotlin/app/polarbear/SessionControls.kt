@@ -7,6 +7,8 @@ import android.view.KeyEvent
 import android.view.View
 import androidx.core.view.ViewCompat
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import java.lang.ref.WeakReference
 
 /** All recall entry points converge on the native overlay readiness gate. */
@@ -14,6 +16,19 @@ object SessionControls {
     @JvmStatic private external fun nativeOpen(): Boolean
     @JvmStatic private external fun nativeUtilityInput(open: Boolean): Boolean
     @JvmStatic private external fun nativeTextInputActive(): Boolean
+    @JvmStatic private external fun nativeUtilityKeyboard(active: Boolean)
+    @JvmStatic private external fun nativeDesktopKey(code: Int, down: Boolean)
+    var desktopKeyboardVisible by androidx.compose.runtime.mutableStateOf(false)
+        private set
+    internal var desktopKeyboardRevision by androidx.compose.runtime.mutableIntStateOf(0)
+        private set
+    internal val desktopKeyboard = DesktopKeyboardState({ code, down -> nativeDesktopKey(code, down) }, { desktopKeyboardRevision++ })
+    fun setDesktopKeyboard(active: Boolean) {
+        desktopKeyboard.reset()
+        desktopKeyboardVisible = active
+        nativeUtilityKeyboard(active)
+    }
+    fun resetDesktopKeyboard() { desktopKeyboard.reset() }
     val textInputFocused = mutableStateOf(false)
     @Volatile private var utilityVisible = false
     private var utilityOwner: Any? = null

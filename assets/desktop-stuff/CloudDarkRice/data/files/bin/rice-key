@@ -5,6 +5,12 @@ where kglobalaccel lives inside kwin and edits to kglobalshortcutsrc are ignored
   rice-key <component> <action> [key ...]     e.g. rice-key kwin "Window Close" Meta+Q Alt+F4
   rice-key <component> <action> none          clear it
   rice-key --get <component> <action>
+  rice-key --who <key ...>                    which actions own these keys
+  rice-key --register <component> <action> <friendly>
+
+Uses python-dbus (installed by the packages step) so it also works inside Portal's
+tawcroot engine. gdbus cannot send credentials there ("Operation not permitted"),
+and qdbus6 has no scriptable way to pass QKeySequence lists.
 """
 import re, subprocess, sys
 
@@ -32,27 +38,64 @@ def code(seq: str) -> int:
         k = ord(key.upper())
     return n | k
 
-def gdbus(method, *args):
-    return subprocess.run(["gdbus", "call", "--session", "--dest", "org.kde.kglobalaccel",
-                           "--object-path", "/kglobalaccel", "--method",
+def action_id(comp, action):
+    return [comp, action, "", ""]
+
+try:
+    import dbus
+except ImportError:
+    dbus = None
+
+def interface():
+    if dbus is None:
+        return None
+    bus = dbus.SessionBus()
+    obj = bus.get_object("org.kde.kglobalaccel", "/kglobalaccel")
+    return dbus.Interface(obj, "org.kde.KGlobalAccel")
+
+def qdbus(method, *args):
+    return subprocess.run(["qdbus6", "--literal", "org.kde.kglobalaccel", "/kglobalaccel",
                            f"org.kde.KGlobalAccel.{method}", *args],
                           check=True, capture_output=True, text=True).stdout.strip()
 
-def action_id(comp, action):
-    return "[" + ",".join(repr(s) for s in (comp, action, "", "")) + "]"
+def who(key):
+    iface = interface()
+    c = code(key)
+    if iface is not None:
+        reply = iface.getGlobalShortcutsByKey(dbus.UInt32(c))
+        return [(str(entry[2]), str(entry[0])) for entry in reply]
+    # Fallback for a missing python-dbus: parse qdbus6 --literal's structs.
+    out = qdbus("getGlobalShortcutsByKey", str(c))
+    return [(m.group(3), m.group(1)) for m in re.finditer(
+        r'\(ssssssaiai\) "([^"]*)", "([^"]*)", "([^"]*)", "([^"]*)"', out)]
+
+if len(sys.argv) < 2:
+    sys.exit(__doc__)
 
 if sys.argv[1] == "--who":           # which actions own these keys
-    for k in sys.argv[2:]:
-        out = gdbus("getGlobalShortcutsByKey", str(code(k)))
-        names = re.findall(r"\('([^']*)', '([^']*)', '[^']*', '([^']*)'", out)
-        print(f"{k:18} " + ("; ".join(f"{c}/{u}" for u, f, c in names) or "-"))
+    for key in sys.argv[2:]:
+        names = who(key)
+        print(f"{key:18} " + ("; ".join(f"{comp}/{action}" for comp, action in names) or "-"))
     sys.exit()
 
 if sys.argv[1] == "--get":
-    print(gdbus("shortcutKeys", action_id(sys.argv[2], sys.argv[3])))
+    iface = interface()
+    keys = iface.shortcutKeys(action_id(sys.argv[2], sys.argv[3])) if iface is not None \
+        else qdbus("shortcutKeys", str(action_id(sys.argv[2], sys.argv[3])))
+    print(keys)
+    sys.exit()
+
+if sys.argv[1] == "--register":
+    if dbus is None:
+        sys.exit("rice-key --register needs python-dbus (run the packages step)")
+    comp, action, friendly = sys.argv[2], sys.argv[3], sys.argv[4]
+    interface().doRegister([comp, action, friendly, friendly])
     sys.exit()
 
 comp, action, keys = sys.argv[1], sys.argv[2], sys.argv[3:]
 keys = [] if keys in ([], ["none"]) else keys
-variant = "[" + ",".join(f"([{code(k)},0,0,0],)" for k in keys) + "]" if keys else "@a(ai) []"
-gdbus("setForeignShortcutKeys", action_id(comp, action), variant)
+if dbus is None:
+    sys.exit("rice-key needs python-dbus (run the packages step)")
+seqs = [(dbus.Array([code(k), 0, 0, 0], signature="i"),) for k in keys]
+interface().setForeignShortcutKeys(action_id(comp, action),
+                                   dbus.Array(seqs, signature="(ai)"))

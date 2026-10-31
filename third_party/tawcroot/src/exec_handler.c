@@ -266,7 +266,8 @@ static long prepare(const char *path, int argc,
 		uint32_t nb = 0;
 		for (size_t i = 0; i < tawcroot_n_binds; i++) {
 			if (!tawcroot_binds[i].active) continue;
-			bind_src_arr[nb] = tawcroot_binds[i].src;
+			bind_src_arr[nb] = tawcroot_binds[i].exec_src[0]
+				? tawcroot_binds[i].exec_src : tawcroot_binds[i].src;
 			bind_dst_arr[nb] = tawcroot_binds[i].dst;
 			bind_ro_arr[nb]  = (unsigned char)
 				tawcroot_binds[i].read_only;

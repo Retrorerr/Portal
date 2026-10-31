@@ -1,154 +1,116 @@
 /*
- * Portal Qt animation rate — guest-native ARM64 glibc preload for Qt 6.
+ * Qt Widgets animation timing for the Debian guest. No Qt DT_NEEDED.
  *
- * Qt drives QPropertyAnimation/QVariantAnimation (every Qt Widgets smooth
- * scroll, KItemListView kinetic scrolling in Dolphin, Breeze widget
- * transitions) from QUnifiedTimer's fixed 16 ms timer, i.e. 60 Hz whatever
- * the display runs at. On a 144 Hz output a 60 Hz animation lands on 2 or 3
- * vsyncs per frame in turn, which reads as judder (device-measured: Dolphin
- * fling scrolling committed ~65 frames/s on a 144 Hz session). Qt Quick
- * scenes are unaffected: their render loop drives animations from vsync.
+ * Versioned entry points keep Qt 5 and Qt 6 separate even when a host
+ * loads one globally and another via a RTLD_LOCAL plugin (VLC's shape).
+ * Unknown Qt releases keep their native timer; private APIs are used only
+ * for the tested 5.15 and 6.8 series. Qt 4/7 and non-Qt processes are inert.
  *
- * Every Qt executable enters its event loop through Q*Application::exec(),
- * a cross-library call that goes through the PLT, so this shim interposes
- * the three exec() entry points and, once, before the loop starts, sets the
- * main thread's QUnifiedTimer interval to 6 ms (166 Hz) when the primary
- * screen runs above 60 Hz; 60 Hz outputs keep Qt's 16 ms default. One value
- * for every high-refresh rate on purpose: the output rate can change after
- * an app started (per-app refresh overrides land just after Portal resumes,
- * e.g. 120 -> 144 Hz, and Portal then re-advertises the rate), and a tick
- * derived from the startup rate would then judder. Animation values are
- * computed from elapsed time, so ticking faster than vsync only means each
- * vsync sees a fresh frame; Qt's update() coalescing and Wayland frame
- * callbacks keep paints and commits at the display rate.
- *
- * The session's LD_PRELOAD is inherited by every process, so the shim has
- * no Qt DT_NEEDED: Qt symbols are looked up with dlsym only inside a hook,
- * which only runs inside a Qt process. PORTAL_QT_ANIMATION_INTERVAL_MS
- * overrides the interval (0 disables the shim).
- *
- * Hosts that load their Qt GUI as a plugin with dlopen(RTLD_LOCAL) (VLC 3's
- * libqt_plugin.so) keep Qt out of the global scope, so RTLD_NEXT finds no
- * real exec() and the shim used to abort() at startup. Every lookup falls
- * back to the already loaded Qt 6 or Qt 5 library by soname; dlsym on that
- * handle searches only its own dependency scope, never this preload.
- *
- * Build (guest-native ARM64 glibc, no libc at link time):
- *   clang --target=aarch64-linux-gnu -shared -fPIC -nostdlib -O2 \
- *       -fuse-ld=lld -ffreestanding -fno-stack-protector -s \
- *       -o qt-anim-rate.so qt-anim-rate.c
+ * Reproduce with scripts/build_qt_animation.py. The symbol-version map is
+ * required; an unversioned hook can dispatch a Qt 5 caller into Qt 6.
  */
 #define RTLD_LAZY 1
 #define RTLD_NOLOAD 4
 #define RTLD_NEXT ((void *)-1l)
-#define RTLD_DEFAULT ((void *)0)
+extern void *dlvsym(void *, const char *, const char *);
+extern void *dlopen(const char *, int);
+extern char *getenv(const char *);
+extern int atoi(const char *);
 
-extern void *dlsym(void *handle, const char *symbol);
-extern void *dlopen(const char *file, int mode);
-extern char *getenv(const char *name);
-extern int atoi(const char *value);
-extern void abort(void);
+#define CORE_EXEC "_ZN16QCoreApplication4execEv"
+#define GUI_EXEC "_ZN15QGuiApplication4execEv"
+#define WIDGETS_EXEC "_ZN12QApplication4execEv"
+#define VERSION "_Z8qVersionv"
+#define TIMER_INSTANCE "_ZN13QUnifiedTimer8instanceEb"
+#define TIMER_INTERVAL "_ZN13QUnifiedTimer17setTimingIntervalEi"
+#define PRIMARY_SCREEN "_ZN15QGuiApplication13primaryScreenEv"
+#define REFRESH_RATE "_ZNK7QScreen11refreshRateEv"
 
-#define SYM_CORE_EXEC "_ZN16QCoreApplication4execEv"
-#define SYM_GUI_EXEC "_ZN15QGuiApplication4execEv"
-#define SYM_WIDGETS_EXEC "_ZN12QApplication4execEv"
-#define SYM_TIMER_INSTANCE "_ZN13QUnifiedTimer8instanceEb"
-#define SYM_TIMER_SET_INTERVAL "_ZN13QUnifiedTimer17setTimingIntervalEi"
-#define SYM_PRIMARY_SCREEN "_ZN15QGuiApplication13primaryScreenEv"
-#define SYM_REFRESH_RATE "_ZNK7QScreen11refreshRateEv"
+struct runtime {
+    const char *tag, *private_tag;
+    const char *libraries[3];
+    int major, minor, tuned;
+};
+static struct runtime qt5 = {"Qt_5", "Qt_5_PRIVATE_API",
+    {"libQt5Core.so.5", "libQt5Gui.so.5", "libQt5Widgets.so.5"}, 5, 15, 0};
+static struct runtime qt6 = {"Qt_6", "Qt_6_PRIVATE_API",
+    {"libQt6Core.so.6", "libQt6Gui.so.6", "libQt6Widgets.so.6"}, 6, 8, 0};
 
-static const char *const CORE_LIBS[] = {"libQt6Core.so.6", "libQt5Core.so.5", 0};
-static const char *const GUI_LIBS[] = {"libQt6Gui.so.6", "libQt5Gui.so.5", 0};
-static const char *const WIDGETS_LIBS[] = {"libQt6Widgets.so.6", "libQt5Widgets.so.5", 0};
-
-typedef int (*exec_fn)(void);
-typedef void *(*timer_instance_fn)(int create);
-typedef void (*timer_set_interval_fn)(void *timer, int interval);
-typedef void *(*primary_screen_fn)(void);
-typedef double (*refresh_rate_fn)(const void *screen);
-
-static int tuned;
-
-/* `scope` first (RTLD_NEXT or RTLD_DEFAULT), then the loaded Qt libraries. */
-static void *qt_symbol(void *scope, const char *name, const char *const *libs)
+static void *symbol(struct runtime *rt, int library, const char *name, const char *tag)
 {
-    void *symbol = dlsym(scope, name);
-    for (; !symbol && *libs; libs++) {
-        void *handle = dlopen(*libs, RTLD_LAZY | RTLD_NOLOAD);
+    void *result = dlvsym(RTLD_NEXT, name, tag);
+    if (!result) {
+        void *handle = dlopen(rt->libraries[library], RTLD_LAZY | RTLD_NOLOAD);
         if (handle)
-            symbol = dlsym(handle, name);
+            result = dlvsym(handle, name, tag);
     }
-    return symbol;
+    return result;
 }
 
-static int interval_from_env(int *out)
+static int tested_version(struct runtime *rt)
 {
-    const char *value = getenv("PORTAL_QT_ANIMATION_INTERVAL_MS");
-    if (!value || !*value)
+    const char *(*version)(void) = symbol(rt, 0, VERSION, rt->tag);
+    if (!version)
         return 0;
-    *out = atoi(value);
-    return 1;
+    const char *p = version();
+    if (!p)
+        return 0;
+    int major = atoi(p);
+    while (*p >= '0' && *p <= '9') ++p;
+    return *p == '.' && major == rt->major && atoi(p + 1) == rt->minor;
 }
 
-static int interval_from_screen(void)
+static void tune(struct runtime *rt)
 {
-    primary_screen_fn primary =
-        (primary_screen_fn)qt_symbol(RTLD_DEFAULT, SYM_PRIMARY_SCREEN, GUI_LIBS);
-    refresh_rate_fn refresh = (refresh_rate_fn)qt_symbol(RTLD_DEFAULT, SYM_REFRESH_RATE, GUI_LIBS);
-    if (!primary || !refresh)
-        return 0; /* QtCore-only process: no animations worth retiming. */
-    void *screen = primary();
-    if (!screen)
-        return 0;
-    double hz = refresh(screen);
-    if (!(hz > 1.0) || hz > 1000.0)
-        return 0;
-    return hz > 61.0 ? 6 : 0;
-}
-
-static void tune_animation_timer(void)
-{
-    if (tuned)
+    if (rt->tuned || !tested_version(rt))
         return;
-    tuned = 1;
+    rt->tuned = 1;
     int interval = 0;
-    if (!interval_from_env(&interval))
-        interval = interval_from_screen();
+    const char *override = getenv("PORTAL_QT_ANIMATION_INTERVAL_MS");
+    if (override) {
+        interval = atoi(override);
+    } else {
+        void *(*primary)(void) = symbol(rt, 1, PRIMARY_SCREEN, rt->tag);
+        double (*refresh)(const void *) = symbol(rt, 1, REFRESH_RATE, rt->tag);
+        void *screen = primary ? primary() : (void *)0;
+        if (screen && refresh) {
+            double hz = refresh(screen);
+            if (hz > 61.0 && hz < 1000.0)
+                interval = 6;
+        }
+    }
     if (interval <= 0 || interval >= 16)
         return;
-    timer_instance_fn instance =
-        (timer_instance_fn)qt_symbol(RTLD_DEFAULT, SYM_TIMER_INSTANCE, CORE_LIBS);
-    timer_set_interval_fn set_interval =
-        (timer_set_interval_fn)qt_symbol(RTLD_DEFAULT, SYM_TIMER_SET_INTERVAL, CORE_LIBS);
-    if (!instance || !set_interval)
-        return;
-    void *timer = instance(1);
-    if (timer)
-        set_interval(timer, interval);
+    void *(*instance)(int) = symbol(rt, 0, TIMER_INSTANCE, rt->private_tag);
+    void (*set_interval)(void *, int) = symbol(rt, 0, TIMER_INTERVAL, rt->private_tag);
+    if (instance && set_interval) {
+        void *timer = instance(1);
+        if (timer)
+            set_interval(timer, interval);
+    }
 }
 
-static int call_next(const char *symbol, const char *const *libs)
+static int execute(struct runtime *rt, int library, const char *name)
 {
-    exec_fn next = (exec_fn)qt_symbol(RTLD_NEXT, symbol, libs);
+    int (*next)(void) = symbol(rt, library, name, rt->tag);
     if (!next)
-        abort(); /* Only reachable from a Qt caller, which has Qt loaded. */
+        return 127;
+    tune(rt);
     return next();
 }
 
-int _ZN16QCoreApplication4execEv(void)
-{
-    tune_animation_timer();
-    return call_next(SYM_CORE_EXEC, CORE_LIBS);
-}
+#define ENTRY(name, rt, library, target) \
+    int name(void) { return execute(&rt, library, target); }
+ENTRY(portal_qt5_core_exec, qt5, 0, CORE_EXEC)
+ENTRY(portal_qt5_gui_exec, qt5, 1, GUI_EXEC)
+ENTRY(portal_qt5_widgets_exec, qt5, 2, WIDGETS_EXEC)
+ENTRY(portal_qt6_core_exec, qt6, 0, CORE_EXEC)
+ENTRY(portal_qt6_gui_exec, qt6, 1, GUI_EXEC)
+ENTRY(portal_qt6_widgets_exec, qt6, 2, WIDGETS_EXEC)
 
-int _ZN15QGuiApplication4execEv(void)
-{
-    tune_animation_timer();
-    return call_next(SYM_GUI_EXEC, GUI_LIBS);
-}
-
-int _ZN12QApplication4execEv(void)
-{
-    tune_animation_timer();
-    return call_next(SYM_WIDGETS_EXEC, WIDGETS_LIBS);
-}
+__asm__(".symver portal_qt5_core_exec," CORE_EXEC "@Qt_5");
+__asm__(".symver portal_qt5_gui_exec," GUI_EXEC "@Qt_5");
+__asm__(".symver portal_qt5_widgets_exec," WIDGETS_EXEC "@Qt_5");
+__asm__(".symver portal_qt6_core_exec," CORE_EXEC "@@Qt_6");
+__asm__(".symver portal_qt6_gui_exec," GUI_EXEC "@@Qt_6");
+__asm__(".symver portal_qt6_widgets_exec," WIDGETS_EXEC "@@Qt_6");

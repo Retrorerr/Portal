@@ -3,7 +3,7 @@ use crate::android::{diagnostics, utils::webview_handoff};
 use crate::core::runtime::LinuxRuntime;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::thread::JoinHandle;
@@ -126,10 +126,25 @@ fn spawn_failure_monitor(cancel: Arc<AtomicBool>) -> JoinHandle<()> {
     })
 }
 
-struct LaunchRunningGuard;
+static NEXT_SESSION_OWNER: AtomicI64 = AtomicI64::new(1);
+
+struct LaunchRunningGuard {
+    owner: i64,
+}
+
+impl LaunchRunningGuard {
+    fn new() -> Self {
+        let owner = NEXT_SESSION_OWNER.fetch_add(1, Ordering::Relaxed);
+        let app = crate::android::utils::application_context::get_application_context().android_app;
+        crate::android::utils::ndk::set_desktop_session_active(&app, owner, true);
+        Self { owner }
+    }
+}
 
 impl Drop for LaunchRunningGuard {
     fn drop(&mut self) {
+        let app = crate::android::utils::application_context::get_application_context().android_app;
+        crate::android::utils::ndk::set_desktop_session_active(&app, self.owner, false);
         LAUNCH_RUNNING.store(false, Ordering::Release);
         // A bounded stop may detach the finished worker from the event-loop thread. Wake the
         // lifecycle owner so a pending Retry Plasma action can continue as soon as the guard is
@@ -158,6 +173,11 @@ pub fn launch() {
         return;
     }
 
+    // Claim Android foreground importance while the launch is still eligible, before asset sync
+    // or guest login can take time. The same guard follows the native worker through logout,
+    // failure and bounded teardown; Android surface loss/resume never releases it.
+    let guard = LaunchRunningGuard::new();
+
     clear_failure_markers();
     if let Ok(mut failure) = launch_failure().lock() {
         *failure = None;
@@ -175,7 +195,6 @@ pub fn launch() {
         !committed && crate::android::proot::setup::can_launch_pending_initial_preferences(rootfs);
     if !committed && !pending_initial_preferences {
         log::error!("Refusing to launch an incomplete or incompatible Debian runtime");
-        LAUNCH_RUNNING.store(false, Ordering::Release);
         // Surface the failure instead of sitting on a blank UI: an
         // interrupted download leaves no error page otherwise, and
         // `sync_session_runtime_files` never runs to attempt repair.
@@ -197,7 +216,6 @@ pub fn launch() {
         crate::android::proot::setup::try_sync_session_runtime_files(&rootfs, 1)
     {
         log::error!("Portal session integration repair failed: {error:#}");
-        LAUNCH_RUNNING.store(false, Ordering::Release);
         report_failure(
             "Portal could not repair its desktop session files. Tap Retry Plasma to try again.",
         );
@@ -211,7 +229,6 @@ pub fn launch() {
         log::error!(
             "Launch registry lock is poisoned; refusing to start an untracked guest session"
         );
-        LAUNCH_RUNNING.store(false, Ordering::Release);
         return;
     };
 
@@ -224,7 +241,7 @@ pub fn launch() {
 
     let thread_cancel = cancel.clone();
     let handle = thread::spawn(move || {
-        let _guard = LaunchRunningGuard;
+        let _guard = guard;
         diagnostics::host_event("desktop-launch", "starting configured Plasma session");
 
         if let Err(error) = crate::android::proot::setup::prepare_desktop_login(committed) {
@@ -298,7 +315,11 @@ pub fn launch() {
         );
         let planned = output.status.success() || thread_cancel.load(Ordering::Acquire);
         log::log!(
-            if planned { log::Level::Info } else { log::Level::Warn },
+            if planned {
+                log::Level::Info
+            } else {
+                log::Level::Warn
+            },
             "Desktop session exited after {:?} with status {:?}",
             started.elapsed(),
             status

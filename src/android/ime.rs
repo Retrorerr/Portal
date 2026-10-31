@@ -574,7 +574,7 @@ pub fn cancel_pointer(id: u64) {
 fn wants_soft_keyboard() -> bool {
     is_wayland_text_input_active()
         && !is_hardware_keyboard_present()
-        && !crate::android::utils::compose_overlay::input_is_blocked()
+        && !crate::android::utils::compose_overlay::suppress_soft_keyboard()
 }
 
 /// Clear any queued commits after a surface loss or focus transition.

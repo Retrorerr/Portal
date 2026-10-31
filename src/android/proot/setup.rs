@@ -270,6 +270,7 @@ const KPACKAGE_OVERLAY: LibraryOverlay = LibraryOverlay {
     stock: "usr/lib/aarch64-linux-gnu/libKF6Package.so.6.13.0",
     // libkf6package6 6.13.0-1 arm64.
     stock_sha256: "78b27bfb16e4862212c02705e35877ec2d150a097e1cc505e3275ad5116b09e1",
+    abi_guards: &[],
 };
 /// Portal's KIconThemes: Debian kf6-kiconthemes 6.13.0-2 plus
 /// `patches/kiconthemes/0001`, which lists icon themes in linear time and
@@ -284,8 +285,23 @@ const KICONTHEMES_OVERLAY: LibraryOverlay = LibraryOverlay {
     stock: "usr/lib/aarch64-linux-gnu/libKF6IconThemes.so.6.13.0",
     // libkf6iconthemes6 6.13.0-2 arm64.
     stock_sha256: "34e751932d5c0f1a683adb2e4972efb7110a07948365a736464dc436d8a0a058",
+    abi_guards: &[],
 };
-const LIBRARY_OVERLAYS: [LibraryOverlay; 2] = [KPACKAGE_OVERLAY, KICONTHEMES_OVERLAY];
+/// Native Qt Wayland fixes: pre-surface fractional scaling and input burst
+/// compression. Source and build recipe: patches/qtwayland/6.8.2.
+const QT_WAYLAND_OVERLAY: LibraryOverlay = LibraryOverlay {
+    tag: "qt6-wayland",
+    payload: include_bytes!("../../../assets/qtwayland-portal/libQt6WaylandClient.so.6.8.2"),
+    dir: "usr/local/lib/portal-qtwayland",
+    file: "libQt6WaylandClient.so.6.8.2",
+    stock: "usr/lib/aarch64-linux-gnu/libQt6WaylandClient.so.6.8.2",
+    stock_sha256: "34bdb39906f0fb30e05cb8f9b2408a2e73c0be7b52f52d450ed4a0ce1962bbb0",
+    abi_guards: &[(
+        "usr/lib/aarch64-linux-gnu/libQt6Core.so.6.8.2",
+        "22fe5be5ca8e7bcac0d4703282aca363da27257e4cc59020cb7b8b110431eae1",
+    )],
+};
+const LIBRARY_OVERLAYS: [LibraryOverlay; 3] = [KPACKAGE_OVERLAY, KICONTHEMES_OVERLAY, QT_WAYLAND_OVERLAY];
 /// Portal's GLEW: Debian glew 2.2.0-4 plus `patches/glew/0001`, so
 /// glewInit() no longer fails on a context made current through EGL. SDL2
 /// runs on native Wayland here, where Debian's GLX-only GLEW gave every
@@ -310,6 +326,7 @@ struct LibraryOverlay {
     file: &'static str,
     stock: &'static str,
     stock_sha256: &'static str,
+    abi_guards: &'static [(&'static str, &'static str)],
 }
 /// Stock Debian trixie arm64 xinput (diagnostic tool for the XI2 proof;
 /// same overlay staging, never in the default loader path).
@@ -336,13 +353,6 @@ const ANLAND_DAMAGE_BINARY: &[u8] = include_bytes!("../../../assets/guest-arm64/
 /// `anland::session_binds`. Source: `assets/mesa-turnip/README.md`.
 const TURNIP_BINARY: CompressedPayload = compressed_payload!("mesa-turnip/libvulkan_freedreno.so");
 pub const TURNIP_FILE: &str = "portal-turnip/libvulkan_freedreno.so";
-/// Qt Wayland input coalescing for LibreOffice, which repaints inside every
-/// scroll/drag event and starved its own presents (3.7 -> 21 frames/s on a
-/// scrollbar drag). Preloaded only by the LibreOffice launchers.
-/// Source: `assets/guest-arm64/qt-input-coalesce.cpp`.
-const QT_INPUT_COALESCE_BINARY: &[u8] =
-    include_bytes!("../../../assets/guest-arm64/qt-input-coalesce.so");
-const QT_INPUT_COALESCE_PATH: &str = "usr/local/lib/portal/qt-input-coalesce.so";
 
 /// Setup is a process that should be done **only once** when the user installed the app.
 /// The setup process consists of several stages.
@@ -1639,7 +1649,15 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     sync_kwin_overlay(fs_root);
     sync_guest_host_path_alias(fs_root);
     sync_chromium_entries(fs_root);
-    sync_libreoffice_launchers(fs_root);
+    retire_libreoffice_launchers(fs_root);
+    write_executable(
+        &fs_root.join("usr/local/bin/portal-run"),
+        include_str!("../../../assets/portal-run.py"),
+    );
+    let _ = fs::write(
+        fs_root.join("usr/share/applications/portal-run.desktop"),
+        include_str!("../../../assets/portal-run.desktop"),
+    );
     super::optional_apps::sync_steam_integration(fs_root);
     browser::sync_default_applications(fs_root);
     browser::repair_user_default_browser(fs_root);
@@ -1839,59 +1857,12 @@ fn sync_chromium_entries(fs_root: &Path) {
     }
 }
 
-/// Keep LibreOffice's Qt windows on the integer Wayland scale.
-///
-/// LibreOffice's Qt VCL plugin derives its DPI and frame geometry from
-/// `QScreen::devicePixelRatio()`, the integer `wl_output` scale (3 at KWin's
-/// 2.5), while Qt renders each window at the fractional scale from
-/// `wp_fractional_scale_v1`. The mismatch drew every dialog 1.2x too large for
-/// its window, cutting off the right and bottom edges with their buttons.
-/// Without that protocol Qt renders at the integer scale throughout and KWin
-/// downscales, which is the model LibreOffice's code assumes; the app stays a
-/// native Wayland client. `/usr/local/bin` precedes `/usr/bin` in PATH, so
-/// this covers the desktop entries (`Exec=libreoffice ...`) and terminal use.
-///
-/// The launchers also preload `qt-input-coalesce.so` (see
-/// `QT_INPUT_COALESCE_BINARY`) so scrolling presents at a usable rate.
-fn sync_libreoffice_launchers(fs_root: &Path) {
-    let coalesce = fs_root.join(QT_INPUT_COALESCE_PATH);
-    if !payload_is_current(&coalesce, QT_INPUT_COALESCE_BINARY) {
-        if let Some(parent) = coalesce.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let temporary = coalesce.with_extension("so.tmp");
-        if fs::write(&temporary, QT_INPUT_COALESCE_BINARY).is_ok() {
-            let _ = fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755));
-            if fs::rename(&temporary, &coalesce).is_ok() {
-                mark_payload_current(&coalesce, QT_INPUT_COALESCE_BINARY);
-            }
-        }
-    }
-    for name in ["libreoffice", "soffice"] {
-        let launcher = fs_root.join("usr/local/bin").join(name);
-        // Stale after an uninstall; resynced on the launch after an install.
-        if fs_root
-            .join("usr/bin")
-            .join(name)
-            .symlink_metadata()
-            .is_err()
-        {
-            if fs::read_to_string(&launcher).is_ok_and(|text| text.contains("Managed by Portal")) {
-                let _ = fs::remove_file(launcher);
-            }
-            continue;
-        }
-        write_executable(
-            &launcher,
-            &format!(
-                "#!/bin/sh\n\
-                 # Managed by Portal: LibreOffice's Qt VCL clips at fractional Wayland scales.\n\
-                 export QT_WAYLAND_DISABLED_INTERFACES=\"${{QT_WAYLAND_DISABLED_INTERFACES:+$QT_WAYLAND_DISABLED_INTERFACES,}}wp_fractional_scale_manager_v1\"\n\
-                 # Merge bursts of scroll/drag input so each repaint is presented.\n\
-                 [ -r /{QT_INPUT_COALESCE_PATH} ] && export LD_PRELOAD=\"/{QT_INPUT_COALESCE_PATH}${{LD_PRELOAD:+:$LD_PRELOAD}}\"\n\
-                 exec /usr/bin/{name} \"$@\"\n"
-            ),
-        );
+/// Retire only the exact Portal-owned LibreOffice launcher generation.
+/// Native Qt Wayland now owns scaling and event compression; independent
+/// Qt builds must never inherit a Qt 6.8 private-API input preload.
+fn retire_libreoffice_launchers(fs_root: &Path) {
+    if let Err(error) = crate::core::guest_compat::retire_libreoffice_launchers(fs_root) {
+        log::warn!("Legacy LibreOffice launchers could not be retired: {error}");
     }
 }
 
@@ -3444,6 +3415,48 @@ fn ensure_desktop_extras(root: &Path) {
     }
 }
 
+/// A versioned, retryable upgrade for common toolkit plugins. It runs with
+/// the existing package jobs after Plasma starts, so an offline upgrade
+/// retains the working Xwayland path. Respect later deliberate removals.
+fn ensure_app_compatibility(root: &Path) {
+    use crate::core::guest_compat::{install_command, MARKER, PACKAGES};
+    let marker = root.join(MARKER);
+    if marker.is_file() {
+        return;
+    }
+    let installed = match installed_dpkg_packages(root) {
+        Ok(installed) => installed,
+        Err(error) => {
+            log::warn!("Desktop toolkit package state unavailable: {error:#}");
+            return;
+        }
+    };
+    if PACKAGES.iter().any(|package| !installed.contains(*package)) {
+        let result = PRootRuntime::new(root).execute(
+            ProcessSpec::new(install_command()).with_env("DEBIAN_FRONTEND", "noninteractive"),
+            None,
+            None,
+        );
+        keep_account_databases_readable();
+        if !result.status.success() {
+            log::warn!("Desktop toolkit upgrade deferred; retrying next launch: {}",
+                String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+    }
+    if !installed_dpkg_packages(root)
+        .is_ok_and(|packages| PACKAGES.iter().all(|package| packages.contains(*package)))
+    {
+        return;
+    }
+    let temporary = marker.with_extension("tmp");
+    if let Err(error) = fs::write(&temporary, b"installed\n")
+        .and_then(|()| fs::rename(&temporary, &marker))
+    {
+        log::warn!("Desktop toolkit upgrade marker unavailable: {error}");
+    }
+}
+
 /// Every launch, so the old `.debian-esr` layout is moved over and an ESR
 /// reinstalled since gets its diversion; a dpkg state file read skips the
 /// PRoot call when nothing is to do. Returns whether the layout is right.
@@ -3517,6 +3530,7 @@ pub fn spawn_background_installs() {
         let root = Path::new(PRODUCTION_FS_ROOT);
         repair_package_dependencies(root);
         keep_account_databases_readable();
+        ensure_app_compatibility(root);
         ensure_desktop_extras(root);
         keep_account_databases_readable();
         if sync_firefox_esr_diversion(root) {
@@ -3874,6 +3888,10 @@ fn sync_library_overlays(fs_root: &Path) {
     for overlay in &LIBRARY_OVERLAYS {
         stage_library(&fs_root.join(overlay.dir), overlay.file, overlay.payload);
     }
+    let notice = fs_root.join("usr/share/doc/portal-qtwayland");
+    if fs::create_dir_all(&notice).is_ok() {
+        let _ = fs::write(notice.join("README.md"), include_str!("../../../assets/qtwayland-portal/README.md"));
+    }
 }
 
 /// Write `payload` to `dir/file` unless it is already there.
@@ -3932,6 +3950,12 @@ pub fn library_overlay_binds(fs_root: &Path) -> Vec<crate::core::runtime::BindMo
         };
         if stock != overlay.stock_sha256 {
             log::info!("{tag}: stock library is not the Debian build it replaces ({stock}); using it as is");
+            continue;
+        }
+        if !overlay.abi_guards.iter().all(|(path, digest)| {
+            crate::core::guest_compat::library_matches(fs_root, path, digest)
+        }) {
+            log::info!("{tag}: dependency ABI changed; using the guest's own library");
             continue;
         }
         binds.push(crate::core::runtime::BindMount::new(

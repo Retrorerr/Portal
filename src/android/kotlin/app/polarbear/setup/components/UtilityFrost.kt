@@ -24,7 +24,6 @@ import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
-import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -35,6 +34,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -44,6 +45,7 @@ private const val FROST_RADIUS = PortalFrostStyle.StrongBlur
 private val CAPTURE_PADDING = (FROST_RADIUS*FROST_SCALE*3).toInt()
 
 internal data class UtilityFrostFrame(val image: ImageBitmap, val region: Rect)
+private data class FrostTransform(val origin: Offset, val sx: Float, val sy: Float)
 
 /** One desktop sample and two reusable blur layers shared by all utility surfaces. */
 @Stable
@@ -74,11 +76,7 @@ internal class UtilityFrost(
         currentLayer.alpha = if (previous == null) 1f else blend.value
     }
 
-    fun draw(scope: DrawScope, coordinates: LayoutCoordinates) = with(scope) {
-        if (!coordinates.isAttached) return@with
-        val origin = coordinates.localToRoot(Offset.Zero)
-        val sx = coordinates.localToRoot(Offset(1f,0f)).x-origin.x
-        val sy = coordinates.localToRoot(Offset(0f,1f)).y-origin.y
+    fun draw(scope: DrawScope, origin: Offset, sx: Float, sy: Float) = with(scope) {
         if (sx < 0.01f || sy < 0.01f) return@with
         fun drawFrame(frame: UtilityFrostFrame?,layer: GraphicsLayer) {
             if (frame == null) return
@@ -148,14 +146,21 @@ internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: ()
                         frame.value = UtilityFrostFrame(bitmap.asImageBitmap(),region)
                         last = bitmap; lastRegion = region; index = 1-index
                     }
-                } else { frame.value = null; last = null; lastRegion = null }
+                }
+                // A transient PixelCopy failure must not flash away the glass.
+                // Keep the last successful sample and retry on the next tick.
             }
-            delay(if (movingNow()) 140 else 300)
+            val moving = movingNow()
+            // Wake immediately when a drag starts, then refresh moving
+            // content at 30 Hz. Spatial sampling redraws at display rate.
+            withTimeoutOrNull(if (moving) 32L else 300L) {
+                snapshotFlow { movingNow() }.first { it != moving }
+            }
         }
     }
     LaunchedEffect(frost) {
         snapshotFlow { frame.value }.collectLatest { next ->
-            frost.previous = frost.current
+            frost.previous = if (movingNow()) null else frost.current
             frost.current = next
             frost.blend.snapTo(if (next != null && frost.previous != null) 0f else 1f)
             if (next != null && frost.previous != null) frost.blend.animateTo(1f,tween(100))
@@ -172,9 +177,15 @@ internal fun Modifier.recordUtilityFrost(frost: UtilityFrost) = drawWithContent 
 
 @Composable
 internal fun Modifier.utilityFrost(frost: UtilityFrost): Modifier {
-    val coordinates = remember { arrayOfNulls<LayoutCoordinates>(1) }
-    return onGloballyPositioned { coordinates[0] = it }.drawWithContent {
-        coordinates[0]?.let { frost.draw(this,it) }
+    var transform by remember { mutableStateOf<FrostTransform?>(null) }
+    return onGloballyPositioned { coordinates ->
+        val origin = coordinates.localToRoot(Offset.Zero)
+        transform = FrostTransform(origin, coordinates.localToRoot(Offset(1f,0f)).x-origin.x,
+            coordinates.localToRoot(Offset(0f,1f)).y-origin.y)
+    }.drawWithContent {
+        // Placement alone reuses a layer's display list. Observing the
+        // transform invalidates just this draw when a floating surface moves.
+        transform?.let { frost.draw(this,it.origin,it.sx,it.sy) }
         drawContent()
     }
 }

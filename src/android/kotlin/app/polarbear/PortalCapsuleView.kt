@@ -18,7 +18,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.*
 
-internal enum class UtilityPage { Dock, Menu, Keyboard }
+internal enum class UtilityPage { Dock, Menu, Keyboard, Gaming }
 
 /** The host is transparent outside its actual controls; guest touches pass through. */
 @SuppressLint("ViewConstructor")
@@ -27,7 +27,7 @@ internal class PortalCapsuleView(
     private val onPositionChanged: (Float, Float) -> Unit,
     private val onSizeChanged: () -> Unit,
     private val onOpen: (String?) -> Unit,
-    private val onGameOptions: () -> Unit,
+    private val onEditController: () -> Unit,
     private val onToggleController: () -> Unit,
 ) : FrameLayout(context) {
     private val density get() = resources.displayMetrics.density
@@ -55,23 +55,27 @@ internal class PortalCapsuleView(
     var dragging by mutableStateOf(false); private set
     private var highRefresh: Boolean? = null
     private var hubBounds = android.graphics.RectF()
+    private var keyboardBounds = android.graphics.RectF()
     private val composition = ComposeView(context).apply {
-        setContent { app.polarbear.setup.components.PortalUiDensity {
+        setContent { app.polarbear.setup.PortalTheme {
+            app.polarbear.setup.components.PortalUiDensity {
             UtilityRoundtable(ready, page, presentationId, { if (dragging) dragPoint else anchor.value }, area,
                 dockRight, dragging, directPosition = freeMotion,
                 onHub = { if (page == UtilityPage.Dock) reveal() else dismiss() },
                 onAction = { action -> when (action) {
                     "keyboard" -> changePage(UtilityPage.Keyboard)
                     "controller" -> onToggleController()
-                    "game" -> handoff(onGameOptions)
+                    "game" -> changePage(UtilityPage.Gaming)
                     "files", "apps" -> handoff { onOpen(action) }
                     else -> handoff { onOpen(null) }
                 } },
                 onBack = { changePage(UtilityPage.Menu) }, onOutside = { dismiss() },
                 onAnimating = { if (isAttachedToWindow) updateFrameRate(it || SessionControls.isUtilityVisible()) },
                 onHubBounds = { hubBounds = it }, onActionBounds = { id, rect -> actionBounds[id] = rect },
+                onKeyboardBounds = { keyboardBounds = it },
+                onEditController = { handoff(onEditController) },
                 onSettled = ::onPresentationSettled)
-        } }
+        } } }
     }
     init {
         clipChildren = false; clipToPadding = false
@@ -119,9 +123,13 @@ internal class PortalCapsuleView(
         pendingAction = null
         freeMotion = false
         requestPage(next)
-        if (next != UtilityPage.Dock) composition.requestFocus()
+        if (next == UtilityPage.Menu) composition.requestFocus() else composition.clearFocus()
     }
     private fun requestPage(next: UtilityPage) {
+        if (next != page) {
+            TouchControls.cancelInput()
+            SessionControls.setDesktopKeyboard(next == UtilityPage.Keyboard)
+        }
         presentationId++
         settledPage = null
         page = next
@@ -137,10 +145,11 @@ internal class PortalCapsuleView(
         }
     }
     fun reveal() { changePage(UtilityPage.Menu) }
+    fun showGameOptions() { changePage(UtilityPage.Gaming) }
     fun dismiss(): Boolean {
         if (page == UtilityPage.Dock) return false
         pendingAction = null
-        requestPage(if (page == UtilityPage.Keyboard) UtilityPage.Menu else UtilityPage.Dock)
+        requestPage(if (page == UtilityPage.Keyboard || page == UtilityPage.Gaming) UtilityPage.Menu else UtilityPage.Dock)
         return true
     }
     fun openVeil() { handoff { onOpen(null) } }
@@ -154,12 +163,14 @@ internal class PortalCapsuleView(
         if (released || !SessionControls.isUtilityVisible()) updateFrameRate(false)
     }
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (page == UtilityPage.Keyboard && !keyboardBounds.contains(event.x,event.y)) return false
         if (!SessionControls.isUtilityVisible() && !hubBounds.contains(event.x,event.y)) return false
         return super.dispatchGenericMotionEvent(event)
     }
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-            touchOwned = SessionControls.isUtilityVisible() || hubBounds.contains(event.x,event.y)
+            touchOwned = if (page == UtilityPage.Keyboard) keyboardBounds.contains(event.x,event.y)
+                else SessionControls.isUtilityVisible() || hubBounds.contains(event.x,event.y)
             if (!touchOwned) return false
         }
         if (!touchOwned) return false
@@ -174,7 +185,8 @@ internal class PortalCapsuleView(
                 dragEligible = page == UtilityPage.Dock && !SessionControls.isUtilityVisible() && hubBounds.contains(event.x,event.y)
                 dragStart = Offset(hubBounds.centerX(),hubBounds.centerY())
                 settle?.cancel()
-                recycleTracker(); tracker = VelocityTracker.obtain().also { it.addMovement(event) }
+                recycleTracker()
+                if (dragEligible) tracker = VelocityTracker.obtain().also { it.addMovement(event) }
             }
             MotionEvent.ACTION_POINTER_DOWN -> { chord = true; return dragEligible }
             MotionEvent.ACTION_MOVE -> {
@@ -227,6 +239,10 @@ internal class PortalCapsuleView(
         return true
     }
     private fun recycleTracker() { tracker?.recycle(); tracker = null }
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (!hasWindowFocus) SessionControls.resetDesktopKeyboard()
+    }
     private fun updateFrameRate(active: Boolean) {
         if (highRefresh == active) return
         highRefresh = active

@@ -1,0 +1,49 @@
+--- a/src/client/qwaylandscreen.cpp
++++ b/src/client/qwaylandscreen.cpp
+@@ -189,6 +189,22 @@
+ 
+ qreal QWaylandScreen::devicePixelRatio() const
+ {
++    if (zxdg_output_v1::isInitialized() && !mXdgGeometry.isEmpty()) {
++        QSize native = mGeometry.size();
++        // wl_output modes are untransformed; xdg-output is transformed.
++        const QSize logical = mXdgGeometry.size();
++        if ((native.width() > native.height()) != (logical.width() > logical.height()))
++            native.transpose();
++        const qreal sx = qreal(native.width()) / logical.width();
++        const qreal sy = qreal(native.height()) / logical.height();
++        // KWin rounds logical dimensions to pixels. Accept that bounded
++        // rounding error, but reject nonuniform or bogus compositor data.
++        const qreal tolerance = qMax(qreal(1) / logical.width(), qreal(1) / logical.height());
++        const qreal scale = qMax(sx, sy);
++        if (scale >= 1 && qAbs(sx - sy) <= tolerance
++                && qCeil(scale - tolerance) == mScale)
++            return qRound(scale * 120) / qreal(120);
++    }
+     return qreal(mScale);
+ }
+ 
+--- a/src/client/qwaylandwindow.cpp
++++ b/src/client/qwaylandwindow.cpp
+@@ -1465,7 +1465,7 @@
+ void QWaylandWindow::updateScale()
+ {
+     if (mFractionalScale) {
+-        qreal preferredScale = mFractionalScale->preferredScale().value_or(1.0);
++        qreal preferredScale = mFractionalScale->preferredScale().value_or(waylandScreen() ? waylandScreen()->devicePixelRatio() : 1.0);
+         preferredScale = std::max<qreal>(1.0, preferredScale);
+         Q_ASSERT(mViewport);
+         setScale(preferredScale);
+@@ -1556,7 +1556,11 @@
+ 
+ qreal QWaylandWindow::devicePixelRatio() const
+ {
+-    return mScale.value_or(waylandScreen() ? waylandScreen()->scale() : 1);
++    const auto *output = waylandScreen();
++    // Match the screen's pre-surface estimate until preferred_scale arrives.
++    // Without fractional-scale support, retain the integer buffer scale.
++    const qreal fallback = output ? (mFractionalScale ? output->devicePixelRatio() : output->scale()) : 1;
++    return mScale.value_or(fallback);
+ }
+ 
+ bool QWaylandWindow::setMouseGrabEnabled(bool grab)

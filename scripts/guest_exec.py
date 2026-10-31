@@ -1,128 +1,153 @@
+#!/usr/bin/env python3
+"""Execute in Portal Debug's live desktop with its recorded engine and mounts.
+
+Requires an updated Debug build and a live desktop. Never switches engines:
+tawcroot hardlinks cannot safely be opened through PRoot.
+"""
+import argparse
+import json
+import os
+import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
 
-def get_device():
-    import os
-    if os.environ.get("ANDROID_SERIAL"):
-        return os.environ["ANDROID_SERIAL"]
-    try:
-        out = subprocess.check_output(["adb", "devices"], text=True)
-        for line in out.strip().splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 2 and parts[1] == "device":
-                return parts[0]
-    except Exception:
-        pass
-    raise RuntimeError("No active authorized ADB device found")
+PACKAGE = 'app.polarbear'
+
+
+def get_device(serial=None):
+    serial = serial or os.environ.get('ANDROID_SERIAL')
+    rows = subprocess.check_output(['adb', 'devices'], text=True).splitlines()[1:]
+    devices = [r.split()[0] for r in rows if len(r.split()) >= 2 and r.split()[1] == 'device']
+    if serial in devices:
+        return serial
+    if not serial and len(devices) == 1:
+        return devices[0]
+    raise RuntimeError('Select one connected, authorized ADB device with --serial or ANDROID_SERIAL')
 
 
 def find_process_pid(ps_output, process_name):
-    """Match Android's exact NAME column, not pidof's command-line substring."""
-    for line in ps_output.splitlines():
-        fields = line.split()
-        if len(fields) >= 2 and fields[1].isdigit() and fields[-1] == process_name:
-            return fields[1]
+    rows = [line.split() for line in ps_output.splitlines()]
+    if not rows or 'PID' not in rows[0] or 'NAME' not in rows[0]:
+        return None
+    pid_column, name_column = rows[0].index('PID'), rows[0].index('NAME')
+    for fields in rows[1:]:
+        if len(fields) > max(pid_column, name_column) and fields[name_column] == process_name:
+            return fields[pid_column]
     return None
 
 
+def parse_environment(data):
+    return dict(item.decode('utf-8', 'surrogateescape').split('=', 1)
+                for item in data.split(b'\0') if b'=' in item)
+
+
+def command_arguments(record, environment, command, root=False):
+    if record.get('version') != 1 or record.get('engine') not in ('tawcroot', 'proot'):
+        raise RuntimeError('Unsupported Debug guest launch record; rebuild Portal Debug')
+    env = dict(environment)
+    if root:
+        env.update(HOME='/root', USER='root', LOGNAME='root')
+    elif env.get('USER') != record['user'] or env.get('HOME') == '/root':
+        raise RuntimeError('Desktop identity differs from the recorded session')
+    home = env['HOME']
+    for key in list(env):
+        if key in ('_', 'SHLVL', 'PWD', 'OLDPWD') or key.startswith(('PROOT_', 'TAWCROOT_')):
+            env.pop(key)
+    script = 'cd ' + shlex.quote(home) + ' && ' + command
+    args = [record['program'], *record['args'], '/usr/bin/env', '-i']
+    args.extend(f'{key}={value}' for key, value in sorted(env.items()))
+    if not root:
+        args.extend(['/usr/sbin/runuser', '-u', record['user'], '--'])
+    args.extend(['/bin/sh', '-c', script])
+    # Android's APK paths contain '='. env(1) misreads an engine path as
+    # another variable assignment even when quoted; exec it through sh.
+    exports = ''.join('export ' + shlex.quote(f'{k}={v}') + '; ' for k, v in record['env'].items())
+    return ['/system/bin/sh', '-c', exports + 'exec ' + shlex.join(args)]
+
+
+@dataclass
+class Session:
+    serial: str
+    record: dict
+    environment: dict
+    desktop_pid: str
+
+    def adb(self, *args, **kwargs):
+        return subprocess.run(['adb', '-s', self.serial, *args], **kwargs)
+
+    @classmethod
+    def connect(cls, serial=None, package=PACKAGE):
+        if package != PACKAGE:
+            raise RuntimeError('Compatibility tooling only operates on Portal Debug (app.polarbear)')
+        serial = get_device(serial)
+        def read(path):
+            return subprocess.check_output(['adb', '-s', serial, 'exec-out', 'run-as', PACKAGE, 'cat', path])
+        try:
+            record = json.loads(read('files/diagnostics/guest-launch.json'))
+        except (subprocess.CalledProcessError, ValueError) as error:
+            raise RuntimeError('Launch an updated Portal Debug once to create its guest launch record') from error
+        # Early Debug snapshots serialized OsStr using serde's Unix bytes.
+        if isinstance(record.get('program'), dict) and 'Unix' in record['program']:
+            record['program'] = os.fsdecode(bytes(record['program']['Unix']))
+        ps = subprocess.check_output(['adb', '-s', serial, 'shell', 'ps -A -o PID,PPID,NAME'], text=True)
+        table = {row[0]: row for line in ps.splitlines()[1:] if len(row := line.split()) == 3}
+        pid = None
+        # Stable may also have plasmashell. Accept only descendants of Debug.
+        for candidate, row in table.items():
+            if row[2] != 'plasmashell':
+                continue
+            parent, visited = candidate, set()
+            while parent in table and parent not in visited:
+                if parent == str(record['host_pid']):
+                    pid = candidate
+                    break
+                visited.add(parent)
+                parent = table[parent][1]
+        if not pid:
+            raise RuntimeError('No live Portal Debug desktop for this launch record; open its desktop first')
+        env = parse_environment(read(f'/proc/{pid}/environ'))
+        # run-as lacks the app's external-storage mount namespace. Borrow
+        # the app's already-open O_PATH descriptor rather than dropping its
+        # storage bind or changing its permissions. The engine opens this
+        # descriptor itself; no fd number is assumed across engine versions.
+        links = subprocess.check_output(['adb', '-s', serial, 'shell', shlex.join([
+            'run-as', PACKAGE, 'sh', '-c',
+            f'for fd in /proc/{pid}/fd/*; do printf "%s " "$fd"; readlink "$fd"; done'
+        ])], text=True)
+        storage_fd = next((line.split(' ', 1)[0] for line in links.splitlines()
+                           if line.endswith(' /storage/emulated/0')), None)
+        if storage_fd:
+            record['args'] = [storage_fd + arg[len('/sdcard'):] if arg.startswith('/sdcard:') else arg
+                              for arg in record['args']]
+        command_arguments(record, env, 'true')
+        return cls(serial, record, env, pid)
+
+    def run(self, command, *, root=False, timeout=60, environment=None, **kwargs):
+        args = command_arguments(self.record, self.environment | (environment or {}), command, root)
+        # Exactly one remote shell parse, with literal environment values.
+        remote = shlex.join(['run-as', PACKAGE, *args])
+        return self.adb('shell', '-T', remote, timeout=timeout, **kwargs)
+
+
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: guest_exec.py <command>")
-        sys.exit(1)
-
-    cmd = " ".join(sys.argv[1:])
-    device_id = get_device()
-
-    pm_path = subprocess.check_output([
-        "adb", "-s", device_id, "shell", "pm path app.polarbear"
-    ], text=True).strip().replace("package:", "")
-
-    lib_dir = pm_path.rsplit("/", 1)[0] + "/lib/arm64"
-    proot_loader = lib_dir + "/libproot_loader.so"
-    libproot = lib_dir + "/libproot.so"
-
-    ps_output = subprocess.check_output([
-        "adb", "-s", device_id, "shell", "ps -A"
-    ], text=True)
-    plasma_pid = find_process_pid(ps_output, "plasmashell")
-    if not plasma_pid:
-        print("plasmashell not running (no exact process-name match)")
-        sys.exit(1)
-
-    env_raw = subprocess.check_output([
-        "adb", "-s", device_id, "exec-out",
-        f"run-as app.polarbear cat /proc/{plasma_pid}/environ"
-    ])
-
-    dbus_addr = ""
-    for item in env_raw.split(b"\x00"):
-        if item.startswith(b"DBUS_SESSION_BUS_ADDRESS="):
-            dbus_addr = item.split(b"=", 1)[1].decode("utf-8", "ignore").strip()
-            break
-
-    guest_script = (
-        "#!/bin/sh\n"
-        "export HOME=/root\n"
-        "export TMPDIR=/tmp\n"
-        "export USER=root\n"
-        "export LOGNAME=root\n"
-        "export LANG=C.UTF-8\n"
-        "export LC_ALL=C.UTF-8\n"
-        "export SHELL=/bin/bash\n"
-        "export PATH=/usr/local/sbin:/usr/local/bin:/usr/lib/aarch64-linux-gnu/libexec:/usr/bin:/bin:/usr/sbin:/sbin\n"
-        "export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu\n"
-        "export XDG_RUNTIME_DIR=/tmp\n"
-        "export WAYLAND_DISPLAY=wayland-1\n"
-        "export DISPLAY=:0\n"
-        f"export DBUS_SESSION_BUS_ADDRESS='{dbus_addr}'\n"
-        f"{cmd}\n"
-    )
-
-    import tempfile, os
-    with tempfile.NamedTemporaryFile(mode="w", delete=False, newline="\n") as f:
-        f.write(guest_script)
-        local_tmp = f.name
-
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--serial')
+    parser.add_argument('--package', default=PACKAGE)
+    parser.add_argument('--root', action='store_true', help='Explicit maintenance command; default is desktop')
+    parser.add_argument('--timeout', type=float, default=60)
+    parser.add_argument('command', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    command = args.command[1:] if args.command[:1] == ['--'] else args.command
+    if not command:
+        parser.error('supply a shell command')
     try:
-        subprocess.check_call(["adb", "-s", device_id, "push", local_tmp, "/data/local/tmp/guest_exec.sh"])
-    finally:
-        os.unlink(local_tmp)
+        return Session.connect(args.serial, args.package).run(
+            ' '.join(command), root=args.root, timeout=args.timeout).returncode
+    except (RuntimeError, subprocess.SubprocessError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
 
-    # Copy into guest /tmp
-    subprocess.check_call([
-        "adb", "-s", device_id, "shell",
-        "run-as app.polarbear cp /data/local/tmp/guest_exec.sh /data/data/app.polarbear/files/runtime-B/tmp/exec.sh"
-    ])
 
-    remote_cmd = (
-        f"export PROOT_LOADER={proot_loader}; "
-        "export PROOT_TMP_DIR=/data/data/app.polarbear/files/runtime-B/tmp; "
-        f"{libproot} -r /data/data/app.polarbear/files/runtime-B "
-        "-L --link2symlink --sysvipc --kill-on-exit --root-id "
-        "-b /dev -b /proc -b /sys "
-        "-b /dev/urandom:/dev/random "
-        "-b /proc/self/fd:/dev/fd "
-        "-b /proc/self/fd/0:/dev/stdin "
-        "-b /proc/self/fd/1:/dev/stdout "
-        "-b /proc/self/fd/2:/dev/stderr "
-        "-b /data/data/app.polarbear/files/runtime-B/tmp:/dev/shm "
-        "-b /data/local/tmp:/data/local/tmp "
-        "-w /root /bin/sh /tmp/exec.sh"
-    )
-
-    res = subprocess.run([
-        "adb", "-s", device_id, "shell",
-        f"run-as app.polarbear sh -c '{remote_cmd}'"
-    ], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(errors="replace")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(errors="replace")
-    if res.stdout:
-        print("STDOUT:", res.stdout)
-    if res.stderr:
-        print("STDERR:", res.stderr)
-    sys.exit(res.returncode)
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    sys.exit(main())

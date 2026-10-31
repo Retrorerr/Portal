@@ -72,6 +72,25 @@ pub fn close_after_logout(android_app: &AndroidApp) {
     );
 }
 
+/// Protect the native guest worker rather than a SurfaceView/readiness generation. Android may
+/// otherwise cache/freeze the entire still-running desktop when Portal's window is suspended.
+pub fn set_desktop_session_active(android_app: &AndroidApp, owner: i64, active: bool) {
+    run_in_jvm(
+        |env, app| {
+            let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            if let Err(error) = env.call_method(
+                activity,
+                "setDesktopSessionActive",
+                "(JZ)V",
+                &[JValue::Long(owner), JValue::Bool(active as u8)],
+            ) {
+                log::error!("Failed to update desktop foreground service: {error}");
+            }
+        },
+        android_app.clone(),
+    );
+}
+
 /// Ask PortalActivity to replace its native surface (see `recycleNativeSurface`).
 pub fn recycle_native_surface(android_app: &AndroidApp) {
     run_in_jvm(

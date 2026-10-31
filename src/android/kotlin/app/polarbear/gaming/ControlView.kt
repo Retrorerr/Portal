@@ -80,12 +80,10 @@ class ControlView(
     private var axisY = 0f
     private var trigger = 0f
 
-    private class Touch(var x: Float, var y: Float, val downTime: Long)
-
-    private val touches = HashMap<Int, Touch>()
-    private var stickPointer = -1
-    private var stickClick = false
-    private var lastStickUp = 0L
+    private val pointers = ControllerPointers(control.kind == ControlKind.STICK)
+    private val touches get() = pointers.touches
+    private val stickPointer get() = pointers.stickPointer
+    private val stickClick get() = pointers.stickClick
     private var hatX = 0
     private var hatY = 0
 
@@ -206,9 +204,8 @@ class ControlView(
 
     /** Forget every touch (hidden, edit mode, pad removed). */
     fun release() {
-        touches.clear()
-        stickPointer = -1
-        stickClick = false
+        val hadInput = touches.isNotEmpty() || buttons != 0 || axisX != 0f || axisY != 0f || trigger != 0f || hatX != 0 || hatY != 0
+        pointers.clear()
         dragPointer = -1
         dragging = false
         translationX = 0f
@@ -219,7 +216,19 @@ class ControlView(
         trigger = 0f
         hatX = 0
         hatY = 0
+        // Resetting the drawing alone leaves the guest holding its last direction.
+        if (hadInput) host.padChanged()
         invalidate()
+    }
+
+    override fun onDetachedFromWindow() {
+        release()
+        super.onDetachedFromWindow()
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (!hasWindowFocus) release()
     }
 
     /** Write the axes this control owns into the pad state. */
@@ -255,7 +264,17 @@ class ControlView(
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (!isEnabled) { release(); return false }
         if (host.editing) return editTouch(event)
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) pointers.beginGesture()
+        else pointers.retain { event.findPointerIndex(it) >= 0 }
+        // POINTER_DOWN/UP also contain fresh coordinates for the other
+        // fingers. Do not freeze a held stick until a separate MOVE arrives.
+        for (index in 0 until event.pointerCount) {
+            val touch = touches[event.getPointerId(index)] ?: continue
+            touch.x = event.getX(index)
+            touch.y = event.getY(index)
+        }
         val before = buttons
         val beforeHat = hatX to hatY
         val beforeTrigger = trigger > 0f
@@ -267,38 +286,18 @@ class ControlView(
                 val y = event.getY(index)
                 if (!accepts(x, y)) {
                     // A first finger off the control falls through to the desktop.
+                    recompute(); host.padChanged(); invalidate()
                     return event.actionMasked != MotionEvent.ACTION_DOWN
                 }
                 val id = event.getPointerId(index)
-                touches[id] = Touch(x, y, event.eventTime)
-                if (control.kind == ControlKind.STICK && stickPointer < 0) {
-                    stickPointer = id
-                    // A second tap soon after letting go clicks the stick.
-                    stickClick = event.eventTime - lastStickUp < STICK_CLICK_MS
-                    stickDown = true
-                }
-            }
-            MotionEvent.ACTION_MOVE -> {
-                for (index in 0 until event.pointerCount) {
-                    val touch = touches[event.getPointerId(index)] ?: continue
-                    touch.x = event.getX(index)
-                    touch.y = event.getY(index)
-                }
+                stickDown = pointers.down(id, x, y, event.eventTime)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 val id = event.getPointerId(event.actionIndex)
-                touches.remove(id)
-                if (id == stickPointer) {
-                    stickPointer = -1
-                    stickClick = false
-                    lastStickUp = event.eventTime
-                }
+                pointers.up(id, event.eventTime, event.flags and MotionEvent.FLAG_CANCELED != 0)
+                if (event.actionMasked == MotionEvent.ACTION_UP) pointers.clear(resetClickHistory = false)
             }
-            MotionEvent.ACTION_CANCEL -> {
-                touches.clear()
-                stickPointer = -1
-                stickClick = false
-            }
+            MotionEvent.ACTION_CANCEL -> pointers.clear()
         }
         recompute()
         val pressed = buttons and before.inv()
@@ -323,7 +322,7 @@ class ControlView(
                     axisY = 0f
                     buttons = 0
                 } else {
-                    val range = radius
+                    val range = radius.coerceAtLeast(1f)
                     val dx = touch.x - centerX
                     val dy = touch.y - centerY
                     val length = hypot(dx, dy)
@@ -628,7 +627,6 @@ class ControlView(
     private class Face(val label: String, val dx: Int, val dy: Int, val bit: Int, val tint: Int)
 
     companion object {
-        private const val STICK_CLICK_MS = 280L
         private const val FACE_BUTTON = 0.4f
         private const val FACE_OFFSET = 0.6f
 

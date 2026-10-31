@@ -96,10 +96,46 @@ pub fn is_up() -> bool {
 }
 
 static UTILITY_INPUT: AtomicBool = AtomicBool::new(false);
+static UTILITY_KEYBOARD: AtomicBool = AtomicBool::new(false);
 
 /// A floating utility menu owns input without changing the desktop surface.
 pub fn input_is_blocked() -> bool {
+    is_up() || (UTILITY_INPUT.load(Ordering::Acquire) && !utility_keyboard_active())
+}
+
+pub fn utility_keyboard_active() -> bool {
+    UTILITY_KEYBOARD.load(Ordering::Acquire)
+}
+
+/// Floating keys suppress Android's IME while letting the surrounding desktop work.
+pub fn suppress_soft_keyboard() -> bool {
     is_up() || UTILITY_INPUT.load(Ordering::Acquire)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SessionControls_nativeUtilityKeyboard(
+    _env: JNIEnv,
+    _class: JObject,
+    active: jni::sys::jboolean,
+) {
+    let active = active != 0 && UTILITY_INPUT.load(Ordering::Acquire) && is_hidden();
+    let was_active = UTILITY_KEYBOARD.swap(active, Ordering::AcqRel);
+    if !active {
+        crate::android::accessibility::release_virtual_keys();
+        // Returning from the floating keyboard makes the controls modal
+        // again. Release desktop touches and hardware keys before their
+        // subsequent releases are blocked by the menu.
+        if was_active && UTILITY_INPUT.load(Ordering::Acquire) {
+            release_desktop_input_for_controls();
+        }
+    }
+}
+
+fn release_desktop_input_for_controls() {
+    crate::android::accessibility::release_service_keys();
+    if let Some(proxy) = crate::android::accessibility::event_loop_proxy() {
+        let _ = proxy.send_event(crate::android::accessibility::AppUserEvent::PortalControlsOpened);
+    }
 }
 
 #[no_mangle]
@@ -113,12 +149,12 @@ pub extern "system" fn Java_app_polarbear_SessionControls_nativeUtilityInput(
         return 0;
     }
     UTILITY_INPUT.store(open, Ordering::Release);
+    if !open {
+        UTILITY_KEYBOARD.store(false, Ordering::Release);
+        crate::android::accessibility::release_virtual_keys();
+    }
     if open {
-        crate::android::accessibility::release_service_keys();
-        if let Some(proxy) = crate::android::accessibility::event_loop_proxy() {
-            let _ =
-                proxy.send_event(crate::android::accessibility::AppUserEvent::PortalControlsOpened);
-        }
+        release_desktop_input_for_controls();
     }
     1
 }

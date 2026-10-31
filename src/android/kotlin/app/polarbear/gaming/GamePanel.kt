@@ -7,6 +7,11 @@ package app.polarbear.gaming
 // TouchControls; game settings live in the files GameSettings writes.
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
@@ -22,10 +27,13 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.gestures.awaitHorizontalTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.horizontalDrag
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -69,13 +77,21 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.TouchControls
+import app.polarbear.LocalUtilityContentActive
 import app.polarbear.setup.PortalColors
 import app.polarbear.setup.PortalPalette
 import app.polarbear.setup.components.PortalEmphasized
@@ -110,7 +126,7 @@ fun GamePanel(onClosed: () -> Unit) {
         if (closing && visible.isIdle && !visible.currentState) onClosed()
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val maxCardHeight = maxHeight - 24.dp
+        val maxCardHeight = (maxHeight - 24.dp).coerceAtLeast(1.dp)
         AnimatedVisibility(
             visibleState = visible,
             enter = fadeIn(tween(220)),
@@ -138,15 +154,19 @@ fun GamePanel(onClosed: () -> Unit) {
                 fadeOut(tween(180, easing = PortalEmphasizedAccelerate)) +
                 scaleOut(tween(220, easing = PortalEmphasizedAccelerate), targetScale = 0.97f),
         ) {
-            PanelCard(palette, maxCardHeight)
+            Box(Modifier.padding(top = 12.dp, start = 16.dp, end = 16.dp).widthIn(max = PanelWidth)
+                .fillMaxWidth().heightIn(max = maxCardHeight).gameCard(palette, RoundedCornerShape(CardCorner))) {
+                GameSettingsContent(palette, PanelWidth, maxCardHeight,
+                    onBack = { TouchControls.closePanel() }, onEditController = { TouchControls.startEditing() })
+            }
         }
     }
 }
 
 @Composable
-private fun PanelCard(palette: PortalPalette, maxHeight: Dp) {
+internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: Dp, onBack: () -> Unit, onEditController: () -> Unit) {
     val context = LocalContext.current
-    val shape = RoundedCornerShape(CardCorner)
+    val active = LocalUtilityContentActive.current
     val appId by TouchControls.appId
     val gameName by TouchControls.gameName
     val gameRunning by TouchControls.gameRunning
@@ -169,45 +189,45 @@ private fun PanelCard(palette: PortalPalette, maxHeight: Dp) {
 
     Column(
         modifier = Modifier
-            .padding(top = 12.dp, start = 16.dp, end = 16.dp)
             .widthIn(max = PanelWidth)
-            .fillMaxWidth()
+            .width(width)
             .heightIn(max = maxHeight)
-            .gameCard(palette, shape)
             // Taps on the card's own blank space must not reach the scrim.
             .pointerInput(Unit) { detectTapGestures { } }
-            .verticalScroll(rememberScrollState())
-            .padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 18.dp),
+            .padding(top = 18.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(
-                    text = gameName ?: if (gameRunning) "Game" else "Steam",
+                AnimatedContent(gameName ?: if (gameRunning) "Game settings" else "Gaming",
+                    transitionSpec = { fadeIn(tween(220, delayMillis = 60)).togetherWith(fadeOut(tween(120))) }, label = "current game") { name -> Text(
+                    text = name,
                     fontSize = 19.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = palette.textPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = when {
+                ) }
+                AnimatedContent(when {
                         appId != null -> "Running · Steam app $appId"
                         gameRunning -> "Running"
                         else -> "No game running · settings apply to the next one"
-                    },
+                    }, transitionSpec = { fadeIn(tween(220)).togetherWith(fadeOut(tween(120))) }, label = "game status") { status -> Text(
+                    text = status,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     color = palette.textMuted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                )
+                ) }
             }
             Spacer(Modifier.width(12.dp))
-            QuietButton("Done", palette) { TouchControls.closePanel() }
+            QuietButton("Done", palette, onClick = onBack)
         }
 
+        Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState(), enabled = active)
+            .padding(start = 20.dp, end = 20.dp, bottom = 18.dp)) {
         SectionHeading("On-screen controller", palette)
-        Group {
+        Group(palette) {
             ToggleRow(
                 title = "Show controller",
                 subtitle = when {
@@ -244,11 +264,11 @@ private fun PanelCard(palette: PortalPalette, maxHeight: Dp) {
                 title = "Edit layout",
                 subtitle = if (TouchControls.appLayout.value) "Using this game's own layout" else "Move, resize and hide controls",
                 palette = palette,
-            ) { TouchControls.startEditing() }
+            ) { onEditController() }
         }
 
         SectionHeading("Feel", palette)
-        Group {
+        Group(palette) {
             ToggleRow("Button vibration", "A tap you can feel on every press", haptics, palette) {
                 TouchControls.setHaptics(it)
             }
@@ -263,19 +283,21 @@ private fun PanelCard(palette: PortalPalette, maxHeight: Dp) {
         }
 
         SectionHeading("Game settings", palette)
-        Group {
+        Group(palette) {
             val id = appId
-            if (id != null) {
+            AnimatedVisibility(id != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                Column {
                 ToggleRow(
                     title = "Only for this game",
                     subtitle = if (ownSettings) "${gameName ?: "This game"} keeps its own settings" else "Off: every game shares these settings",
                     checked = ownSettings,
                     palette = palette,
                 ) { own ->
-                    GameSettings.setAppConfig(context, id, own)
+                    if (id != null) GameSettings.setAppConfig(context, id, own)
                     ownSettings = own
                 }
                 GroupDivider()
+                }
             }
             OptionRow(
                 title = "Video memory",
@@ -301,17 +323,18 @@ private fun PanelCard(palette: PortalPalette, maxHeight: Dp) {
         }
 
         SectionHeading("Compatibility", palette)
-        Group {
+        Group(palette) {
             OptionRow(
                 title = "Proton",
                 subtitle = "Which installed Proton for ARM64 runs Windows games",
                 options = listOf("", "stable", "experimental"),
-                selected = config.proton.takeIf { it == "stable" || it == "experimental" } ?: "",
+                selected = config.proton,
                 label = {
                     when (it) {
                         "stable" -> "Stable"
                         "experimental" -> "Experimental"
-                        else -> "Newest"
+                        "" -> "Newest"
+                        else -> it
                     }
                 },
                 palette = palette,
@@ -338,6 +361,7 @@ private fun PanelCard(palette: PortalPalette, maxHeight: Dp) {
             color = palette.textMuted.copy(alpha = 0.7f),
             lineHeight = 15.sp,
         )
+    }
     }
 }
 
@@ -387,7 +411,9 @@ fun EditBar() {
             QuietButton("Done", palette, accent = true) { TouchControls.stopEditing() }
         }
         val control = selected
+        AnimatedContent(control, transitionSpec = { fadeIn(tween(220, delayMillis = 60)).togetherWith(fadeOut(tween(120))) }, label = "selected control") { control ->
         if (control != null) {
+            Column {
             val state = layout.element(control)
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -411,6 +437,8 @@ fun EditBar() {
                 onChange = { TouchControls.setElementScale(control, it, persist = false) },
                 onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
             )
+            }
+        }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Box(Modifier.weight(1f)) {
@@ -436,7 +464,7 @@ fun EditBar() {
                 )
             }
         }
-        if (appId != null) {
+        AnimatedVisibility(appId != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
             ToggleRow(
                 title = "Layout only for ${gameName ?: "this game"}",
                 subtitle = if (appLayout) "Other games keep the shared layout" else "Off: every game shares this layout",
@@ -448,25 +476,23 @@ fun EditBar() {
 }
 
 /** Grouped rows: one soft inset surface per section, like a settings list. */
-private val GroupFill = Color(0x0FF1EBDD)
-private val GroupLine = Color(0x12F1EBDD)
-
 @Composable
-private fun Group(content: @Composable () -> Unit) {
+private fun Group(palette: PortalPalette, content: @Composable () -> Unit) {
     val shape = RoundedCornerShape(16.dp)
     Column(
         Modifier
             .fillMaxWidth()
+            .animateContentSize(spring(dampingRatio = 1f, stiffness = 380f))
             .clip(shape)
-            .background(GroupFill)
-            .border(1.dp, GroupLine, shape)
+            .background(palette.textPrimary.copy(alpha = 0.035f))
+            .border(1.dp, palette.surfaceBorder, shape)
             .padding(horizontal = 14.dp, vertical = 4.dp),
     ) { content() }
 }
 
 @Composable
 private fun GroupDivider() {
-    Box(Modifier.fillMaxWidth().padding(vertical = 2.dp).height(1.dp).background(GroupLine))
+    Box(Modifier.fillMaxWidth().padding(vertical = 2.dp).height(1.dp).background(GamePalette.surfaceBorder))
 }
 
 @Composable
@@ -484,10 +510,10 @@ private fun SectionHeading(text: String, palette: PortalPalette) {
 
 @Composable
 private fun RowText(title: String, subtitle: String?, palette: PortalPalette, modifier: Modifier) {
-    Column(modifier) {
+    Column(modifier.animateContentSize(spring(dampingRatio = 1f, stiffness = 380f))) {
         Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.textPrimary)
-        if (subtitle != null) {
-            Text(subtitle, fontSize = 11.5.sp, fontWeight = FontWeight.Normal, color = palette.textMuted, lineHeight = 15.sp)
+        AnimatedContent(subtitle, transitionSpec = { fadeIn(tween(200)).togetherWith(fadeOut(tween(100))) }, label = "setting detail") { text ->
+            if (text != null) Text(text, fontSize = 11.5.sp, fontWeight = FontWeight.Normal, color = palette.textMuted, lineHeight = 15.sp)
         }
     }
 }
@@ -496,20 +522,22 @@ private fun RowText(title: String, subtitle: String?, palette: PortalPalette, mo
 @Composable
 private fun QuietButton(text: String, palette: PortalPalette, accent: Boolean = false, onClick: () -> Unit) {
     val shape = RoundedCornerShape(50)
+    val fill by animateColorAsState(if (accent) palette.accent else palette.surfaceTop, tween(180), label = "game button fill")
     Box(
         Modifier
             .clip(shape)
-            .background(if (accent) palette.accent else Color(0x1AF1EBDD))
-            .clickable(role = Role.Button, onClick = onClick)
+            .background(fill)
+            .heightIn(min = 44.dp)
+            .clickable(enabled = LocalUtilityContentActive.current, role = Role.Button, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text,
+        AnimatedContent(text, transitionSpec = { fadeIn(tween(180)).togetherWith(fadeOut(tween(100))) }, label = "game button label") { label -> Text(
+            label,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             color = if (accent) PortalColors.Charcoal else palette.textPrimary,
-        )
+        ) }
     }
 }
 
@@ -518,7 +546,7 @@ private fun NavRow(title: String, subtitle: String?, palette: PortalPalette, onC
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(role = Role.Button, onClick = onClick)
+            .clickable(enabled = LocalUtilityContentActive.current, role = Role.Button, onClick = onClick)
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -546,11 +574,13 @@ private fun ToggleRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(
+            .toggleable(
+                value = checked,
+                enabled = LocalUtilityContentActive.current,
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 role = Role.Switch,
-                onClick = { onChange(!checked) },
+                onValueChange = onChange,
             )
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -564,7 +594,7 @@ private fun ToggleRow(
 @Composable
 private fun PortalSwitch(checked: Boolean, palette: PortalPalette) {
     val travel by animateDpAsState(if (checked) 18.dp else 0.dp, spring(dampingRatio = 0.8f, stiffness = 700f), label = "switch thumb")
-    val track by animateColorAsState(if (checked) palette.accent else Color(0x29F1EBDD), tween(160), label = "switch track")
+    val track by animateColorAsState(if (checked) palette.accent else palette.textMuted.copy(alpha = 0.25f), tween(160), label = "switch track")
     Box(
         Modifier
             .size(width = 42.dp, height = 24.dp)
@@ -598,13 +628,14 @@ private fun SliderRow(
             Text(title, modifier = Modifier.weight(1f), fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.textPrimary)
             Text(valueText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = palette.textMuted)
         }
-        PortalSlider(value, range, palette, onChange, onFinished)
+        PortalSlider(title, value, range, palette, onChange, onFinished)
     }
 }
 
 /** A slim slider: thin track, ivory knob; drag or tap anywhere along it. */
 @Composable
 private fun PortalSlider(
+    title: String,
     value: Float,
     range: ClosedFloatingPointRange<Float>,
     palette: PortalPalette,
@@ -613,14 +644,25 @@ private fun PortalSlider(
 ) {
     val change by rememberUpdatedState(onChange)
     val finished by rememberUpdatedState(onFinished)
+    val enabled = LocalUtilityContentActive.current
     val span = (range.endInclusive - range.start).coerceAtLeast(1e-6f)
     val fraction = ((value - range.start) / span).coerceIn(0f, 1f)
     val knob = 9.dp
     Canvas(
         Modifier
             .fillMaxWidth()
-            .height(30.dp)
-            .pointerInput(range) {
+            .height(44.dp)
+            .semantics {
+                contentDescription = title
+                progressBarRangeInfo = ProgressBarRangeInfo(value.coerceIn(range), range)
+                if (!enabled) disabled()
+                setProgress { next ->
+                    if (enabled) { change(next.coerceIn(range)); finished() }
+                    enabled
+                }
+            }
+            .pointerInput(range, enabled) {
+                if (!enabled) return@pointerInput
                 val radius = knob.toPx()
                 fun at(x: Float): Float {
                     val usable = (size.width - radius * 2f).coerceAtLeast(1f)
@@ -628,13 +670,26 @@ private fun PortalSlider(
                 }
                 awaitEachGesture {
                     val down = awaitFirstDown()
-                    down.consume()
-                    change(at(down.position.x))
-                    drag(down.id) {
-                        it.consume()
-                        change(at(it.position.x))
+                    // A vertical gesture belongs to the settings list. Only
+                    // claim the slider once the finger deliberately moves sideways.
+                    var started = false
+                    try {
+                        val drag = awaitHorizontalTouchSlopOrCancellation(down.id) { pointer, _ ->
+                            pointer.consume()
+                            started = true
+                            change(at(pointer.position.x))
+                        }
+                        if (drag != null) horizontalDrag(drag.id) { pointer ->
+                            pointer.consume(); change(at(pointer.position.x))
+                        } else {
+                            val up = currentEvent.changes.firstOrNull { it.id == down.id }
+                            if (up != null && !up.pressed && !up.isConsumed) {
+                                up.consume(); started = true; change(at(up.position.x))
+                            }
+                        }
+                    } finally {
+                        if (started) finished()
                     }
-                    finished()
                 }
             },
     ) {
@@ -645,10 +700,10 @@ private fun PortalSlider(
         val end = size.width - radius
         val x = start + (end - start) * fraction
         val corner = CornerRadius(thickness / 2f)
-        drawRoundRect(Color(0x24F1EBDD), Offset(start, cy - thickness / 2f), Size(end - start, thickness), corner)
+        drawRoundRect(palette.textMuted.copy(alpha = 0.2f), Offset(start, cy - thickness / 2f), Size(end - start, thickness), corner)
         drawRoundRect(palette.accent, Offset(start, cy - thickness / 2f), Size(x - start, thickness), corner)
         drawCircle(Color(0x55000000), radius + 1.5.dp.toPx(), Offset(x, cy + 1.dp.toPx()))
-        drawCircle(PortalColors.Ivory, radius, Offset(x, cy))
+        drawCircle(palette.textPrimary, radius, Offset(x, cy))
     }
 }
 
@@ -665,15 +720,24 @@ private fun <T> OptionRow(
     Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
         RowText(title, subtitle, palette, Modifier)
         Spacer(Modifier.height(8.dp))
-        // A value set by hand in the file that the panel does not offer shows the first option.
-        val current = if (selected in options) selected else options.first()
+        // Preserve custom values instead of displaying a different setting as selected.
+        val choices = if (selected in options) options else options + selected
+        val enabled = LocalUtilityContentActive.current
+        val fontScale = LocalDensity.current.fontScale
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val controlWidth = maxOf(maxWidth, ((choices.maxOf { label(it).length } * 7f * fontScale + 24f) * choices.size).dp)
+        Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState(), enabled = enabled)) {
         SlidingSegmentedControl(
-            options = options,
-            selected = current,
-            onSelect = onSelect,
+            modifier = Modifier.width(controlWidth),
+            options = choices,
+            selected = selected,
+            onSelect = { if (enabled) onSelect(it) },
             label = label,
             palette = palette,
-            height = 36.dp,
+            height = 44.dp,
+            enabled = enabled,
         )
+        }
+        }
     }
 }

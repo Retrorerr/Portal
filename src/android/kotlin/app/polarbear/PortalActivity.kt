@@ -184,6 +184,7 @@ open class PortalActivity : GameActivity() {
 
     override fun onStart() {
         super.onStart()
+        SessionService.sync(this)
         SetupService.setPortalVisible(this, true)
     }
 
@@ -233,8 +234,14 @@ open class PortalActivity : GameActivity() {
      */
     override fun onDestroy() {
         Log.i(TAG, "Activity destroyed (finishing=$isFinishing); ending the process")
+        SessionService.endProcess(this)
         Process.killProcess(Process.myPid())
         super.onDestroy()
+    }
+
+    /** Native guest-worker ownership; surface suspension deliberately does not end the session. */
+    fun setDesktopSessionActive(owner: Long, active: Boolean) {
+        SessionService.setActive(this, owner, active)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -247,7 +254,7 @@ open class PortalActivity : GameActivity() {
             // if the guest still holds its pointer lock.
             applyPointerCapture()
             SessionControls.focused()
-        }
+        } else TouchControls.cancelInput()
     }
 
     /**

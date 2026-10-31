@@ -78,6 +78,7 @@ object TouchControls : ControlHost {
     private var handle: PortalCapsuleView? = null
     private var editBar: ComposeView? = null
     private var panel: ComposeView? = null
+    private val retiringViews = mutableSetOf<View>()
     private val views = LinkedHashMap<Control, ControlView>()
     private var padPlugged = false
     private var scanning = false
@@ -87,6 +88,7 @@ object TouchControls : ControlHost {
 
     private val rootLayoutListener = View.OnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
         if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
+            cancelInput()
             placeAll()
             placeHandle()
         }
@@ -286,7 +288,7 @@ object TouchControls : ControlHost {
         if (wantHandle && handle == null) addHandle(host, overlay)
         if (!wantHandle && handle != null) removeView(handle).also { handle = null }
         if (editingState.value && editBar == null) addEditBar(host, overlay)
-        if (!editingState.value && editBar != null) removeView(editBar).also { editBar = null }
+        if (!editingState.value && editBar != null) retireView(editBar).also { editBar = null }
     }
 
     /** Add and remove control views for the current mode; place them when anything changed. */
@@ -297,6 +299,7 @@ object TouchControls : ControlHost {
         val modeChanged = mode != lastMode
         lastMode = mode
         var changed = false
+        val arriving = mutableListOf<ControlView>()
         val wanted: Set<Control> = when (mode) {
             Mode.NONE -> emptySet()
             Mode.EDIT -> Control.values().toSet()
@@ -307,7 +310,7 @@ object TouchControls : ControlHost {
             val (control, view) = iterator.next()
             if (control !in wanted) {
                 view.release()
-                removeView(view)
+                retireView(view)
                 iterator.remove()
                 changed = true
             }
@@ -318,12 +321,17 @@ object TouchControls : ControlHost {
                 // Above the native surface (child 0), below the handle and Portal's own screens.
                 overlay.addView(view, min(1, overlay.childCount), FrameLayout.LayoutParams(1, 1, Gravity.TOP or Gravity.START))
                 views[control] = view
+                arriving += view
                 changed = true
             }
         }
         // Touches held in one mode mean nothing in the other.
         if (modeChanged) views.values.forEach { it.release() }
         if (changed || modeChanged || place) placeAll()
+        arriving.forEach { view ->
+            view.alpha = 0f; view.scaleX = 0.96f; view.scaleY = 0.96f
+            view.animate().alpha(layout.value.opacity).scaleX(1f).scaleY(1f).setDuration(240).start()
+        }
         when (mode) {
             Mode.PLAY -> {
                 // Plug the pad in now, so games and Steam see it before a touch.
@@ -388,10 +396,22 @@ object TouchControls : ControlHost {
 
     private fun removeView(view: View?) {
         view ?: return
+        view.animate().cancel()
+        retiringViews.remove(view)
         (view.parent as? ViewGroup)?.removeView(view)
     }
 
+    private fun retireView(view: View?) {
+        view ?: return
+        view.isEnabled = false
+        retiringViews += view
+        view.animate().cancel()
+        view.animate().alpha(0f).scaleX(0.98f).scaleY(0.98f).setDuration(180)
+            .withEndAction { removeView(view) }.start()
+    }
+
     private fun removeAll() {
+        retiringViews.toList().forEach(::removeView)
         for (view in views.values) {
             view.release()
             removeView(view)
@@ -417,6 +437,12 @@ object TouchControls : ControlHost {
     private fun sendNeutral() {
         axes.fill(0f)
         GamepadBridge.touchPad(0, axes)
+    }
+
+    /** A modal control or lost focus ends every held gesture immediately. */
+    fun cancelInput() {
+        views.values.forEach { it.release() }
+        if (padPlugged) sendNeutral()
     }
 
     // ---- ControlHost -----------------------------------------------------
@@ -554,6 +580,7 @@ object TouchControls : ControlHost {
 
     fun startEditing() {
         if (activity == null) return
+        cancelInput()
         selectedState.value = null
         editingState.value = true
         closePanel(immediately = true)
@@ -568,12 +595,13 @@ object TouchControls : ControlHost {
     }
 
     fun openPanel() {
+        handle?.let { it.showGameOptions(); return }
         val host = activity ?: return
         val overlay = root ?: return
         if (panel != null) return
         panelClosing.value = false
         val view = ComposeView(host).apply {
-            setContent { app.polarbear.setup.components.PortalUiDensity { GamePanel(onClosed = { closePanel(immediately = true) }) } }
+            setContent { app.polarbear.setup.PortalTheme { app.polarbear.setup.components.PortalUiDensity { GamePanel(onClosed = { closePanel(immediately = true) }) } } }
         }
         overlay.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         panel = view
@@ -605,7 +633,7 @@ object TouchControls : ControlHost {
     }
 
     private fun addEditBar(host: PortalActivity, overlay: FrameLayout) {
-        val view = ComposeView(host).apply { setContent { app.polarbear.setup.components.PortalUiDensity { EditBar() } } }
+        val view = ComposeView(host).apply { setContent { app.polarbear.setup.PortalTheme { app.polarbear.setup.components.PortalUiDensity { EditBar() } } } }
         overlay.addView(
             view,
             FrameLayout.LayoutParams(
@@ -615,6 +643,8 @@ object TouchControls : ControlHost {
             ),
         )
         editBar = view
+        view.alpha = 0f; view.translationY = -8 * host.resources.displayMetrics.density
+        view.animate().alpha(1f).translationY(0f).setDuration(280).start()
     }
 
     fun overlayChanged() { activity?.let(::refresh) }
@@ -623,6 +653,7 @@ object TouchControls : ControlHost {
     fun openVeilFromUtility() { handle?.openVeil() }
     fun dispatchUtilityKey(event: KeyEvent): Boolean {
         if (!SessionControls.isUtilityVisible()) return false
+        if (SessionControls.desktopKeyboardVisible && event.keyCode != KeyEvent.KEYCODE_BACK) return false
         if (event.keyCode in setOf(KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_POWER)) return false
         if (event.keyCode == KeyEvent.KEYCODE_BACK || event.keyCode == KeyEvent.KEYCODE_ESCAPE) {
             if (event.action == KeyEvent.ACTION_UP) closeUtilityMenu()
@@ -657,7 +688,7 @@ object TouchControls : ControlHost {
             onPositionChanged = { x, y -> saveHandle(x,y) },
             onSizeChanged = { placeHandle() },
             onOpen = { panel -> SessionControls.requestPanel(host,panel) },
-            onGameOptions = { later { openPanel() } },
+            onEditController = { later { startEditing() } },
             onToggleController = { later { toggleController() } },
         )
         val index = views.values.maxOfOrNull { overlay.indexOfChild(it) }?.plus(1) ?: min(1, overlay.childCount)

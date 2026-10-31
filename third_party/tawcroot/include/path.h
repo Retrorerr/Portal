@@ -179,6 +179,12 @@ struct tawcroot_bind {
 	                              * the new tawcroot can re-open it.
 	                              * Stable across chroot — host fs doesn't
 	                              * move.                                 */
+	/* A directory borrowed from another process's open fd can be usable
+	 * even when its canonical pathname cannot be reopened (Android storage
+	 * mount namespaces). Keep the canonical src for reverse translation,
+	 * but retain the peer fd path across exec. Never retain /proc/self/fd:
+	 * a child may legitimately close those before its next exec. */
+	char   exec_src[64];
 };
 
 extern struct tawcroot_bind tawcroot_binds[TAWCROOT_MAX_BINDS];

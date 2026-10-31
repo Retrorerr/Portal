@@ -58,10 +58,12 @@ object PortalPreview {
             )
             if (slow > 1f) stopSlowClock = slowDown(this, slow)
             setContent {
-                if (gate) {
-                    PortalPrepareGate(launchMarkModifier = Modifier, onCleared = { hide() }, preview = true)
-                } else {
-                    PortalSetupScreen(previewOnly = true, previewInstall = install)
+                app.polarbear.setup.PortalTheme {
+                    if (gate) {
+                        PortalPrepareGate(launchMarkModifier = Modifier, onCleared = { hide() }, preview = true)
+                    } else {
+                        PortalSetupScreen(previewOnly = true, previewInstall = install)
+                    }
                 }
             }
         }

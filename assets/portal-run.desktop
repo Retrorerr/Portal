@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Open with Portal
+Comment=Run a portable Linux, AppImage, Java or Windows application
+Exec=/usr/local/bin/portal-run --gui -- %f
+Icon=application-x-executable
+Terminal=false
+NoDisplay=true
+MimeType=application/vnd.appimage;application/x-iso9660-appimage;application/java-archive;application/x-ms-dos-executable;application/x-msi;
+Categories=Utility;

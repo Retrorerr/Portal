@@ -311,7 +311,10 @@ step_power() {
   install -Dm644 -t ~/.config/rofi "$F"/rofi/colors.rasi
   install_power_launcher
   # rofi is an X11 client here, drawn at the screen's native pixels: scale the laptop's sizes
-  scale=$(kscreen-doctor -j | jq -r '[.outputs[] | select(.enabled)][0].scale')
+  # Plasma 6.8's kscreen-doctor JSON has no "enabled" field, only "connected"; a missing
+  # scale used to become the string "null" and made every rofi size zero (an empty menu).
+  scale=$(kscreen-doctor -j | jq -r '([.outputs[] | select(.connected != false)][0] // .outputs[0]).scale // empty')
+  case "$scale" in ''|null|0) scale=1 ;; esac
   read -r W H < <(xdpyinfo | awk '/dimensions:/{split($2, d, "x"); print d[1], d[2]}')
   s() { awk -v a="$1" -v k="$scale" 'BEGIN { printf "%d", a * k + 0.5 }'; }
   sed -e "s/@S@/$scale/; s/@DPI@/$(s 96)/" -e "s/@MARGIN@/$(( (W - 3 * $(s 260) - 2 * $(s 22)) / 2 ))/" \
@@ -322,8 +325,7 @@ step_power() {
   kpackagetool6 --type=KWin/Script -u "$F/kwin/rice-rofi-autoclose" >/dev/null 2>&1 \
     || kpackagetool6 --type=KWin/Script -i "$F/kwin/rice-rofi-autoclose"
   kw --file kwinrc --group Plugins --key rice-rofi-autocloseEnabled true
-  gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
-    --method org.kde.KGlobalAccel.doRegister "['rice-rofi-close.desktop','_launch','Rice: close rofi','Rice: close rofi']" >/dev/null
+  rice-key --register rice-rofi-close.desktop _launch "Rice: close rofi"
   qdbus6 org.kde.KWin /KWin reconfigure
   rm -f ~/.local/share/applications/rice-leave.desktop
 }
@@ -393,8 +395,7 @@ step_keys() {
     rice-key $K "Window to Desktop $d" "Meta+Shift+$d" "Meta+${s[$((d-1))]}"
   done
   rice-key org.kde.plasma-systemmonitor.desktop _launch Ctrl+Escape
-  gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
-    --method org.kde.KGlobalAccel.doRegister "['rice-powermenu.desktop','_launch','Rice: power menu','Rice: power menu']" >/dev/null
+  rice-key --register rice-powermenu.desktop _launch "Rice: power menu"
   rice-key rice-powermenu.desktop _launch Meta+Escape
   kw --file kwinrc --group ModifierOnlyShortcuts --key Meta --delete
   qdbus6 org.kde.KWin /KWin reconfigure
