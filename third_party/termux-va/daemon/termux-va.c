@@ -97,6 +97,8 @@
 #include <android/api-level.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
+#include <media/NdkImageReader.h>
+#include <android/hardware_buffer.h>
 
 /* MediaFormat keys are string literals in Android's MediaFormat API. Use
  * them directly instead of importing AMEDIAFORMAT_KEY_* data symbols from
@@ -504,6 +506,18 @@ typedef struct {
     int              output_layout;    /* enum OutputLayout; -1 until known */
     uint8_t         *convert_buf;      /* reusable I420 -> NV12 conversion buffer */
     size_t           convert_cap;
+
+    /* Image output (SHM decode sessions): the codec renders into an
+     * AImageReader and the frame is copied once, from the image planes into
+     * the slot.  ByteBuffer output made Codec2 convert every graphic block
+     * into a linear buffer first (CopyRow_NEON, ~40% of the daemon's CPU at
+     * 4K).  NULL = ByteBuffer output. */
+    AImageReader    *reader;
+    pthread_mutex_t  img_mu;
+    pthread_cond_t   img_cv;
+    long             img_ts_mismatch;
+    int              img_crop_known;   /* display crop from the output format */
+    int              img_crop_l, img_crop_t, img_crop_r, img_crop_b;
 
     /* shared-memory transport */
     XferMode         xfer;
@@ -1545,6 +1559,229 @@ static int send_frame_shm_i420(Session *s, const uint8_t *data, size_t len,
     return shm_publish_slot(s, slot, out_len, pts);
 }
 
+/* ------------------------------------------------------- image output */
+#define IMAGE_WAIT_MS 2000
+#define QCOM_NV12_VENUS 0x7fa30c04   /* HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS */
+
+static void image_available(void *ctx, AImageReader *reader)
+{
+    (void)reader;
+    Session *s = ctx;
+    pthread_mutex_lock(&s->img_mu);
+    pthread_cond_broadcast(&s->img_cv);
+    pthread_mutex_unlock(&s->img_mu);
+}
+
+/* TERMUX_VA_OUTPUT=buffer keeps ByteBuffer output (A/B and fallback). */
+static int image_output_wanted(void)
+{
+    const char *e = getenv("TERMUX_VA_OUTPUT");
+    return !(e && strcmp(e, "buffer") == 0);
+}
+
+static ANativeWindow *image_reader_open(Session *s)
+{
+    AImageReader *r = NULL;
+    media_status_t st = AImageReader_newWithUsage(
+        s->w, s->h, AIMAGE_FORMAT_YUV_420_888,
+        AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, 3, &r);
+    if (st != AMEDIA_OK || !r) {
+        dlog(1, "[%d] AImageReader unavailable (%d), using ByteBuffer output", s->id, st);
+        return NULL;
+    }
+    ANativeWindow *win = NULL;
+    if (AImageReader_getWindow(r, &win) != AMEDIA_OK || !win) {
+        AImageReader_delete(r);
+        return NULL;
+    }
+    pthread_mutex_init(&s->img_mu, NULL);
+    pthread_cond_init(&s->img_cv, NULL);
+    AImageReader_ImageListener l = { .context = s, .onImageAvailable = image_available };
+    AImageReader_setImageListener(r, &l);
+    s->reader = r;
+    return win;
+}
+
+static void image_reader_close(Session *s)
+{
+    if (!s->reader)
+        return;
+    AImageReader_delete(s->reader);
+    s->reader = NULL;
+    pthread_cond_destroy(&s->img_cv);
+    pthread_mutex_destroy(&s->img_mu);
+}
+
+/* Drop images left in the reader (after a drain flush). */
+static void image_reader_discard(Session *s)
+{
+    AImage *img = NULL;
+    while (s->reader && AImageReader_acquireNextImage(s->reader, &img) == AMEDIA_OK) {
+        AImage_delete(img);
+        img = NULL;
+    }
+}
+
+/* Render output buffer `oi` into the reader, take the image and copy it into
+ * an SHM slot as NV12.  Strictly serialized - one image in flight - so a
+ * queued buffer is never replaced before it is acquired.  Returns 0, a
+ * negative send code, or -3 when the output buffer could not be released. */
+static int image_send_frame(Session *s, ssize_t oi, const AMediaCodecBufferInfo *info,
+                            uint32_t pts)
+{
+    if (AMediaCodec_releaseOutputBuffer(s->codec, oi, true) != AMEDIA_OK)
+        return -3;
+
+    AImage *img = NULL;
+    int64_t deadline = monotonic_ms() + IMAGE_WAIT_MS;
+    for (;;) {
+        media_status_t st = AImageReader_acquireNextImage(s->reader, &img);
+        if (st == AMEDIA_OK)
+            break;
+        if (st != AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE) {
+            dlog(1, "[%d] acquireNextImage failed: %d", s->id, st);
+            return -1;
+        }
+        if (!running || s->stop)
+            return SEND_PEER_GONE;
+        if (monotonic_ms() >= deadline) {
+            dlog(1, "[%d] rendered frame never reached the image reader", s->id);
+            return -1;
+        }
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 10 * 1000000;
+        if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_mutex_lock(&s->img_mu);
+        pthread_cond_timedwait(&s->img_cv, &s->img_mu, &ts);
+        pthread_mutex_unlock(&s->img_mu);
+    }
+
+    int rc = -1;
+    int32_t w = 0, h = 0, ys = 0, us = 0, vs = 0, up = 0, vp = 0;
+    const uint8_t *y = NULL, *u = NULL, *v = NULL;
+    AHardwareBuffer *hb = NULL;
+    void *base = NULL;
+    AHardwareBuffer_Desc d = {0};
+    if (AImage_getHardwareBuffer(img, &hb) == AMEDIA_OK && hb)
+        AHardwareBuffer_describe(hb, &d);
+
+    if (d.format == QCOM_NV12_VENUS) {
+        /* Qualcomm's linear NV12: gralloc locks it as a single plane, the
+         * layout is fixed (msm_media_info.h): UV follows Y at stride x
+         * ALIGN(height, 32), with the same stride. */
+        if (AHardwareBuffer_lock(hb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL,
+                                 &base) != 0 || !base) {
+            dlog(1, "[%d] cannot lock output buffer", s->id);
+            base = NULL;
+            goto out;
+        }
+        w = (int32_t)d.width; h = (int32_t)d.height;
+        ys = us = vs = (int32_t)d.stride;
+        up = vp = 2;
+        y = base;
+        u = y + (size_t)d.stride * ((d.height + 31) & ~31u);
+        v = u + 1;
+    } else {
+        /* Any other layout must be fully described by AImage. */
+        uint8_t *py = NULL, *pu = NULL, *pv = NULL;
+        int yl = 0, ul = 0, vl = 0;
+        int32_t yp = 0;
+        if (AImage_getWidth(img, &w) != AMEDIA_OK || AImage_getHeight(img, &h) != AMEDIA_OK ||
+            AImage_getPlaneData(img, 0, &py, &yl) != AMEDIA_OK ||
+            AImage_getPlaneData(img, 1, &pu, &ul) != AMEDIA_OK ||
+            AImage_getPlaneData(img, 2, &pv, &vl) != AMEDIA_OK ||
+            AImage_getPlaneRowStride(img, 0, &ys) != AMEDIA_OK ||
+            AImage_getPlaneRowStride(img, 1, &us) != AMEDIA_OK ||
+            AImage_getPlaneRowStride(img, 2, &vs) != AMEDIA_OK ||
+            AImage_getPlanePixelStride(img, 0, &yp) != AMEDIA_OK ||
+            AImage_getPlanePixelStride(img, 1, &up) != AMEDIA_OK ||
+            AImage_getPlanePixelStride(img, 2, &vp) != AMEDIA_OK) {
+            dlog(1, "[%d] unusable output image (buffer format 0x%x)", s->id, d.format);
+            goto out;
+        }
+        size_t cw0 = ((size_t)w + 1) / 2, ch0 = ((size_t)h + 1) / 2;
+        if (w <= 0 || h <= 0 || yp != 1 || !py || !pu || !pv || ys < w ||
+            us <= 0 || vs <= 0 || up <= 0 || vp <= 0 ||
+            (size_t)yl < (size_t)ys * (h - 1) + w ||
+            (size_t)ul < (size_t)us * (ch0 - 1) + (cw0 - 1) * up + 1 ||
+            (size_t)vl < (size_t)vs * (ch0 - 1) + (cw0 - 1) * vp + 1) {
+            dlog(1, "[%d] output image planes (buffer format 0x%x) do not cover %dx%d",
+                 s->id, d.format, w, h);
+            goto out;
+        }
+        y = py; u = pu; v = pv;
+    }
+
+    int64_t its = 0;
+    AImage_getTimestamp(img, &its);
+    if (its != info->presentationTimeUs * 1000 && s->img_ts_mismatch++ < 8)
+        dlog(1, "[%d] image timestamp %lld != output %lld us", s->id,
+             (long long)its, (long long)info->presentationTimeUs);
+
+    /* The slot holds the decoder's aligned buffer; the visible picture is
+     * the codec's display crop (the image crop rect is the whole buffer on
+     * Qualcomm).  Announce the geometry whenever it changes. */
+    int cl = 0, ct = 0, cr = w - 1, cb = h - 1;
+    if (s->img_crop_known) {
+        cl = s->img_crop_l; ct = s->img_crop_t;
+        cr = s->img_crop_r < w ? s->img_crop_r : w - 1;
+        cb = s->img_crop_b < h ? s->img_crop_b : h - 1;
+    }
+    if (s->stride != w || s->slice_height != h || s->crop_l != cl ||
+        s->crop_t != ct || s->crop_r != cr || s->crop_b != cb || !s->fmt_sent) {
+        s->stride = w; s->slice_height = h;
+        s->crop_l = cl; s->crop_t = ct; s->crop_r = cr; s->crop_b = cb;
+        if (!s->frames_out || s->fmt_changes > 1)
+            dlog(1, "[%d] image output %dx%d (buffer 0x%x stride %d) crop=(%d,%d)-(%d,%d)",
+                 s->id, w, h, d.format, ys, cl, ct, cr, cb);
+        if (send_format_desc(s) < 0)
+            goto out;
+    }
+
+    size_t cw = ((size_t)w + 1) / 2, ch = ((size_t)h + 1) / 2;
+    size_t total = (size_t)w * h + (size_t)w * ch;
+    if (total > s->shm_slot) {
+        dlog(1, "[%d] %dx%d image exceeds slot of %zu", s->id, w, h, s->shm_slot);
+        goto out;
+    }
+    int slot = shm_claim_slot(s);
+    if (slot < 0) {
+        rc = slot;
+        goto out;
+    }
+    uint8_t *dst = shm_slot_data(s, slot);
+    if (ys == w) {
+        memcpy(dst, y, (size_t)w * h);
+    } else {
+        for (int32_t r = 0; r < h; r++)
+            memcpy(dst + (size_t)r * w, y + (size_t)r * ys, w);
+    }
+    uint8_t *uv = dst + (size_t)w * h;
+    if (up == 2 && vp == 2 && v == u + 1 && us == w && vs == w) {
+        memcpy(uv, u, (size_t)w * ch);      /* NV12, same stride */
+    } else {
+        for (size_t r = 0; r < ch; r++) {
+            uint8_t *o = uv + r * w;
+            const uint8_t *ur = u + r * us, *vr = v + r * vs;
+            if (up == 2 && vp == 2 && vr == ur + 1) {
+                memcpy(o, ur, cw * 2);      /* NV12 */
+            } else {
+                for (size_t c = 0; c < cw; c++) {
+                    o[c * 2] = ur[c * up];
+                    o[c * 2 + 1] = vr[c * vp];
+                }
+            }
+        }
+    }
+    rc = shm_publish_slot(s, slot, total, pts);
+out:
+    if (base)
+        AHardwareBuffer_unlock(hb, NULL);
+    AImage_delete(img);
+    return rc;
+}
+
 /*
  * Output thread: dequeues decoded frames and writes them back to the
  * socket.  Fully decoupled from the input thread - sending a large frame
@@ -1567,12 +1804,32 @@ static void *output_thread(void *arg)
              * any frame.  Normally FORMAT_CHANGED arrives first, but do not
              * depend on it: if the decoder yields a frame directly, send
              * the descriptor from known values to keep the client aligned. */
-            if (!s->fmt_sent && info.size > 0) {
+            if (!s->reader && !s->fmt_sent && info.size > 0) {
                 if (send_format_desc(s) == 0)
                     dlog(2, "[%d] format descriptor sent late (FORMAT_CHANGED had not arrived)", s->id);
             }
 
-            if (info.size > 0 && !s->stop) {
+            int buffer_released = 0;
+            if (s->reader && info.size > 0 && !s->stop) {
+                int rc = image_send_frame(s, oi, &info,
+                                          (uint32_t)(info.presentationTimeUs / PTS_UNIT_SCALE));
+                buffer_released = 1;
+                if (rc == -3) {
+                    dlog(1, "[%d] releaseOutputBuffer(render) failed", s->id);
+                    session_abort(s);
+                    break;
+                } else if (rc == SEND_PEER_GONE) {
+                    s->frames_dropped_at_exit++;
+                    if (!s->stop)
+                        s->peer_gone = 1;
+                    s->stop = 1;
+                } else if (rc < 0) {
+                    dlog(1, "[%d] image frame failed, ending session", s->id);
+                    s->stop = 1;
+                } else {
+                    s->frames_out++;
+                }
+            } else if (info.size > 0 && !s->stop) {
                 size_t osz;
                 uint8_t *ob = AMediaCodec_getOutputBuffer(s->codec, oi, &osz);
                 if (ob) {
@@ -1665,7 +1922,8 @@ static void *output_thread(void *arg)
                     }
                 }
             }
-            media_status_t released = AMediaCodec_releaseOutputBuffer(s->codec, oi, 0);
+            media_status_t released = buffer_released ? AMEDIA_OK
+                : AMediaCodec_releaseOutputBuffer(s->codec, oi, 0);
             if (released != AMEDIA_OK) {
                 dlog(1, "[%d] releaseOutputBuffer failed: %d", s->id, released);
                 session_abort(s);
@@ -1692,6 +1950,7 @@ static void *output_thread(void *arg)
                      * parsing with stale stride/crop and every subsequent
                      * frame is misaligned. */
                     s->fmt_sent = 0;
+                    image_reader_discard(s);
                     s->drain_done++;
                     dlog(2, "[%d] drain #%u complete, session continues", s->id, s->drain_done);
                     continue;
@@ -1747,6 +2006,9 @@ static void *output_thread(void *arg)
                                      &cl, &ct, &cr, &cb);
                 s->crop_l = cl; s->crop_t = ct;
                 s->crop_r = cr; s->crop_b = cb;
+                s->img_crop_l = cl; s->img_crop_t = ct;
+                s->img_crop_r = cr; s->img_crop_b = cb;
+                s->img_crop_known = 1;
                 AMediaFormat_delete(of);
 
                 s->fmt_changes++;
@@ -1761,7 +2023,10 @@ static void *output_thread(void *arg)
                  * the client must learn the new stride/crop or it keeps
                  * parsing with the old geometry and every frame is offset. */
                 s->fmt_sent = 0;
-                send_format_desc(s);
+                /* Image output announces the reader's geometry with the
+                 * next frame instead. */
+                if (!s->reader)
+                    send_format_desc(s);
             }
         } else if (oi == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
             /* nothing to do: with the NDK the buffer pointer is re-fetched
@@ -2307,8 +2572,33 @@ static void *session_thread(void *arg)
     s->codec = AMediaCodec_createDecoderByType(s->mime);
     if (!s->codec) { dlog(0, "[%d] no available decoder: %s", s->id, s->mime); goto out_fmt; }
 
-    media_status_t st = AMediaCodec_configure(s->codec, fmt, NULL, NULL, 0);
+    /* Image output for SHM sessions; never drop a rendered frame, the
+     * bridge waits for every unit. */
+    ANativeWindow *win = NULL;
+    if (s->xfer == XFER_SHM && image_output_wanted()) {
+        AMediaFormat_setInt32(fmt, "allow-frame-drop", 0);
+        /* Without a color format Qualcomm renders UBWC-compressed buffers,
+         * which a CPU mapping cannot read; any request selects linear NV12
+         * (Venus layout).  YUV420SemiPlanar is the portable one. */
+        const char *cf = getenv("DMD_IMAGE_COLOR_FORMAT");
+        AMediaFormat_setInt32(fmt, TVA_MF_KEY_COLOR_FORMAT,
+                              cf ? (int32_t)strtoul(cf, NULL, 0) : COLOR_FORMAT_YUV420_SEMIPLANAR);
+        win = image_reader_open(s);
+    }
+    media_status_t st = AMediaCodec_configure(s->codec, fmt, win, NULL, 0);
+    if (st != AMEDIA_OK && win) {
+        dlog(1, "[%d] configure with image output failed (%d), using ByteBuffer output",
+             s->id, st);
+        /* a codec whose configure failed is not reusable: start over */
+        AMediaCodec_stop(s->codec);
+        AMediaCodec_delete(s->codec);
+        image_reader_close(s);
+        s->codec = AMediaCodec_createDecoderByType(s->mime);
+        if (!s->codec) { dlog(0, "[%d] no available decoder: %s", s->id, s->mime); goto out_fmt; }
+        st = AMediaCodec_configure(s->codec, fmt, NULL, NULL, 0);
+    }
     if (st != AMEDIA_OK) { dlog(0, "[%d] configure failed: %d", s->id, st); goto out_started; }
+    dlog(1, "[%d] output: %s", s->id, s->reader ? "image reader" : "byte buffer");
 
     st = AMediaCodec_start(s->codec);
     if (st != AMEDIA_OK) { dlog(0, "[%d] start failed: %d", s->id, st); goto out_started; }
@@ -2360,6 +2650,7 @@ out_started:
      * Codec2 reap its callback thread. */
     AMediaCodec_stop(s->codec);
     AMediaCodec_delete(s->codec);
+    image_reader_close(s);
 out_fmt:
     AMediaFormat_delete(fmt);
 out_fd:
