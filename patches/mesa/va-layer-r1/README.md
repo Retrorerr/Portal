@@ -28,6 +28,12 @@ frontend. `portal-va-r1.patch` adds:
   next descriptor arrives it is decoded again as a hidden frame with the real
   mask; both decodes see the same references. `DMD_AV1_EAGER_FLUSH=1` forces
   this on every picture for testing.
+- `vaDeriveImage` on contiguous NV12 surfaces (`DMD_VA_CONTIGUOUS_DMABUF=1`):
+  advertise the contiguous-planes cap, also for the profile-less query
+  derive makes, and take each plane's real offset in the shared object (the
+  bridge page-aligns the chroma plane). VLC 3's VA interop needs derive;
+  without it VLC decodes in software. The default per-plane layout is
+  unchanged.
 - Fail `vaInitialize` when no daemon listens on the endpoint. The VA frontend
   creates the decoder at the first picture, so a missing daemon used to
   surface mid-decode (2 of 120 frames, then errors) and clients never took
