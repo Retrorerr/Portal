@@ -28,6 +28,14 @@ frontend. `portal-va-r1.patch` adds:
   next descriptor arrives it is decoded again as a hidden frame with the real
   mask; both decodes see the same references. `DMD_AV1_EAGER_FLUSH=1` forces
   this on every picture for testing.
+- AV1: write the real `global_motion_params()`. The bridge wrote IDENTITY
+  for every reference, so any frame with global motion had its tile data
+  misparsed: YouTube AV1 (ads, then the video itself) froze within seconds,
+  dav1d and aomdec reject the same units. The VA `wm[]` parameters are now
+  coded against PrevGmParams, the set saved with the primary reference
+  frame, which the bridge tracks per surface next to the order hints.
+- Gate the per-call `tva-va:` traces behind `DMD_VA_LOG=1`; they wrote
+  several lines per decoded frame to every VA client's stderr.
 - `vaDeriveImage` on contiguous NV12 surfaces (`DMD_VA_CONTIGUOUS_DMABUF=1`):
   advertise the contiguous-planes cap, also for the profile-less query
   derive makes, and take each plane's real offset in the shared object (the

@@ -437,7 +437,7 @@ index cf66d338..6c1faca0 100644
     util_blitter_save_blend(ctx->blitter, ctx->blend);
     util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->zsa);
 diff --git a/src/gallium/frontends/va/av1_bitstream.c b/src/gallium/frontends/va/av1_bitstream.c
-index 6e229523..a856a1b8 100644
+index 6e229523..7952e580 100644
 --- a/src/gallium/frontends/va/av1_bitstream.c
 +++ b/src/gallium/frontends/va/av1_bitstream.c
 @@ -19,17 +19,13 @@
@@ -477,7 +477,112 @@ index 6e229523..a856a1b8 100644
  }
  
  /* Some Pixel AV1 streams arrive through FFmpeg's VA descriptors with the
-@@ -636,8 +630,7 @@ size_t dmd_av1_build_sequence_header(const void *pic_v,
+@@ -171,6 +165,104 @@ void dmd_av1_put_su(struct dmd_bitwriter *bw, int32_t v, int nbits)
+     dmd_bw_put_bits(bw, (uint32_t)v & mask, nbits);
+ }
+ 
++/* ---------------------------------------------------------- global motion */
++
++const int32_t dmd_av1_gm_default[6] = { 0, 0, 1 << 16, 0, 0, 1 << 16 };
++
++/* Inverse of inverse_recenter() (specification 5.9.28). */
++static uint32_t recenter_nonneg(uint32_t r, uint32_t v)
++{
++    if (v > (r << 1))
++        return v;
++    if (v >= r)
++        return (v - r) << 1;
++    return ((r - v) << 1) - 1;
++}
++
++/* Inverse of decode_subexp() (specification 5.9.27). */
++static void put_subexp(struct dmd_bitwriter *bw, uint32_t v, uint32_t num_syms)
++{
++    uint32_t i = 0, mk = 0;
++    const uint32_t k = 3;
++    for (;;) {
++        const uint32_t b2 = i ? k + i - 1 : k;
++        const uint32_t a = 1u << b2;
++        if (num_syms <= mk + 3 * a) {
++            dmd_av1_put_ns(bw, v - mk, num_syms - mk);
++            return;
++        }
++        const int more = v >= mk + a;
++        dmd_bw_put_flag(bw, more);
++        if (!more) {
++            dmd_bw_put_bits(bw, v - mk, (int)b2);
++            return;
++        }
++        i++;
++        mk += a;
++    }
++}
++
++/* Inverse of read_global_param() (specification 5.9.25). */
++static void put_global_param(struct dmd_bitwriter *bw, int type, int idx,
++                             const int32_t *params, const int32_t *prev,
++                             int hp)
++{
++    int abs_bits = 12, prec_bits = 15;        /* GM_ABS_ALPHA / GM_ALPHA_PREC */
++    if (idx < 2) {
++        if (type == 1) {                      /* TRANSLATION */
++            abs_bits = 9 - !hp;
++            prec_bits = 3 - !hp;
++        } else {
++            abs_bits = 12;
++            prec_bits = 6;
++        }
++    }
++    const int prec_diff = 16 - prec_bits;     /* WARPEDMODEL_PREC_BITS */
++    const int32_t round = (idx % 3) == 2 ? (1 << 16) : 0;
++    const int32_t sub = (idx % 3) == 2 ? (1 << prec_bits) : 0;
++    const int32_t mx = 1 << abs_bits;
++    const int32_t r = (prev[idx] >> prec_diff) - sub;
++    int32_t coded = (params[idx] - round) >> prec_diff;
++    if (coded < -mx)
++        coded = -mx;
++    if (coded > mx)
++        coded = mx;
++
++    /* decode_signed_subexp_with_ref(-mx, mx + 1, r) */
++    const uint32_t n = (uint32_t)(2 * mx + 1);
++    const uint32_t x = (uint32_t)(coded + mx);
++    const uint32_t rr = (uint32_t)(r + mx);
++    uint32_t v;
++    if ((rr << 1) <= n)
++        v = recenter_nonneg(rr, x);
++    else
++        v = recenter_nonneg(n - 1 - rr, n - 1 - x);
++    put_subexp(bw, v, n);
++}
++
++static void put_global_motion(struct dmd_bitwriter *bw,
++                              const VAWarpedMotionParamsAV1 *wm,
++                              const int32_t *prev, int hp)
++{
++    const int type = wm->wmtype <= 3 ? (int)wm->wmtype : 0;
++    dmd_bw_put_flag(bw, type != 0);           /* is_global */
++    if (!type)
++        return;
++    dmd_bw_put_flag(bw, type == 2);           /* is_rot_zoom */
++    if (type != 2)
++        dmd_bw_put_flag(bw, type == 1);       /* is_translation */
++    if (type >= 2) {
++        put_global_param(bw, type, 2, wm->wmmat, prev, hp);
++        put_global_param(bw, type, 3, wm->wmmat, prev, hp);
++        if (type == 3) {
++            put_global_param(bw, type, 4, wm->wmmat, prev, hp);
++            put_global_param(bw, type, 5, wm->wmmat, prev, hp);
++        }
++    }
++    put_global_param(bw, type, 0, wm->wmmat, prev, hp);
++    put_global_param(bw, type, 1, wm->wmmat, prev, hp);
++}
++
+ /* --------------------------------------------------------------- alignment */
+ 
+ void dmd_av1_byte_align(struct dmd_bitwriter *bw)
+@@ -636,8 +728,7 @@ size_t dmd_av1_build_sequence_header(const void *pic_v,
       * this field is omitted.  VA-API does not preserve the source value, so
       * advertise one five-frame initial delay for the single operating point;
       * it is decoder configuration only and does not change frame syntax. */
@@ -487,7 +592,7 @@ index 6e229523..a856a1b8 100644
      dmd_bw_put_bits(&bw, 0, 5);/* operating_points_cnt_minus_1: one operating
                                  * point; this driver has no scalable layer,
                                  * matching the OBU extension_flag of zero. */
-@@ -646,10 +639,8 @@ size_t dmd_av1_build_sequence_header(const void *pic_v,
+@@ -646,10 +737,8 @@ size_t dmd_av1_build_sequence_header(const void *pic_v,
       * is accepted by the Pixel decoder for the tested AV1 streams. */
      dmd_bw_put_bits(&bw, 9, 5);           /* seq_level_idx[0] */
      dmd_bw_put_flag(&bw, 0);              /* seq_tier[0] (idx > 7) */
@@ -500,17 +605,18 @@ index 6e229523..a856a1b8 100644
  
      /* Use the minimum width needed for frame_width_bits rather than a fixed
       * 16 bits.  Per va_dec_av1.h:332-334, frame_width_minus1 is the upscaled
-@@ -747,7 +738,8 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+@@ -747,7 +836,9 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
                                      const VADecPictureParameterBufferAV1 *p,
                                      uint8_t refresh_frame_flags,
                                      unsigned tile_size_bytes,
 -                                    int enable_restoration)
 +                                    int enable_restoration,
-+                                    int skip_mode_allowed)
++                                    int skip_mode_allowed,
++                                    const int32_t (*prev_gm)[6])
  {
      /* struct dmd_bitwriter is a value type: buf points to the caller's
       * storage and the remaining fields are counters.  Copying it in and back
-@@ -1048,6 +1040,14 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+@@ -1048,6 +1139,14 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
       * decoder infers skipModeAllowed=0.  Omit the field by default; callers
       * which have independently established that skip mode is available may
       * opt in with DMD_AV1_FORCE_SKIP_MODE=1. */
@@ -525,7 +631,7 @@ index 6e229523..a856a1b8 100644
      unsigned populated_refs = 0;
      if (!intra_only && p->mode_control_fields.bits.reference_select) {
          for (int i = 0; i < 7; i++)
-@@ -1062,6 +1062,7 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+@@ -1062,6 +1161,7 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
                                    !strcmp(force_skip, "true") ||
                                    !strcmp(force_skip, "on")))))
          dmd_bw_put_flag(&bw, (int)p->mode_control_fields.bits.skip_mode_present);
@@ -533,7 +639,7 @@ index 6e229523..a856a1b8 100644
  
      /* allow_warped_motion is present for every inter frame which is not
       * error-resilient when the sequence-level capability is enabled.  It is
-@@ -1069,11 +1070,7 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+@@ -1069,11 +1169,7 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
       * interpolation mode field earlier in the header. */
      if (!intra_only && !err_res) {
          const char *force_warp = getenv("DMD_AV1_FORCE_WARPED_MOTION");
@@ -546,23 +652,50 @@ index 6e229523..a856a1b8 100644
              (!strcmp(force_warp, "1") || !strcmp(force_warp, "true") ||
               !strcmp(force_warp, "on")))) ? 1 :
              (int)p->pic_info_fields.bits.allow_warped_motion;
-@@ -1121,12 +1118,13 @@ static size_t build_frame_header_obu(const VADecPictureParameterBufferAV1 *p,
+@@ -1084,15 +1180,18 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+         dmd_bw_put_flag(&bw, (int)p->mode_control_fields.bits.reduced_tx_set_used);
+     }
+ 
+-    /* global_motion_params() (5.9.24): write is_global for each reference on
+-     * inter frames.  VA-API supplies transform parameters in wm[], but
+-     * encoding them back requires the complete differential coding and
+-     * reference projection logic.  Write is_global=0 (IDENTITY) for every
+-     * reference instead; the known simplification loses global-motion
+-     * compensation and is documented at the end of this file. */
++    /* global_motion_params() (5.9.24).  VA-API supplies the decoded
++     * parameters in wm[]; each one is coded against the same parameter of
++     * PrevGmParams, the set saved with the primary reference frame.  Writing
++     * IDENTITY instead changes the motion-vector candidates and the
++     * motion-mode syntax, so the decoder misparses the tile data of any frame
++     * that uses global motion. */
+     if (!intra_only) {
++        const int hp = !p->pic_info_fields.bits.force_integer_mv &&
++                       p->pic_info_fields.bits.allow_high_precision_mv;
+         for (int i = 0; i < 7; i++)
+-            dmd_bw_put_flag(&bw, 0);     /* is_global[LAST+i] = 0 */
++            put_global_motion(&bw, &p->wm[i],
++                              prev_gm ? prev_gm[i] : dmd_av1_gm_default, hp);
+     }
+ 
+     /* film_grain_params() (5.9.30): the section is absent when the sequence
+@@ -1121,12 +1220,14 @@ static size_t build_frame_header_obu(const VADecPictureParameterBufferAV1 *p,
                                       size_t *body_len_out,
                                       uint8_t refresh_frame_flags,
                                       unsigned tile_size_bytes,
 -                                     int enable_restoration)
 +                                     int enable_restoration,
-+                                     int skip_mode_allowed)
++                                     int skip_mode_allowed,
++                                     const int32_t (*prev_gm)[6])
  {
      struct dmd_bitwriter bw;
      dmd_bw_init(&bw, body, body_cap);
      put_uncompressed_header(&bw, p, refresh_frame_flags, tile_size_bytes,
 -                            enable_restoration);
-+                            enable_restoration, skip_mode_allowed);
++                            enable_restoration, skip_mode_allowed, prev_gm);
  
      if (obu_type == DMD_OBU_FRAME)
          dmd_av1_byte_align(&bw);      /* zero padding only, no marker bit */
-@@ -1141,6 +1139,7 @@ static size_t build_frame_header_obu(const VADecPictureParameterBufferAV1 *p,
+@@ -1141,6 +1242,7 @@ static size_t build_frame_header_obu(const VADecPictureParameterBufferAV1 *p,
  
  size_t dmd_av1_build_frame_header(const void *pic_v,
                                    int enable_restoration,
@@ -570,33 +703,36 @@ index 6e229523..a856a1b8 100644
                                    unsigned char *out, size_t out_cap)
  {
      const VADecPictureParameterBufferAV1 *p = pic_v;
-@@ -1152,7 +1151,7 @@ size_t dmd_av1_build_frame_header(const void *pic_v,
+@@ -1152,7 +1254,8 @@ size_t dmd_av1_build_frame_header(const void *pic_v,
      if (build_frame_header_obu(p, DMD_OBU_FRAME_HEADER,
                                body, sizeof(body), &body_len, 0xff,
                                2,
 -                              enable_restoration) == 0)
-+                              enable_restoration, skip_mode_allowed) == 0)
++                              enable_restoration, skip_mode_allowed,
++                              NULL) == 0)
          return 0;
  
      const size_t hdr = dmd_av1_obu_header(DMD_OBU_FRAME_HEADER,
-@@ -1168,6 +1167,7 @@ size_t dmd_av1_build_frame(const void *pic_v,
+@@ -1168,6 +1271,8 @@ size_t dmd_av1_build_frame(const void *pic_v,
                             const struct dmd_av1_tile *tiles, int num_tiles,
                             uint8_t refresh_frame_flags,
                             int enable_restoration,
 +                           int skip_mode_allowed,
++                           const int32_t (*prev_gm)[6],
                             unsigned char *out, size_t out_cap)
  {
      const VADecPictureParameterBufferAV1 *p = pic_v;
-@@ -1184,7 +1184,7 @@ size_t dmd_av1_build_frame(const void *pic_v,
+@@ -1184,7 +1289,8 @@ size_t dmd_av1_build_frame(const void *pic_v,
                                fh, sizeof(fh), &fh_len,
                                refresh_frame_flags,
                                tile_size_bytes,
 -                              enable_restoration) == 0)
-+                              enable_restoration, skip_mode_allowed) == 0)
++                              enable_restoration, skip_mode_allowed,
++                              prev_gm) == 0)
          return 0;
      /* tile_group_obu() payload (specification 5.11.1):
       *   when NumTiles > 1, write tile_start_and_end_present_flag first
-@@ -1206,7 +1206,7 @@ size_t dmd_av1_build_frame(const void *pic_v,
+@@ -1206,7 +1312,7 @@ size_t dmd_av1_build_frame(const void *pic_v,
          p->pic_info_fields.bits.frame_type != 0 &&
          (p->pic_info_fields.bits.show_frame ||
           p->mode_control_fields.bits.reduced_tx_set_used) &&
@@ -606,10 +742,19 @@ index 6e229523..a856a1b8 100644
      unsigned char tg_hdr[8];
      struct dmd_bitwriter tgw;
 diff --git a/src/gallium/frontends/va/av1_bitstream.h b/src/gallium/frontends/va/av1_bitstream.h
-index 6cd0b296..4b151b12 100644
+index 6cd0b296..3cd9ae85 100644
 --- a/src/gallium/frontends/va/av1_bitstream.h
 +++ b/src/gallium/frontends/va/av1_bitstream.h
-@@ -140,11 +140,16 @@ struct dmd_av1_tile {
+@@ -83,7 +83,7 @@ void dmd_av1_put_le(struct dmd_bitwriter *bw, uint64_t v, int nbytes);
+ void dmd_av1_put_ns(struct dmd_bitwriter *bw, uint32_t v, uint32_t n);
+ 
+ /* su(n) (AV1 specification 4.10.6): signed fixed-width coding, used by
+- * global_motion and related fields. */
++ * loop filter and segmentation deltas. */
+ void dmd_av1_put_su(struct dmd_bitwriter *bw, int32_t v, int nbits);
+ 
+ /* --------------------------------------------------------------- alignment */
+@@ -140,13 +140,27 @@ struct dmd_av1_tile {
   *
   * tiles are supplied in tile-row-major order, and the count must equal
   * tile_cols * tile_rows.  Write to out and return the total byte count; return
@@ -618,16 +763,27 @@ index 6cd0b296..4b151b12 100644
 + *
 + * skip_mode_allowed is skipModeAllowed (specification 5.9.22), which depends
 + * on reference order hints that VA-API does not carry: 0 or 1 when the
-+ * caller tracked them, -1 for the legacy heuristic. */
++ * caller tracked them, -1 for the legacy heuristic.
++ *
++ * prev_gm is PrevGmParams (specification 7.20 load_previous): the global
++ * motion parameters saved with the primary reference frame, indexed by
++ * reference LAST..ALTREF.  The pic's wm[] parameters are coded against it.
++ * NULL means the defaults, which is exact when primary_ref_frame is NONE. */
  size_t dmd_av1_build_frame(const void *pic,
                             const struct dmd_av1_tile *tiles, int num_tiles,
                             uint8_t refresh_frame_flags,
                             int enable_restoration,
 +                           int skip_mode_allowed,
++                           const int32_t (*prev_gm)[6],
                             unsigned char *out, size_t out_cap);
  
++/* Default global motion parameters (identity warp). */
++extern const int32_t dmd_av1_gm_default[6];
++
  /* Build an OBU_FRAME_HEADER carrying show_existing_frame for a reference
-@@ -166,6 +171,7 @@ size_t dmd_av1_build_show_existing(uint8_t map_idx,
+  * slot.  The synthetic sequence header emitted by the bridge does not carry
+  * frame IDs, timing information, or a decoder model, so the payload consists
+@@ -166,6 +180,7 @@ size_t dmd_av1_build_show_existing(uint8_t map_idx,
   * capacity or invalid parameters. */
  size_t dmd_av1_build_frame_header(const void *pic,
                                    int enable_restoration,
@@ -635,12 +791,78 @@ index 6cd0b296..4b151b12 100644
                                    unsigned char *out, size_t out_cap);
  
  /* obu_header() + obu_size (AV1 specification 5.3.1/5.3.2).
+diff --git a/src/gallium/frontends/va/buffer.c b/src/gallium/frontends/va/buffer.c
+index 2f5a816a..39bb20a8 100644
+--- a/src/gallium/frontends/va/buffer.c
++++ b/src/gallium/frontends/va/buffer.c
+@@ -54,7 +54,7 @@ vlVaCreateBuffer(VADriverContextP ctx, VAContextID context, VABufferType type,
+    vlVaDriver *drv;
+    vlVaBuffer *buf;
+ 
+-   fprintf(stderr, "tva-va: create buffer context=%u type=%d size=%u elements=%u\n",
++   TVA_VA_LOG("tva-va: create buffer context=%u type=%d size=%u elements=%u\n",
+            context, type, size, num_elements);
+ 
+    if (!ctx)
+diff --git a/src/gallium/frontends/va/config.c b/src/gallium/frontends/va/config.c
+index 0f52d587..3ceeab6c 100644
+--- a/src/gallium/frontends/va/config.c
++++ b/src/gallium/frontends/va/config.c
+@@ -59,7 +59,7 @@ vlVaQueryConfigProfiles(VADriverContextP ctx, VAProfile *profile_list, int *num_
+    if (!ctx)
+       return VA_STATUS_ERROR_INVALID_CONTEXT;
+ 
+-   fprintf(stderr, "tva-va: query profiles\n");
++   TVA_VA_LOG("tva-va: query profiles\n");
+ 
+    *num_profiles = 0;
+ 
+@@ -91,7 +91,7 @@ vlVaQueryConfigEntrypoints(VADriverContextP ctx, VAProfile profile,
+    if (!ctx)
+       return VA_STATUS_ERROR_INVALID_CONTEXT;
+ 
+-   fprintf(stderr, "tva-va: query entrypoints profile=%d\n", profile);
++   TVA_VA_LOG("tva-va: query entrypoints profile=%d\n", profile);
+ 
+    *num_entrypoints = 0;
+ 
+@@ -647,7 +647,7 @@ vlVaCreateConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoin
+    if (!ctx)
+       return VA_STATUS_ERROR_INVALID_CONTEXT;
+ 
+-   fprintf(stderr, "tva-va: create config profile=%d entrypoint=%d attrs=%d\n",
++   TVA_VA_LOG("tva-va: create config profile=%d entrypoint=%d attrs=%d\n",
+            profile, entrypoint, num_attribs);
+ 
+    drv = VL_VA_DRIVER(ctx);
+@@ -827,7 +827,7 @@ vlVaQueryConfigAttributes(VADriverContextP ctx, VAConfigID config_id, VAProfile
+    vlVaDriver *drv;
+    vlVaConfig *config;
+ 
+-   fprintf(stderr, "tva-va: query config attrs config=%u list=%p count=%d\n",
++   TVA_VA_LOG("tva-va: query config attrs config=%u list=%p count=%d\n",
+            config_id, (void *)attrib_list, num_attribs ? *num_attribs : 0);
+ 
+    if (!ctx)
+@@ -867,7 +867,7 @@ vlVaQueryConfigAttributes(VADriverContextP ctx, VAConfigID config_id, VAProfile
+                                                              config->profile,
+                                                              config->entrypoint);
+ 
+-   fprintf(stderr, "tva-va: query config attrs success profile=%d entrypoint=%d rt=%#x count=%d\n",
++   TVA_VA_LOG("tva-va: query config attrs success profile=%d entrypoint=%d rt=%#x count=%d\n",
+            *profile, *entrypoint, attrib_list[0].value, *num_attribs);
+ 
+    return VA_STATUS_SUCCESS;
 diff --git a/src/gallium/frontends/va/context.c b/src/gallium/frontends/va/context.c
-index fbfb128a..c80c8aa8 100644
+index fbfb128a..0e4f7a31 100644
 --- a/src/gallium/frontends/va/context.c
 +++ b/src/gallium/frontends/va/context.c
-@@ -138,6 +138,9 @@ VA_DRIVER_INIT_FUNC(VADriverContextP ctx)
-    fprintf(stderr, "tva-va: driver init display_type=%lu\n",
+@@ -135,9 +135,12 @@ VA_DRIVER_INIT_FUNC(VADriverContextP ctx)
+    if (!ctx)
+       return VA_STATUS_ERROR_INVALID_CONTEXT;
+ 
+-   fprintf(stderr, "tva-va: driver init display_type=%lu\n",
++   TVA_VA_LOG("tva-va: driver init display_type=%lu\n",
             (unsigned long)ctx->display_type);
  
 +   if (tva_bridge_active() && !tva_bridge_daemon_reachable())
@@ -649,6 +871,42 @@ index fbfb128a..c80c8aa8 100644
     drv = CALLOC(1, sizeof(vlVaDriver));
     if (!drv)
        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+@@ -222,7 +225,7 @@ VA_DRIVER_INIT_FUNC(VADriverContextP ctx)
+    if (!drv->vscreen)
+       goto error_screen;
+ 
+-   fprintf(stderr, "tva-va: driver screen ready\n");
++   TVA_VA_LOG("tva-va: driver screen ready\n");
+ 
+    struct pipe_screen *raw_pscreen = drv->vscreen->pscreen;
+ 
+@@ -319,7 +322,7 @@ vlVaCreateContext(VADriverContextP ctx, VAConfigID config_id, int picture_width,
+    if (!ctx)
+       return VA_STATUS_ERROR_INVALID_CONTEXT;
+ 
+-   fprintf(stderr, "tva-va: create context config=%u size=%dx%d targets=%d\n",
++   TVA_VA_LOG("tva-va: create context config=%u size=%dx%d targets=%d\n",
+            config_id, picture_width, picture_height, num_render_targets);
+ 
+    drv = VL_VA_DRIVER(ctx);
+@@ -489,7 +492,7 @@ vlVaCreateContext(VADriverContextP ctx, VAConfigID config_id, int picture_width,
+       pipe_reference_init(&context->decoder->reference, 1);
+    }
+ 
+-   fprintf(stderr, "tva-va: create context success id=%u decoder=%p\n",
++   TVA_VA_LOG("tva-va: create context success id=%u decoder=%p\n",
+            *context_id, (void *)context->decoder);
+    return VA_STATUS_SUCCESS;
+ }
+@@ -503,7 +506,7 @@ vlVaDestroyContext(VADriverContextP ctx, VAContextID context_id)
+    if (!ctx)
+       return VA_STATUS_ERROR_INVALID_CONTEXT;
+ 
+-   fprintf(stderr, "tva-va: destroy context id=%u\n", context_id);
++   TVA_VA_LOG("tva-va: destroy context id=%u\n", context_id);
+ 
+    if (context_id == 0)
+       return VA_STATUS_ERROR_INVALID_CONTEXT;
 diff --git a/src/gallium/frontends/va/image.c b/src/gallium/frontends/va/image.c
 index 50956762..bbf36425 100644
 --- a/src/gallium/frontends/va/image.c
@@ -670,8 +928,151 @@ index 50956762..bbf36425 100644
           surf->strides[i] = transfer->stride;
           surf->offsets[i] = offset;
           offset += transfer->layer_stride;
+diff --git a/src/gallium/frontends/va/picture.c b/src/gallium/frontends/va/picture.c
+index 8226f689..fd016038 100644
+--- a/src/gallium/frontends/va/picture.c
++++ b/src/gallium/frontends/va/picture.c
+@@ -54,7 +54,7 @@ vlVaBeginPicture(VADriverContextP ctx, VAContextID context_id, VASurfaceID rende
+    if (!drv)
+       return VA_STATUS_ERROR_INVALID_CONTEXT;
+ 
+-   fprintf(stderr, "tva-va: begin picture context=%u target=%u\n",
++   TVA_VA_LOG("tva-va: begin picture context=%u target=%u\n",
+            context_id, render_target);
+ 
+    mtx_lock(&drv->mutex);
+@@ -143,7 +143,7 @@ vlVaRenderPicture(VADriverContextP ctx, VAContextID context_id, VABufferID *buff
+    if (!drv)
+       return VA_STATUS_ERROR_INVALID_CONTEXT;
+ 
+-   fprintf(stderr, "tva-va: render picture context=%u buffers=%d\n",
++   TVA_VA_LOG("tva-va: render picture context=%u buffers=%d\n",
+            context_id, num_buffers);
+ 
+    mtx_lock(&drv->mutex);
+diff --git a/src/gallium/frontends/va/surface.c b/src/gallium/frontends/va/surface.c
+index c55dc811..b5ec201e 100644
+--- a/src/gallium/frontends/va/surface.c
++++ b/src/gallium/frontends/va/surface.c
+@@ -411,7 +411,7 @@ vlVaQuerySurfaceAttributes(VADriverContextP ctx, VAConfigID config_id,
+    struct pipe_screen *pscreen;
+    int i;
+ 
+-   fprintf(stderr, "tva-va: query surface attrs config=%u list=%p count=%u\n",
++   TVA_VA_LOG("tva-va: query surface attrs config=%u list=%p count=%u\n",
+            config_id, (void *)attrib_list, num_attribs ? *num_attribs : 0);
+ 
+    if (config_id == VA_INVALID_ID)
+@@ -422,7 +422,7 @@ vlVaQuerySurfaceAttributes(VADriverContextP ctx, VAConfigID config_id,
+ 
+    if (!attrib_list) {
+       *num_attribs = VL_VA_MAX_IMAGE_FORMATS + VASurfaceAttribCount;
+-      fprintf(stderr, "tva-va: query surface attrs count=%u\n", *num_attribs);
++      TVA_VA_LOG("tva-va: query surface attrs count=%u\n", *num_attribs);
+       return VA_STATUS_SUCCESS;
+    }
+ 
+@@ -613,7 +613,7 @@ vlVaQuerySurfaceAttributes(VADriverContextP ctx, VAConfigID config_id,
+    memcpy(attrib_list, attribs, i * sizeof(VASurfaceAttrib));
+    FREE(attribs);
+ 
+-   fprintf(stderr, "tva-va: query surface attrs success count=%d\n", i);
++   TVA_VA_LOG("tva-va: query surface attrs success count=%d\n", i);
+ 
+    return VA_STATUS_SUCCESS;
+ }
+@@ -778,7 +778,7 @@ surface_find_prime_producer_for_surface(vlVaDriver *drv,
+             if (match) {
+                close(import_handle.handle);
+                if (getenv("DMD_VA_PROBE"))
+-                  fprintf(stderr, "tva-va: prime producer matched import=%p "
++                  TVA_VA_LOG("tva-va: prime producer matched import=%p "
+                           "producer=%p plane=%u fence=%p codec=%p\n",
+                           (void *)import_surface, (void *)candidate,
+                           candidate_plane, (void *)candidate->fence,
+@@ -813,7 +813,7 @@ surface_from_prime(VADriverContextP ctx, vlVaSurface *surface,
+    drv = VL_VA_DRIVER(ctx);
+ 
+    if (getenv("DMD_VA_PROBE")) {
+-      fprintf(stderr, "tva-va: import prime surface=%p type=%#x desc=%p "
++      TVA_VA_LOG("tva-va: import prime surface=%p type=%#x desc=%p "
+               "fourcc=%#x size=%ux%u objects=%u layers=%u\n",
+               (void *)surface, mem_type, (void *)desc,
+               desc ? desc->fourcc : 0, desc ? desc->width : 0,
+@@ -821,14 +821,14 @@ surface_from_prime(VADriverContextP ctx, vlVaSurface *surface,
+               desc ? desc->num_layers : 0);
+       if (desc) {
+          for (unsigned i = 0; i < desc->num_objects; i++)
+-            fprintf(stderr, "tva-va: import prime object[%u] fd=%d size=%u mod=%#llx\n",
++            TVA_VA_LOG("tva-va: import prime object[%u] fd=%d size=%u mod=%#llx\n",
+                     i, desc->objects[i].fd, desc->objects[i].size,
+                     (unsigned long long)desc->objects[i].drm_format_modifier);
+          for (unsigned i = 0; i < desc->num_layers; i++) {
+-            fprintf(stderr, "tva-va: import prime layer[%u] fmt=%#x planes=%u\n",
++            TVA_VA_LOG("tva-va: import prime layer[%u] fmt=%#x planes=%u\n",
+                     i, desc->layers[i].drm_format, desc->layers[i].num_planes);
+             for (unsigned j = 0; j < desc->layers[i].num_planes; j++)
+-               fprintf(stderr, "tva-va: import prime layer[%u].plane[%u] obj=%u "
++               TVA_VA_LOG("tva-va: import prime layer[%u].plane[%u] obj=%u "
+                        "pitch=%u offset=%u\n", i, j,
+                        desc->layers[i].object_index[j],
+                        desc->layers[i].pitch[j], desc->layers[i].offset[j]);
+@@ -945,7 +945,7 @@ surface_from_prime(VADriverContextP ctx, vlVaSurface *surface,
+    surface->sync_surface = surface_find_prime_producer_for_surface(drv, surface);
+    surface->prime_fence = surface->sync_surface ? surface->sync_surface->fence : NULL;
+    if (getenv("DMD_VA_PROBE"))
+-      fprintf(stderr, "tva-va: prime import producer=%p fence=%p\n",
++      TVA_VA_LOG("tva-va: prime import producer=%p fence=%p\n",
+               (void *)surface->sync_surface, (void *)surface->prime_fence);
+ 
+    return VA_STATUS_SUCCESS;
+@@ -1005,7 +1005,7 @@ vlVaHandleSurfaceAllocate(vlVaDriver *drv, vlVaSurface *surface,
+    struct pipe_surface *surfaces;
+    unsigned i;
+ 
+-   fprintf(stderr, "tva-va: allocate surface=%p format=%d size=%ux%u modifiers=%u\n",
++   TVA_VA_LOG("tva-va: allocate surface=%p format=%d size=%ux%u modifiers=%u\n",
+            (void *)surface,
+            surface ? surface->templat.buffer_format : -1,
+            surface ? surface->templat.width : 0,
+@@ -1028,7 +1028,7 @@ vlVaHandleSurfaceAllocate(vlVaDriver *drv, vlVaSurface *surface,
+       return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+ 
+-   fprintf(stderr, "tva-va: surface allocation ready buffer=%p\n",
++   TVA_VA_LOG("tva-va: surface allocation ready buffer=%p\n",
+            (void *)surface->buffer);
+ 
+    /* The termux-va bridge fills every plane before exporting a decoded
+@@ -1076,7 +1076,7 @@ vlVaGetSurfaceBuffer(vlVaDriver *drv, vlVaSurface *surface)
+    if (surface->buffer)
+       return surface->buffer;
+    vlVaHandleSurfaceAllocate(drv, surface, NULL, 0);
+-   fprintf(stderr, "tva-va: get surface buffer=%p\n", (void *)surface->buffer);
++   TVA_VA_LOG("tva-va: get surface buffer=%p\n", (void *)surface->buffer);
+    return surface->buffer;
+ }
+ 
+@@ -1172,7 +1172,7 @@ vlVaCreateSurfaces2(VADriverContextP ctx, unsigned int format,
+    if (!ctx)
+       return VA_STATUS_ERROR_INVALID_CONTEXT;
+ 
+-   fprintf(stderr, "tva-va: create surfaces format=%#x size=%ux%u count=%u attrs=%u\n",
++   TVA_VA_LOG("tva-va: create surfaces format=%#x size=%ux%u count=%u attrs=%u\n",
+            format, width, height, num_surfaces, num_attribs);
+ 
+    if (!(width && height))
+@@ -1274,7 +1274,7 @@ vlVaCreateSurfaces2(VADriverContextP ctx, unsigned int format,
+    }
+ 
+    if (getenv("DMD_VA_PROBE")) {
+-      fprintf(stderr, "tva-va: surface attrs resolved type=%#x expected=%#x "
++      TVA_VA_LOG("tva-va: surface attrs resolved type=%#x expected=%#x "
+               "prime=%p ext=%p modifiers=%u bind=%#x\n", memory_type,
+               expected_fourcc, (void *)prime_desc, (void *)memory_attribute,
+               modifiers_count, templat.bind);
 diff --git a/src/gallium/frontends/va/tva_bridge.c b/src/gallium/frontends/va/tva_bridge.c
-index 31b3aade..f5fdc7e2 100644
+index 31b3aade..b30ea63f 100644
 --- a/src/gallium/frontends/va/tva_bridge.c
 +++ b/src/gallium/frontends/va/tva_bridge.c
 @@ -57,6 +57,8 @@
@@ -683,7 +1084,7 @@ index 31b3aade..f5fdc7e2 100644
  #include <va/va.h>
  #include <va/va_dec_av1.h>
  #ifndef _WIN32
-@@ -130,6 +132,35 @@ bool tva_bridge_active(void)
+@@ -130,11 +132,39 @@ bool tva_bridge_active(void)
      return def && stat(def, &st) == 0 && S_ISSOCK(st.st_mode);
  }
  
@@ -719,7 +1120,13 @@ index 31b3aade..f5fdc7e2 100644
  static bool
  tva_dbg(void)
  {
-@@ -220,6 +251,8 @@ tva_encode_profile_supported(enum pipe_video_profile profile)
+-    const char *e = getenv("DMD_VA_LOG");
+-    return e && e[0] == '1';
++    return tva_va_trace();
+ }
+ 
+ static int tva_dbg_seq;
+@@ -220,6 +250,8 @@ tva_encode_profile_supported(enum pipe_video_profile profile)
      }
  }
  
@@ -728,7 +1135,7 @@ index 31b3aade..f5fdc7e2 100644
  static int
  tva_codec_id(enum pipe_video_profile profile)
  {
-@@ -304,6 +337,12 @@ tva_screen_get_video_param(struct pipe_screen *screen,
+@@ -304,6 +336,12 @@ tva_screen_get_video_param(struct pipe_screen *screen,
          (profile == PIPE_VIDEO_PROFILE_UNKNOWN || tva_profile_supported(profile)))
          return 1;
  
@@ -741,7 +1148,7 @@ index 31b3aade..f5fdc7e2 100644
      if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE &&
          tva_encode_profile_supported(profile)) {
          switch (param) {
-@@ -358,9 +397,11 @@ tva_screen_get_video_param(struct pipe_screen *screen,
+@@ -358,9 +396,11 @@ tva_screen_get_video_param(struct pipe_screen *screen,
               * written by the first frame copy */
              return 1;
          case PIPE_VIDEO_CAP_SUPPORTS_CONTIGUOUS_PLANES_MAP:
@@ -756,25 +1163,28 @@ index 31b3aade..f5fdc7e2 100644
          default:
              return 0;
          }
-@@ -493,8 +534,17 @@ struct tva_av1_picture {
+@@ -493,7 +533,20 @@ struct tva_av1_picture {
      size_t tile_bytes;
      unsigned tile_count;
      uint8_t refresh_frame_flags;
 +    /* skipModeAllowed for the header writer, -1 when unknown */
 +    int skip_mode_allowed;
- };
- 
-+/* Order hint last decoded into each surface, for skipModeAllowed */
++    /* PrevGmParams for the header writer */
++    int32_t prev_gm[7][6];
++};
++
++/* Order hint and global motion parameters last decoded into each surface,
++ * for skipModeAllowed and PrevGmParams */
 +struct tva_av1_hint {
 +    struct pipe_video_buffer *buffer;
 +    uint8_t order_hint;
-+};
++    int32_t gm[7][6];
+ };
 +#define TVA_AV1_MAX_HINTS 32
-+
+ 
  struct tva_av1_frame {
      bool valid;
-     struct tva_av1_picture pictures[TVA_AV1_GROUP_MAX_FRAMES];
-@@ -543,6 +593,9 @@ struct tva_codec {
+@@ -543,6 +596,9 @@ struct tva_codec {
      bool h264_pps_defaults_valid;
      unsigned h264_pps_l0_default;
      unsigned h264_pps_l1_default;
@@ -784,7 +1194,7 @@ index 31b3aade..f5fdc7e2 100644
      /* The VA HEVC picture descriptor omits max_sub_layers_minus1.  Keep the
       * largest temporal id observed in the access units so synthesized VPS/SPS
       * parameter sets accept streams which use temporal scalability. */
-@@ -556,12 +609,19 @@ struct tva_codec {
+@@ -556,12 +612,19 @@ struct tva_codec {
      bool h264_bootstrap_done;
      bool av1_sequence_sent;
      bool av1_enable_restoration;
@@ -804,7 +1214,7 @@ index 31b3aade..f5fdc7e2 100644
  
      bool broken;                  /* session error, further decodes fail */
  
-@@ -624,6 +684,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
+@@ -624,6 +687,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
     if (!c || !c->sess)
        return TVA_ERR_STATE;
     mtx_lock(&c->io_mutex);
@@ -823,38 +1233,84 @@ index 31b3aade..f5fdc7e2 100644
     ret = tva_session_send_unit(c->sess, data, len);
     mtx_unlock(&c->io_mutex);
     return ret;
-@@ -1104,6 +1176,100 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
+@@ -1104,6 +1179,146 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
      return 0;
  }
  
++static const struct tva_av1_hint *
++tva_av1_hint_find(const struct tva_codec *c,
++                  const struct pipe_video_buffer *buffer)
++{
++    for (unsigned i = 0; buffer && i < c->av1_hint_count; i++) {
++        if (c->av1_hints[i].buffer == buffer)
++            return &c->av1_hints[i];
++    }
++    return NULL;
++}
++
 +static int
 +tva_av1_hint_lookup(const struct tva_codec *c,
 +                    const struct pipe_video_buffer *buffer)
 +{
-+    for (unsigned i = 0; buffer && i < c->av1_hint_count; i++) {
-+        if (c->av1_hints[i].buffer == buffer)
-+            return c->av1_hints[i].order_hint;
-+    }
-+    return -1;
++    const struct tva_av1_hint *hint = tva_av1_hint_find(c, buffer);
++    return hint ? hint->order_hint : -1;
 +}
 +
++/* Record the order hint and the global motion parameters that later frames
++ * load as PrevGmParams when this picture is their primary reference.  Intra
++ * frames save the defaults (setup_past_independence). */
 +static void
 +tva_av1_hint_record(struct tva_codec *c, struct pipe_video_buffer *buffer,
-+                    uint8_t order_hint)
++                    const VADecPictureParameterBufferAV1 *p)
 +{
++    const unsigned frame_type = p->pic_info_fields.bits.frame_type;
++    const bool intra = frame_type == 0 || frame_type == 2;
++    struct tva_av1_hint *hint = NULL;
 +    for (unsigned i = 0; i < c->av1_hint_count; i++) {
 +        if (c->av1_hints[i].buffer == buffer) {
-+            c->av1_hints[i].order_hint = order_hint;
-+            return;
++            hint = &c->av1_hints[i];
++            break;
 +        }
 +    }
-+    if (c->av1_hint_count == TVA_AV1_MAX_HINTS) {
-+        memmove(&c->av1_hints[0], &c->av1_hints[1],
-+                sizeof(c->av1_hints[0]) * (TVA_AV1_MAX_HINTS - 1));
-+        c->av1_hint_count--;
++    if (!hint) {
++        if (c->av1_hint_count == TVA_AV1_MAX_HINTS) {
++            memmove(&c->av1_hints[0], &c->av1_hints[1],
++                    sizeof(c->av1_hints[0]) * (TVA_AV1_MAX_HINTS - 1));
++            c->av1_hint_count--;
++        }
++        hint = &c->av1_hints[c->av1_hint_count++];
 +    }
-+    c->av1_hints[c->av1_hint_count++] =
-+        (struct tva_av1_hint){ buffer, order_hint };
++    hint->buffer = buffer;
++    hint->order_hint = p->order_hint;
++    for (unsigned i = 0; i < 7; i++) {
++        for (unsigned j = 0; j < 6; j++)
++            hint->gm[i][j] = intra || !p->wm[i].wmtype
++                ? dmd_av1_gm_default[j] : p->wm[i].wmmat[j];
++    }
++}
++
++/* PrevGmParams (AV1 specification 7.20): the parameters saved with the
++ * primary reference frame, or the defaults without one.  An unknown primary
++ * reference (a session that started mid-stream) falls back to the defaults,
++ * which only codes IDENTITY references exactly. */
++static void
++tva_av1_prev_gm(const struct tva_codec *c,
++                const struct pipe_av1_picture_desc *av1,
++                const VADecPictureParameterBufferAV1 *p, int32_t prev[7][6])
++{
++    const struct tva_av1_hint *hint = NULL;
++    const unsigned primary = p->primary_ref_frame;
++    if (primary < 7 && !p->pic_info_fields.bits.error_resilient_mode) {
++        const unsigned slot = p->ref_frame_idx[primary];
++        hint = slot < 8 ? tva_av1_hint_find(c, av1->ref[slot]) : NULL;
++        if (!hint)
++            TVA_TRACE("AV1 primary reference slot=%u unknown; default "
++                      "global motion", slot);
++    }
++    for (unsigned i = 0; i < 7; i++) {
++        for (unsigned j = 0; j < 6; j++)
++            prev[i][j] = hint ? hint->gm[i][j] : dmd_av1_gm_default[j];
++    }
 +}
 +
 +static int
@@ -924,7 +1380,7 @@ index 31b3aade..f5fdc7e2 100644
  /* AV1 show_existing_frame packets do not enter the VA decode callbacks.  A
   * hidden reference picture therefore has no consumer-visible callback even
   * though its surface must still contain decoded pixels before a later
-@@ -2065,6 +2231,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
+@@ -2065,6 +2280,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
             profile == PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444;
  }
  
@@ -1033,7 +1489,23 @@ index 31b3aade..f5fdc7e2 100644
  /*
   * Build the SPS NALU (with NAL header + emulation prevention) from the
   * frontend-parsed struct.  Returns the RBSP size; the NAL header byte is
-@@ -3311,7 +3579,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
+@@ -3286,6 +3603,15 @@ tva_av1_to_va_picture(const struct pipe_av1_picture_desc *src,
+     dst->loop_restoration_fields.bits.lr_uv_shift =
+         p->loop_restoration_fields.lr_uv_shift;
+ 
++    for (unsigned i = 0; i < 7; i++) {
++        if (p->wm[i].wmtype > 3)
++            return false;
++        dst->wm[i].wmtype = p->wm[i].wmtype;
++        dst->wm[i].invalid = p->wm[i].invalid;
++        for (unsigned j = 0; j < 6; j++)
++            dst->wm[i].wmmat[j] = p->wm[i].wmmat[j];
++    }
++
+     return true;
+ }
+ 
+@@ -3311,7 +3637,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
          return;
      }
  
@@ -1042,15 +1514,16 @@ index 31b3aade..f5fdc7e2 100644
          p->pic_info_fields.bits.frame_type != 0 &&
          !p->pic_info_fields.bits.show_frame &&
          p->mode_control_fields.bits.tx_mode == 2 &&
-@@ -3412,6 +3680,7 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3412,6 +3738,8 @@ tva_av1_send_pending(struct tva_codec *c)
                                      (int)pic->tile_count,
                                      pic->refresh_frame_flags,
                                      c->av1_enable_restoration,
 +                                    pic->skip_mode_allowed,
++                                    (const int32_t (*)[6])pic->prev_gm,
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3546,24 +3815,15 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3546,24 +3874,16 @@ tva_av1_send_pending(struct tva_codec *c)
              }
  
              VADecPictureParameterBufferAV1 picture = pic->picture;
@@ -1076,18 +1549,20 @@ index 31b3aade..f5fdc7e2 100644
                                      pic->refresh_frame_flags,
                                      c->av1_enable_restoration,
 +                                    pic->skip_mode_allowed,
++                                    (const int32_t (*)[6])pic->prev_gm,
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3649,6 +3909,7 @@ too_large:
+@@ -3649,6 +3969,8 @@ too_large:
                                  (int)pic->tile_count,
                                  pic->refresh_frame_flags,
                                  c->av1_enable_restoration,
 +                                pic->skip_mode_allowed,
++                                (const int32_t (*)[6])pic->prev_gm,
                                  unit + unit_len, unit_cap - unit_len);
          if (!n)
              goto failed;
-@@ -3776,15 +4037,98 @@ tva_av1_flush_pending(struct tva_codec *c, bool terminal)
+@@ -3776,15 +4098,99 @@ tva_av1_flush_pending(struct tva_codec *c, bool terminal)
      return ret;
  }
  
@@ -1152,6 +1627,7 @@ index 31b3aade..f5fdc7e2 100644
 +                                           (int)pic->tile_count, mask,
 +                                           c->av1_enable_restoration,
 +                                           pic->skip_mode_allowed,
++                                           (const int32_t (*)[6])pic->prev_gm,
 +                                           unit + unit_len,
 +                                           unit_cap - unit_len);
 +            unit_len = n ? unit_len + n : 0;
@@ -1189,7 +1665,7 @@ index 31b3aade..f5fdc7e2 100644
  {
      struct tva_codec *c = tva_codec(codec);
  
-@@ -3857,7 +4201,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
+@@ -3857,7 +4263,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
                   * with a two-reference PPS default unchanged while allowing
                   * the five-reference vertical AVC stream to select its
                   * five-entry default before subsequent no-override slices. */
@@ -1214,7 +1690,7 @@ index 31b3aade..f5fdc7e2 100644
                      h264->num_ref_idx_l0_active_minus1 >=
                      c->base.max_references - 1 &&
                      c->h264_pps_l0_default < c->base.max_references - 1) {
-@@ -4228,6 +4588,10 @@ hevc_csd_done:
+@@ -4228,6 +4650,10 @@ hevc_csd_done:
          bool boundary = frame->valid && frame->picture_count &&
                          frame->have_show_frame &&
                          !frame->hidden_since_show_frame;
@@ -1225,7 +1701,7 @@ index 31b3aade..f5fdc7e2 100644
          if (frame->valid && frame->picture_count) {
              struct tva_av1_picture *previous =
                  &frame->pictures[frame->picture_count - 1];
-@@ -4249,15 +4613,18 @@ hevc_csd_done:
+@@ -4249,15 +4675,18 @@ hevc_csd_done:
           * no restoration themselves while later frames in the same sequence
           * still do. */
          const char *restoration = getenv("DMD_AV1_ENABLE_RESTORATION");
@@ -1248,16 +1724,17 @@ index 31b3aade..f5fdc7e2 100644
          }
          if (frame->picture_count >= TVA_AV1_GROUP_MAX_FRAMES) {
              debug_printf("tva: AV1 temporal unit has too many frames (%u)\n",
-@@ -4287,6 +4654,8 @@ hevc_csd_done:
+@@ -4287,6 +4716,9 @@ hevc_csd_done:
          current->target = target;
          tva_av1_normalize_picture(c, &va_pic);
          current->picture = va_pic;
 +        current->skip_mode_allowed = tva_av1_skip_mode_allowed(c, av1, &va_pic);
-+        tva_av1_hint_record(c, target, va_pic.order_hint);
++        tva_av1_prev_gm(c, av1, &va_pic, current->prev_gm);
++        tva_av1_hint_record(c, target, &va_pic);
          current->tile_data = tile_data;
          current->tile_bytes = tile_bytes;
          current->tile_count = tile_count;
-@@ -4389,6 +4758,13 @@ hevc_csd_done:
+@@ -4389,6 +4821,13 @@ hevc_csd_done:
              tva_av1_inline_show_existing())
              last_vcl = pending && pending->unit_seq ? pending->unit_seq :
                         (uint32_t)(c->next_unit + 1);
@@ -1271,7 +1748,7 @@ index 31b3aade..f5fdc7e2 100644
      } else {
          /* Chromium splits VP9 superframes into individual pictures.  Hidden
           * reference pictures must reach MediaCodec, but they do not produce
-@@ -4456,6 +4832,20 @@ hevc_csd_done:
+@@ -4456,6 +4895,20 @@ hevc_csd_done:
      return 0;
  }
  
@@ -1292,7 +1769,7 @@ index 31b3aade..f5fdc7e2 100644
  static void
  tva_codec_flush(struct pipe_video_codec *codec)
  {
-@@ -4463,7 +4853,9 @@ tva_codec_flush(struct pipe_video_codec *codec)
+@@ -4463,7 +4916,9 @@ tva_codec_flush(struct pipe_video_codec *codec)
      if (!c->av1_pending.valid || tva_codec_is_broken(c))
          return;
  
@@ -1303,7 +1780,7 @@ index 31b3aade..f5fdc7e2 100644
  }
  
  /*
-@@ -4529,36 +4921,21 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4529,36 +4984,21 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
          return 1;
      }
      p->waiters++;
@@ -1349,7 +1826,7 @@ index 31b3aade..f5fdc7e2 100644
                  c->broken = true;
                  p->ready = true;
                  p->failed = true;
-@@ -4566,8 +4943,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4566,8 +5006,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
                  ret = 0;
                  break;
              }
@@ -1368,7 +1845,7 @@ index 31b3aade..f5fdc7e2 100644
  
          /* Qualcomm's AV1 decoder may hold the terminal showable picture until
           * input EOS.  VA-API does not expose an explicit decoder flush, and
-@@ -4785,6 +5172,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
+@@ -4785,6 +5235,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
      }
      c->h264_bootstrap_count = 0;
      tva_av1_pending_clear(&c->av1_pending);
@@ -1376,7 +1853,46 @@ index 31b3aade..f5fdc7e2 100644
      mtx_destroy(&c->io_mutex);
      mtx_destroy(&c->av1_mutex);
      mtx_destroy(&c->pend_mutex);
-@@ -4976,7 +5364,7 @@ tva_pipe_create_video_codec(struct pipe_context *context,
+@@ -4844,7 +5295,7 @@ static struct pipe_video_buffer *
+ tva_pipe_create_video_buffer(struct pipe_context *context,
+                              const struct pipe_video_buffer *templat)
+ {
+-    fprintf(stderr, "tva: create video buffer format=%d size=%ux%u bind=%#x\n",
++    TVA_VA_LOG("tva: create video buffer format=%d size=%ux%u bind=%#x\n",
+             templat ? templat->buffer_format : -1,
+             templat ? templat->width : 0, templat ? templat->height : 0,
+             templat ? templat->bind : 0);
+@@ -4854,7 +5305,7 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
+             tva_create_contiguous_video_buffer(context, templat);
+         if (buffer)
+         {
+-            fprintf(stderr, "tva: contiguous video buffer ready\n");
++            TVA_VA_LOG("tva: contiguous video buffer ready\n");
+             return buffer;
+         }
+         fprintf(stderr, "tva: contiguous video buffer failed\n");
+@@ -4876,7 +5327,10 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
+         bridge_templ.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR;
+     struct pipe_video_buffer *buffer =
+         vl_video_buffer_create(context, &bridge_templ);
+-    fprintf(stderr, "tva: separate video buffer %s\n", buffer ? "ready" : "failed");
++    if (!buffer)
++        fprintf(stderr, "tva: separate video buffer failed\n");
++    else
++        TVA_VA_LOG("tva: separate video buffer ready\n");
+     return buffer;
+ }
+ 
+@@ -4895,7 +5349,7 @@ static struct pipe_video_codec *
+ tva_pipe_create_video_codec(struct pipe_context *context,
+                             const struct pipe_video_codec *templat)
+ {
+-    fprintf(stderr, "tva: create codec profile=%d entrypoint=%d size=%ux%u\n",
++    TVA_VA_LOG("tva: create codec profile=%d entrypoint=%d size=%ux%u\n",
+             templat ? templat->profile : -1,
+             templat ? templat->entrypoint : -1,
+             templat ? templat->width : 0, templat ? templat->height : 0);
+@@ -4976,7 +5430,7 @@ tva_pipe_create_video_codec(struct pipe_context *context,
      c->strict_pending = codec_id == CODEC_AV1 && tva_av1_strict_pending();
  
      mtx_init(&c->io_mutex, mtx_plain);
@@ -1397,6 +1913,44 @@ index c62f6185..8f7d36e4 100644
  
  /* Complete AVC/HEVC decoder output before VA context teardown releases its
   * codec reference. Called on the application thread with drv->mutex held. */
+diff --git a/src/gallium/frontends/va/va_private.h b/src/gallium/frontends/va/va_private.h
+index 9ebb94aa..97edcda8 100644
+--- a/src/gallium/frontends/va/va_private.h
++++ b/src/gallium/frontends/va/va_private.h
+@@ -30,6 +30,9 @@
+ #define VA_PRIVATE_H
+ 
+ #include <assert.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
+ 
+ #include <va/va.h>
+ #include <va/va_backend.h>
+@@ -55,6 +58,23 @@
+ #define VA_RT_FORMAT_YUV420_10  VA_RT_FORMAT_YUV420_10BPP
+ #endif
+ 
++/* termux-va call tracing, enabled with DMD_VA_LOG=1 and read once.  The
++ * per-call lines otherwise reach every VA client's stderr several times per
++ * decoded frame. */
++static inline bool
++tva_va_trace(void)
++{
++   static int enabled = -1;
++   if (enabled < 0) {
++      const char *env = getenv("DMD_VA_LOG");
++      enabled = env && env[0] == '1';
++   }
++   return enabled;
++}
++
++#define TVA_VA_LOG(...) \
++   do { if (tva_va_trace()) fprintf(stderr, __VA_ARGS__); } while (0)
++
+ #define VL_VA_DRIVER(ctx) ((vlVaDriver *)ctx->pDriverData)
+ #define VL_VA_PSCREEN(ctx) (VL_VA_DRIVER(ctx)->vscreen->pscreen)
+ 
 diff --git a/src/gallium/targets/va/meson.build b/src/gallium/targets/va/meson.build
 index ec402341..920780c0 100644
 --- a/src/gallium/targets/va/meson.build
