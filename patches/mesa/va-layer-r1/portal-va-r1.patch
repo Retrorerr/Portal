@@ -635,29 +635,87 @@ index 6cd0b296..4b151b12 100644
                                    unsigned char *out, size_t out_cap);
  
  /* obu_header() + obu_size (AV1 specification 5.3.1/5.3.2).
+diff --git a/src/gallium/frontends/va/context.c b/src/gallium/frontends/va/context.c
+index fbfb128a..c80c8aa8 100644
+--- a/src/gallium/frontends/va/context.c
++++ b/src/gallium/frontends/va/context.c
+@@ -138,6 +138,9 @@ VA_DRIVER_INIT_FUNC(VADriverContextP ctx)
+    fprintf(stderr, "tva-va: driver init display_type=%lu\n",
+            (unsigned long)ctx->display_type);
+ 
++   if (tva_bridge_active() && !tva_bridge_daemon_reachable())
++      return VA_STATUS_ERROR_UNKNOWN;
++
+    drv = CALLOC(1, sizeof(vlVaDriver));
+    if (!drv)
+       return VA_STATUS_ERROR_ALLOCATION_FAILED;
 diff --git a/src/gallium/frontends/va/tva_bridge.c b/src/gallium/frontends/va/tva_bridge.c
-index 31b3aade..fd8ccb40 100644
+index 31b3aade..3783dd5d 100644
 --- a/src/gallium/frontends/va/tva_bridge.c
 +++ b/src/gallium/frontends/va/tva_bridge.c
-@@ -493,8 +493,17 @@ struct tva_av1_picture {
+@@ -57,6 +57,8 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/stat.h>
++#include <sys/socket.h>
++#include <sys/un.h>
+ #include <va/va.h>
+ #include <va/va_dec_av1.h>
+ #ifndef _WIN32
+@@ -130,6 +132,35 @@ bool tva_bridge_active(void)
+     return def && stat(def, &st) == 0 && S_ISSOCK(st.st_mode);
+ }
+ 
++/* The VA frontend creates the decoder at the first picture, so without this
++ * check a missing daemon (not started, restarting, or a sandbox with its own
++ * /tmp) surfaces mid-decode and clients never take their software path.
++ * Probe the endpoint at driver init instead: a connect that is refused or
++ * finds no socket fails vaInitialize. */
++bool tva_bridge_daemon_reachable(void)
++{
++    char buf[300];
++    const char *ep = tva_default_endpoint(buf, sizeof(buf));
++    struct sockaddr_un ua;
++    if (!ep || !*ep || strlen(ep) >= sizeof(ua.sun_path))
++        return true;   /* abstract or unusual endpoint: leave it to the session */
++
++    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
++    if (fd < 0)
++        return true;
++    memset(&ua, 0, sizeof(ua));
++    ua.sun_family = AF_UNIX;
++    memcpy(ua.sun_path, ep, strlen(ep));
++    int r = connect(fd, (struct sockaddr *)&ua, sizeof(ua));
++    int e = errno;
++    close(fd);
++    if (r == 0 || e == EINPROGRESS || e == EAGAIN)
++        return true;
++    fprintf(stderr, "tva: no termux-va daemon at %s (%s); VA-API unavailable\n",
++            ep, strerror(e));
++    return false;
++}
++
+ static bool
+ tva_dbg(void)
+ {
+@@ -493,7 +524,16 @@ struct tva_av1_picture {
      size_t tile_bytes;
      unsigned tile_count;
      uint8_t refresh_frame_flags;
 +    /* skipModeAllowed for the header writer, -1 when unknown */
 +    int skip_mode_allowed;
- };
- 
++};
++
 +/* Order hint last decoded into each surface, for skipModeAllowed */
 +struct tva_av1_hint {
 +    struct pipe_video_buffer *buffer;
 +    uint8_t order_hint;
-+};
+ };
 +#define TVA_AV1_MAX_HINTS 32
-+
+ 
  struct tva_av1_frame {
      bool valid;
-     struct tva_av1_picture pictures[TVA_AV1_GROUP_MAX_FRAMES];
-@@ -543,6 +552,9 @@ struct tva_codec {
+@@ -543,6 +583,9 @@ struct tva_codec {
      bool h264_pps_defaults_valid;
      unsigned h264_pps_l0_default;
      unsigned h264_pps_l1_default;
@@ -667,7 +725,7 @@ index 31b3aade..fd8ccb40 100644
      /* The VA HEVC picture descriptor omits max_sub_layers_minus1.  Keep the
       * largest temporal id observed in the access units so synthesized VPS/SPS
       * parameter sets accept streams which use temporal scalability. */
-@@ -556,6 +568,8 @@ struct tva_codec {
+@@ -556,6 +599,8 @@ struct tva_codec {
      bool h264_bootstrap_done;
      bool av1_sequence_sent;
      bool av1_enable_restoration;
@@ -676,7 +734,7 @@ index 31b3aade..fd8ccb40 100644
      /* Some FFmpeg/libva AV1 streams omit reduced_tx_set_used on the
       * hierarchical base-layer reference frames.  Track the first base frame
       * after each key frame so the reconstruction can restore that syntax
-@@ -624,6 +638,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
+@@ -624,6 +669,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
     if (!c || !c->sess)
        return TVA_ERR_STATE;
     mtx_lock(&c->io_mutex);
@@ -695,7 +753,7 @@ index 31b3aade..fd8ccb40 100644
     ret = tva_session_send_unit(c->sess, data, len);
     mtx_unlock(&c->io_mutex);
     return ret;
-@@ -1104,6 +1130,100 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
+@@ -1104,6 +1161,100 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
      return 0;
  }
  
@@ -796,7 +854,7 @@ index 31b3aade..fd8ccb40 100644
  /* AV1 show_existing_frame packets do not enter the VA decode callbacks.  A
   * hidden reference picture therefore has no consumer-visible callback even
   * though its surface must still contain decoded pixels before a later
-@@ -2065,6 +2185,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
+@@ -2065,6 +2216,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
             profile == PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444;
  }
  
@@ -905,7 +963,7 @@ index 31b3aade..fd8ccb40 100644
  /*
   * Build the SPS NALU (with NAL header + emulation prevention) from the
   * frontend-parsed struct.  Returns the RBSP size; the NAL header byte is
-@@ -3311,7 +3533,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
+@@ -3311,7 +3564,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
          return;
      }
  
@@ -914,7 +972,7 @@ index 31b3aade..fd8ccb40 100644
          p->pic_info_fields.bits.frame_type != 0 &&
          !p->pic_info_fields.bits.show_frame &&
          p->mode_control_fields.bits.tx_mode == 2 &&
-@@ -3412,6 +3634,7 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3412,6 +3665,7 @@ tva_av1_send_pending(struct tva_codec *c)
                                      (int)pic->tile_count,
                                      pic->refresh_frame_flags,
                                      c->av1_enable_restoration,
@@ -922,7 +980,7 @@ index 31b3aade..fd8ccb40 100644
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3546,24 +3769,15 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3546,24 +3800,15 @@ tva_av1_send_pending(struct tva_codec *c)
              }
  
              VADecPictureParameterBufferAV1 picture = pic->picture;
@@ -951,7 +1009,7 @@ index 31b3aade..fd8ccb40 100644
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3649,6 +3863,7 @@ too_large:
+@@ -3649,6 +3894,7 @@ too_large:
                                  (int)pic->tile_count,
                                  pic->refresh_frame_flags,
                                  c->av1_enable_restoration,
@@ -959,7 +1017,7 @@ index 31b3aade..fd8ccb40 100644
                                  unit + unit_len, unit_cap - unit_len);
          if (!n)
              goto failed;
-@@ -3857,7 +4072,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
+@@ -3857,7 +4103,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
                   * with a two-reference PPS default unchanged while allowing
                   * the five-reference vertical AVC stream to select its
                   * five-entry default before subsequent no-override slices. */
@@ -984,7 +1042,7 @@ index 31b3aade..fd8ccb40 100644
                      h264->num_ref_idx_l0_active_minus1 >=
                      c->base.max_references - 1 &&
                      c->h264_pps_l0_default < c->base.max_references - 1) {
-@@ -4249,15 +4480,18 @@ hevc_csd_done:
+@@ -4249,15 +4511,18 @@ hevc_csd_done:
           * no restoration themselves while later frames in the same sequence
           * still do. */
          const char *restoration = getenv("DMD_AV1_ENABLE_RESTORATION");
@@ -1007,7 +1065,7 @@ index 31b3aade..fd8ccb40 100644
          }
          if (frame->picture_count >= TVA_AV1_GROUP_MAX_FRAMES) {
              debug_printf("tva: AV1 temporal unit has too many frames (%u)\n",
-@@ -4287,6 +4521,8 @@ hevc_csd_done:
+@@ -4287,6 +4552,8 @@ hevc_csd_done:
          current->target = target;
          tva_av1_normalize_picture(c, &va_pic);
          current->picture = va_pic;
@@ -1016,6 +1074,18 @@ index 31b3aade..fd8ccb40 100644
          current->tile_data = tile_data;
          current->tile_bytes = tile_bytes;
          current->tile_count = tile_count;
+diff --git a/src/gallium/frontends/va/tva_bridge.h b/src/gallium/frontends/va/tva_bridge.h
+index c62f6185..8f7d36e4 100644
+--- a/src/gallium/frontends/va/tva_bridge.h
++++ b/src/gallium/frontends/va/tva_bridge.h
+@@ -39,6 +39,7 @@ extern "C" {
+  *     (/tmp/termux-va/termux-va.sock)
+  */
+ bool tva_bridge_active(void);
++bool tva_bridge_daemon_reachable(void);
+ 
+ /* Complete AVC/HEVC decoder output before VA context teardown releases its
+  * codec reference. Called on the application thread with drv->mutex held. */
 diff --git a/src/gallium/targets/va/meson.build b/src/gallium/targets/va/meson.build
 index ec402341..920780c0 100644
 --- a/src/gallium/targets/va/meson.build

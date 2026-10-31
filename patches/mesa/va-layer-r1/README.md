@@ -20,6 +20,10 @@ frontend. `portal-va-r1.patch` adds:
   screen-content tools are always declared in the sequence header and each
   frame writes its own values. Hidden frames keep their own
   `allow_screen_content_tools`.
+- Fail `vaInitialize` when no daemon listens on the endpoint. The VA frontend
+  creates the decoder at the first picture, so a missing daemon used to
+  surface mid-decode (2 of 120 frames, then errors) and clients never took
+  their software path.
 - Meson: link freedreno into the standalone VA target and pull in
   xcb-xfixes when GLX is off.
 - `TVA_DUMP_UNITS=<file>`: append every unit sent to the daemon (u32 length +
