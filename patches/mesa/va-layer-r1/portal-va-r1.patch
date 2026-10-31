@@ -650,7 +650,7 @@ index fbfb128a..c80c8aa8 100644
     if (!drv)
        return VA_STATUS_ERROR_ALLOCATION_FAILED;
 diff --git a/src/gallium/frontends/va/tva_bridge.c b/src/gallium/frontends/va/tva_bridge.c
-index 31b3aade..3783dd5d 100644
+index 31b3aade..0e5c2c9d 100644
 --- a/src/gallium/frontends/va/tva_bridge.c
 +++ b/src/gallium/frontends/va/tva_bridge.c
 @@ -57,6 +57,8 @@
@@ -725,7 +725,7 @@ index 31b3aade..3783dd5d 100644
      /* The VA HEVC picture descriptor omits max_sub_layers_minus1.  Keep the
       * largest temporal id observed in the access units so synthesized VPS/SPS
       * parameter sets accept streams which use temporal scalability. */
-@@ -556,6 +599,8 @@ struct tva_codec {
+@@ -556,12 +599,19 @@ struct tva_codec {
      bool h264_bootstrap_done;
      bool av1_sequence_sent;
      bool av1_enable_restoration;
@@ -734,7 +734,18 @@ index 31b3aade..3783dd5d 100644
      /* Some FFmpeg/libva AV1 streams omit reduced_tx_set_used on the
       * hierarchical base-layer reference frames.  Track the first base frame
       * after each key frame so the reconstruction can restore that syntax
-@@ -624,6 +669,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
+      * bit without changing ordinary inter frames. */
+     bool av1_base_layer_seen;
+     struct tva_av1_frame av1_pending;
++    /* The newest picture, submitted early with refresh_frame_flags=0 because
++     * a client waited on it before sending the next descriptor.  Replayed as
++     * a hidden refresh-only frame once that descriptor reveals its mask. */
++    struct tva_av1_picture av1_fixup;
++    bool av1_fixup_valid;
+ 
+     bool broken;                  /* session error, further decodes fail */
+ 
+@@ -624,6 +674,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
     if (!c || !c->sess)
        return TVA_ERR_STATE;
     mtx_lock(&c->io_mutex);
@@ -753,7 +764,7 @@ index 31b3aade..3783dd5d 100644
     ret = tva_session_send_unit(c->sess, data, len);
     mtx_unlock(&c->io_mutex);
     return ret;
-@@ -1104,6 +1161,100 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
+@@ -1104,6 +1166,100 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
      return 0;
  }
  
@@ -854,7 +865,7 @@ index 31b3aade..3783dd5d 100644
  /* AV1 show_existing_frame packets do not enter the VA decode callbacks.  A
   * hidden reference picture therefore has no consumer-visible callback even
   * though its surface must still contain decoded pixels before a later
-@@ -2065,6 +2216,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
+@@ -2065,6 +2221,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
             profile == PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444;
  }
  
@@ -963,7 +974,7 @@ index 31b3aade..3783dd5d 100644
  /*
   * Build the SPS NALU (with NAL header + emulation prevention) from the
   * frontend-parsed struct.  Returns the RBSP size; the NAL header byte is
-@@ -3311,7 +3564,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
+@@ -3311,7 +3569,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
          return;
      }
  
@@ -972,7 +983,7 @@ index 31b3aade..3783dd5d 100644
          p->pic_info_fields.bits.frame_type != 0 &&
          !p->pic_info_fields.bits.show_frame &&
          p->mode_control_fields.bits.tx_mode == 2 &&
-@@ -3412,6 +3665,7 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3412,6 +3670,7 @@ tva_av1_send_pending(struct tva_codec *c)
                                      (int)pic->tile_count,
                                      pic->refresh_frame_flags,
                                      c->av1_enable_restoration,
@@ -980,7 +991,7 @@ index 31b3aade..3783dd5d 100644
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3546,24 +3800,15 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3546,24 +3805,15 @@ tva_av1_send_pending(struct tva_codec *c)
              }
  
              VADecPictureParameterBufferAV1 picture = pic->picture;
@@ -1009,7 +1020,7 @@ index 31b3aade..3783dd5d 100644
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3649,6 +3894,7 @@ too_large:
+@@ -3649,6 +3899,7 @@ too_large:
                                  (int)pic->tile_count,
                                  pic->refresh_frame_flags,
                                  c->av1_enable_restoration,
@@ -1017,7 +1028,109 @@ index 31b3aade..3783dd5d 100644
                                  unit + unit_len, unit_cap - unit_len);
          if (!n)
              goto failed;
-@@ -3857,7 +4103,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
+@@ -3776,15 +4027,98 @@ tva_av1_flush_pending(struct tva_codec *c, bool terminal)
+     return ret;
+ }
+ 
++/* A client may wait on the newest AV1 picture before it submits the next
++ * one: Firefox syncs every surface right after vaEndPicture.  That picture's
++ * refresh mask is only known from the next descriptor, so submit it now with
++ * refresh_frame_flags=0, which leaves the decoder's reference map untouched,
++ * and keep its parameters.  When the next descriptor shows which slots it
++ * refreshed, tva_av1_send_fixup() decodes it again as a hidden frame with
++ * that mask.  Both decodes see the same references, so the slots receive
++ * exactly the picture the source stored.  Only referenced pictures that a
++ * client waited on early pay the second decode.  Call with av1_mutex held. */
++static int
++tva_av1_flush_early_locked(struct tva_codec *c)
++{
++    struct tva_av1_frame *frame = &c->av1_pending;
++    if (!frame->valid || !frame->picture_count)
++        return 0;
++
++    struct tva_av1_picture *last = &frame->pictures[frame->picture_count - 1];
++    const bool shown_key =
++        last->picture.pic_info_fields.bits.frame_type == 0 &&
++        last->picture.pic_info_fields.bits.show_frame;
++    if (shown_key) {
++        /* A shown key frame refreshes every slot implicitly. */
++        last->refresh_frame_flags = 0xff;
++    } else {
++        free(c->av1_fixup.tile_data);
++        c->av1_fixup = *last;
++        c->av1_fixup.pending = NULL;
++        c->av1_fixup_valid = true;
++        /* The fixup owns the tile data; the tiles still point into it. */
++        last->tile_data = NULL;
++        last->refresh_frame_flags = 0;
++    }
++    TVA_TRACE("AV1 early flush pictures=%u order=%u fixup=%d",
++              frame->picture_count, last->picture.order_hint, !shown_key);
++    return tva_av1_send_pending(c);
++}
++
++static int
++tva_av1_send_fixup(struct tva_codec *c, const struct pipe_av1_picture_desc *next)
++{
++    if (!c->av1_fixup_valid)
++        return 0;
++
++    struct tva_av1_picture *pic = &c->av1_fixup;
++    const uint8_t mask = tva_av1_refresh_mask(next, pic->target);
++    int ret = 0;
++    if (mask) {
++        const size_t unit_cap = pic->tile_bytes + 8192u +
++                                (size_t)pic->tile_count * 4u;
++        uint8_t *unit = unit_cap <= MAX_FRAME ? malloc(unit_cap) : NULL;
++        size_t unit_len = unit
++            ? dmd_av1_obu_header(DMD_OBU_TEMPORAL_DELIMITER, 0, unit, unit_cap)
++            : 0;
++        if (unit_len) {
++            VADecPictureParameterBufferAV1 picture = pic->picture;
++            picture.pic_info_fields.bits.show_frame = 0;
++            picture.pic_info_fields.bits.showable_frame = 1;
++            size_t n = dmd_av1_build_frame(&picture, pic->tiles,
++                                           (int)pic->tile_count, mask,
++                                           c->av1_enable_restoration,
++                                           pic->skip_mode_allowed,
++                                           unit + unit_len,
++                                           unit_cap - unit_len);
++            unit_len = n ? unit_len + n : 0;
++        }
++        TVA_TRACE("AV1 refresh fixup unit=%u refresh=%02x order=%u len=%zu",
++                  (unsigned)c->next_unit + 1, mask, pic->picture.order_hint,
++                  unit_len);
++        if (!unit_len || tva_send_unit(c, unit, unit_len) != TVA_OK) {
++            debug_printf("tva: AV1 refresh fixup failed\n");
++            tva_mark_broken(c);
++            ret = -1;
++        } else {
++            c->next_unit++;
++        }
++        free(unit);
++    }
++    free(pic->tile_data);
++    memset(pic, 0, sizeof(*pic));
++    c->av1_fixup_valid = false;
++    return ret;
++}
++
+ /*
+  * Send the accumulated picture to the daemon and register the fence.
+  * Returns 0 on success, non-zero to make EndPicture report
+  * VA_STATUS_ERROR_OPERATION_FAILED.
+  */
+ static int
+-tva_codec_end_frame(struct pipe_video_codec *codec,
+-                    struct pipe_video_buffer *target,
+-                    struct pipe_picture_desc *picture)
++tva_codec_end_frame_locked(struct pipe_video_codec *codec,
++                           struct pipe_video_buffer *target,
++                           struct pipe_picture_desc *picture)
+ {
+     struct tva_codec *c = tva_codec(codec);
+ 
+@@ -3857,7 +4191,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
                   * with a two-reference PPS default unchanged while allowing
                   * the five-reference vertical AVC stream to select its
                   * five-entry default before subsequent no-override slices. */
@@ -1042,7 +1155,18 @@ index 31b3aade..3783dd5d 100644
                      h264->num_ref_idx_l0_active_minus1 >=
                      c->base.max_references - 1 &&
                      c->h264_pps_l0_default < c->base.max_references - 1) {
-@@ -4249,15 +4511,18 @@ hevc_csd_done:
+@@ -4228,6 +4578,10 @@ hevc_csd_done:
+         bool boundary = frame->valid && frame->picture_count &&
+                         frame->have_show_frame &&
+                         !frame->hidden_since_show_frame;
++        if (tva_av1_send_fixup(c, av1)) {
++            c->acc_len = 0;
++            return -1;
++        }
+         if (frame->valid && frame->picture_count) {
+             struct tva_av1_picture *previous =
+                 &frame->pictures[frame->picture_count - 1];
+@@ -4249,15 +4603,18 @@ hevc_csd_done:
           * no restoration themselves while later frames in the same sequence
           * still do. */
          const char *restoration = getenv("DMD_AV1_ENABLE_RESTORATION");
@@ -1065,7 +1189,7 @@ index 31b3aade..3783dd5d 100644
          }
          if (frame->picture_count >= TVA_AV1_GROUP_MAX_FRAMES) {
              debug_printf("tva: AV1 temporal unit has too many frames (%u)\n",
-@@ -4287,6 +4552,8 @@ hevc_csd_done:
+@@ -4287,6 +4644,8 @@ hevc_csd_done:
          current->target = target;
          tva_av1_normalize_picture(c, &va_pic);
          current->picture = va_pic;
@@ -1074,6 +1198,134 @@ index 31b3aade..3783dd5d 100644
          current->tile_data = tile_data;
          current->tile_bytes = tile_bytes;
          current->tile_count = tile_count;
+@@ -4389,6 +4748,13 @@ hevc_csd_done:
+             tva_av1_inline_show_existing())
+             last_vcl = pending && pending->unit_seq ? pending->unit_seq :
+                        (uint32_t)(c->next_unit + 1);
++        /* DMD_AV1_EAGER_FLUSH=1 submits every picture as if the client had
++         * waited on it, to verify the refresh fixup against software. */
++        if (tva_option_enabled("DMD_AV1_EAGER_FLUSH") &&
++            tva_av1_flush_early_locked(c)) {
++            c->acc_len = 0;
++            return -1;
++        }
+     } else {
+         /* Chromium splits VP9 superframes into individual pictures.  Hidden
+          * reference pictures must reach MediaCodec, but they do not produce
+@@ -4456,6 +4822,20 @@ hevc_csd_done:
+     return 0;
+ }
+ 
++/* AV1 assembly state is shared with the fence path, which flushes the held
++ * picture when a client waits on it. */
++static int
++tva_codec_end_frame(struct pipe_video_codec *codec,
++                    struct pipe_video_buffer *target,
++                    struct pipe_picture_desc *picture)
++{
++    struct tva_codec *c = tva_codec(codec);
++    mtx_lock(&c->av1_mutex);
++    int ret = tva_codec_end_frame_locked(codec, target, picture);
++    mtx_unlock(&c->av1_mutex);
++    return ret;
++}
++
+ static void
+ tva_codec_flush(struct pipe_video_codec *codec)
+ {
+@@ -4463,7 +4843,9 @@ tva_codec_flush(struct pipe_video_codec *codec)
+     if (!c->av1_pending.valid || tva_codec_is_broken(c))
+         return;
+ 
+-    (void)tva_av1_flush_pending(c, true);
++    mtx_lock(&c->av1_mutex);
++    (void)tva_av1_flush_early_locked(c);
++    mtx_unlock(&c->av1_mutex);
+ }
+ 
+ /*
+@@ -4529,36 +4911,21 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+         return 1;
+     }
+     p->waiters++;
+-    const uint64_t wait_start_ns = os_time_get_nano();
++    uint64_t wait_start_ns = os_time_get_nano();
+     const uint64_t drain_after_ns = (uint64_t)tva_av1_drain_idle_ms() * 1000000ull;
+     uint64_t reorder_drain_start_ns = 0;
+     while (!p->ready) {
+-        if (!infinite && timeout == 0) {
+-            ret = 0;
+-            break;
+-        }
+-        uint64_t now = os_time_get_nano();
+-        if (!infinite && now >= deadline_ns) {
+-            ret = 0;
+-            break;
+-        }
+-
+-        /* A final AV1 picture is held until the next VA descriptor so its
+-         * refresh mask can be inferred from the following reference map.  At
+-         * EOF there is no next descriptor.  Only flush after the same
+-         * conservative idle period used by the EOS fallback; ordinary
+-         * temporal-unit fences can therefore wait for their next descriptor
+-         * without being submitted out of order. */
+-        if (av1 && c->av1_pending.valid && p->unit_seq > c->next_unit &&
+-            now - wait_start_ns >= drain_after_ns) {
+-            TVA_TRACE("flushing terminal AV1 unit=%u idle=%.3f ms",
+-                      p->unit_seq,
+-                      (double)(now - wait_start_ns) / 1000000.0);
++        /* The waited picture is still held for its refresh mask.  Submit it
++         * now, also for zero-timeout status queries; the fixup replays it
++         * once the next descriptor arrives. */
++        if (av1 && c->av1_pending.valid && p->unit_seq > c->next_unit) {
+             mtx_unlock(&c->pend_mutex);
+-            int flush_ret = tva_av1_flush_pending(c, true);
++            mtx_lock(&c->av1_mutex);
++            int flush_ret = tva_av1_flush_early_locked(c);
++            mtx_unlock(&c->av1_mutex);
+             mtx_lock(&c->pend_mutex);
+             if (flush_ret != 0) {
+-                TVA_TRACE("terminal AV1 flush failed: %d", flush_ret);
++                TVA_TRACE("early AV1 flush failed: %d", flush_ret);
+                 c->broken = true;
+                 p->ready = true;
+                 p->failed = true;
+@@ -4566,8 +4933,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+                 ret = 0;
+                 break;
+             }
++            wait_start_ns = os_time_get_nano();
+             continue;
+         }
++        if (!infinite && timeout == 0) {
++            ret = 0;
++            break;
++        }
++        uint64_t now = os_time_get_nano();
++        if (!infinite && now >= deadline_ns) {
++            ret = 0;
++            break;
++        }
+ 
+         /* Qualcomm's AV1 decoder may hold the terminal showable picture until
+          * input EOS.  VA-API does not expose an explicit decoder flush, and
+@@ -4785,6 +5162,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
+     }
+     c->h264_bootstrap_count = 0;
+     tva_av1_pending_clear(&c->av1_pending);
++    free(c->av1_fixup.tile_data);
+     mtx_destroy(&c->io_mutex);
+     mtx_destroy(&c->av1_mutex);
+     mtx_destroy(&c->pend_mutex);
+@@ -4976,7 +5354,7 @@ tva_pipe_create_video_codec(struct pipe_context *context,
+     c->strict_pending = codec_id == CODEC_AV1 && tva_av1_strict_pending();
+ 
+     mtx_init(&c->io_mutex, mtx_plain);
+-    mtx_init(&c->av1_mutex, mtx_plain);
++    mtx_init(&c->av1_mutex, mtx_plain | mtx_recursive);
+     mtx_init(&c->pend_mutex, mtx_plain);
+     if (u_cnd_monotonic_init(&c->pend_cond) != thrd_success) {
+         tva_session_destroy(c->sess);
 diff --git a/src/gallium/frontends/va/tva_bridge.h b/src/gallium/frontends/va/tva_bridge.h
 index c62f6185..8f7d36e4 100644
 --- a/src/gallium/frontends/va/tva_bridge.h

@@ -20,6 +20,14 @@ frontend. `portal-va-r1.patch` adds:
   screen-content tools are always declared in the sequence header and each
   frame writes its own values. Hidden frames keep their own
   `allow_screen_content_tools`.
+- AV1: submit a held picture as soon as a client waits on it. The bridge
+  holds the newest picture until the next descriptor reveals its refresh
+  mask, and Firefox syncs each surface before sending the next one, so every
+  shown frame stalled 5 s and the EOS drain then broke the reference chain
+  (0 frames played). The picture now goes out with refresh 0, and once the
+  next descriptor arrives it is decoded again as a hidden frame with the real
+  mask; both decodes see the same references. `DMD_AV1_EAGER_FLUSH=1` forces
+  this on every picture for testing.
 - Fail `vaInitialize` when no daemon listens on the endpoint. The VA frontend
   creates the decoder at the first picture, so a missing daemon used to
   surface mid-decode (2 of 120 frames, then errors) and clients never took
