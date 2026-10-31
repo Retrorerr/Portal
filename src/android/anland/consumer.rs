@@ -215,6 +215,9 @@ struct Inner {
     client_cache: Mutex<(Vec<u32>, u64)>,
     /// Transition latch for busy logging (quiet -> active).
     client_active: AtomicBool,
+    /// KWin damage hints are arriving. While they are, they carry every
+    /// visible change and the CPU sampler stays out of presentation demand.
+    damage_live: AtomicBool,
     /// Kick channel: input forwarding and busy composites write here so the
     /// render loop wakes for an immediate select (input latency), then falls
     /// back to VSYNC-gated pacing. Only the render thread reads.
@@ -494,6 +497,7 @@ impl AnlandSession {
             client_prev: Mutex::new((0, 0, 0)),
             client_cache: Mutex::new((Vec::new(), 0)),
             client_active: AtomicBool::new(false),
+            damage_live: AtomicBool::new(false),
             wake,
             demand_until_ns: AtomicU64::new(0),
             high_refresh_until_ns: AtomicU64::new(0),
@@ -1682,7 +1686,10 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
     let mut recv_failures: u64 = 0;
     while inner.running.load(Ordering::Acquire) {
         match socket.recv(&mut buf) {
-            Ok(_) => recv_failures = 0,
+            Ok(_) => {
+                recv_failures = 0;
+                inner.damage_live.store(true, Ordering::Release);
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -1696,6 +1703,7 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
                 continue;
             }
             Err(error) => {
+                inner.damage_live.store(false, Ordering::Release);
                 // Never give up: without hints, frame-callback clients drop
                 // to the idle heartbeat for the rest of the session.
                 // Logged once per error streak: a dead socket must not
@@ -1733,6 +1741,7 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
                 .fetch_max(until, Ordering::AcqRel);
         }
     }
+    inner.damage_live.store(false, Ordering::Release);
     log::info!("anland.damage listener stopped hints={hints}");
 }
 
@@ -2465,6 +2474,17 @@ fn proc_jiffies(pid: u32) -> u64 {
 }
 
 fn sample_client_activity(inner: &Arc<Inner>) {
+    // With live damage hints a busy client that changes nothing on screen (a
+    // hidden tab playing a stream, background decode) must not hold
+    // full-rate, peak-refresh presentation of identical frames. The sampler
+    // stays the fallback for sessions whose damage hints are unavailable.
+    if inner.damage_live.load(Ordering::Acquire) {
+        if inner.client_active.swap(false, Ordering::AcqRel) {
+            log::info!("anland.demand damage hints live; sampler stands down");
+        }
+        *inner.client_prev.lock().unwrap() = (0, 0, 0);
+        return;
+    }
     // Substrings matched against /proc/PID/cmdline (NULs are fine: the
     // binary name itself is matched, separators don't matter).
     // NOTE: plasmashell is deliberately NOT watched. It burns ~2.6% CPU

@@ -9,9 +9,11 @@
 //! `ANativeWindow_setFrameRate[WithChangeStrategy](<preferred> Hz, AT_LEAST,
 //! ONLY_IF_SEAMLESS)`, where `<preferred>` is resolved from
 //! `Display.getSupportedModes()` (144 Hz on the OnePlus Pad 3, otherwise the
-//! device's own maximum). The interactive desktop never downshifts based on
-//! observed client commit cadence. Neither the request nor physical
-//! observations change the nominal Wayland mode.
+//! device's own maximum). The vote follows presentation demand
+//! (`display_mode_request`): it is withdrawn while the desktop is idle,
+//! because Android 16 honours `AT_LEAST` strictly and a permanent vote pins
+//! the panel at its peak. Neither the request nor physical observations
+//! change the nominal Wayland mode.
 //! Semantics per the NDK:
 //! - `frameRate` is a hint; the system may stay on a lower refresh when idle
 //!   or when no better match exists. Unsupported modes are never forced.
@@ -172,6 +174,35 @@ pub fn ensure_high_refresh_rate_hz(android_app: &AndroidApp, rate_hz: f32) {
                 "frame-rate",
                 "api=unavailable requires_api=30 status=missing-symbol",
             );
+        }
+        libc::dlclose(handle);
+    }
+}
+
+/// Withdraw Portal's surface frame-rate vote (0 Hz = no preference). An
+/// `AT_LEAST` vote is honoured strictly on Android 16, so a vote kept while
+/// the desktop is idle pins the panel at its peak rate; the demand-driven
+/// request in `display_mode_request` withdraws it when presentation goes idle.
+pub fn clear_frame_rate(android_app: &AndroidApp) {
+    let Some(native_window) = android_app.native_window() else {
+        return;
+    };
+    let raw_window = native_window.ptr().as_ptr().cast::<std::ffi::c_void>();
+    // SAFETY: as in `ensure_high_refresh_rate_hz`; `native_window` keeps the
+    // window alive for the call.
+    unsafe {
+        let lib_name = std::ffi::CString::new("libnativewindow.so").expect("static str");
+        let handle = libc::dlopen(lib_name.as_ptr(), libc::RTLD_NOW);
+        if handle.is_null() {
+            return;
+        }
+        let name = std::ffi::CString::new("ANativeWindow_setFrameRate").expect("static str");
+        let addr = libc::dlsym(handle, name.as_ptr());
+        if !addr.is_null() {
+            type SetFrameRateFn = unsafe extern "system" fn(*mut std::ffi::c_void, f32, i8) -> i32;
+            let func: SetFrameRateFn = std::mem::transmute(addr);
+            let status = func(raw_window, 0.0, COMPATIBILITY_DEFAULT);
+            log::debug!("frame-rate: vote withdrawn status={status}");
         }
         libc::dlclose(handle);
     }

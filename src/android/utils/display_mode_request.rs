@@ -28,6 +28,9 @@ const HIGH: u8 = 2;
 /// Last state handed to the worker (dedupe for per-frame callers).
 static REQUESTED: AtomicU8 = AtomicU8::new(UNKNOWN);
 
+/// State of the surface frame-rate vote, which follows the same demand.
+static SURFACE_VOTE: AtomicU8 = AtomicU8::new(UNKNOWN);
+
 /// When the held high-refresh request was last resolved (ms since `epoch()`).
 static RESOLVED_MS: AtomicU64 = AtomicU64::new(0);
 
@@ -90,6 +93,7 @@ pub fn attach(android_app: &AndroidApp) {
         *slot = Some(android_app.clone());
     }
     REQUESTED.store(UNKNOWN, Ordering::Release);
+    SURFACE_VOTE.store(UNKNOWN, Ordering::Release);
     TARGET_MILLIHZ.store(0, Ordering::Release);
 }
 
@@ -151,6 +155,28 @@ fn apply(enable: bool) {
                 log::info!("anland.refresh window high-refresh request enable={enable}");
             }
         },
-        app,
+        app.clone(),
     );
+    // The surface's AT_LEAST vote follows the same demand: held while idle it
+    // keeps the panel at peak refresh even with the window request released.
+    let state = if enable { HIGH } else { LOW };
+    let transition = SURFACE_VOTE.swap(state, Ordering::AcqRel) != state;
+    let retarget = changed_target();
+    if transition || (enable && retarget) {
+        if enable {
+            let rate_hz = target_millihz()
+                .map(|millihz| millihz as f32 / 1000.0)
+                .unwrap_or_else(|| super::frame_rate::preferred_frame_rate_hz(&app));
+            super::frame_rate::ensure_high_refresh_rate_hz(&app, rate_hz);
+        } else {
+            super::frame_rate::clear_frame_rate(&app);
+        }
+    }
+}
+
+/// The target refresh changed since the surface vote was last set.
+fn changed_target() -> bool {
+    static VOTED_MILLIHZ: AtomicU32 = AtomicU32::new(0);
+    let target = TARGET_MILLIHZ.load(Ordering::Acquire);
+    VOTED_MILLIHZ.swap(target, Ordering::AcqRel) != target
 }

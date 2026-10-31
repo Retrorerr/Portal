@@ -327,7 +327,8 @@ fn resume_anland(
     }
     // Demand-driven window display-mode requests target this activity.
     crate::android::utils::display_mode_request::attach(android_app);
-    // Same sticky per-window high-refresh hint as the Smithay path.
+    // Same per-window high-refresh hint as the Smithay path; from here on
+    // display_mode_request withdraws and restores it with presentation demand.
     if !backend.frame_rate_requested {
         let rate_hz = ndk::preferred_high_refresh_millihz(android_app) as f32 / 1000.0;
         crate::android::utils::frame_rate::ensure_high_refresh_rate_hz(android_app, rate_hz);
