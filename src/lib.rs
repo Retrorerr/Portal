@@ -55,6 +55,7 @@ pub mod android {
     }
     pub mod backend {
         pub mod pipewire_standalone_aaudio;
+        pub mod video_decode;
         pub mod wayland;
         pub mod webview;
     }

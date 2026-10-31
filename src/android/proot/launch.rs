@@ -257,6 +257,8 @@ pub fn launch() {
         if anland {
             extra_env = crate::android::anland::guest_mesa_env();
             extra_binds = crate::android::anland::session_binds();
+            extra_env.extend(crate::android::backend::video_decode::guest_env());
+            extra_binds.extend(crate::android::backend::video_decode::session_binds());
             // The broker socket dir must exist before proot binds it. Never
             // remove the socket file here: the Anland session binds it at
             // resume time, before this launch worker runs (unlinking a live

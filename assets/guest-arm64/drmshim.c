@@ -817,3 +817,26 @@ int ioctl(int fd, unsigned long request, ...) {
     *__errno_location() = ENOTTY;
     return -1;
 }
+
+/* libdrm's node type lookup tries /dev/dri/{card,renderD}<minor> by the
+ * device's own minor, which is kgsl's (0), so the fake renderD128 is never
+ * matched: drmGetNodeTypeFromFd fails ENODEV and libva's vaGetDisplayDRM
+ * returns NULL, so no VA-API over DRM (ffmpeg -vaapi_device, Firefox's VA-API
+ * decoder) works. The kgsl device is what the fake render node opens, so
+ * answer RENDER for it and leave every other fd to libdrm. */
+#define DRM_NODE_RENDER 2
+#define RTLD_NEXT ((void *)-1l)
+extern void *dlsym(void *handle, const char *symbol);
+
+int drmGetNodeTypeFromFd(int fd) {
+    static int (*real)(int);
+    if (is_kgsl_device(fd))
+        return DRM_NODE_RENDER;
+    if (!real)
+        real = (int (*)(int))dlsym(RTLD_NEXT, "drmGetNodeTypeFromFd");
+    if (!real) {
+        *__errno_location() = EINVAL;
+        return -1;
+    }
+    return real(fd);
+}

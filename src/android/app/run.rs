@@ -262,6 +262,7 @@ fn resume_wayland(
         return false;
     }
     pipewire_standalone_aaudio::spawn_after_ready(android_app.clone());
+    crate::android::backend::video_decode::spawn_after_ready();
     launch();
     // Spawn guest/audio workers first so they retain normal priority. Only
     // the NativeActivity event/render thread receives Android display
@@ -412,6 +413,7 @@ fn resume_anland(
         crate::android::utils::pointer_capture::attach(android_app, session.pointer_sink());
     }
     pipewire_standalone_aaudio::spawn_after_ready(android_app.clone());
+    crate::android::backend::video_decode::spawn_after_ready();
     if existing_session {
         // A normal Android resume must not call launch(): the tracked Plasma
         // process and KWin producer are still alive and reconnect through the

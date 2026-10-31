@@ -1,0 +1,1030 @@
+diff --git a/meson.build b/meson.build
+index 9d731daa..669ae339 100644
+--- a/meson.build
++++ b/meson.build
+@@ -2378,6 +2378,7 @@ if with_platform_x11
+   endif
+   if (with_egl or
+       with_dri or
++      with_gallium_va or
+       with_any_vk)
+     dep_xcb_xfixes = dependency('xcb-xfixes')
+   endif
+diff --git a/src/freedreno/drm/kgsl/kgsl_bo.c b/src/freedreno/drm/kgsl/kgsl_bo.c
+index 2302f84b..ebfd8f7a 100644
+--- a/src/freedreno/drm/kgsl/kgsl_bo.c
++++ b/src/freedreno/drm/kgsl/kgsl_bo.c
+@@ -3,6 +3,7 @@
+ #include "util/os_mman.h"
+ 
+ #include <linux/dma-heap.h>
++#include <poll.h>
+ 
+ static uint64_t
+ kgsl_bo_iova(struct fd_bo *bo)
+@@ -37,8 +38,37 @@ kgsl_bo_madvise(struct fd_bo *bo, int willneed)
+ static int
+ kgsl_bo_cpu_prep(struct fd_bo *bo, struct fd_pipe *pipe, uint32_t op)
+ {
+-    /* only need to handle implicit sync here which is a NOP for KGSL */
+-    return 0;
++    /* Implicit sync: KGSL does not wait on dma-buf fences, so wait on the
++     * dma-buf itself (the fences attached in kgsl_ringbuffer_sp.c and by
++     * other processes), as msm's GEM_CPU_PREP does in the kernel.
++     */
++    struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
++
++    if (kgsl_bo->bo_type != KGSL_BO_IMPORT || kgsl_bo->import_fd < 0)
++        return 0;
++
++    struct pollfd idle = {
++        .fd = kgsl_bo->import_fd,
++        .events = (op & FD_BO_PREP_WRITE) ? POLLOUT : POLLIN,
++    };
++    int timeout = (op & FD_BO_PREP_NOSYNC) ? 0 : -1;
++    int ret;
++
++    do {
++        ret = poll(&idle, 1, timeout);
++    } while (ret < 0 && (errno == EINTR || errno == EAGAIN));
++
++    return ret == 0 ? -EBUSY : 0;
++}
++
++static void
++kgsl_free_id(struct fd_device *dev, uint32_t id)
++{
++    struct kgsl_gpumem_free_id req = {
++        .id = id
++    };
++
++    kgsl_pipe_safe_ioctl(dev->fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req);
+ }
+ 
+ void
+@@ -49,11 +79,7 @@ kgsl_bo_close_handle(struct fd_bo *bo)
+        close(kgsl_bo->import_fd);
+     }
+ 
+-    struct kgsl_gpumem_free_id req = {
+-        .id = bo->handle
+-    };
+-
+-    kgsl_pipe_safe_ioctl(bo->dev->fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req);
++    kgsl_free_id(bo->dev, bo->handle);
+ }
+ 
+ static void
+@@ -229,6 +255,15 @@ kgsl_bo_from_dmabuf(struct fd_device *dev, int fd)
+ 
+     bo = fd_bo_from_handle(dev, req.id, 0);
+ 
++    /* The common code closes a failed import with GEM_CLOSE, which means
++     * nothing to KGSL: free the object here.
++     */
++    if (!bo) {
++        ERROR_MSG("Failed to import dma-buf object");
++        kgsl_free_id(dev, req.id);
++        return NULL;
++    }
++
+     struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
+     kgsl_bo->bo_type = KGSL_BO_IMPORT;
+     kgsl_bo->import_fd = os_dupfd_cloexec(fd);
+@@ -352,13 +387,14 @@ kgsl_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
+ 
+     bo = kgsl_bo_from_handle(dev, size, req.id);
+ 
+-    struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
+-    kgsl_bo->bo_type = KGSL_BO_NATIVE;
+-
+     if (!bo) {
+         ERROR_MSG("Failed to allocate buffer object");
++        kgsl_free_id(dev, req.id);
+         return NULL;
+     }
+ 
++    struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
++    kgsl_bo->bo_type = KGSL_BO_NATIVE;
++
+     return bo;
+ }
+diff --git a/src/freedreno/drm/kgsl/kgsl_pipe.c b/src/freedreno/drm/kgsl/kgsl_pipe.c
+index 47602128..46bcaff4 100644
+--- a/src/freedreno/drm/kgsl/kgsl_pipe.c
++++ b/src/freedreno/drm/kgsl/kgsl_pipe.c
+@@ -122,7 +122,14 @@ static int
+ kgsl_pipe_wait(struct fd_pipe *pipe, const struct fd_fence *fence, uint64_t timeout)
+ {
+     struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
+-    return wait_timestamp_safe(pipe->dev->fd, kgsl_pipe->queue_id, fence->kfence, timeout);
++    /* timeout is in ns, KGSL's is a 32-bit count of ms where 0 waits
++     * forever. Round up so a sub-ms wait isn't infinite, and clamp so a
++     * long one doesn't wrap; KGSL takes anything over INT_MAX ms as
++     * infinite, so ~0 still waits forever.
++     */
++    uint64_t timeout_ms = timeout / 1000000 + (timeout % 1000000 != 0);
++    return wait_timestamp_safe(pipe->dev->fd, kgsl_pipe->queue_id, fence->kfence,
++                               MIN2(timeout_ms, UINT32_MAX));
+ }
+ 
+ static void
+diff --git a/src/freedreno/drm/kgsl/kgsl_priv.h b/src/freedreno/drm/kgsl/kgsl_priv.h
+index 09e77a1d..15ddb617 100644
+--- a/src/freedreno/drm/kgsl/kgsl_priv.h
++++ b/src/freedreno/drm/kgsl/kgsl_priv.h
+@@ -29,6 +29,11 @@ struct kgsl_pipe {
+     uint32_t gmem_size;
+     uint64_t gmem_base;
+     uint32_t queue_id;
++
++    /* Sync timeline name of this context's fences, learnt from the first
++     * one (see kgsl_ringbuffer_sp.c implicit sync).
++     */
++    char timeline[32];
+ };
+ FD_DEFINE_CAST(fd_pipe, kgsl_pipe);
+ 
+diff --git a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+index c4843a1f..e5dd5d82 100644
+--- a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
++++ b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+@@ -1,6 +1,13 @@
++#include <poll.h>
++
+ #include "kgsl_priv.h"
+ #include "freedreno_ringbuffer_sp.h"
+ 
++#include "drm-uapi/dma-buf.h"
++#include "util/libsync.h"
++#include "util/os_file.h"
++#include "util/u_dynarray.h"
++
+ static int
+ timestamp_to_fd(struct fd_pipe *pipe, uint32_t timestamp)
+ {
+@@ -21,6 +28,147 @@ timestamp_to_fd(struct fd_pipe *pipe, uint32_t timestamp)
+     return fd;
+ }
+ 
++/*
++ * Implicit sync for dma-bufs.
++ *
++ * KGSL attaches no fences to dma-bufs, so unlike msm nothing orders this
++ * context's GPU work against another process using the same buffer: a
++ * compositor samples a client frame the GPU has not finished (or the client
++ * overwrites a buffer the compositor still reads), and the screen shows
++ * stale or torn content. Do in userspace what the msm kernel driver does
++ * for every BO in a submit:
++ *
++ *  - before the submit, wait on the GPU for the buffer's unsignaled fences
++ *    from other contexts, unless the pipe uses explicit sync (msm's
++ *    MSM_SUBMIT_NO_IMPLICIT); our own fences are skipped because the
++ *    context executes in order,
++ *  - after the submit, attach its fence to the buffer.
++ *
++ * Every BO backed by a dma-buf (KGSL_BO_IMPORT: imports and the dma-heap
++ * allocations used for shared/scanout BOs) takes part.
++ */
++static int
++bo_dmabuf_fd(struct fd_bo *bo)
++{
++    struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
++
++    if (kgsl_bo->bo_type != KGSL_BO_IMPORT)
++        return -1;
++    return kgsl_bo->import_fd;
++}
++
++static void
++collect_dmabuf_bos(struct list_head *submit_list, struct util_dynarray *bos)
++{
++    foreach_submit (submit, submit_list) {
++        struct fd_submit_sp *fd_submit = to_fd_submit_sp(submit);
++
++        for (unsigned i = 0; i < fd_submit->nr_bos; i++) {
++            struct fd_bo *bo = fd_submit->bos[i];
++            bool seen = false;
++
++            if (bo_dmabuf_fd(bo) < 0)
++                continue;
++            util_dynarray_foreach (bos, struct fd_bo *, b) {
++                if (*b == bo) {
++                    seen = true;
++                    break;
++                }
++            }
++            if (!seen)
++                util_dynarray_append_typed(bos, struct fd_bo *, fd_bo_ref(bo));
++        }
++    }
++}
++
++/* Remember the name of our own sync timeline from one of our fences. */
++static void
++learn_timeline(struct kgsl_pipe *kgsl_pipe, int fence_fd)
++{
++    struct sync_file_info *info = sync_file_info(fence_fd);
++
++    if (!info)
++        return;
++    if (info->num_fences == 1) {
++        struct sync_fence_info *fence =
++            (struct sync_fence_info *)(uintptr_t)info->sync_fence_info;
++        memcpy(kgsl_pipe->timeline, fence->obj_name, sizeof(kgsl_pipe->timeline));
++        kgsl_pipe->timeline[sizeof(kgsl_pipe->timeline) - 1] = '\0';
++    }
++    free(info);
++}
++
++/* True when every unsignaled fence in fence_fd is on our own timeline. */
++static bool
++only_own_fences(struct kgsl_pipe *kgsl_pipe, int fence_fd)
++{
++    if (!kgsl_pipe->timeline[0])
++        return false;
++
++    struct sync_file_info *info = sync_file_info(fence_fd);
++    if (!info)
++        return false;
++
++    struct sync_fence_info *fences =
++        (struct sync_fence_info *)(uintptr_t)info->sync_fence_info;
++    bool own = true;
++    for (unsigned i = 0; i < info->num_fences; i++) {
++        if (fences[i].status != 0)
++            continue;
++        if (strncmp(fences[i].obj_name, kgsl_pipe->timeline,
++                    sizeof(kgsl_pipe->timeline) - 1)) {
++            own = false;
++            break;
++        }
++    }
++    free(info);
++    return own;
++}
++
++/* Merged fence of the other contexts' pending work on the bos, or -1. */
++static int
++implicit_in_fence(struct kgsl_pipe *kgsl_pipe, struct util_dynarray *bos)
++{
++    int in_fence_fd = -1;
++
++    util_dynarray_foreach (bos, struct fd_bo *, b) {
++        int dmabuf = bo_dmabuf_fd(*b);
++        struct pollfd idle = {
++            .fd = dmabuf,
++            .events = POLLOUT,
++        };
++
++        /* POLLOUT: every fence, readers' and writers', has signaled. */
++        if (poll(&idle, 1, 0) == 1)
++            continue;
++
++        struct dma_buf_export_sync_file export = {
++            .flags = DMA_BUF_SYNC_WRITE,
++            .fd = -1,
++        };
++        if (drmIoctl(dmabuf, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &export))
++            continue;
++
++        if (!only_own_fences(kgsl_pipe, export.fd))
++            sync_accumulate("kgsl implicit sync", &in_fence_fd, export.fd);
++        close(export.fd);
++    }
++
++    return in_fence_fd;
++}
++
++static void
++attach_out_fence(struct util_dynarray *bos, int fence_fd)
++{
++    util_dynarray_foreach (bos, struct fd_bo *, b) {
++        struct dma_buf_import_sync_file import = {
++            .flags = DMA_BUF_SYNC_WRITE,
++            .fd = fence_fd,
++        };
++        drmIoctl(bo_dmabuf_fd(*b), DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &import);
++    }
++}
++
+ static int
+ flush_submit_list(struct list_head *submit_list)
+ {
+@@ -28,10 +176,32 @@ flush_submit_list(struct list_head *submit_list)
+     struct fd_pipe *pipe = fd_submit->base.pipe;
+     struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
+     unsigned nr_cmds = 0;
++    int implicit_fence_fd = -1;
++    int in_fence_fd = fd_submit->in_fence_fd;
+ 
+ 
+     MESA_TRACE_FUNC();
+ 
++    struct util_dynarray dmabuf_bos;
++    util_dynarray_init(&dmabuf_bos, NULL);
++    collect_dmabuf_bos(submit_list, &dmabuf_bos);
++
++    if (!pipe->no_implicit_sync)
++        implicit_fence_fd = implicit_in_fence(kgsl_pipe, &dmabuf_bos);
++
++    if (implicit_fence_fd != -1) {
++        if (in_fence_fd == -1) {
++            in_fence_fd = implicit_fence_fd;
++        } else {
++            /* On a failed merge keep the explicit fence alone. */
++            int merged = sync_merge("kgsl implicit sync", in_fence_fd, implicit_fence_fd);
++            close(implicit_fence_fd);
++            implicit_fence_fd = merged >= 0 ? merged : -1;
++            if (implicit_fence_fd != -1)
++                in_fence_fd = implicit_fence_fd;
++        }
++    }
++
+     foreach_submit (submit, submit_list) {
+         assert(submit->pipe == &kgsl_pipe->base);
+         nr_cmds += to_fd_ringbuffer_sp(submit->primary)->u.nr_cmds;
+@@ -62,7 +232,7 @@ flush_submit_list(struct list_head *submit_list)
+     }
+ 
+     struct kgsl_cmd_syncpoint_fence sync_fence = {
+-        .fd = fd_submit->in_fence_fd,
++        .fd = in_fence_fd,
+     };
+ 
+     struct kgsl_command_syncpoint sync = {
+@@ -96,16 +266,37 @@ flush_submit_list(struct list_head *submit_list)
+         int fd = timestamp_to_fd(pipe, req.timestamp);
+         if (fd < 0) {
+             ERROR_MSG("Failed to create sync file for timestamp (%s)", strerror(errno));
++            ret = -1;
+             goto fail;
+         }
+ 
+         fd_submit->out_fence->fence_fd = fd;
+     }
+ 
+-    if (fd_submit->in_fence_fd != -1)
+-        close(fd_submit->in_fence_fd);
++    if (util_dynarray_num_elements(&dmabuf_bos, struct fd_bo *)) {
++        int fd = fd_submit->out_fence->use_fence_fd ?
++            fd_submit->out_fence->fence_fd : timestamp_to_fd(pipe, req.timestamp);
++
++        if (fd >= 0) {
++            if (!kgsl_pipe->timeline[0])
++                learn_timeline(kgsl_pipe, fd);
++            attach_out_fence(&dmabuf_bos, fd);
++            if (fd != fd_submit->out_fence->fence_fd)
++                close(fd);
++        }
++    }
+ 
+ fail:
++    if (fd_submit->in_fence_fd != -1) {
++        close(fd_submit->in_fence_fd);
++        fd_submit->in_fence_fd = -1;
++    }
++    if (implicit_fence_fd != -1)
++        close(implicit_fence_fd);
++    util_dynarray_foreach (&dmabuf_bos, struct fd_bo *, b)
++        fd_bo_del(*b);
++    util_dynarray_fini(&dmabuf_bos);
++
+     /* Keep merged submits alive until KGSL has consumed the command list and,
+      * on success, populated the shared kernel timestamp.  Dropping them before
+      * IOCTL_KGSL_GPU_COMMAND can free BOs that the command stream still uses.
+@@ -114,6 +305,19 @@ fail:
+         if (submit == last_submit(submit_list))
+             break;
+ 
++        /* Move the deferred submit's bos over to the last submit, as msm
++         * does, so they stay referenced until that submit is destroyed after
++         * the GPU_COMMAND ioctl. KGSL takes no bo list and frees memory
++         * immediately on GPUMEM_FREE_ID, and kgsl_bo_destroy() can only wait
++         * on a fence whose kfence is set. Dropped here instead, a bo with no
++         * other reference and no bo cache bucket (over 112 MiB, like the
++         * linear staging texture of a large glTexSubImage) is freed before
++         * the GPU runs the commands that read it.
++         */
++        struct fd_submit_sp *fd_deferred_submit = to_fd_submit_sp(submit);
++        for (unsigned i = 0; i < fd_deferred_submit->nr_bos; i++)
++            fd_submit_append_bo(fd_submit, fd_deferred_submit->bos[i]);
++
+         list_del(&submit->node);
+         fd_submit_del(submit);
+     }
+diff --git a/src/gallium/drivers/freedreno/freedreno_blitter.c b/src/gallium/drivers/freedreno/freedreno_blitter.c
+index cf66d338..6c1faca0 100644
+--- a/src/gallium/drivers/freedreno/freedreno_blitter.c
++++ b/src/gallium/drivers/freedreno/freedreno_blitter.c
+@@ -80,7 +80,17 @@ fd_blitter_pipe_begin(struct fd_context *ctx, bool render_cond) assert_dt
+                                 ctx->streamout.targets, MESA_PRIM_UNKNOWN);
+    util_blitter_save_rasterizer(ctx->blitter, ctx->rasterizer);
+    util_blitter_save_viewport(ctx->blitter, &ctx->viewport[0]);
+-   util_blitter_save_scissor(ctx->blitter, &ctx->scissor[0]);
++   /* ctx->scissor holds inclusive max bounds, but the blitter restores the
++    * saved scissor through set_scissor_states(), which takes exclusive ones
++    * and subtracts 1 again.  Save it in the exclusive form so a blit does
++    * not shrink the scissor that the state tracker believes is still bound.
++    */
++   struct pipe_scissor_state scissor = ctx->scissor[0];
++   if (scissor.minx <= scissor.maxx && scissor.miny <= scissor.maxy) {
++      scissor.maxx++;
++      scissor.maxy++;
++   }
++   util_blitter_save_scissor(ctx->blitter, &scissor);
+    util_blitter_save_fragment_shader(ctx->blitter, ctx->prog.fs);
+    util_blitter_save_blend(ctx->blitter, ctx->blend);
+    util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->zsa);
+diff --git a/src/gallium/frontends/va/av1_bitstream.c b/src/gallium/frontends/va/av1_bitstream.c
+index 6e229523..a856a1b8 100644
+--- a/src/gallium/frontends/va/av1_bitstream.c
++++ b/src/gallium/frontends/va/av1_bitstream.c
+@@ -19,17 +19,13 @@
+ 
+ #include "av1_bitstream.h"
+ 
+-static int
+-dmd_av1_pixel_1080(const VADecPictureParameterBufferAV1 *p)
+-{
+-    return p && p->frame_width_minus1 == 1919 &&
+-           p->frame_height_minus1 == 1079;
+-}
+-
+ /* VA-API exposes the per-frame screen-content flag but not the sequence-level
+- * choose/force value.  Keep the old per-frame inference as the default and
+- * allow callers to provide the missing sequence bit explicitly with
+- * DMD_AV1_SCREEN_CONTENT_TOOLS=0|1. */
++ * choose/force value.  The selectable form is correct for every stream: each
++ * frame then carries its own allow_screen_content_tools (and force_integer_mv)
++ * from the descriptor, so the header means what the source header meant.
++ * Inferring the sequence value from a frame flag, or from the frame size as
++ * the earlier Pixel-specific rule did, drops or adds a bit for other streams.
++ * DMD_AV1_SCREEN_CONTENT_TOOLS=0 restores the forced-off form. */
+ int
+ dmd_av1_screen_content_tools_selected(const void *pic_v)
+ {
+@@ -41,10 +37,8 @@ dmd_av1_screen_content_tools_selected(const void *pic_v)
+         if (!strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off"))
+             return 0;
+     }
+-    /* The Pixel 1080p C2 streams use the selectable form even when the key
+-     * frame itself has allow_screen_content_tools=0. */
+-    return dmd_av1_pixel_1080(p) ||
+-           p->pic_info_fields.bits.allow_screen_content_tools != 0;
++    (void)p;
++    return 1;
+ }
+ 
+ /* Some Pixel AV1 streams arrive through FFmpeg's VA descriptors with the
+@@ -636,8 +630,7 @@ size_t dmd_av1_build_sequence_header(const void *pic_v,
+      * this field is omitted.  VA-API does not preserve the source value, so
+      * advertise one five-frame initial delay for the single operating point;
+      * it is decoder configuration only and does not change frame syntax. */
+-    const int pixel_1080 = dmd_av1_pixel_1080(p);
+-    dmd_bw_put_flag(&bw, pixel_1080); /* initial_display_delay_present_flag */
++    dmd_bw_put_flag(&bw, 1);   /* initial_display_delay_present_flag */
+     dmd_bw_put_bits(&bw, 0, 5);/* operating_points_cnt_minus_1: one operating
+                                 * point; this driver has no scalable layer,
+                                 * matching the OBU extension_flag of zero. */
+@@ -646,10 +639,8 @@ size_t dmd_av1_build_sequence_header(const void *pic_v,
+      * is accepted by the Pixel decoder for the tested AV1 streams. */
+     dmd_bw_put_bits(&bw, 9, 5);           /* seq_level_idx[0] */
+     dmd_bw_put_flag(&bw, 0);              /* seq_tier[0] (idx > 7) */
+-    if (pixel_1080) {
+-        dmd_bw_put_flag(&bw, 1);          /* initial_display_delay_present_for_this_op */
+-        dmd_bw_put_bits(&bw, 4, 4);       /* initial_display_delay_minus_1 */
+-    }
++    dmd_bw_put_flag(&bw, 1);              /* initial_display_delay_present_for_this_op */
++    dmd_bw_put_bits(&bw, 4, 4);           /* initial_display_delay_minus_1 */
+ 
+     /* Use the minimum width needed for frame_width_bits rather than a fixed
+      * 16 bits.  Per va_dec_av1.h:332-334, frame_width_minus1 is the upscaled
+@@ -747,7 +738,8 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+                                     const VADecPictureParameterBufferAV1 *p,
+                                     uint8_t refresh_frame_flags,
+                                     unsigned tile_size_bytes,
+-                                    int enable_restoration)
++                                    int enable_restoration,
++                                    int skip_mode_allowed)
+ {
+     /* struct dmd_bitwriter is a value type: buf points to the caller's
+      * storage and the remaining fields are counters.  Copying it in and back
+@@ -1048,6 +1040,14 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+      * decoder infers skipModeAllowed=0.  Omit the field by default; callers
+      * which have independently established that skip mode is available may
+      * opt in with DMD_AV1_FORCE_SKIP_MODE=1. */
++    if (skip_mode_allowed >= 0) {
++        /* The caller tracked the reference order hints and evaluated
++         * skipModeAllowed itself: the field is present exactly then. */
++        if (skip_mode_allowed)
++            dmd_bw_put_flag(&bw,
++                (int)p->mode_control_fields.bits.skip_mode_present);
++        goto skip_mode_done;
++    }
+     unsigned populated_refs = 0;
+     if (!intra_only && p->mode_control_fields.bits.reference_select) {
+         for (int i = 0; i < 7; i++)
+@@ -1062,6 +1062,7 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+                                   !strcmp(force_skip, "true") ||
+                                   !strcmp(force_skip, "on")))))
+         dmd_bw_put_flag(&bw, (int)p->mode_control_fields.bits.skip_mode_present);
++skip_mode_done:
+ 
+     /* allow_warped_motion is present for every inter frame which is not
+      * error-resilient when the sequence-level capability is enabled.  It is
+@@ -1069,11 +1070,7 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+      * interpolation mode field earlier in the header. */
+     if (!intra_only && !err_res) {
+         const char *force_warp = getenv("DMD_AV1_FORCE_WARPED_MOTION");
+-        /* The matrix coefficient alone is not enough to identify the Pixel
+-         * C2 syntax variant: ordinary libaom BT.709 streams use the same
+-         * value while retaining the descriptor's per-frame warp flag. */
+-        const int force_pixel_warp = dmd_av1_pixel_1080(p);
+-        const int warp = (force_pixel_warp || (force_warp &&
++        const int warp = ((force_warp &&
+             (!strcmp(force_warp, "1") || !strcmp(force_warp, "true") ||
+              !strcmp(force_warp, "on")))) ? 1 :
+             (int)p->pic_info_fields.bits.allow_warped_motion;
+@@ -1121,12 +1118,13 @@ static size_t build_frame_header_obu(const VADecPictureParameterBufferAV1 *p,
+                                      size_t *body_len_out,
+                                      uint8_t refresh_frame_flags,
+                                      unsigned tile_size_bytes,
+-                                     int enable_restoration)
++                                     int enable_restoration,
++                                     int skip_mode_allowed)
+ {
+     struct dmd_bitwriter bw;
+     dmd_bw_init(&bw, body, body_cap);
+     put_uncompressed_header(&bw, p, refresh_frame_flags, tile_size_bytes,
+-                            enable_restoration);
++                            enable_restoration, skip_mode_allowed);
+ 
+     if (obu_type == DMD_OBU_FRAME)
+         dmd_av1_byte_align(&bw);      /* zero padding only, no marker bit */
+@@ -1141,6 +1139,7 @@ static size_t build_frame_header_obu(const VADecPictureParameterBufferAV1 *p,
+ 
+ size_t dmd_av1_build_frame_header(const void *pic_v,
+                                   int enable_restoration,
++                                  int skip_mode_allowed,
+                                   unsigned char *out, size_t out_cap)
+ {
+     const VADecPictureParameterBufferAV1 *p = pic_v;
+@@ -1152,7 +1151,7 @@ size_t dmd_av1_build_frame_header(const void *pic_v,
+     if (build_frame_header_obu(p, DMD_OBU_FRAME_HEADER,
+                               body, sizeof(body), &body_len, 0xff,
+                               2,
+-                              enable_restoration) == 0)
++                              enable_restoration, skip_mode_allowed) == 0)
+         return 0;
+ 
+     const size_t hdr = dmd_av1_obu_header(DMD_OBU_FRAME_HEADER,
+@@ -1168,6 +1167,7 @@ size_t dmd_av1_build_frame(const void *pic_v,
+                            const struct dmd_av1_tile *tiles, int num_tiles,
+                            uint8_t refresh_frame_flags,
+                            int enable_restoration,
++                           int skip_mode_allowed,
+                            unsigned char *out, size_t out_cap)
+ {
+     const VADecPictureParameterBufferAV1 *p = pic_v;
+@@ -1184,7 +1184,7 @@ size_t dmd_av1_build_frame(const void *pic_v,
+                               fh, sizeof(fh), &fh_len,
+                               refresh_frame_flags,
+                               tile_size_bytes,
+-                              enable_restoration) == 0)
++                              enable_restoration, skip_mode_allowed) == 0)
+         return 0;
+     /* tile_group_obu() payload (specification 5.11.1):
+      *   when NumTiles > 1, write tile_start_and_end_present_flag first
+@@ -1206,7 +1206,7 @@ size_t dmd_av1_build_frame(const void *pic_v,
+         p->pic_info_fields.bits.frame_type != 0 &&
+         (p->pic_info_fields.bits.show_frame ||
+          p->mode_control_fields.bits.reduced_tx_set_used) &&
+-        (dmd_av1_pixel_1080(p) || prefix_override);
++        prefix_override;
+ 
+     unsigned char tg_hdr[8];
+     struct dmd_bitwriter tgw;
+diff --git a/src/gallium/frontends/va/av1_bitstream.h b/src/gallium/frontends/va/av1_bitstream.h
+index 6cd0b296..4b151b12 100644
+--- a/src/gallium/frontends/va/av1_bitstream.h
++++ b/src/gallium/frontends/va/av1_bitstream.h
+@@ -140,11 +140,16 @@ struct dmd_av1_tile {
+  *
+  * tiles are supplied in tile-row-major order, and the count must equal
+  * tile_cols * tile_rows.  Write to out and return the total byte count; return
+- * 0 for insufficient capacity or invalid parameters. */
++ * 0 for insufficient capacity or invalid parameters.
++ *
++ * skip_mode_allowed is skipModeAllowed (specification 5.9.22), which depends
++ * on reference order hints that VA-API does not carry: 0 or 1 when the
++ * caller tracked them, -1 for the legacy heuristic. */
+ size_t dmd_av1_build_frame(const void *pic,
+                            const struct dmd_av1_tile *tiles, int num_tiles,
+                            uint8_t refresh_frame_flags,
+                            int enable_restoration,
++                           int skip_mode_allowed,
+                            unsigned char *out, size_t out_cap);
+ 
+ /* Build an OBU_FRAME_HEADER carrying show_existing_frame for a reference
+@@ -166,6 +171,7 @@ size_t dmd_av1_build_show_existing(uint8_t map_idx,
+  * capacity or invalid parameters. */
+ size_t dmd_av1_build_frame_header(const void *pic,
+                                   int enable_restoration,
++                                  int skip_mode_allowed,
+                                   unsigned char *out, size_t out_cap);
+ 
+ /* obu_header() + obu_size (AV1 specification 5.3.1/5.3.2).
+diff --git a/src/gallium/frontends/va/tva_bridge.c b/src/gallium/frontends/va/tva_bridge.c
+index 31b3aade..fd8ccb40 100644
+--- a/src/gallium/frontends/va/tva_bridge.c
++++ b/src/gallium/frontends/va/tva_bridge.c
+@@ -493,8 +493,17 @@ struct tva_av1_picture {
+     size_t tile_bytes;
+     unsigned tile_count;
+     uint8_t refresh_frame_flags;
++    /* skipModeAllowed for the header writer, -1 when unknown */
++    int skip_mode_allowed;
+ };
+ 
++/* Order hint last decoded into each surface, for skipModeAllowed */
++struct tva_av1_hint {
++    struct pipe_video_buffer *buffer;
++    uint8_t order_hint;
++};
++#define TVA_AV1_MAX_HINTS 32
++
+ struct tva_av1_frame {
+     bool valid;
+     struct tva_av1_picture pictures[TVA_AV1_GROUP_MAX_FRAMES];
+@@ -543,6 +552,9 @@ struct tva_codec {
+     bool h264_pps_defaults_valid;
+     unsigned h264_pps_l0_default;
+     unsigned h264_pps_l1_default;
++    /* PPS list-length defaults read back from slices without an override */
++    bool h264_l0_default_known;
++    bool h264_l1_default_known;
+     /* The VA HEVC picture descriptor omits max_sub_layers_minus1.  Keep the
+      * largest temporal id observed in the access units so synthesized VPS/SPS
+      * parameter sets accept streams which use temporal scalability. */
+@@ -556,6 +568,8 @@ struct tva_codec {
+     bool h264_bootstrap_done;
+     bool av1_sequence_sent;
+     bool av1_enable_restoration;
++    struct tva_av1_hint av1_hints[TVA_AV1_MAX_HINTS];
++    unsigned av1_hint_count;
+     /* Some FFmpeg/libva AV1 streams omit reduced_tx_set_used on the
+      * hierarchical base-layer reference frames.  Track the first base frame
+      * after each key frame so the reconstruction can restore that syntax
+@@ -624,6 +638,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
+    if (!c || !c->sess)
+       return TVA_ERR_STATE;
+    mtx_lock(&c->io_mutex);
++   {
++      const char *dump = getenv("TVA_DUMP_UNITS");
++      if (dump) {
++         FILE *f = fopen(dump, "ab");
++         if (f) {
++            uint32_t n = len;
++            fwrite(&n, 4, 1, f);
++            fwrite(data, 1, len, f);
++            fclose(f);
++         }
++      }
++   }
+    ret = tva_session_send_unit(c->sess, data, len);
+    mtx_unlock(&c->io_mutex);
+    return ret;
+@@ -1104,6 +1130,100 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
+     return 0;
+ }
+ 
++static int
++tva_av1_hint_lookup(const struct tva_codec *c,
++                    const struct pipe_video_buffer *buffer)
++{
++    for (unsigned i = 0; buffer && i < c->av1_hint_count; i++) {
++        if (c->av1_hints[i].buffer == buffer)
++            return c->av1_hints[i].order_hint;
++    }
++    return -1;
++}
++
++static void
++tva_av1_hint_record(struct tva_codec *c, struct pipe_video_buffer *buffer,
++                    uint8_t order_hint)
++{
++    for (unsigned i = 0; i < c->av1_hint_count; i++) {
++        if (c->av1_hints[i].buffer == buffer) {
++            c->av1_hints[i].order_hint = order_hint;
++            return;
++        }
++    }
++    if (c->av1_hint_count == TVA_AV1_MAX_HINTS) {
++        memmove(&c->av1_hints[0], &c->av1_hints[1],
++                sizeof(c->av1_hints[0]) * (TVA_AV1_MAX_HINTS - 1));
++        c->av1_hint_count--;
++    }
++    c->av1_hints[c->av1_hint_count++] =
++        (struct tva_av1_hint){ buffer, order_hint };
++}
++
++static int
++tva_av1_relative_dist(int a, int b, unsigned bits)
++{
++    int diff = a - b;
++    int m = 1 << (bits - 1);
++    return (diff & (m - 1)) - (diff & m);
++}
++
++/* skipModeAllowed (AV1 specification 5.9.22) decides whether the frame
++ * header carries skip_mode_present.  It depends on the order hints of the
++ * reference frames, which VA-API does not pass; they are known here because
++ * every reference was decoded through this codec.  Writing or omitting the
++ * bit wrongly shifts the rest of the header, and with skip_mode_present
++ * dropped the decoder misparses every tile of the frame.  Returns -1 when a
++ * reference was never seen (e.g. a session that started mid-stream). */
++static int
++tva_av1_skip_mode_allowed(const struct tva_codec *c,
++                          const struct pipe_av1_picture_desc *av1,
++                          const VADecPictureParameterBufferAV1 *p)
++{
++    const unsigned frame_type = p->pic_info_fields.bits.frame_type;
++    if (frame_type == 0 || frame_type == 2 ||
++        !p->mode_control_fields.bits.reference_select ||
++        !p->seq_info_fields.fields.enable_order_hint)
++        return 0;
++
++    const unsigned bits = p->order_hint_bits_minus_1 + 1;
++    const int order_hint = p->order_hint;
++    int hints[7];
++    for (unsigned i = 0; i < 7; i++) {
++        unsigned slot = p->ref_frame_idx[i];
++        hints[i] = slot < 8 ? tva_av1_hint_lookup(c, av1->ref[slot]) : -1;
++        if (hints[i] < 0)
++            return -1;
++    }
++
++    int forward = -1, backward = -1, forward_hint = 0, backward_hint = 0;
++    for (unsigned i = 0; i < 7; i++) {
++        int dist = tva_av1_relative_dist(hints[i], order_hint, bits);
++        if (dist < 0) {
++            if (forward < 0 ||
++                tva_av1_relative_dist(hints[i], forward_hint, bits) > 0) {
++                forward = i;
++                forward_hint = hints[i];
++            }
++        } else if (dist > 0) {
++            if (backward < 0 ||
++                tva_av1_relative_dist(hints[i], backward_hint, bits) < 0) {
++                backward = i;
++                backward_hint = hints[i];
++            }
++        }
++    }
++    if (forward < 0)
++        return 0;
++    if (backward >= 0)
++        return 1;
++    for (unsigned i = 0; i < 7; i++) {
++        if (tva_av1_relative_dist(hints[i], forward_hint, bits) < 0)
++            return 1;
++    }
++    return 0;
++}
++
+ /* AV1 show_existing_frame packets do not enter the VA decode callbacks.  A
+  * hidden reference picture therefore has no consumer-visible callback even
+  * though its surface must still contain decoded pixels before a later
+@@ -2065,6 +2185,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
+            profile == PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444;
+ }
+ 
++/* Read the H.264 slice header of the last slice in an access unit up to
++ * num_ref_idx_active_override_flag.  VA-API passes only the effective list
++ * lengths, not the PPS defaults or the override flag, yet MediaCodec parses
++ * every slice against the synthetic PPS: a default that differs from the
++ * stream's makes it misparse each P/B slice without an override and stop
++ * returning pictures.  A slice without an override shows the exact default.
++ * Returns the slice type (0 P, 1 B, 2 I, 3 SP, 4 SI) and sets *override, or
++ * -1 if the header cannot be read. */
++struct tva_br {
++    uint8_t buf[64];
++    unsigned len, pos;
++};
++
++static unsigned
++tva_br_u(struct tva_br *r, unsigned n)
++{
++    unsigned v = 0;
++    while (n--) {
++        unsigned bit = 0;
++        if (r->pos < r->len * 8)
++            bit = (r->buf[r->pos >> 3] >> (7 - (r->pos & 7))) & 1;
++        r->pos++;
++        v = (v << 1) | bit;
++    }
++    return v;
++}
++
++static unsigned
++tva_br_ue(struct tva_br *r)
++{
++    unsigned zeros = 0;
++    while (!tva_br_u(r, 1) && zeros < 32 && r->pos < r->len * 8)
++        zeros++;
++    return zeros >= 32 ? ~0u : ((1u << zeros) - 1) + tva_br_u(r, zeros);
++}
++
++static int
++tva_h264_last_slice_override(const uint8_t *data, size_t len,
++                             const struct pipe_h264_pps *pps, bool *override)
++{
++    const struct pipe_h264_sps *sps = pps->sps;
++    size_t nal = len;
++    for (size_t scan = 0; scan < len;) {
++        size_t sc = tva_next_start_code(data, len, scan);
++        if (sc >= len || sc + 3 >= len)
++            break;
++        unsigned type = data[sc + 3] & 0x1f;
++        if (type == 1 || type == 5)
++            nal = sc + 3;
++        scan = sc + 3;
++    }
++    if (nal >= len)
++        return -1;
++
++    struct tva_br r = {0};
++    unsigned zeros = 0;
++    for (size_t i = nal + 1; i < len && r.len < sizeof(r.buf); i++) {
++        if (zeros >= 2 && data[i] == 3) {
++            zeros = 0;
++            continue;
++        }
++        zeros = data[i] ? 0 : zeros + 1;
++        r.buf[r.len++] = data[i];
++    }
++    bool idr = (data[nal] & 0x1f) == 5;
++
++    tva_br_ue(&r);                                  /* first_mb_in_slice */
++    unsigned slice_type = tva_br_ue(&r) % 5;
++    tva_br_ue(&r);                                  /* pic_parameter_set_id */
++    if (sps->separate_colour_plane_flag)
++        tva_br_u(&r, 2);
++    tva_br_u(&r, sps->log2_max_frame_num_minus4 + 4);
++    bool field = false;
++    if (!sps->frame_mbs_only_flag) {
++        field = tva_br_u(&r, 1);
++        if (field)
++            tva_br_u(&r, 1);                        /* bottom_field_flag */
++    }
++    if (idr)
++        tva_br_ue(&r);                              /* idr_pic_id */
++    if (sps->pic_order_cnt_type == 0) {
++        tva_br_u(&r, sps->log2_max_pic_order_cnt_lsb_minus4 + 4);
++        if (pps->bottom_field_pic_order_in_frame_present_flag && !field)
++            tva_br_ue(&r);                          /* delta_pic_order_cnt_bottom */
++    } else if (sps->pic_order_cnt_type == 1 &&
++               !sps->delta_pic_order_always_zero_flag) {
++        tva_br_ue(&r);
++        if (pps->bottom_field_pic_order_in_frame_present_flag && !field)
++            tva_br_ue(&r);
++    }
++    if (pps->redundant_pic_cnt_present_flag)
++        tva_br_ue(&r);
++    if (slice_type == 1)
++        tva_br_u(&r, 1);                            /* direct_spatial_mv_pred */
++    *override = false;
++    if (slice_type == 0 || slice_type == 1 || slice_type == 3)
++        *override = tva_br_u(&r, 1);
++    if (r.pos > r.len * 8)
++        return -1;
++    return slice_type;
++}
++
+ /*
+  * Build the SPS NALU (with NAL header + emulation prevention) from the
+  * frontend-parsed struct.  Returns the RBSP size; the NAL header byte is
+@@ -3311,7 +3533,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
+         return;
+     }
+ 
+-    if (p->frame_width_minus1 == 1919 && p->frame_height_minus1 == 1079 &&
++    if (tva_option_enabled("DMD_AV1_PIXEL_REDUCED_TX") &&
+         p->pic_info_fields.bits.frame_type != 0 &&
+         !p->pic_info_fields.bits.show_frame &&
+         p->mode_control_fields.bits.tx_mode == 2 &&
+@@ -3412,6 +3634,7 @@ tva_av1_send_pending(struct tva_codec *c)
+                                     (int)pic->tile_count,
+                                     pic->refresh_frame_flags,
+                                     c->av1_enable_restoration,
++                                    pic->skip_mode_allowed,
+                                     unit + unit_len, unit_cap - unit_len);
+             if (!n) {
+                 free(unit);
+@@ -3546,24 +3769,15 @@ tva_av1_send_pending(struct tva_codec *c)
+             }
+ 
+             VADecPictureParameterBufferAV1 picture = pic->picture;
+-            const bool source_hidden = !picture.pic_info_fields.bits.show_frame;
++            /* Present the hidden frame so the decoder returns it.  Its
++             * showable_frame bit disappears from the header, which ends in
++             * byte_alignment, so the tile data that follows is unaffected. */
+             picture.pic_info_fields.bits.show_frame = 1;
+-            /* The source hidden frame carries showable_frame, which is one
+-             * syntax bit that disappears when it is presented as a normal
+-             * frame.  Keep the reconstructed header byte-aligned with the
+-             * original tile payload by using the selectable screen-content
+-             * flag as the replacement bit.  The tile data does not use
+-             * screen-content tools; this flag only preserves its bit offset. */
+-            const bool selectable_screen =
+-                dmd_av1_screen_content_tools_selected(&picture);
+-            if (source_hidden && selectable_screen) {
+-                picture.pic_info_fields.bits.allow_screen_content_tools = 1;
+-                picture.pic_info_fields.bits.force_integer_mv = 0;
+-            }
+             n = dmd_av1_build_frame(&picture, pic->tiles,
+                                     (int)pic->tile_count,
+                                     pic->refresh_frame_flags,
+                                     c->av1_enable_restoration,
++                                    pic->skip_mode_allowed,
+                                     unit + unit_len, unit_cap - unit_len);
+             if (!n) {
+                 free(unit);
+@@ -3649,6 +3863,7 @@ too_large:
+                                 (int)pic->tile_count,
+                                 pic->refresh_frame_flags,
+                                 c->av1_enable_restoration,
++                                pic->skip_mode_allowed,
+                                 unit + unit_len, unit_cap - unit_len);
+         if (!n)
+             goto failed;
+@@ -3857,7 +4072,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
+                  * with a two-reference PPS default unchanged while allowing
+                  * the five-reference vertical AVC stream to select its
+                  * five-entry default before subsequent no-override slices. */
+-                if (c->base.max_references >= 5 &&
++                bool slice_override;
++                int slice_type = tva_h264_last_slice_override(c->acc,
++                                                              c->acc_len,
++                                                              h264->pps,
++                                                              &slice_override);
++                if (slice_type >= 0 && slice_type != 2 && slice_type != 4 &&
++                    !slice_override) {
++                    c->h264_pps_l0_default = h264->num_ref_idx_l0_active_minus1;
++                    c->h264_l0_default_known = true;
++                    if (slice_type == 1) {
++                        c->h264_pps_l1_default =
++                            h264->num_ref_idx_l1_active_minus1;
++                        c->h264_l1_default_known = true;
++                    }
++                }
++                if (!c->h264_l0_default_known &&
++                    c->base.max_references >= 5 &&
+                     h264->num_ref_idx_l0_active_minus1 >=
+                     c->base.max_references - 1 &&
+                     c->h264_pps_l0_default < c->base.max_references - 1) {
+@@ -4249,15 +4480,18 @@ hevc_csd_done:
+          * no restoration themselves while later frames in the same sequence
+          * still do. */
+         const char *restoration = getenv("DMD_AV1_ENABLE_RESTORATION");
+-        const bool pixel_1080 = va_pic.frame_width_minus1 == 1919 &&
+-                                va_pic.frame_height_minus1 == 1079;
+         if (restoration && (!strcmp(restoration, "0") ||
+                             !strcmp(restoration, "false") ||
+                             !strcmp(restoration, "off"))) {
+             c->av1_enable_restoration = false;
+         } else {
+-            c->av1_enable_restoration |= uses_restoration || pixel_1080 ||
+-                                          tva_option_enabled("DMD_AV1_FORCE_RESTORATION");
++            /* Declaring the capability is correct for every stream: a
++             * frame without loop restoration codes lr_type NONE, which the
++             * descriptor supplies.  Inferring it from the frames seen so far
++             * changed the sequence header mid-stream when a later frame
++             * started using restoration. */
++            (void)uses_restoration;
++            c->av1_enable_restoration = true;
+         }
+         if (frame->picture_count >= TVA_AV1_GROUP_MAX_FRAMES) {
+             debug_printf("tva: AV1 temporal unit has too many frames (%u)\n",
+@@ -4287,6 +4521,8 @@ hevc_csd_done:
+         current->target = target;
+         tva_av1_normalize_picture(c, &va_pic);
+         current->picture = va_pic;
++        current->skip_mode_allowed = tva_av1_skip_mode_allowed(c, av1, &va_pic);
++        tva_av1_hint_record(c, target, va_pic.order_hint);
+         current->tile_data = tile_data;
+         current->tile_bytes = tile_bytes;
+         current->tile_count = tile_count;
+diff --git a/src/gallium/targets/va/meson.build b/src/gallium/targets/va/meson.build
+index ec402341..920780c0 100644
+--- a/src/gallium/targets/va/meson.build
++++ b/src/gallium/targets/va/meson.build
+@@ -74,6 +74,7 @@ else
+     link_with : link_with_libva_gallium,
+     dependencies : [
+       dep_libdrm, driver_r600, driver_radeonsi, driver_nouveau, driver_d3d12, driver_virgl, driver_zink,
++      driver_freedreno,
+       idep_mesautil,
+     ],
+     link_depends : va_link_depends,
