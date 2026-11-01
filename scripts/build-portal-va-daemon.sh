@@ -28,7 +28,8 @@ CC="$BIN/aarch64-linux-android$API-clang"
 [[ -x "$CC" ]] || { echo "NDK clang not found: $CC" >&2; exit 2; }
 
 CFLAGS=(-O2 -Wall -Wextra -std=c11 -fPIE -pie -I "$SRC/common"
-        -ffile-prefix-map="$ROOT"=. -Wl,--build-id=none)
+        -ffile-prefix-map="$ROOT"=. -Wl,--build-id=none
+        -Wl,-z,max-page-size=16384)
 mkdir -p "$OUT_DIR"
 "$CC" "${CFLAGS[@]}" -o "$OUT_DIR/libportal_va_daemon.so" "$SRC/daemon/termux-va.c" \
   -lmediandk -llog -landroid
