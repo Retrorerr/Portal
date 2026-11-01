@@ -4396,6 +4396,15 @@ fn setup_flatpak_gl(_: &SetupOptions) -> StageOutput {
     }))
 }
 
+/// The hardware video decode driver (VA layer). Never fails setup: launch
+/// retries a failed download in the background.
+fn setup_va_layer(_: &SetupOptions) -> StageOutput {
+    Some(thread::spawn(|| {
+        crate::android::backend::video_decode::install_for_setup();
+        Ok(())
+    }))
+}
+
 fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
     let username = get_application_context().local_config.user.username;
@@ -4913,6 +4922,7 @@ fn stages() -> Vec<NamedSetupStage> {
         ("onboard-signal-fix", Box::new(setup_onboard_signal_fix)),
         ("mesa-kgsl-layer", Box::new(setup_mesa_layer)),
         ("flatpak-gl", Box::new(setup_flatpak_gl)),
+        ("va-layer", Box::new(setup_va_layer)),
         ("plasma-wayland", Box::new(setup_plasma_wayland)),
         ("desktop-login", Box::new(setup_desktop_login)),
         ("mozilla-firefox", Box::new(setup_mozilla_firefox)),

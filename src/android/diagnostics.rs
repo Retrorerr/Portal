@@ -588,6 +588,11 @@ fn device_report() -> String {
         crate::android::proot::mesa_layer::active_pin().version,
         crate::android::proot::mesa_layer::is_provisioned()
     ));
+    report.push_str(&format!(
+        "va_layer={} installed={}\n",
+        crate::android::backend::video_decode::LAYER_VERSION,
+        crate::android::backend::video_decode::layer_installed()
+    ));
     report
 }
 
