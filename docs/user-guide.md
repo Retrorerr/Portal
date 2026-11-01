@@ -112,6 +112,8 @@ Android's kernel has no user or PID namespaces, so Portal's guest engine emulate
 
 Display size, refresh rate, rotation, and density come from Android. Plasma receives a logical desktop size and scale suitable for the attached screen. You can adjust the result under **System Settings → Display & Monitor**.
 
+On the OnePlus Pad 3, OxygenOS drops the screen to 50 Hz after a few seconds without touch input, even while video plays. 60 fps video then stutters and drops frames, in Portal and in Android's own browsers alike. Portal cannot override this; touching the screen restores the full rate until the next idle period.
+
 Android may intercept desktop shortcuts before they reach Linux. If keys such as `Ctrl+C`, `Ctrl+V`, or `Alt+Tab` do not arrive in Plasma, enable Portal under **Android Settings → Accessibility → Downloaded apps**. The service forwards physical key events and does not inspect window content.
 
 When no external keyboard, mouse, or touchpad is connected, Portal can present Plasma in tablet mode and allow Android's software keyboard. Attaching desktop input switches the session back to desktop behaviour.
