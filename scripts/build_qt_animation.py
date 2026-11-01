@@ -14,6 +14,7 @@ def build(output, compiler='clang', target='aarch64-linux-gnu'):
     command += ['-shared', '-fPIC', '-nostdlib', '-O2', '-fuse-ld=lld',
                 '-ffreestanding', '-fno-stack-protector', '-Wall', '-Wextra', '-Werror',
                 '-Wl,-z,max-page-size=16384',
+                '-Wl,-soname,qt-anim-rate.so',
                 '-Wl,--version-script=' + str(REPO / 'assets/guest-arm64/qt-anim-rate.map'),
                 '-Wl,--build-id=sha1', '-s', '-o', str(output),
                 str(REPO / 'assets/guest-arm64/qt-anim-rate.c')]

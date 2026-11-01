@@ -7,13 +7,17 @@
  * for the tested 5.15 and 6.8 series. Qt 4/7 and non-Qt processes are inert.
  *
  * Reproduce with scripts/build_qt_animation.py. The symbol-version map is
- * required; an unversioned hook can dispatch a Qt 5 caller into Qt 6.
+ * required. Both versions are non-default and version index 2 is empty:
+ * unversioned Qt 4/bundled builds must resolve their native entry points.
  */
 #define RTLD_LAZY 1
 #define RTLD_NOLOAD 4
 #define RTLD_NEXT ((void *)-1l)
 extern void *dlvsym(void *, const char *, const char *);
 extern void *dlopen(const char *, int);
+extern int dlclose(void *);
+extern int strncmp(const char *, const char *, unsigned long);
+extern const char *strrchr(const char *, int);
 extern char *getenv(const char *);
 extern int atoi(const char *);
 
@@ -36,13 +40,69 @@ static struct runtime qt5 = {"Qt_5", "Qt_5_PRIVATE_API",
 static struct runtime qt6 = {"Qt_6", "Qt_6_PRIVATE_API",
     {"libQt6Core.so.6", "libQt6Gui.so.6", "libQt6Widgets.so.6"}, 6, 8, 0};
 
+/* Stable public prefix of glibc's dl_phdr_info on the shipped 64-bit ABIs.
+ * No Qt headers or DT_NEEDED libraries enter the preload. */
+struct loaded_image { unsigned long address; const char *name; };
+extern int dl_iterate_phdr(int (*)(struct loaded_image *, unsigned long, void *), void *);
+struct lookup {
+    const char *prefix;
+    unsigned long length, skip, seen;
+    char path[4096];
+};
+
+static int bundled_symbol(struct loaded_image *image, unsigned long size, void *data)
+{
+    struct lookup *lookup = data;
+    if (size < sizeof(*image) || !image->name || !*image->name)
+        return 0;
+    const char *base = strrchr(image->name, '/');
+    base = base ? base + 1 : image->name;
+    if (strncmp(base, lookup->prefix, lookup->length))
+        return 0;
+    if (lookup->seen++ != lookup->skip)
+        return 0;
+    unsigned long index = 0;
+    while (image->name[index] && index + 1 < sizeof(lookup->path)) {
+        lookup->path[index] = image->name[index];
+        index++;
+    }
+    if (image->name[index])
+        return 0;
+    lookup->path[index] = 0;
+    return 1;
+}
+
 static void *symbol(struct runtime *rt, int library, const char *name, const char *tag)
 {
     void *result = dlvsym(RTLD_NEXT, name, tag);
     if (!result) {
         void *handle = dlopen(rt->libraries[library], RTLD_LAZY | RTLD_NOLOAD);
-        if (handle)
+        if (handle) {
             result = dlvsym(handle, name, tag);
+            dlclose(handle);
+        }
+    }
+    if (!result) {
+        /* Wheels and portable bundles may rename Qt's SONAME. Their
+         * RTLD_LOCAL dependencies are invisible to RTLD_NEXT; resolve in
+         * the already-loaded matching component without loading a second Qt. */
+        struct lookup lookup = {rt->libraries[library], 0, 0, 0, {0}};
+        while (lookup.prefix[lookup.length] && lookup.prefix[lookup.length] != '.')
+            lookup.length++;
+        do {
+            lookup.seen = 0;
+            lookup.path[0] = 0;
+            dl_iterate_phdr(bundled_symbol, &lookup);
+            if (!lookup.path[0])
+                break;
+            /* Loader operations run after the iteration lock is released. */
+            void *handle = dlopen(lookup.path, RTLD_LAZY | RTLD_NOLOAD);
+            if (handle) {
+                result = dlvsym(handle, name, tag);
+                dlclose(handle);
+            }
+            lookup.skip++;
+        } while (!result);
     }
     return result;
 }
@@ -111,6 +171,6 @@ ENTRY(portal_qt6_widgets_exec, qt6, 2, WIDGETS_EXEC)
 __asm__(".symver portal_qt5_core_exec," CORE_EXEC "@Qt_5");
 __asm__(".symver portal_qt5_gui_exec," GUI_EXEC "@Qt_5");
 __asm__(".symver portal_qt5_widgets_exec," WIDGETS_EXEC "@Qt_5");
-__asm__(".symver portal_qt6_core_exec," CORE_EXEC "@@Qt_6");
-__asm__(".symver portal_qt6_gui_exec," GUI_EXEC "@@Qt_6");
-__asm__(".symver portal_qt6_widgets_exec," WIDGETS_EXEC "@@Qt_6");
+__asm__(".symver portal_qt6_core_exec," CORE_EXEC "@Qt_6");
+__asm__(".symver portal_qt6_gui_exec," GUI_EXEC "@Qt_6");
+__asm__(".symver portal_qt6_widgets_exec," WIDGETS_EXEC "@Qt_6");

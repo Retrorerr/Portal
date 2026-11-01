@@ -7,9 +7,12 @@ tawcroot hardlinks cannot safely be opened through PRoot.
 import argparse
 import json
 import os
+from pathlib import Path
 import shlex
 import subprocess
 import sys
+import time
+import uuid
 from dataclasses import dataclass
 
 PACKAGE = 'app.polarbear'
@@ -129,12 +132,88 @@ class Session:
         remote = shlex.join(['run-as', PACKAGE, *args])
         return self.adb('shell', '-T', remote, timeout=timeout, **kwargs)
 
+    def run_desktop(self, command, *, timeout=60, environment=None, capture_output=False,
+                    text=False, check=False):
+        """Launch through the real session, including its Android SELinux domain."""
+        token = uuid.uuid4().hex
+        name = 'org.portal.CompatibilityExec.x' + token
+        directory = '/tmp/portal-desktop-exec-' + token
+        env = self.environment | (environment or {})
+        data_home = env.get('XDG_DATA_HOME') or env['HOME'] + '/.local/share'
+        service = data_home + '/dbus-1/services/' + name + '.service'
+        service_text = f'[D-BUS Service]\nName={name}\nExec=/usr/bin/python3 -I {directory}/broker.py {name} {directory}\n'
+        payload = dict(directory=directory, service=service, service_text=service_text,
+                       broker=Path(__file__).with_name('desktop_exec_broker.py').read_text(),
+                       request=dict(command=command, environment=env, timeout=timeout))
+        setup = """import json,os,sys
+from pathlib import Path
+os.umask(0o077)
+p=json.load(sys.stdin)
+d=Path(p['directory']);d.mkdir(mode=0o700)
+(d/'broker.py').write_text(p['broker'])
+(d/'request.json').write_text(json.dumps(p['request']))
+s=Path(p['service']);s.parent.mkdir(parents=True,exist_ok=True)
+with s.open('x') as f:f.write(p['service_text'])
+"""
+        self.run('python3 -c ' + shlex.quote(setup), input=json.dumps(payload).encode(),
+                 capture_output=True, check=True)
+        def read(file):
+            result = self.adb('shell', '-T', shlex.join(['run-as', PACKAGE, 'cat',
+                              self.record['rootfs'] + directory + '/' + file]),
+                              capture_output=True, timeout=10)
+            return result.stdout if result.returncode == 0 else None
+        status = None
+        try:
+            activate = ("import dbus; b=dbus.SessionBus(); b.call_blocking('org.freedesktop.DBus', "
+                        "'/org/freedesktop/DBus', 'org.freedesktop.DBus', 'StartServiceByName', "
+                        "'su', [" + repr(name) + ", 0], timeout=20)")
+            activated = self.run('python3 -c ' + shlex.quote(activate), capture_output=True, text=True, timeout=25)
+            if activated.returncode:
+                raise RuntimeError('Desktop session activation failed: ' + activated.stderr.strip())
+            deadline = time.monotonic() + timeout + 15 if timeout is not None else None
+            while True:
+                data = read('status.json')
+                if data is not None:
+                    status = json.loads(data)
+                    break
+                if deadline and time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                time.sleep(0.1)
+            stdout, stderr = read('stdout') or b'', read('stderr') or b''
+            if status.get('error'):
+                stderr += status['error'].encode() + b'\n'
+            if text:
+                stdout, stderr = stdout.decode(errors='replace'), stderr.decode(errors='replace')
+            result = subprocess.CompletedProcess(command, status['returncode'], stdout, stderr)
+            context = status.get('selinux_context', '').split(':')
+            result.portal_launch_context = context[2] if len(context) > 2 else 'unavailable'
+            if not capture_output:
+                sys.stdout.buffer.write(stdout.encode() if text else stdout)
+                sys.stderr.buffer.write(stderr.encode() if text else stderr)
+                result.stdout = result.stderr = None
+            if check:
+                result.check_returncode()
+            return result
+        finally:
+            cleanup = """import json,shutil,sys
+from pathlib import Path
+p=json.load(sys.stdin);d=Path(p['directory']);s=Path(p['service'])
+if not (d/'status.json').exists():
+ (d/'cancel').touch()
+else:
+ shutil.rmtree(d)
+if s.is_file() and s.read_text()==p['service_text']:s.unlink()
+"""
+            self.run('python3 -c ' + shlex.quote(cleanup), input=json.dumps(payload).encode(),
+                     capture_output=True, timeout=15)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial')
     parser.add_argument('--package', default=PACKAGE)
     parser.add_argument('--root', action='store_true', help='Explicit maintenance command; default is desktop')
+    parser.add_argument('--adb-context', action='store_true', help='Run directly from run-as for engine maintenance instead of native desktop activation')
     parser.add_argument('--timeout', type=float, default=60)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -142,8 +221,10 @@ def main():
     if not command:
         parser.error('supply a shell command')
     try:
-        return Session.connect(args.serial, args.package).run(
-            ' '.join(command), root=args.root, timeout=args.timeout).returncode
+        session = Session.connect(args.serial, args.package)
+        if args.root or args.adb_context:
+            return session.run(' '.join(command), root=args.root, timeout=args.timeout).returncode
+        return session.run_desktop(' '.join(command), timeout=args.timeout).returncode
     except (RuntimeError, subprocess.SubprocessError) as error:
         print(str(error), file=sys.stderr)
         return 1

@@ -65,13 +65,10 @@ export WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}
 # the nested QPainter KWin does today.
 if [ -n "${ANLAND_SOCKET:-}" ]; then
     export WAYLAND_DISPLAY=wayland-1
-    # Force Plasma/KDE Qt clients onto the Wayland QPA backend on the Anland
-    # path: without this, ksmserver/plasmashell can fall back to xcb, fail to
-    # start, and plasma_session waits forever for org.kde.ksmserver. DISPLAY
-    # stays set for XWayland/Firefox (X11), which select xcb explicitly.
-    # XCB remains available for older/bundled Qt builds without Wayland.
-    # Preserve an explicit user choice, including an intentionally empty one.
-    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM-wayland;xcb}"
+    # Qt 5.15/6 select Wayland from XDG_SESSION_TYPE/WAYLAND_DISPLAY and
+    # retain their compiled XCB fallback. Older/bundled Qt selects its own
+    # supported backend: Qt 5.9 treats "wayland;xcb" as one plugin name.
+    # Leave QT_QPA_PLATFORM alone so explicit application/user choices survive.
     export QT_LOGGING_RULES="kwin_core.debug=true;kwin_backend_anland.debug=true;kwin_scene_opengl.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
     # DRM render-node shim for the whole session, not just KWin. The app
     # sandbox denies /dev/dri, so libdrm clients (Chromium/Electron bundle

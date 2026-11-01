@@ -1,3 +1,6 @@
+/* ELF permits an unversioned legacy reference to bind version index 2.
+ * Reserve it so only explicitly versioned Qt 5/6 callers see our hooks. */
+PORTAL_QT_ANIMATION_INERT {};
 Qt_5 {
     global: _ZN16QCoreApplication4execEv; _ZN15QGuiApplication4execEv; _ZN12QApplication4execEv;
 };

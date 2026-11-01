@@ -521,13 +521,13 @@ fn mesa_kgsl_layer_is_pinned_and_matches_session_binds() {
 }
 
 #[test]
-fn anland_session_forces_wayland_qpa_for_plasma_clients() {
-    // On the Anland path, Plasma/KDE Qt clients must select the Wayland
-    // backend explicitly; otherwise ksmserver/plasmashell can fall back to
-    // xcb, fail to start, and plasma_session waits forever for
-    // org.kde.ksmserver. DISPLAY stays set for XWayland/Firefox (X11).
-    // Wayland must come first; xcb is only the fallback for Qt5 apps.
-    assert!(STARTPLASMA_SOURCE.contains("QT_QPA_PLATFORM=\"${QT_QPA_PLATFORM-wayland;xcb}\""));
+fn anland_session_leaves_qpa_selection_to_each_qt_runtime() {
+    // Current Qt discovers Wayland from the session; older Qt must not
+    // inherit a semicolon-separated override it cannot parse. DISPLAY
+    // stays available for Xwayland and explicit user choices survive.
+    assert!(STARTPLASMA_SOURCE.contains("export XDG_SESSION_TYPE=wayland"));
+    assert!(STARTPLASMA_SOURCE.contains("export WAYLAND_DISPLAY=wayland-1"));
+    assert!(!STARTPLASMA_SOURCE.contains("export QT_QPA_PLATFORM="));
 }
 
 #[test]

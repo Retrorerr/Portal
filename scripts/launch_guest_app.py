@@ -16,7 +16,7 @@ def main():
     if not command:
         parser.error('supply an application command')
     script = 'exec ' + ' '.join(command)
-    return Session.connect(args.serial).run(
+    return Session.connect(args.serial).run_desktop(
         'nohup /bin/sh -c ' + shlex.quote(script) + ' >' + shlex.quote(args.log)
         + ' 2>&1 </dev/null &', timeout=None).returncode
 

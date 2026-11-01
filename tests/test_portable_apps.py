@@ -72,6 +72,51 @@ class PortableAppTests(unittest.TestCase):
                 with self.assertRaisesRegex(runner.Unsupported, 'default-jre'):
                     runner.launch(jar, [])
 
+    def test_windows_apps_reuse_installed_proton_with_a_separate_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            steam = base / 'Steam with spaces'
+            proton = steam / 'steamapps/common/Proton 11.0 (ARM64)/proton'
+            proton.parent.mkdir(parents=True)
+            proton.touch()
+            tool = base / 'portal-proton.sh'
+            tool.touch()
+            env = dict(STEAM_COMPAT_CLIENT_INSTALL_PATH=str(steam), XDG_DATA_HOME=str(base / 'data'),
+                       QT_PLUGIN_PATH='/bundle/plugins', LIBVA_DRIVER_NAME='termuxva')
+            with patch.object(runner, 'PROTON_TOOL', tool), patch.object(runner.shutil, 'which', return_value=None):
+                command, actual = runner.windows_command(base / 'test.exe', ['a b'], env)
+                self.assertEqual(command, [str(tool), 'run', str(base / 'test.exe'), 'a b'])
+                self.assertEqual(actual['STEAM_COMPAT_DATA_PATH'], str(base / 'data/portal/windows'))
+                self.assertEqual(actual['QT_PLUGIN_PATH'], '/bundle/plugins')
+                self.assertEqual(actual['LIBVA_DRIVER_NAME'], 'termuxva')
+                selected = dict(env, STEAM_COMPAT_DATA_PATH='/my/chosen/prefix')
+                self.assertEqual(runner.windows_command(base / 'test.msi', [], selected)[1]['STEAM_COMPAT_DATA_PATH'], '/my/chosen/prefix')
+                self.assertNotIn('STEAM_COMPAT_DATA_PATH', env)
+
+    def test_explicit_wine_prefix_and_invalid_proton_are_not_replaced(self):
+        with patch.object(runner.shutil, 'which', return_value='/usr/bin/wine'), patch.object(runner, 'translator', return_value=[]):
+            env = {'WINEPREFIX': '/my/existing/wine'}
+            command, actual = runner.windows_command(Path('/app.exe'), [], env)
+            self.assertEqual(command, ['/usr/bin/wine', '/app.exe'])
+            self.assertEqual(actual, env)
+        with patch.object(runner.shutil, 'which', return_value=None):
+            with self.assertRaisesRegex(runner.Unsupported, 'WINEPREFIX'):
+                runner.windows_command(Path('/app.exe'), [], env)
+            with self.assertRaisesRegex(runner.Unsupported, 'selected Proton'):
+                runner.windows_command(Path('/app.exe'), [], {'PORTAL_PROTON': '/missing/proton'})
+
+    def test_x86_wine_uses_its_installed_translator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wine = Path(tmp) / 'wine64'
+            self.image(wine, 62)
+            def which(name):
+                return str(wine) if name == 'wine' else '/usr/bin/box64' if name == 'box64' else None
+            env = {'WINEPREFIX': '/my/prefix', 'BOX64_LD_LIBRARY_PATH': '/my/x86/libraries'}
+            with patch.object(runner.shutil, 'which', side_effect=which), patch.object(runner.platform, 'machine', return_value='aarch64'):
+                command, actual = runner.windows_command(Path('/app.exe'), ['a b'], env)
+            self.assertEqual(command, ['/usr/bin/box64', str(wine), '/app.exe', 'a b'])
+            self.assertEqual(actual, env)
+
 
 if __name__ == '__main__':
     unittest.main()

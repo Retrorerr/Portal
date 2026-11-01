@@ -102,6 +102,34 @@ Third-party repositories and `.deb` files work too, for example `sudo apt instal
 
 Portal keeps its own KWin and Xwayland builds pinned so a package upgrade cannot replace them with stock Debian ones; everything else upgrades normally.
 
+### Portable applications
+
+Use **Open With → Open with Portal** in Dolphin, or run
+`portal-run /path/to/application` in a terminal. Arguments, including paths
+with spaces, are passed through to the application.
+
+- Type 2 AppImages extract into a reusable cache without requiring FUSE.
+  Mark the downloaded file executable first. Each updated image gets its
+  own cache; a failed extraction can be retried.
+- Native Linux bundles keep their own libraries and Qt plugins. x86-64
+  Linux programs use Box64 when installed; other x86 programs require FEX
+  and its matching RootFS. The launcher explains which runtime is missing.
+- Java archives use the installed Java runtime. `.NET` DLLs require the
+  application's matching `dotnet` runtime.
+- Windows `.exe` and `.msi` files use Wine when installed. Otherwise, an
+  installed Proton for ARM64 can run them through Portal's Steam integration.
+  Install the large runtime through Steam's Tools library first. Standalone
+  applications share a separate prefix under
+  `~/.local/share/portal/windows`; game prefixes are preserved.
+  `STEAM_COMPAT_DATA_PATH` selects a different Proton prefix and
+  `PORTAL_PROTON` selects a particular installed Proton. An explicit
+  `WINEPREFIX` is used with Wine; Proton uses its own compatibility-data path.
+
+App compatibility depends on the application's architecture, dependencies
+and required kernel features. Extraction or a successful launch alone does
+not verify graphics, input or every application feature. See the
+[compatibility coverage](app-compatibility.md) for tested paths and limits.
+
 ### Firefox
 
 Portal ships Mozilla's own Firefox from Mozilla's APT repository, so the launcher shows a single Firefox. Installs set up before 2.6 keep Debian's Firefox ESR installed, hidden from the menu, as a fallback; the `firefox-beta`, `firefox-devedition` and `firefox-nightly` channels install from the same repository. Portal applies the settings it needs for Android (GPU compositing on) to every Firefox under `/usr/lib`, at each launch and again after every `apt`/`dpkg` run, so a new install or upgrade needs nothing extra. **System Settings → Default Applications** chooses the default browser.

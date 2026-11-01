@@ -27,7 +27,7 @@ def shell(serial, args):
     return subprocess.check_output(["adb", "-s", serial, "shell", shlex.join(args)], text=True)
 
 def guest(serial, command):
-    result = Session.connect(serial).run(command, capture_output=True, text=True)
+    result = Session.connect(serial).run_desktop(command, capture_output=True, text=True)
     result.check_returncode()
     return result.stdout
 

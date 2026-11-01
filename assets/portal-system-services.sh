@@ -62,6 +62,7 @@ start() {
 	done
 	probe_bwrap
 	refresh_ld_cache
+	refresh_desktop_cache
 	divert_fwupd_backend
 	flatpak_sandbox_env
 	# app_store first: on older images it is what installs Flatpak. Its
@@ -79,8 +80,55 @@ start() {
 # FD_FORCE_KGSL, which stays.
 flatpak_sandbox_env() {
 	command -v flatpak >/dev/null || return 0
-	flatpak override --system --unset-env=MESA_LOADER_DRIVER_OVERRIDE \
-		--unset-env=GALLIUM_DRIVER >/dev/null 2>&1
+	flatpak_env_defaults /var/lib/localdesktop/flatpak-sandbox-env-v1 \
+		MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER >/dev/null 2>&1
+}
+
+# Launchers can omit the desktop's GPU variables. System-installed Flatpaks
+# still need the Portal GL extension's KGSL defaults inside the sandbox.
+# Add missing defaults once; explicit values, explicit
+# unsets and later removals remain the user's choices. User/app overrides
+# and flatpak run --env also retain their normal precedence.
+flatpak_env_defaults() {
+	compat_env_marker=$1
+	shift
+	# All declarations are fixed internal environment names or NAME=value
+	# defaults without spaces. An unvalued name requests an explicit unset.
+	compat_defaults="$*"
+	[ -e "$compat_env_marker" ] && return 0
+	compat_overrides=$(flatpak override --system --show) || return 1
+	set --
+	for compat_default in $compat_defaults; do
+		compat_name=${compat_default%%=*}
+		if printf '%s\n' "$compat_overrides" | awk -v key="$compat_name" '
+			/^\[/ { environment = ($0 == "[Environment]") }
+			environment && index($0, key "=") == 1 { found = 1 }
+			/^unset-environment=/ {
+				count = split(substr($0, index($0, "=") + 1), names, ";")
+				for (i = 1; i <= count; i++) if (names[i] == key) found = 1
+			}
+			END { exit !found }
+		'; then
+			continue
+		fi
+		case "$compat_default" in
+		*=*) set -- "$@" "--env=$compat_default" ;;
+		*) set -- "$@" "--unset-env=$compat_default" ;;
+		esac
+	done
+	[ "$#" -eq 0 ] || flatpak override --system "$@" || return 1
+	mkdir -p "${compat_env_marker%/*}" || return 1
+	compat_env_tmp=$(mktemp "${compat_env_marker%/*}/.environment-XXXXXX") || return 1
+	if printf '1\n' >"$compat_env_tmp" && mv -f "$compat_env_tmp" "$compat_env_marker"; then
+		return 0
+	fi
+	rm -f "$compat_env_tmp"
+	return 1
+}
+
+flatpak_kgsl_env_default() {
+	flatpak_env_defaults "$1/environment-v1" \
+		FD_FORCE_KGSL=1 FD_KGSL_ENABLE_DMABUF=1 TURNIP_KMD=kgsl
 }
 
 # Portal's KGSL Mesa for Flatpak apps: org.freedesktop.Platform.GL.portal,
@@ -107,6 +155,7 @@ flatpak_gl_portal() {
 	[ -e /dev/kgsl-3d0 ] && command -v flatpak >/dev/null || return 0
 	state=/var/lib/localdesktop/flatpak-gl-portal
 	failed=0
+	flatpak_kgsl_env_default "$state" >>"$log" 2>&1 || failed=1
 	for branch in $flatpak_gl_branches; do
 		sha=$(flatpak_gl_sha256 "$branch")
 		# "flatpak uninstall --unused" removes it too, state file or not.
@@ -137,6 +186,14 @@ refresh_ld_cache() {
 		ldconfig
 		return
 	done
+}
+
+# Register changed portable-app handlers without replacing mimeapps.list or
+# the user's preferred applications. KDE also refreshes its service cache.
+refresh_desktop_cache() {
+	command -v update-desktop-database >/dev/null || return 0
+	[ /usr/share/applications/portal-run.desktop -nt /usr/share/applications/mimeinfo.cache ] || return 0
+	update-desktop-database /usr/share/applications >>"$log" 2>&1
 }
 
 # Discover's firmware backend: fwupd finds no devices here (an app has no

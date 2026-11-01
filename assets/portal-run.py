@@ -6,6 +6,7 @@ import hashlib
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,54 @@ import tempfile
 
 class Unsupported(RuntimeError):
     pass
+
+
+PROTON_TOOL = Path('/usr/share/steam/compatibilitytools.d/portal-proton-arm64/portal-proton')
+
+
+def steam_libraries(environment):
+    root = Path(environment.get('STEAM_COMPAT_CLIENT_INSTALL_PATH', str(Path.home() / '.local/share/Steam')))
+    libraries = [root]
+    try:
+        lines = (root / 'steamapps/libraryfolders.vdf').read_text().splitlines()
+    except OSError:
+        return libraries
+    for line in lines:
+        match = re.fullmatch(r'\s*"path"\s*"((?:\\.|[^"\\])*)"\s*', line)
+        if match:
+            value = re.sub(r'\\([\\"])', r'\1', match[1])
+            library = Path(value)
+            if library.is_absolute() and library not in libraries:
+                libraries.append(library)
+    return libraries
+
+
+def windows_command(path, arguments, environment):
+    wine = shutil.which('wine') or shutil.which('wine64')
+    selection = environment.get('PORTAL_PROTON', '')
+    windows_args = ['msiexec', '/i', str(path)] if path.suffix.lower() == '.msi' else [str(path)]
+    if wine and not selection:
+        return [*translator(wine), wine, *windows_args, *arguments], environment
+    if environment.get('WINEPREFIX') and not selection:
+        raise Unsupported('WINEPREFIX is set but Wine is missing. Install Wine for that prefix, or select Proton and set STEAM_COMPAT_DATA_PATH.')
+    libraries = steam_libraries(environment)
+    if selection not in ('', 'experimental', 'stable'):
+        installed = Path(selection).is_file()
+        if not installed:
+            raise Unsupported(f'The selected Proton does not exist: {selection}')
+    else:
+        installed = any(p.is_file() for library in libraries for p in (library / 'steamapps/common').glob('Proton*/proton')
+                        if 'arm64' in p.parent.name.lower()
+                        and (selection != 'stable' or 'experimental' not in p.parent.name.lower()))
+    if not PROTON_TOOL.is_file() or not installed:
+        raise Unsupported('Windows runtime missing. Install Wine, or install Proton for ARM64 through Steam. Existing Windows prefixes and game data are preserved.')
+    env = dict(environment)
+    # Use Portal's existing ARM64EC/FEX integration, with a separate prefix
+    # for non-Steam apps. Never borrow or reset a game's Proton prefix.
+    env.setdefault('STEAM_COMPAT_CLIENT_INSTALL_PATH', str(libraries[0]))
+    data = Path(env.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'portal/windows'
+    env.setdefault('STEAM_COMPAT_DATA_PATH', str(data))
+    return [str(PROTON_TOOL), 'run', *windows_args, *arguments], env
 
 
 def elf_machine(path):
@@ -103,11 +152,7 @@ def launch(path, arguments, cache=None):
             raise Unsupported('Java runtime missing. Install it with: sudo apt install default-jre')
         return [java, '-jar', str(path), *arguments], env
     if path.suffix.lower() in ('.exe', '.msi'):
-        wine = shutil.which('wine') or shutil.which('wine64')
-        if not wine:
-            raise Unsupported('Windows application: install a compatible Wine/Proton runtime. Steam titles can use Portal Proton; an .exe is not a native Linux executable.')
-        args = ['msiexec', '/i', str(path)] if path.suffix.lower() == '.msi' else [str(path)]
-        return [wine, *args, *arguments], env
+        return windows_command(path, arguments, env)
     if path.suffix.lower() == '.dll':
         dotnet = shutil.which('dotnet')
         if not dotnet:
@@ -124,6 +169,10 @@ def main():
     args = parser.parse_args()
     try:
         command, environment = launch(args.application, args.arguments)
+        if command[0] == str(PROTON_TOOL):
+            # Steam normally creates this directory before invoking Proton.
+            # Standalone launches must also provide it before Proton locks it.
+            Path(environment['STEAM_COMPAT_DATA_PATH']).mkdir(mode=0o700, parents=True, exist_ok=True)
         os.execvpe(command[0], command, environment)
     except (Unsupported, OSError) as error:
         message = str(error)
