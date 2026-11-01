@@ -8,7 +8,10 @@
 # libx11-xcb-dev libxcb-dri3-dev libxcb-present-dev libxcb-sync-dev
 # libxshmfence-dev libxcb-xfixes0-dev libxcb-randr0-dev git`).
 #
-# Output: $OUT/termuxva_drv_video.so, one self-contained library (freedreno
+# CI: .github/workflows/va-layer-arm64.yml.
+#
+# Output: $OUT/termuxva_drv_video.so (+ .gz, the release asset, and
+# SHA256SUMS), one self-contained library (freedreno
 # KGSL screen + VA frontend + termux-va bridge). It shares no soname with the
 # KGSL Mesa layer, so both load in one process. Install it as
 # files/va-layer/termuxva_drv_video.so (see src/android/backend/video_decode.rs).
@@ -17,10 +20,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SRC:-$PWD/mesa-va-r1}"
 OUT="${OUT:-$PWD/va-layer}"
-TAG=mesa-27.0.0-devel-20261025-r1   # lfdevs/mesa, dev/adreno-main
+TAG=mesa-27.0.0-devel-20261025-r1   # lfdevs/mesa-for-android-container, dev/adreno-main
+SHA=eb3e7fd4f009cab04b1482aad4843c0bde28a786
 
 if [[ ! -f "$SRC/meson.build" ]]; then
-  git clone --depth 1 --branch "$TAG" https://github.com/lfdevs/mesa.git "$SRC"
+  git clone --quiet --depth 1 --branch "$TAG" https://github.com/lfdevs/mesa-for-android-container.git "$SRC"
+  test "$(git -C "$SRC" rev-parse HEAD)" = "$SHA"
   git -C "$SRC" apply "$HERE/portal-va-r1.patch"
 fi
 
@@ -35,4 +40,7 @@ mkdir -p "$OUT"
 install -m 644 "$SRC/build/src/gallium/targets/va/libgallium_drv_video.so" \
   "$OUT/termuxva_drv_video.so"
 strip --strip-unneeded "$OUT/termuxva_drv_video.so"
-sha256sum "$OUT/termuxva_drv_video.so"
+# The release asset video_decode.rs pins (LAYER_URL/SHA256/size).
+gzip -9 -n -c "$OUT/termuxva_drv_video.so" > "$OUT/termuxva_drv_video.so.gz"
+(cd "$OUT" && sha256sum termuxva_drv_video.so termuxva_drv_video.so.gz | tee SHA256SUMS \
+  && stat -c '%s %n' termuxva_drv_video.so.gz)

@@ -1,6 +1,6 @@
 # VA layer (termuxva driver)
 
-Base: lfdevs/mesa tag `mesa-27.0.0-devel-20261025-r1` (eb3e7fd, branch
+Base: lfdevs/mesa-for-android-container tag `mesa-27.0.0-devel-20261025-r1` (eb3e7fd, branch
 dev/adreno-main), which carries the termux-va bridge in the gallium VA
 frontend. `portal-va-r1.patch` adds:
 
