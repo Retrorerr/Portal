@@ -45,13 +45,10 @@ jobs:
     steps:
       - name: Install build dependencies
         run: |
+          sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates git build-essential \
-            meson ninja-build pkg-config python3-mako python3-yaml python3-packaging bison flex \
-            glslang-tools libdrm-dev libva-dev libexpat1-dev zlib1g-dev libzstd-dev \
-            libwayland-dev wayland-protocols libx11-xcb-dev libxcb-dri3-dev \
-            libxcb-present-dev libxcb-sync-dev libxshmfence-dev libxcb-xfixes0-dev \
-            libxcb-randr0-dev binutils
+          apt-get build-dep -y mesa
+          apt-get install -y --no-install-recommends ca-certificates git libva-dev binutils
 
       - uses: actions/checkout@v5
         with:
