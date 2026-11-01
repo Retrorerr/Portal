@@ -437,7 +437,7 @@ index cf66d338..6c1faca0 100644
     util_blitter_save_blend(ctx->blitter, ctx->blend);
     util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->zsa);
 diff --git a/src/gallium/frontends/va/av1_bitstream.c b/src/gallium/frontends/va/av1_bitstream.c
-index 6e229523..7952e580 100644
+index 6e229523..265f179e 100644
 --- a/src/gallium/frontends/va/av1_bitstream.c
 +++ b/src/gallium/frontends/va/av1_bitstream.c
 @@ -19,17 +19,13 @@
@@ -616,7 +616,20 @@ index 6e229523..7952e580 100644
  {
      /* struct dmd_bitwriter is a value type: buf points to the caller's
       * storage and the remaining fields are counters.  Copying it in and back
-@@ -1048,6 +1139,14 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+@@ -953,7 +1044,11 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+         dmd_bw_put_flag(&bw, (int)allow_intrabc);
+ 
+     if (!intra_only) {
+-        dmd_bw_put_flag(&bw, (int)p->pic_info_fields.bits.allow_high_precision_mv);
++        /* allow_high_precision_mv is implied zero, not coded, when the frame
++         * forces integer motion vectors (screen content). */
++        if (!(p->pic_info_fields.bits.allow_screen_content_tools &&
++              p->pic_info_fields.bits.force_integer_mv))
++            dmd_bw_put_flag(&bw, (int)p->pic_info_fields.bits.allow_high_precision_mv);
+         /* read_interpolation_filter(): is_filter_switchable f(1); when zero,
+          * write the two-bit interp_filter value.  VA-API uses 4 for
+          * SWITCHABLE. */
+@@ -1048,6 +1143,14 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
       * decoder infers skipModeAllowed=0.  Omit the field by default; callers
       * which have independently established that skip mode is available may
       * opt in with DMD_AV1_FORCE_SKIP_MODE=1. */
@@ -631,7 +644,7 @@ index 6e229523..7952e580 100644
      unsigned populated_refs = 0;
      if (!intra_only && p->mode_control_fields.bits.reference_select) {
          for (int i = 0; i < 7; i++)
-@@ -1062,6 +1161,7 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+@@ -1062,6 +1165,7 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
                                    !strcmp(force_skip, "true") ||
                                    !strcmp(force_skip, "on")))))
          dmd_bw_put_flag(&bw, (int)p->mode_control_fields.bits.skip_mode_present);
@@ -639,7 +652,7 @@ index 6e229523..7952e580 100644
  
      /* allow_warped_motion is present for every inter frame which is not
       * error-resilient when the sequence-level capability is enabled.  It is
-@@ -1069,11 +1169,7 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+@@ -1069,11 +1173,7 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
       * interpolation mode field earlier in the header. */
      if (!intra_only && !err_res) {
          const char *force_warp = getenv("DMD_AV1_FORCE_WARPED_MOTION");
@@ -652,7 +665,7 @@ index 6e229523..7952e580 100644
              (!strcmp(force_warp, "1") || !strcmp(force_warp, "true") ||
               !strcmp(force_warp, "on")))) ? 1 :
              (int)p->pic_info_fields.bits.allow_warped_motion;
-@@ -1084,15 +1180,18 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
+@@ -1084,15 +1184,18 @@ static void put_uncompressed_header(struct dmd_bitwriter *bwp,
          dmd_bw_put_flag(&bw, (int)p->mode_control_fields.bits.reduced_tx_set_used);
      }
  
@@ -678,7 +691,7 @@ index 6e229523..7952e580 100644
      }
  
      /* film_grain_params() (5.9.30): the section is absent when the sequence
-@@ -1121,12 +1220,14 @@ static size_t build_frame_header_obu(const VADecPictureParameterBufferAV1 *p,
+@@ -1121,12 +1224,14 @@ static size_t build_frame_header_obu(const VADecPictureParameterBufferAV1 *p,
                                       size_t *body_len_out,
                                       uint8_t refresh_frame_flags,
                                       unsigned tile_size_bytes,
@@ -695,7 +708,7 @@ index 6e229523..7952e580 100644
  
      if (obu_type == DMD_OBU_FRAME)
          dmd_av1_byte_align(&bw);      /* zero padding only, no marker bit */
-@@ -1141,6 +1242,7 @@ static size_t build_frame_header_obu(const VADecPictureParameterBufferAV1 *p,
+@@ -1141,6 +1246,7 @@ static size_t build_frame_header_obu(const VADecPictureParameterBufferAV1 *p,
  
  size_t dmd_av1_build_frame_header(const void *pic_v,
                                    int enable_restoration,
@@ -703,7 +716,7 @@ index 6e229523..7952e580 100644
                                    unsigned char *out, size_t out_cap)
  {
      const VADecPictureParameterBufferAV1 *p = pic_v;
-@@ -1152,7 +1254,8 @@ size_t dmd_av1_build_frame_header(const void *pic_v,
+@@ -1152,7 +1258,8 @@ size_t dmd_av1_build_frame_header(const void *pic_v,
      if (build_frame_header_obu(p, DMD_OBU_FRAME_HEADER,
                                body, sizeof(body), &body_len, 0xff,
                                2,
@@ -713,7 +726,7 @@ index 6e229523..7952e580 100644
          return 0;
  
      const size_t hdr = dmd_av1_obu_header(DMD_OBU_FRAME_HEADER,
-@@ -1168,6 +1271,8 @@ size_t dmd_av1_build_frame(const void *pic_v,
+@@ -1168,6 +1275,8 @@ size_t dmd_av1_build_frame(const void *pic_v,
                             const struct dmd_av1_tile *tiles, int num_tiles,
                             uint8_t refresh_frame_flags,
                             int enable_restoration,
@@ -722,7 +735,7 @@ index 6e229523..7952e580 100644
                             unsigned char *out, size_t out_cap)
  {
      const VADecPictureParameterBufferAV1 *p = pic_v;
-@@ -1184,7 +1289,8 @@ size_t dmd_av1_build_frame(const void *pic_v,
+@@ -1184,7 +1293,8 @@ size_t dmd_av1_build_frame(const void *pic_v,
                                fh, sizeof(fh), &fh_len,
                                refresh_frame_flags,
                                tile_size_bytes,
@@ -732,7 +745,7 @@ index 6e229523..7952e580 100644
          return 0;
      /* tile_group_obu() payload (specification 5.11.1):
       *   when NumTiles > 1, write tile_start_and_end_present_flag first
-@@ -1206,7 +1312,7 @@ size_t dmd_av1_build_frame(const void *pic_v,
+@@ -1206,7 +1316,7 @@ size_t dmd_av1_build_frame(const void *pic_v,
          p->pic_info_fields.bits.frame_type != 0 &&
          (p->pic_info_fields.bits.show_frame ||
           p->mode_control_fields.bits.reduced_tx_set_used) &&
@@ -1072,7 +1085,7 @@ index c55dc811..b5ec201e 100644
                expected_fourcc, (void *)prime_desc, (void *)memory_attribute,
                modifiers_count, templat.bind);
 diff --git a/src/gallium/frontends/va/tva_bridge.c b/src/gallium/frontends/va/tva_bridge.c
-index 31b3aade..b30ea63f 100644
+index 31b3aade..27226e1b 100644
 --- a/src/gallium/frontends/va/tva_bridge.c
 +++ b/src/gallium/frontends/va/tva_bridge.c
 @@ -57,6 +57,8 @@
@@ -1380,7 +1393,39 @@ index 31b3aade..b30ea63f 100644
  /* AV1 show_existing_frame packets do not enter the VA decode callbacks.  A
   * hidden reference picture therefore has no consumer-visible callback even
   * though its surface must still contain decoded pixels before a later
-@@ -2065,6 +2280,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
+@@ -1256,8 +1471,8 @@ tva_drm_render_node_present(void)
+ /* Chromium's Vulkan importer currently expects all NV12 planes to refer to
+  * one dma-buf object.  The normal Gallium video-buffer allocator creates one
+  * object per plane, which is valid for VA-API but cannot be consumed by that
+- * importer in a PRoot environment.  It can be overridden explicitly, and is
+- * enabled automatically for KGSL-only containers without a DRM render node. */
++ * importer.  It can be overridden explicitly, and is enabled automatically
++ * for the KGSL backend. */
+ static bool
+ tva_contiguous_dmabuf_enabled(void)
+ {
+@@ -1268,14 +1483,15 @@ tva_contiguous_dmabuf_enabled(void)
+         return !strcmp(e, "1") || !strcmp(e, "true") || !strcmp(e, "on");
+ 
+ #if defined(__linux__)
+-    /* PRoot exposes KGSL directly but has no DRM render node.  Chromium's
+-     * native-pixmap importer accepts only one NV12 dma-buf in that setup, so
+-     * select the shared-object layout automatically when no override is set. */
++    /* Chromium's native-pixmap importer accepts only one NV12 dma-buf and
++     * reads the Y plane as chroma otherwise.  Containers may expose a
++     * render node that only fronts KGSL (Portal's fake /dev/dri), so the
++     * presence of one says nothing about the importer: select the
++     * shared-object layout whenever the KGSL backend is in use. */
+     const char *backend = getenv("TERMUX_VA_GPU_BACKEND");
+     if ((!backend || !*backend || !strcmp(backend, "auto") ||
+          !strcmp(backend, "kgsl")) &&
+-        access("/dev/kgsl-3d0", R_OK) == 0 &&
+-        !tva_drm_render_node_present())
++        access("/dev/kgsl-3d0", R_OK) == 0)
+         return true;
+ #endif
+ 
+@@ -2065,6 +2281,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
             profile == PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444;
  }
  
@@ -1489,7 +1534,7 @@ index 31b3aade..b30ea63f 100644
  /*
   * Build the SPS NALU (with NAL header + emulation prevention) from the
   * frontend-parsed struct.  Returns the RBSP size; the NAL header byte is
-@@ -3286,6 +3603,15 @@ tva_av1_to_va_picture(const struct pipe_av1_picture_desc *src,
+@@ -3286,6 +3604,15 @@ tva_av1_to_va_picture(const struct pipe_av1_picture_desc *src,
      dst->loop_restoration_fields.bits.lr_uv_shift =
          p->loop_restoration_fields.lr_uv_shift;
  
@@ -1505,7 +1550,7 @@ index 31b3aade..b30ea63f 100644
      return true;
  }
  
-@@ -3311,7 +3637,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
+@@ -3311,7 +3638,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
          return;
      }
  
@@ -1514,7 +1559,7 @@ index 31b3aade..b30ea63f 100644
          p->pic_info_fields.bits.frame_type != 0 &&
          !p->pic_info_fields.bits.show_frame &&
          p->mode_control_fields.bits.tx_mode == 2 &&
-@@ -3412,6 +3738,8 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3412,6 +3739,8 @@ tva_av1_send_pending(struct tva_codec *c)
                                      (int)pic->tile_count,
                                      pic->refresh_frame_flags,
                                      c->av1_enable_restoration,
@@ -1523,7 +1568,7 @@ index 31b3aade..b30ea63f 100644
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3546,24 +3874,16 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3546,24 +3875,16 @@ tva_av1_send_pending(struct tva_codec *c)
              }
  
              VADecPictureParameterBufferAV1 picture = pic->picture;
@@ -1553,7 +1598,7 @@ index 31b3aade..b30ea63f 100644
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3649,6 +3969,8 @@ too_large:
+@@ -3649,6 +3970,8 @@ too_large:
                                  (int)pic->tile_count,
                                  pic->refresh_frame_flags,
                                  c->av1_enable_restoration,
@@ -1562,7 +1607,7 @@ index 31b3aade..b30ea63f 100644
                                  unit + unit_len, unit_cap - unit_len);
          if (!n)
              goto failed;
-@@ -3776,15 +4098,99 @@ tva_av1_flush_pending(struct tva_codec *c, bool terminal)
+@@ -3776,15 +4099,99 @@ tva_av1_flush_pending(struct tva_codec *c, bool terminal)
      return ret;
  }
  
@@ -1665,7 +1710,7 @@ index 31b3aade..b30ea63f 100644
  {
      struct tva_codec *c = tva_codec(codec);
  
-@@ -3857,7 +4263,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
+@@ -3857,7 +4264,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
                   * with a two-reference PPS default unchanged while allowing
                   * the five-reference vertical AVC stream to select its
                   * five-entry default before subsequent no-override slices. */
@@ -1690,7 +1735,7 @@ index 31b3aade..b30ea63f 100644
                      h264->num_ref_idx_l0_active_minus1 >=
                      c->base.max_references - 1 &&
                      c->h264_pps_l0_default < c->base.max_references - 1) {
-@@ -4228,6 +4650,10 @@ hevc_csd_done:
+@@ -4228,6 +4651,10 @@ hevc_csd_done:
          bool boundary = frame->valid && frame->picture_count &&
                          frame->have_show_frame &&
                          !frame->hidden_since_show_frame;
@@ -1701,7 +1746,7 @@ index 31b3aade..b30ea63f 100644
          if (frame->valid && frame->picture_count) {
              struct tva_av1_picture *previous =
                  &frame->pictures[frame->picture_count - 1];
-@@ -4249,15 +4675,18 @@ hevc_csd_done:
+@@ -4249,15 +4676,18 @@ hevc_csd_done:
           * no restoration themselves while later frames in the same sequence
           * still do. */
          const char *restoration = getenv("DMD_AV1_ENABLE_RESTORATION");
@@ -1724,7 +1769,7 @@ index 31b3aade..b30ea63f 100644
          }
          if (frame->picture_count >= TVA_AV1_GROUP_MAX_FRAMES) {
              debug_printf("tva: AV1 temporal unit has too many frames (%u)\n",
-@@ -4287,6 +4716,9 @@ hevc_csd_done:
+@@ -4287,6 +4717,9 @@ hevc_csd_done:
          current->target = target;
          tva_av1_normalize_picture(c, &va_pic);
          current->picture = va_pic;
@@ -1734,7 +1779,7 @@ index 31b3aade..b30ea63f 100644
          current->tile_data = tile_data;
          current->tile_bytes = tile_bytes;
          current->tile_count = tile_count;
-@@ -4389,6 +4821,13 @@ hevc_csd_done:
+@@ -4389,6 +4822,13 @@ hevc_csd_done:
              tva_av1_inline_show_existing())
              last_vcl = pending && pending->unit_seq ? pending->unit_seq :
                         (uint32_t)(c->next_unit + 1);
@@ -1748,7 +1793,7 @@ index 31b3aade..b30ea63f 100644
      } else {
          /* Chromium splits VP9 superframes into individual pictures.  Hidden
           * reference pictures must reach MediaCodec, but they do not produce
-@@ -4456,6 +4895,20 @@ hevc_csd_done:
+@@ -4456,6 +4896,20 @@ hevc_csd_done:
      return 0;
  }
  
@@ -1769,7 +1814,7 @@ index 31b3aade..b30ea63f 100644
  static void
  tva_codec_flush(struct pipe_video_codec *codec)
  {
-@@ -4463,7 +4916,9 @@ tva_codec_flush(struct pipe_video_codec *codec)
+@@ -4463,7 +4917,9 @@ tva_codec_flush(struct pipe_video_codec *codec)
      if (!c->av1_pending.valid || tva_codec_is_broken(c))
          return;
  
@@ -1780,7 +1825,7 @@ index 31b3aade..b30ea63f 100644
  }
  
  /*
-@@ -4529,36 +4984,21 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4529,36 +4985,21 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
          return 1;
      }
      p->waiters++;
@@ -1826,7 +1871,7 @@ index 31b3aade..b30ea63f 100644
                  c->broken = true;
                  p->ready = true;
                  p->failed = true;
-@@ -4566,8 +5006,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4566,8 +5007,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
                  ret = 0;
                  break;
              }
@@ -1845,7 +1890,7 @@ index 31b3aade..b30ea63f 100644
  
          /* Qualcomm's AV1 decoder may hold the terminal showable picture until
           * input EOS.  VA-API does not expose an explicit decoder flush, and
-@@ -4785,6 +5235,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
+@@ -4785,6 +5236,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
      }
      c->h264_bootstrap_count = 0;
      tva_av1_pending_clear(&c->av1_pending);
@@ -1853,7 +1898,7 @@ index 31b3aade..b30ea63f 100644
      mtx_destroy(&c->io_mutex);
      mtx_destroy(&c->av1_mutex);
      mtx_destroy(&c->pend_mutex);
-@@ -4844,7 +5295,7 @@ static struct pipe_video_buffer *
+@@ -4844,7 +5296,7 @@ static struct pipe_video_buffer *
  tva_pipe_create_video_buffer(struct pipe_context *context,
                               const struct pipe_video_buffer *templat)
  {
@@ -1862,7 +1907,7 @@ index 31b3aade..b30ea63f 100644
              templat ? templat->buffer_format : -1,
              templat ? templat->width : 0, templat ? templat->height : 0,
              templat ? templat->bind : 0);
-@@ -4854,7 +5305,7 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
+@@ -4854,7 +5306,7 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
              tva_create_contiguous_video_buffer(context, templat);
          if (buffer)
          {
@@ -1871,7 +1916,7 @@ index 31b3aade..b30ea63f 100644
              return buffer;
          }
          fprintf(stderr, "tva: contiguous video buffer failed\n");
-@@ -4876,7 +5327,10 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
+@@ -4876,7 +5328,10 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
          bridge_templ.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR;
      struct pipe_video_buffer *buffer =
          vl_video_buffer_create(context, &bridge_templ);
@@ -1883,7 +1928,7 @@ index 31b3aade..b30ea63f 100644
      return buffer;
  }
  
-@@ -4895,7 +5349,7 @@ static struct pipe_video_codec *
+@@ -4895,7 +5350,7 @@ static struct pipe_video_codec *
  tva_pipe_create_video_codec(struct pipe_context *context,
                              const struct pipe_video_codec *templat)
  {
@@ -1892,7 +1937,7 @@ index 31b3aade..b30ea63f 100644
              templat ? templat->profile : -1,
              templat ? templat->entrypoint : -1,
              templat ? templat->width : 0, templat ? templat->height : 0);
-@@ -4976,7 +5430,7 @@ tva_pipe_create_video_codec(struct pipe_context *context,
+@@ -4976,7 +5431,7 @@ tva_pipe_create_video_codec(struct pipe_context *context,
      c->strict_pending = codec_id == CODEC_AV1 && tva_av1_strict_pending();
  
      mtx_init(&c->io_mutex, mtx_plain);

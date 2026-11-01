@@ -34,14 +34,23 @@ frontend. `portal-va-r1.patch` adds:
   dav1d and aomdec reject the same units. The VA `wm[]` parameters are now
   coded against PrevGmParams, the set saved with the primary reference
   frame, which the bridge tracks per surface next to the order hints.
+- AV1: omit `allow_high_precision_mv` when the frame sets
+  `force_integer_mv`; the spec implies it zero there. The extra bit shifted
+  the rest of the header, so MediaCodec dropped screen-content frames
+  without an error and the client hung waiting for the surface (YouTube AV1
+  stopped after a few minutes).
 - Gate the per-call `tva-va:` traces behind `DMD_VA_LOG=1`; they wrote
   several lines per decoded frame to every VA client's stderr.
 - `vaDeriveImage` on contiguous NV12 surfaces (`DMD_VA_CONTIGUOUS_DMABUF=1`):
   advertise the contiguous-planes cap, also for the profile-less query
   derive makes, and take each plane's real offset in the shared object (the
   bridge page-aligns the chroma plane). VLC 3's VA interop needs derive;
-  without it VLC decodes in software. The default per-plane layout is
-  unchanged.
+  without it VLC decodes in software.
+- Use the contiguous layout by default on the KGSL backend. Chromium imports
+  an NV12 export as one dma-buf and read the Y plane as chroma when the
+  planes were separate objects (purple/green video). Upstream enabled it only
+  without a DRM render node, which Portal's fake `/dev/dri` defeats.
+  `DMD_VA_CONTIGUOUS_DMABUF=0` restores the per-plane layout.
 - Fail `vaInitialize` when no daemon listens on the endpoint. The VA frontend
   creates the decoder at the first picture, so a missing daemon used to
   surface mid-decode (2 of 120 frames, then errors) and clients never took
