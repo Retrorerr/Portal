@@ -94,13 +94,18 @@ internal class UtilityFrost(
     }
 }
 
-/** Capture actual rendered windows, with a small crop while the edge tab is stationary. */
+/**
+ * Capture actual rendered windows, with a small crop while the edge tab is stationary. A parked
+ * tab samples rarely and swaps samples without a crossfade: over a changing desktop (video, chat)
+ * the 300 ms sample plus 100 ms fade kept Portal's own window redrawing nearly every frame.
+ */
 @Composable
-internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: () -> Boolean): UtilityFrost {
+internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: () -> Boolean, parked: () -> Boolean = { false }): UtilityFrost {
     val view = LocalView.current
     val lifecycle = (LocalContext.current as? LifecycleOwner)?.lifecycle
     val requestedCrop by rememberUpdatedState(crop)
     val movingNow by rememberUpdatedState(moving)
+    val parkedNow by rememberUpdatedState(parked)
     val frame = remember { mutableStateOf<UtilityFrostFrame?>(null) }
     val oldLayer = rememberGraphicsLayer()
     val newLayer = rememberGraphicsLayer()
@@ -150,11 +155,12 @@ internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: ()
                 // A transient PixelCopy failure must not flash away the glass.
                 // Keep the last successful sample and retry on the next tick.
             }
-            val moving = movingNow()
-            // Wake immediately when a drag starts, then refresh moving
-            // content at 30 Hz. Spatial sampling redraws at display rate.
-            withTimeoutOrNull(if (moving) 32L else 300L) {
-                snapshotFlow { movingNow() }.first { it != moving }
+            val state = movingNow() to parkedNow()
+            // Wake immediately when a drag starts or the tab wakes, then
+            // refresh moving content at 30 Hz. Spatial sampling redraws at
+            // display rate.
+            withTimeoutOrNull(if (state.first) 32L else if (state.second) 2_000L else 300L) {
+                snapshotFlow { movingNow() to parkedNow() }.first { it != state }
             }
         }
     }
@@ -162,8 +168,9 @@ internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: ()
         snapshotFlow { frame.value }.collectLatest { next ->
             frost.previous = if (movingNow()) null else frost.current
             frost.current = next
-            frost.blend.snapTo(if (next != null && frost.previous != null) 0f else 1f)
-            if (next != null && frost.previous != null) frost.blend.animateTo(1f,tween(100))
+            val fade = next != null && frost.previous != null && !parkedNow()
+            frost.blend.snapTo(if (fade) 0f else 1f)
+            if (fade) frost.blend.animateTo(1f,tween(100))
             frost.previous = null
         }
     }

@@ -82,13 +82,14 @@ internal fun UtilityRoundtable(
     val dockCaptureBounds = remember { android.graphics.RectF() }
     val keyboardCaptureBounds = remember { android.graphics.RectF() }
     val moving = { dragging || directPosition || transition.isRunning || surfaceResizing || keyboardMotion.isMoving }
+    var resting by remember { mutableStateOf(false) }
     val frost = rememberUtilityFrost(ready,
         crop = {
             if (page == UtilityPage.Keyboard && !moving() && !keyboardCaptureBounds.isEmpty)
                 androidx.compose.ui.geometry.Rect(keyboardCaptureBounds.left,keyboardCaptureBounds.top,keyboardCaptureBounds.right,keyboardCaptureBounds.bottom)
             else if (page != UtilityPage.Dock || moving() || dockCaptureBounds.isEmpty) null
             else androidx.compose.ui.geometry.Rect(dockCaptureBounds.left,dockCaptureBounds.top,dockCaptureBounds.right,dockCaptureBounds.bottom)
-        },moving = moving)
+        },moving = moving, parked = { resting && page == UtilityPage.Dock && !moving() })
     val hasFrost by remember(frost) { derivedStateOf { frost.current != null } }
     val surfaceBase by animateColorAsState(palette.background.copy(alpha = if (hasFrost) PortalFrostStyle.tint(palette.isDark) else 0.96f),
         tween(320,easing = PortalEmphasized),label = "utility glass tint")
@@ -120,7 +121,6 @@ internal fun UtilityRoundtable(
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val focused by interaction.collectIsFocusedAsState()
-    var resting by remember { mutableStateOf(false) }
     LaunchedEffect(page, dragging, hovered, focused) {
         resting = false
         if (page == UtilityPage.Dock && !dragging && !hovered && !focused) { delay(2200); resting = true }
