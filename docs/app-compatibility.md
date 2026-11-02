@@ -3,7 +3,9 @@
 Portal uses Debian's normal desktop runtimes and preserves application-specific
 library, plugin, scaling, rendering and input-method settings. Qt 5 and Qt 6
 Wayland plugins are included in fresh installations and added once to existing
-installations. Xwayland remains available. Bundled and older Qt installations
+installations. Older downloaded runtime images receive missing plugins through
+the first session's APT repair; Xwayland remains available while that finishes
+or when an upgrade is offline. Bundled and older Qt installations
 keep their own plugins; Portal does not set a global `QT_PLUGIN_PATH`.
 [Qt documents why these plugin paths must remain separate](https://doc.qt.io/qt-6/deployment-plugins.html).
 Portal also leaves `QT_QPA_PLATFORM` to the application and user. Modern Qt
@@ -16,6 +18,19 @@ QtWayland source in `patches/qtwayland/6.8.2`. Its overlay is used only when
 the installed QtCore and original QtWayland library match the tested hashes.
 An upgraded or independently bundled Qt is left intact. The former managed
 LibreOffice preload launcher is retired without removing custom launchers.
+Portal-derived Electron launchers no longer force `--ozone-platform=wayland`
+or `--no-stdio-init`. Existing entries lose those options only when their
+contents still match the vendor entry plus Portal's known additions. Modified
+user launchers and vendor-supplied options are preserved. Android input-method
+integration and the existing shortcut-portal integration remain in place;
+this is not a removal of every browser compatibility option. Steam likewise
+uses its native scale selection and inherits an explicit
+`STEAM_FORCE_DESKTOPUI_SCALING` without manufacturing one from a Qt setting.
+KWallet's first-login setup uses the base image's D-Bus client. It no longer
+waits for Python's `gi` binding, which older runtime images install in the
+background for IBus. Existing wallets and chosen passwords retain their
+normal behavior.
+
 The animation preload intercepts only explicitly versioned Qt 5/6 entry
 points. Unversioned legacy and bundled builds use their native event loops.
 Its remaining private timer adjustment is limited to tested Qt 5.15/6.8;
@@ -39,11 +54,13 @@ application built with the same toolkit.
 | LibreOffice Writer, Calc and Impress | Disposable native KDE/Qt documents, save/reopen, repeated viewport updates and shutdown |
 | GTK 2/3/4, Tk and wxWidgets | Native runtime windows and Unicode text; GTK 2 through Xwayland |
 | SDL 2 | Animated Wayland OpenGL window on Adreno 830 |
-| VLC | Dynamically loaded Qt 5.15.15 interface window on Xwayland; launch-only coverage |
+| VLC 3.0.24 | Dynamically loaded Qt 5.15.15 interface on Xwayland; default 1080p playback and displayed-frame counters for H.264, HEVC, VP9 and AV1 |
 | Chromium 156 | Disposable profile, owned WebGL 2 animation on Wayland, Adreno ANGLE renderer and correct pixel readback |
+| Steam ARM64 | Native sign-in window and matching geometry with/without the former forced scale; account features and games are not covered |
+| Electron 45.2.1 | Official independent ARM64 runtime, owned application, default Wayland/Adreno WebGL 2 rendering, pixel readback and debugger-driven Unicode composition; native Claude launch checked separately |
 | Java 21 Swing | Window creation and animation tested; default XRender presentation batching remains a performance limitation |
 | OpenGL and Vulkan | Wayland EGL, Xwayland GLX, and Vulkan enumeration plus cube swapchain rendering on both Wayland and Xwayland, using Adreno 830 |
-| VA hardware decoding | H.264, HEVC, VP9 profile 0 and AV1 profile 0; owned 8-bit 320×180 clips, 60 frames each |
+| VA hardware decoding | H.264, HEVC, VP9 profile 0 and AV1 profile 0; owned 8-bit 1920×1080 clips, 60 frames per decode, exact software-reference pixels and active Qualcomm Android decoder components |
 | x86-64 Linux | Box64 console fixture, including spaced and Unicode arguments |
 | Windows x86-64 | ARM64 Proton/FEX console fixture with a file receipt from inside the Windows process; separate disposable prefix |
 | Native type 2 AppImage | FUSE-free extraction, repeated cached launch, AppImage environment and Unicode arguments |
@@ -65,7 +82,18 @@ runs without a presentation gap over 100 ms. Its Xwayland test verifies
 swapchain execution; startup/teardown gaps are not classified as animation jank.
 The installed Chromium likewise completed three warmed WebGL runs without a
 presentation gap over 100 ms, using its normal renderer selection. That does
-not establish compatibility for individual Electron applications.
+not establish compatibility for individual Electron applications. The Electron
+fixture uses its own application and profile; its composition test uses the
+debug protocol, rather than the Android keyboard. Native Claude launch tests
+use no debugger and do not exercise sign-in or account features.
+The Electron fixture records an initial input-focus/window pause of about one
+second on this device, both with the old options and with native launch
+selection. After two seconds of per-window warmup, three four-second runs in
+each mode had no presentation gap over 100 ms. Warmup timing is retained in
+the observations; this does not establish pause-free startup. Steam's initial
+client update downloaded successfully, but its first CEF handoff timed out;
+a subsequent native launch and a repeat of the old launch both opened the
+sign-in window. That first-update limitation is not fixed by a scale override.
 
 Flatpak GL extensions are provided for freedesktop branches 24.08 and 25.08.
 Their presence alone does not verify an installed application's graphics or
@@ -83,11 +111,19 @@ gaps over 100 ms. This small clear-animation fixture is not a general app
 performance estimate. The file canary checks one access rule; namespace
 emulation retains Android kernel limits.
 
-Qt 4 and other untested Qt versions, 32-bit FEX applications, `.NET`/Mono, JavaFX, individual
-Electron applications, Windows installers and complete Windows GUI applications
+Default VLC playback selects VAAPI/Qualcomm hardware for H.264, HEVC and VP9.
+VLC 3.0.24 selects software decoding for AV1; playback success must not be
+reported as AV1 hardware acceleration in that player. Direct FFmpeg VAAPI AV1
+checks use the physical Qualcomm decoder. The media suite records the actual
+Android codec components separately from VA surfaces; Android's public codec
+inventory distinguishes hardware and software implementations. These checks
+cover the tested 8-bit profiles, not every codec profile, resolution or player.
+
+Qt 4 and other untested Qt versions, 32-bit FEX applications, `.NET`/Mono, JavaFX,
+complete Electron application workflows, Windows installers and complete Windows GUI applications
 need their own functional tests. PRoot needs separate disposable runtime data;
 results from tawcroot cannot be transferred to it. Qt windows were also tested
-at integer scale 2 and fractional scale 2.2333, with portrait rotation, resize
+at integer scale 2 and fractional scales 2.2333 and 2.625, with portrait rotation, resize
 and Android background/foreground resume. The original scale and rotation
 policy were restored. Power suspend, physical keyboard/IME, touchpad, stylus,
 clipboard, drag-and-drop and capture still require dedicated interaction
@@ -127,7 +163,7 @@ from that gate. Functional success and pacing observations are recorded
 separately.
 
 Reports include runtime versions, selected engine, inherited graphics/toolkit
-environment, launch failures, probe observations, SurfaceFlinger presentations,
+environment, installed APK fingerprints, launch failures, probe observations, SurfaceFlinger presentations,
 Android PSS and CPU ticks. GNU `time`, when installed, adds command CPU time
 and maximum individual-process RSS. These are not total guest memory. Optional
 Perfetto captures contain scheduler/graphics evidence; frame-timeline or
@@ -147,6 +183,10 @@ python3 scripts/build_compat_fixtures.py --output target/compat-fixtures \
   --kind linux --kind windows --kind media
 python3 scripts/app_compat.py --serial DEVICE --suite media --repeat 3 \
   --fixtures target/compat-fixtures --output target/qa/media
+python3 scripts/build_compat_fixtures.py --output target/compat-hd \
+  --kind media --media-size 1920x1080 --frames 240
+python3 scripts/app_compat.py --serial DEVICE --suite playback --repeat 3 \
+  --fixtures target/compat-hd --output target/qa/playback
 python3 scripts/app_compat.py --serial DEVICE --suite portable --repeat 3 \
   --fixtures target/compat-fixtures --output target/qa/portable
 ```
@@ -160,6 +200,17 @@ or runtimes are reported explicitly. Windows probes require a receipt written
 inside the Windows process; a successful Proton launcher exit is insufficient.
 Hardware decode tests require VA surfaces and compare every downloaded pixel
 with a separate software decode, accepting at least 40 dB PSNR or exact output.
+Playback fixtures must last at least one second longer than the measured
+interval. VLC's probe uses its normal decoder/output selection with an isolated
+configuration and a local statistics interface; no hardware decoder is forced.
+`scripts/read_android_codecs.py --serial DEVICE --output target/qa/codecs.json`
+records Android's public decoder flags. Codec log evidence is limited to
+Debug's Android UID and the measured interval.
+
+An independently installed Electron runtime can be tested with
+`--suite apps --case electron --electron-runtime /path/to/electron`.
+The owned fixture covers renderer selection, animation, pixels and composition;
+applications which reject debugging require separate native launch checks.
 
 `tests/compat/qt_widgets_probe.cpp` can also be compiled against an older
 bundle's own Qt 5/6 headers and libraries, without replacing system Qt. Run
@@ -170,3 +221,18 @@ backend, animation count and resize result; Qt 4 needs a separate fixture.
 Portable tests use isolated caches and Proton prefixes. LibreOffice uses
 disposable profiles and documents; VLC uses a disposable configuration.
 Diagnostic logs and fixtures remain in the report's named guest `/tmp` folder.
+
+Updated-install checks compare an actual in-place APK update with controlled
+document and preference fingerprints. Clean first-run checks use
+`scripts/debug_data_state.py`: it force-stops Debug and renames its private data
+into a journalled snapshot, preserving guest hardlinks and permissions. Both
+states remain on the device after restoration; it never clears or uninstalls
+an app. Android permission grants are retained, so this tests clean app-data
+setup rather than resetting every Android first-install permission flow.
+Always restore using the same device and record after testing:
+
+```bash
+python3 scripts/debug_data_state.py --serial DEVICE --record target/qa/data.json isolate
+# Run first-run setup and the compatibility suites in Portal Debug.
+python3 scripts/debug_data_state.py --serial DEVICE --record target/qa/data.json restore
+```

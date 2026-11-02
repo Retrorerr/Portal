@@ -19,8 +19,8 @@ Vendored `build/proot` is `termux/proot` `master` at
 `d4d2a19081c3c07f75250e4ce2980b9fa2f5720f` (September 24, 2026, tag
 v5.1.107.95), merged with the Portal patches below.
 
-Portal compatibility patches (September 2026), needed by coding agents such as
-Claude Code and by ordinary developer tools:
+Portal compatibility patches (September 2026), needed by Node/Bun-based
+developer tools and other ordinary programs:
 
 - `fstat()`/`fstatat(fd, "", AT_EMPTY_PATH)` no longer fail with `ENOENT` on
   descriptors without a file-system path (sockets, epoll, eventfd, inotify,

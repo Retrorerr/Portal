@@ -493,7 +493,7 @@ fn install(app: OptionalApp, progress: Progress) -> anyhow::Result<()> {
 }
 
 /// Official Electron apps ship their own launchers, which need Portal's copy
-/// (Wayland, stdio and shortcut flags) in the user's applications directory.
+/// (input-method and shortcut integration) in the user's applications directory.
 fn prepare_electron_launcher(app: OptionalApp) -> anyhow::Result<()> {
     let desktop_file = app.desktop_file_id();
     anyhow::ensure!(

@@ -126,8 +126,9 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
     fi
 
     dst="$target_dir/$(basename "$src")"
-    # Leave alone anything the user wrote themselves.
-    if [ -e "$dst" ] && ! grep -q '^X-LocalDesktop-NoSandbox=' "$dst"; then
+    # Existing user entries belong to the user. Session startup migrates
+    # unchanged Portal copies after checking their complete vendor source.
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
         continue
     fi
 
@@ -137,10 +138,6 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
         /^Exec=/ {
             if (no_sandbox == 1 && index($0, "--no-sandbox") == 0)
                 sub(/^Exec=[^ ]+/, "& --no-sandbox")
-            if (electron == 1 && index($0, "--no-stdio-init") == 0)
-                sub(/^Exec=[^ ]+/, "& --no-stdio-init")
-            if (electron == 1 && index($0, "--ozone-platform=") == 0)
-                sub(/^Exec=[^ ]+/, "& --ozone-platform=wayland")
             # On Wayland Chromium reports text fields to the input method
             # (and so opens the Android keyboard) only with this switch.
             # The bare name also spots a --disable-wayland-ime the user chose.
@@ -152,10 +149,11 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
                 sub(/^Exec=[^ ]+/, "& --disable-features=GlobalShortcutsPortal")
         }
         { print }
-    ' "$src" > "$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$dst"; then
+    ' "$src" > "$tmp" || ! chmod 0644 "$tmp" || ! mv -n "$tmp" "$dst"; then
         rm -f "$tmp"
         printf 'Failed to update Portal desktop integration for %s\n' "$src" >&2
     fi
+    rm -f "$tmp"
 done
 "#;
 const CHROMIUM_WAYLAND_IME: &str = r#"# Portal: report text fields to the input method (Android keyboard) on Wayland.
@@ -364,7 +362,7 @@ type NamedSetupStage = (&'static str, SetupStage);
 /// Thus, it should return a finished status if the task is done, so that the setup process can move on to the next stage.
 /// Otherwise, it should return a `JoinHandle`, so that the setup process can wait for the task to finish, but not block the main thread so that the setup progress can be reported to the user.
 ///
-/// For coding agents: READ THIS BEFORE ADDING WORK HERE.
+/// Where work belongs:
 /// - Heavy/long work belongs inside the spawned thread of a returned `Some(JoinHandle)`, so it runs once at install and surfaces as setup progress.
 /// - Simple/light tasks or important settings that must be run every launch (e.g. the Firefox config) can be done inline on the `None` path.
 type StageOutput = Option<JoinHandle<anyhow::Result<()>>>;
@@ -1060,7 +1058,7 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
         })
         .collect::<Vec<_>>();
     // Official Electron apps ship their own launchers, which need Portal's
-    // copy (Wayland, stdio and shortcut flags) in the user's applications
+    // copy (input-method and shortcut integration) in the user's applications
     // directory.
     let electron_apps = selected_apps
         .iter()
@@ -1784,14 +1782,16 @@ fn kconfig_value<'a>(text: &'a str, group: &str, key: &str) -> Option<&'a str> {
 }
 
 /// Keep the Chromium/Electron entries helper current and bring entries it
-/// already derived up to its current flags. Only entries carrying the helper's
-/// marker are touched, so entries the user removed or wrote stay as they are.
+/// already derived up to its current flags. Entries must still match their
+/// vendor source plus known Portal additions; a user edit takes ownership.
 ///
 /// Earlier helpers forced `--password-store=basic`. Electron's safeStorage is
 /// unavailable with that store, so apps such as Claude could not keep their
 /// sign-in; derived entries drop it and use the desktop's secret service.
 /// They also forced `--no-sandbox`, which PRoot's namespace emulation made
 /// unnecessary: derived entries drop it and keep Chromium's sandbox.
+/// Unchanged derived entries also retire forced Electron backend and stdio
+/// options; native runtime selection now works without them.
 fn sync_chromium_entries(fs_root: &Path) {
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-no-sandbox-entries"),
@@ -1805,15 +1805,25 @@ fn sync_chromium_entries(fs_root: &Path) {
         if path.extension().is_none_or(|ext| ext != "desktop") {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&path) else {
+        let Ok(original) = fs::read_to_string(&path) else {
             continue;
         };
-        if !text
+        if !original
             .lines()
             .any(|line| line == "X-LocalDesktop-NoSandbox=true")
         {
             continue;
         }
+        let native = ["usr/share/applications", "usr/local/share/applications"]
+            .into_iter()
+            .find_map(|directory| {
+                fs::read_to_string(fs_root.join(directory).join(entry.file_name())).ok()
+            });
+        let Some(text) = native.as_deref().and_then(|source| {
+            crate::core::guest_compat::retire_electron_launch_options(&original, source)
+        }) else {
+            continue;
+        };
         let updated = text
             .split_inclusive('\n')
             .map(|line| {
@@ -1849,8 +1859,14 @@ fn sync_chromium_entries(fs_root: &Path) {
                 format!("Exec={program}{added}{rest}{eol}")
             })
             .collect::<String>();
-        if updated != text {
-            if let Err(error) = fs::write(&path, updated) {
+        if updated != original {
+            if fs::read_to_string(&path).ok().as_deref() != Some(original.as_str()) {
+                continue;
+            }
+            let temporary = path.with_extension("desktop.portal-tmp");
+            if let Err(error) =
+                fs::write(&temporary, updated).and_then(|()| fs::rename(&temporary, &path))
+            {
                 log::warn!("{} could not be updated: {error}", path.display());
             }
         }

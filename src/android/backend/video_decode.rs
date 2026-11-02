@@ -59,10 +59,12 @@ fn files_root() -> PathBuf {
 }
 
 /// Whether hardware video decoding is wanted: on unless
-/// `files/hw-video-decode` says `off`.
+/// `files/hw-video-decode` says `off`. The driver exports decoded frames
+/// through KGSL only, so other GPUs keep software decoding.
 fn wanted() -> bool {
-    fs::read_to_string(files_root().join("hw-video-decode"))
-        .map_or(true, |value| value.trim() != "off")
+    Path::new(crate::core::drm_nodes::KGSL_DEVICE).exists()
+        && fs::read_to_string(files_root().join("hw-video-decode"))
+            .map_or(true, |value| value.trim() != "off")
 }
 
 fn marker_line() -> String {

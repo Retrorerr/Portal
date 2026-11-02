@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Repeatable benchmark script that accurately measures the complete Portal
-cgroup on the OnePlus Pad 3 (f105b146), aggregating true VmRSS and RssAnon across
+cgroup on the device, aggregating true VmRSS and RssAnon across
 all guest processes (KWin, Plasma, D-Bus, XWayland, PipeWire, apps) and the
 host app, total PSS from Android's memory subsystem, and distinguishing process-tree
 CPU from total system CPU over a sampling window.

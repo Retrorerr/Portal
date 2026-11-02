@@ -16,7 +16,15 @@ socket=/run/dbus/system_bus_socket
 log=/var/log/portal-system-services.log
 
 stop() {
-	[ -s "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null
+	# Guest PIDs are Android PIDs and wrap quickly. A pidfile left by an
+	# earlier app process can name an unrelated process of Portal's UID,
+	# Portal itself included, so signal it only while it is still the bus.
+	pid=$(cat "$pidfile" 2>/dev/null)
+	case "$pid" in
+	'' | *[!0-9]*) ;;
+	*) [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = dbus-daemon ] &&
+		kill "$pid" 2>/dev/null ;;
+	esac
 	for daemon in packagekitd polkitd udisksd accounts-daemon fwupd \
 		ModemManager upowerd; do
 		pkill -x "$daemon" 2>/dev/null

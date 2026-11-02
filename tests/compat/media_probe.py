@@ -35,10 +35,13 @@ with tempfile.TemporaryDirectory(prefix='portal-decode-probe-') as tmp:
     expected = software.read_bytes() if software.exists() else b''
     psnr, max_error = None, None
     if reference.returncode == 0 and actual and len(actual) == len(expected):
-        mse = sum((a-b)**2 for a, b in zip(actual, expected)) / len(actual)
-        # JSON has no infinity; exact is represented separately.
-        psnr = 10 * math.log10(255**2 / mse) if mse else None
-        max_error = max(abs(a-b) for a, b in zip(actual, expected))
+        if actual == expected:
+            max_error = 0
+        else:
+            mse = sum((a-b)**2 for a, b in zip(actual, expected)) / len(actual)
+            # JSON has no infinity; exact is represented separately.
+            psnr = 10 * math.log10(255**2 / mse)
+            max_error = max(abs(a-b) for a, b in zip(actual, expected))
 frames = [int(x) for x in re.findall(r'^frame=(\d+)\s*$', result.stdout, re.M)]
 count = frames[-1] if frames else 0
 # hwdownload cannot accept software frames; a successful completed decode

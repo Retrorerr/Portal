@@ -117,7 +117,7 @@ fi
             labwc_pid=$(cat "$state_dir/labwc.pid" 2>/dev/null || true)
             case "$labwc_pid" in
                 ''|*[!0-9]*) ;;
-                *) [ "$labwc_pid" -gt 1 ] && kill -TERM "$labwc_pid" 2>/dev/null || true ;;
+                *) [ "$labwc_pid" -gt 1 ] && [ "$(cat "/proc/$labwc_pid/comm" 2>/dev/null)" = labwc ] && kill -TERM "$labwc_pid" 2>/dev/null || true ;;
             esac
             exit 0
         fi

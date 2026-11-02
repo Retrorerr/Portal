@@ -18,7 +18,7 @@ cargo fmt --all -- --check
 cargo test --tests
 ```
 
-Run relevant syntax checks for modified shell, PowerShell, Python, Java, or XML assets. Android changes should be built for `arm64-v8a`; release candidates also require package, signing, alignment, install, launch, log, and physical-device checks from `docs/arm64-validation.md`.
+Run relevant syntax checks for modified shell, PowerShell, Python, Java, or XML assets. Android changes should be built for `arm64-v8a`; release candidates also require package, signing, alignment, install, launch, log, and physical-device checks.
 
 ## Pull requests
 

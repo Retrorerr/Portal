@@ -42,14 +42,6 @@ pub fn runs_in_primary_profile(files_dir: &std::path::Path, app_files_root: &std
 /// Project homepage, also the online documentation entry point.
 pub const DOCS_HOME_URL: &str = "https://github.com/Retrorerr/Portal#readme";
 
-/// Download URL for the offline User Manual PDF matching the running version.
-/// The release asset is dot-free/hyphenated (GitHub turns spaces into dots).
-pub fn user_manual_url() -> String {
-    format!(
-        "https://github.com/Retrorerr/Portal/releases/download/v{VERSION}/Portal-v{VERSION}-User-Manual.pdf"
-    )
-}
-
 pub const WAYLAND_SOCKET_NAME: &str = "wayland-0";
 pub const DESKTOP_USER: &str = "desktop";
 pub const DESKTOP_UID: u32 = 1000;

@@ -14,6 +14,7 @@ a real password there simply gets KWallet's usual prompt from then on.
 
 import hashlib
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -66,26 +67,25 @@ def main():
     if salt is None:
         return 0
     key = hashlib.pbkdf2_hmac("sha512", b"", salt, ITERATIONS, KEY_SIZE)
+    # busctl is part of the base desktop. Older runtime images acquire
+    # python3-gi asynchronously for IBus, after this autostart has run.
+    # Wallet creation must not depend on that background package repair.
+    bus = ["busctl", "--user", "--timeout=60", "call", "org.kde.kwalletd6",
+           "/modules/kwalletd6", "org.kde.KWallet"]
     try:
-        from gi.repository import Gio, GLib
-    except ImportError as error:
-        print(f"portal-kwallet-unlock: {error}", file=sys.stderr)
-        return 0
-    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-    try:
-        bus.call_sync(
-            "org.kde.kwalletd6",
-            "/modules/kwalletd6",
-            "org.kde.KWallet",
-            "pamOpen",
-            GLib.Variant("(sayi)", (WALLET, list(key), 0)),
-            None,
-            Gio.DBusCallFlags.NONE,
-            60000,
-            None,
-        )
-    except GLib.Error as error:
-        print(f"portal-kwallet-unlock: {error.message}", file=sys.stderr)
+        result = subprocess.run([*bus, "pamOpen", "sayi", WALLET, str(len(key)),
+                                 *map(str, key), "0"], capture_output=True, text=True, timeout=65)
+        if result.returncode:
+            print(f"portal-kwallet-unlock: {result.stderr.strip()}", file=sys.stderr)
+        else:
+            # pamOpen has no D-Bus return value. A successful method call
+            # alone does not prove that the wallet opened.
+            opened = subprocess.run([*bus, "isOpen", "s", WALLET], capture_output=True,
+                                    text=True, timeout=65)
+            if opened.returncode or opened.stdout.strip() != "b true":
+                print("portal-kwallet-unlock: wallet remains locked; keeping its password and settings", file=sys.stderr)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"portal-kwallet-unlock: {type(error).__name__}", file=sys.stderr)
     return 0
 
 

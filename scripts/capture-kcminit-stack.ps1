@@ -18,7 +18,7 @@ if (-not $DeviceId) {
         if ($devs) {
             $first = if ($devs -is [array]) { $devs[0].Line } else { $devs.Line }
             ($first -split "\s+")[0]
-        } else { "f105b146" }
+        } else { throw "No adb device connected" }
     }
 }
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot = Split-Path -Parent $PSScriptRoot }

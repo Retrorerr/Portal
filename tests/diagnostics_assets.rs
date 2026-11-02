@@ -162,8 +162,9 @@ fn electron_helper_remains_available_without_automatic_desktop_rewrites() {
     // Chromium's sandbox stays on wherever PRoot emulates its namespaces.
     assert!(SETUP.contains("[ -L /proc/self/ns/user ] || no_sandbox=1"));
     assert!(SETUP.contains(".replace(\" --no-sandbox\", \"\")"));
-    assert!(SETUP.contains("--no-stdio-init"));
-    assert!(SETUP.contains("--ozone-platform=wayland"));
+    assert!(!SETUP.contains("--no-stdio-init"));
+    assert!(!SETUP.contains("--ozone-platform=wayland"));
+    assert!(SETUP.contains("retire_electron_launch_options"));
     assert!(SETUP.contains("retire_legacy_desktop_mutators"));
     assert!(!PLASMA_LAUNCHER.contains("localdesktop-no-sandbox-entries"));
     let package_setup = SETUP

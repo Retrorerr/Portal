@@ -112,6 +112,7 @@ Pick Steam during setup and you get the ARM64 Steam client running natively.
   - If the switch is greyed out, open Portal's **App info**, tap **⋮** and choose **Allow restricted settings**. Android 13 and newer does this for apps installed outside an app store.
 - **Tablet or desktop:** with no keyboard or mouse plugged in, Plasma switches to tablet mode and the Android keyboard pops up when you tap a text field. Plug in a keyboard and mouse and it goes back to desktop mode.
 - **Sound** goes through Android, and pausing and resuming Portal doesn't break it. You might notice a "Portal Audio (standby)" device in the volume list. That's what keeps apps connected while Portal is in the background, so leave it be.
+- **Video:** on Snapdragon tablets, Firefox, Chromium and mpv decode video in hardware through Android's decoders, which keeps 4K YouTube smooth.
 - **Camera and microphone:** Linux apps can use the tablet's cameras and microphone (video calls in Firefox, for example). Android asks for permission the first time an app opens one.
 - **Your Android files:** grant **All files access** if you want to open shared storage (Downloads, Pictures and so on) from Linux. Debian itself lives in Portal's private storage.
 - **Browsers:** Firefox, Chromium and Electron apps run with their normal sandboxes on, no `--no-sandbox` needed. The Firefox you get is Mozilla's own build from Mozilla's APT repo, and Portal sets up any Firefox you install automatically.

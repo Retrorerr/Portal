@@ -5,7 +5,7 @@ import tempfile
 import json
 import hashlib
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from app_compat import frame_stats, desktop_visibility, presentation_for_flow, fixture_files
+from app_compat import frame_stats, desktop_visibility, presentation_for_flow, fixture_files, unavailable_launch, android_codec_components
 
 
 class FrameStatsTests(unittest.TestCase):
@@ -72,6 +72,27 @@ class FixtureTests(unittest.TestCase):
             (directory / 'manifest.json').write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, 'filenames'):
                 fixture_files(directory)
+
+
+class MissingCapabilityTests(unittest.TestCase):
+    def test_codec_evidence_uses_active_component_messages(self):
+        text = ('1793615557.173 651 28224 D CCodecBuffers: [c2.qti.avc.decoder#147:1D-Input.Impl[N]] converted buffers\n'
+                '1793615558.173 651 28225 W OplusMediaMonitor: c2.qti.hevc.decoder inputFps=30\n'
+                '1793615559.173 651 28225 I Registry: supports c2.android.avc.decoder\n')
+        self.assertEqual(android_codec_components(text), ['c2.qti.avc.decoder', 'c2.qti.hevc.decoder'])
+
+    def test_missing_runtimes_are_reported_precisely(self):
+        for message in ('ModuleNotFoundError: No module named PySide6',
+                        '/bin/sh: 1: glxinfo: not found',
+                        "FileNotFoundError: [Errno 2] No such file or directory: 'ffmpeg'",
+                        'OSError: libgtk-x11-2.0.so.0: cannot open shared object file: No such file or directory',
+                        'Windows runtime missing. Install Wine'):
+            self.assertTrue(unavailable_launch(message), message)
+
+    def test_optional_plugin_messages_do_not_hide_a_failed_flow(self):
+        message = ('VLC debug: optional service not found\n'
+                   "FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pv-owned/rc'\n")
+        self.assertFalse(unavailable_launch(message))
 
 
 if __name__ == '__main__':

@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -12,7 +13,11 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def build(output, kinds, appimage_runtime=None, runtime_sha256=None):
+def build(output, kinds, appimage_runtime=None, runtime_sha256=None, media_size='320x180', frames=60):
+    if not re.fullmatch(r'[1-9][0-9]*x[1-9][0-9]*', media_size) or frames < 1:
+        raise ValueError('Media size must be WIDTHxHEIGHT and frame count must be positive')
+    if any(int(value) % 2 for value in media_size.split('x')):
+        raise ValueError('YUV 4:2:0 fixtures require even dimensions')
     output.mkdir(parents=True, exist_ok=True)
     results = {}
     def run(command, name):
@@ -43,7 +48,7 @@ def build(output, kinds, appimage_runtime=None, runtime_sha256=None):
         for name, (encoder, options) in encoders.items():
             filename = name + '.mp4'
             run(['ffmpeg', '-nostdin', '-hide_banner', '-y', '-f', 'lavfi', '-i',
-                 'testsrc2=size=320x180:rate=30', '-frames:v', '60', '-an', '-threads', '2',
+                 'testsrc2=size=' + media_size + ':rate=30', '-frames:v', str(frames), '-an', '-threads', '2',
                  '-c:v', encoder, *options, str(output / filename)], name)
             results[name] = filename
     if 'appimage' in kinds:
@@ -94,5 +99,8 @@ if __name__ == '__main__':
     parser.add_argument('--kind', action='append', choices=['linux', 'windows', 'media', 'appimage'], required=True)
     parser.add_argument('--appimage-runtime', type=Path, help='Official type 2 runtime for the target architecture')
     parser.add_argument('--runtime-sha256', help='Expected SHA256 of the downloaded runtime')
+    parser.add_argument('--media-size', default='320x180', help='Codec fixture dimensions, for example 1920x1080')
+    parser.add_argument('--frames', type=int, default=60, help='Frames encoded in each codec fixture')
     args = parser.parse_args()
-    print(json.dumps(build(args.output.resolve(), args.kind, args.appimage_runtime, args.runtime_sha256), indent=2))
+    print(json.dumps(build(args.output.resolve(), args.kind, args.appimage_runtime, args.runtime_sha256,
+                           args.media_size, args.frames), indent=2))

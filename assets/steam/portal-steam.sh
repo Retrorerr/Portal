@@ -109,8 +109,8 @@ export STEAM_RUNTIME_ROOT="$STEAM_ROOT/steamrtarm64"
 export LD_LIBRARY_PATH="$STEAM_ROOT/steamrtarm64:$STEAM_ROOT/steamrtarm64/libs:$portal_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # Wine esync wants many descriptors; Android caps the hard limit at 32768.
 ulimit -n "$(ulimit -Hn)" 2>/dev/null
-# Steam's own scaling follows the KWin output scale it reads through Xwayland.
-export STEAM_FORCE_DESKTOPUI_SCALING="${STEAM_FORCE_DESKTOPUI_SCALING:-${QT_SCALE_FACTOR:-1}}"
+# Steam selects its own scale through Xwayland. An explicitly supplied
+# STEAM_FORCE_DESKTOPUI_SCALING remains inherited, as on a native desktop.
 
 cd "$STEAM_ROOT" || exit 1
 

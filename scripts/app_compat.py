@@ -31,15 +31,16 @@ SUITES = {
     'office': ['writer', 'calc', 'impress'],
     'apps': ['vlc', 'chromium', 'electron', 'flatpak', 'translated'],
     'media': ['h264', 'hevc', 'vp9', 'av1'],
+    'playback': ['vlc-h264', 'vlc-hevc', 'vlc-vp9', 'vlc-av1'],
     'portable': ['linux', 'windows', 'appimage'],
     'java': ['swing'],
 }
-PROBE_PACKAGES = ['python3-pyqt5', 'python3-pyqt5.qtquick', 'python3-pyqt6',
+PROBE_PACKAGES = ['python3-dbus', 'python3-websocket', 'python3-pyqt5', 'python3-pyqt5.qtquick', 'python3-pyqt6',
                   'python3-pyqt6.qtquick', 'python3-gi', 'gir1.2-gtk-3.0',
                   'gir1.2-gtk-4.0', 'python3-tk', 'python3-wxgtk4.0',
                   'mesa-utils', 'vulkan-tools', 'python3-uno', 'time',
                   'python3-pyside6.qtwidgets', 'python3-pyside6.qtquick',
-                  'libgtk2.0-0t64', 'libsdl2-2.0-0', 'default-jre', 'x11-utils', 'gcc', 'libc6-dev', 'libvulkan-dev']
+                  'libgtk2.0-0t64', 'libsdl2-2.0-0', 'default-jre', 'x11-utils', 'gcc', 'libc6-dev', 'libvulkan-dev', 'ffmpeg']
 
 
 def desktop_visibility(raw):
@@ -220,6 +221,41 @@ def fixture_files(directory):
     return files
 
 
+def unavailable_launch(stderr):
+    # A verbose plugin log can contain harmless "not found" messages.
+    # Only explicit missing-runtime/dependency errors classify a failed
+    # flow as unavailable; a missing test-control socket is still a failure.
+    if any(value in stderr for value in ('runtime missing', 'install Box64', 'install FEX',
+                                        'vkcube not found', 'Playback fixture too short')):
+        return True
+    return bool(re.search(r'^ModuleNotFoundError:|Namespace Gtk not available|'
+                          r'^/bin/sh: \d+: (?:exec: )?\S+: not found|'
+                          r'^(?:OSError:|.*error while loading shared libraries:).*cannot open shared object file|'
+                          r"^FileNotFoundError: .*'(?:ffmpeg|ffprobe|vlc|cc|gcc|java)'", stderr, re.M))
+
+
+def android_codec_components(log):
+    names = set()
+    for line in log.splitlines():
+        if not any(marker in line for marker in ('CCodecBuffers:', 'OplusMediaMonitor:',
+                                                 'Created component [', 'allocate(')):
+            continue
+        names.update(re.findall(r'\b(?:c2\.|OMX\.)[A-Za-z0-9_.-]+', line))
+    return sorted(names)
+
+
+def installed_apk(session):
+    paths = session.adb('shell', 'pm path ' + PACKAGE, capture_output=True,
+                        text=True, check=True).stdout.splitlines()
+    base = next(path.removeprefix('package:').strip() for path in paths
+                if path.startswith('package:') and path.strip().endswith('/base.apk'))
+    digest = session.adb('shell', shlex.join(['sha256sum', base]), capture_output=True,
+                         text=True, check=True).stdout.split()[0]
+    if not re.fullmatch('[0-9a-f]{64}', digest):
+        raise RuntimeError('Could not fingerprint the installed Debug APK')
+    return digest
+
+
 @contextlib.contextmanager
 def perfetto_capture(session, destination, duration):
     """Optional scheduler/graphics evidence for the exact measured flow."""
@@ -270,6 +306,8 @@ def main():
     parser.add_argument('--install-probes', action='store_true', help='Install optional Debian GUI test dependencies')
     parser.add_argument('--fixtures', type=Path, help='Directory from build_compat_fixtures.py; verifies its SHA256 manifest')
     parser.add_argument('--launcher', type=Path, help='Stage a candidate portable launcher instead of testing installed portal-run')
+    parser.add_argument('--electron-runtime', default='electron', help='Independently installed Electron runtime for an owned rendering/input fixture')
+    parser.add_argument('--electron-launch-flag', action='append', default=[], help='Explicit per-test flag for a native-launch comparison')
     parser.add_argument('--perfetto', action='store_true', help='Record a scheduler/graphics trace for each probe')
     parser.add_argument('--env', action='append', default=[], metavar='KEY=VALUE', help='Explicit per-probe environment for fallback/renderer comparisons')
     parser.add_argument('--require-frame-pacing', action='store_true', help='Fail if an active GUI flow has presentation gaps over 100 ms or insufficient samples')
@@ -296,7 +334,7 @@ def main():
         (args.output / 'desktop-before.png').write_bytes(screenshot.stdout)
     inventory = session.run("dpkg-query -W -f '${Package} ${Version} ${Architecture} ${db:Status-Status}\\n' | grep -E '^(libqt[56]|qtwayland|qt[56]-|libgtk|libreoffice|flatpak |box64 |wine|openjdk|chromium|ffmpeg |libavcodec|libva|mesa-|vulkan-|libegl|libgl|libsdl|libpyside|python3-(pyqt|pyside|gi|tk|wx))'; printf '\\n--- graphics/session ---\\n'; kscreen-doctor -o; printf '\\n--- installed Flatpaks ---\\n'; flatpak list --columns=application,arch,branch,runtime", capture_output=True, text=True)
     (args.output / 'inventory.txt').write_text(inventory.stdout + inventory.stderr)
-    report = dict(version=2, serial=session.serial, package=PACKAGE, engine=session.record['engine'],
+    report = dict(version=2, serial=session.serial, package=PACKAGE, apk_sha256=installed_apk(session), engine=session.record['engine'],
                   rootfs=session.record['rootfs'], user=session.environment['USER'],
                   session={k: v for k, v in session.environment.items() if k.startswith(('QT_', 'GTK_', 'GDK_', 'QSG_', 'LIBVA_', 'TERMUX_VA_', 'MESA_', 'GALLIUM_', 'VK_', 'EGL_', 'LIBGL_', 'SDL_', 'BOX64_', 'FEX_', 'FD_', 'TURNIP_', 'FLATPAK_'))
                            or k in ('DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS')},
@@ -305,6 +343,7 @@ def main():
                   environment_overrides=overrides,
                   desktop_visibility=visibility, results=[])
     report['selected_runtime'] = {}
+    app_uid = session.adb('shell', 'run-as ' + PACKAGE + ' id -u', capture_output=True, text=True, check=True).stdout.strip()
     for name in ('renderer-mode', 'guest-engine', 'hw-video-decode'):
         value = session.adb('shell', '-T', shlex.join(['run-as', PACKAGE, 'cat', 'files/' + name]),
                             capture_output=True, text=True)
@@ -324,7 +363,7 @@ def main():
     directory = '/tmp/portal-compat-' + uuid.uuid4().hex
     session.run('mkdir -m 700 ' + shlex.quote(directory), check=True)
     report['probe_sources'] = {}
-    for probe in ('toolkit_probe.py', 'libreoffice_probe.py', 'media_probe.py', 'sdl_probe.py', 'vulkan_probe.py', 'gtk2_probe.py', 'windows_probe.py', 'vlc_probe.py', 'chromium_probe.py', 'JavaProbe.java', 'flatpak_probe.py', 'flatpak_sdl_probe.c'):
+    for probe in ('toolkit_probe.py', 'libreoffice_probe.py', 'media_probe.py', 'sdl_probe.py', 'vulkan_probe.py', 'gtk2_probe.py', 'windows_probe.py', 'vlc_probe.py', 'vlc_playback_probe.py', 'chromium_probe.py', 'electron_probe.py', 'JavaProbe.java', 'flatpak_probe.py', 'flatpak_sdl_probe.c'):
         source = REPO / 'tests/compat' / probe
         report['probe_sources'][probe] = hashlib.sha256(source.read_bytes()).hexdigest()
         push(session, source, directory + '/' + probe)
@@ -368,6 +407,15 @@ def main():
             elif case == 'swing':
                 command = f'java {directory}/JavaProbe.java {args.seconds}'
                 level, timeout = 'gui_probe', args.seconds + 35
+            elif case in SUITES['playback']:
+                codec = case.removeprefix('vlc-')
+                if codec not in remote_fixtures:
+                    report['results'].append(dict(case=case, status='untested', reason='Provide a clip with --fixtures'))
+                    break
+                command = shlex.join(['python3', directory + '/vlc_playback_probe.py', remote_fixtures[codec],
+                                      '--seconds', str(args.seconds)])
+                env.update(XDG_CONFIG_HOME=directory + '/vlc-playback-config', XDG_CACHE_HOME=directory + '/vlc-playback-cache')
+                level, timeout = 'video_playback', args.seconds + 35
             elif case in SUITES['media'] + SUITES['portable']:
                 if case not in remote_fixtures:
                     report['results'].append(dict(case=case, status='untested', reason='Provide an owned fixture with --fixtures; see build_compat_fixtures.py'))
@@ -394,8 +442,10 @@ def main():
                 command = f'python3 {directory}/chromium_probe.py --seconds {args.seconds}'
                 level, timeout = 'gui_probe', args.seconds + 40
             elif case == 'electron':
-                report['results'].append(dict(case=case, status='untested', reason='Requires an application-specific disposable profile and functional flow'))
-                break
+                command = shlex.join(['python3', directory + '/electron_probe.py', '--seconds', str(args.seconds),
+                                      '--runtime', args.electron_runtime,
+                                      *['--launch-flag=' + flag for flag in args.electron_launch_flag]])
+                level, timeout = 'gui_probe', args.seconds + 50
             elif case == 'flatpak':
                 command = f'python3 {directory}/flatpak_probe.py --directory {directory}/flatpak --installation {args.flatpak_installation} --seconds {args.seconds}'
                 level, timeout = 'packaged_graphics_probe', args.seconds + 120
@@ -410,9 +460,20 @@ def main():
             env.update(overrides)
             try:
                 trace = args.output / (label + '.pftrace') if args.perfetto else None
+                codec_start = None
+                if level in ('hardware_decode', 'video_playback'):
+                    codec_start = float(session.adb('shell', 'date +%s.%N', capture_output=True, text=True, check=True).stdout)
                 with perfetto_capture(session, trace, timeout + 10) as trace_metadata:
                     result, measurements = capture(session, command, env, timeout)
                 measurements['perfetto'] = trace_metadata
+                if codec_start is not None:
+                    raw = session.adb('shell', shlex.join(['logcat', '-d', '--uid=' + app_uid,
+                                      '-v', 'epoch', '-T', f'{codec_start:.3f}']), capture_output=True, text=True, timeout=20)
+                    lines = [line.lstrip() for line in raw.stdout.splitlines()
+                             if re.match(r'^\s*\d+\.\d+\s', line) and float(line.split()[0]) >= codec_start]
+                    (args.output / (label + '.android-codec.log')).write_text('\n'.join(lines) + '\n')
+                    measurements['android_codec_components'] = android_codec_components('\n'.join(lines))
+                    measurements['codec_capture_start_epoch'] = codec_start
                 (args.output / (label + '.stdout')).write_text(result.stdout)
                 (args.output / (label + '.stderr')).write_text(result.stderr)
                 observations = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{') and line.endswith('}')]
@@ -422,9 +483,7 @@ def main():
                 (args.output / (label + '.frames.csv')).write_text(
                     'desired_present_ns,actual_present_ns,frame_ready_ns\n' +
                     ''.join(','.join(map(str, row)) + '\n' for row in sorted(rows)))
-                unavailable = any(x in result.stderr for x in (
-                    'ModuleNotFoundError', 'Namespace Gtk not available', 'not found',
-                    'runtime missing', 'install Box64', 'install FEX', 'cannot open shared object file'))
+                unavailable = unavailable_launch(result.stderr)
                 success = result.returncode == 0 and (level == 'graphics_probe' or bool(observations))
                 if level == 'launch_only':
                     success = result.returncode == 0 and any(o.get('qt_interface_window') for o in observations)
@@ -453,8 +512,12 @@ def main():
     # Deliberately keep disposable profiles and logs in the named /tmp folder
     # for diagnosis. They never replace the user's application profiles.
     report['guest_artifacts'] = directory
+    report['apk_sha256_after'] = installed_apk(session)
+    report['compatibility_valid'] = report['apk_sha256'] == report['apk_sha256_after']
+    if not report['compatibility_valid']:
+        report['invalid_reason'] = 'The installed APK changed during the suite; repeat on one build'
     save()
-    return int(any(r['status'] in ('failed', 'invalid') or
+    return int(not report['compatibility_valid'] or any(r['status'] in ('failed', 'invalid') or
                    (args.require_frame_pacing and not r.get('warmup', False) and r.get('desktop_presentation', {}).get('pacing_status')
                     in ('gaps_over_100ms_observed', 'insufficient_samples')) for r in report['results']))
 

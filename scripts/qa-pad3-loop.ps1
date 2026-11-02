@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Automated Continuous QA Validation Loop on OnePlus Pad 3 (adb: f105b146).
+    Automated Continuous QA Validation Loop on OnePlus Pad 3.
 
 .DESCRIPTION
     Automates the build, install, launch, diagnostics retrieval, screenshot capture,
@@ -27,7 +27,7 @@
     screenshot-content, and stability evidence.
 
 .PARAMETER DeviceId
-    Target adb device ID (default: "f105b146" for OnePlus Pad 3).
+    Target adb device ID (default: the first connected adb device).
 
 .PARAMETER ArtifactDir
     Output directory for logs, screenshots, and validation reports.
@@ -75,9 +75,9 @@
 
 .EXAMPLE
     . .\scripts\qa-pad3-loop.ps1 -FunctionsOnly
-    Test-ScreenResolution -DeviceId "f105b146"
-    Test-KWinConnection -DeviceId "f105b146"
-    Test-WaylandReadinessMarker -DeviceId "f105b146"
+    Test-ScreenResolution -DeviceId "<adb serial>"
+    Test-KWinConnection -DeviceId "<adb serial>"
+    Test-WaylandReadinessMarker -DeviceId "<adb serial>"
 #>
 
 [CmdletBinding()]
@@ -110,7 +110,7 @@ function Get-DefaultQaDeviceId {
             if ($detected) { return $detected }
         }
     } catch {}
-    return "f105b146"
+    throw "No adb device connected"
 }
 
 if (-not $DeviceId) {
@@ -133,7 +133,6 @@ function Initialize-BuildEnvironment {
     # 1. Android SDK
     if (-not $env:ANDROID_HOME -or -not (Test-Path $env:ANDROID_HOME)) {
         $sdkCandidates = @(
-            "C:\Users\masob\AppData\Local\Android\Sdk",
             (Join-Path $env:LOCALAPPDATA "Android\Sdk")
         )
         foreach ($candidate in $sdkCandidates) {
@@ -183,8 +182,7 @@ function Initialize-BuildEnvironment {
 
     # 4. Locate or compile x.exe (xbuild)
     $xbuildCandidates = @(
-        (Join-Path $RepoRoot "patches\xbuild\target\debug\x.exe"),
-        "C:\Users\masob\Documents\Portal\patches\xbuild\target\debug\x.exe"
+        (Join-Path $RepoRoot "patches\xbuild\target\debug\x.exe")
     )
     $xbuildPath = $null
     foreach ($candidate in $xbuildCandidates) {

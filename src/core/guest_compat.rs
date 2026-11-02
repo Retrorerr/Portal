@@ -47,6 +47,63 @@ pub fn retire_libreoffice_launchers(root: &std::path::Path) -> std::io::Result<(
     Ok(())
 }
 
+/// Retire forced Electron backend/stdio options only from an unchanged
+/// Portal-derived entry. A marker alone is not ownership proof after a user
+/// edits an entry, and options shipped by the app itself must remain intact.
+pub fn retire_electron_launch_options(entry: &str, source: &str) -> Option<String> {
+    const MARKER: &str = "X-LocalDesktop-NoSandbox=true";
+    const MANAGED: &[&str] = &[
+        " --disable-features=GlobalShortcutsPortal",
+        " --enable-wayland-ime",
+        " --wayland-text-input-version=3",
+        " --ozone-platform=wayland",
+        " --no-stdio-init",
+        " --no-sandbox",
+        " --password-store=basic",
+    ];
+    if !entry.lines().any(|line| line == MARKER) {
+        return None;
+    }
+    let normalized = entry
+        .split_inclusive('\n')
+        .filter(|line| line.trim_end() != MARKER)
+        .map(|line| {
+            if line.starts_with("Exec=") {
+                MANAGED
+                    .iter()
+                    .fold(line.to_owned(), |text, flag| text.replace(flag, ""))
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<String>();
+    if normalized != source {
+        return None;
+    }
+    // Older Electron helpers added these as a pair. A single matching
+    // option could be an explicit user choice on another Chromium launcher.
+    if !entry.lines().any(|line| {
+        line.starts_with("Exec=")
+            && line.contains(" --no-stdio-init")
+            && line.contains(" --ozone-platform=wayland")
+    }) {
+        return Some(entry.to_owned());
+    }
+    Some(
+        entry
+            .split_inclusive('\n')
+            .map(|line| {
+                if line.starts_with("Exec=") {
+                    line.replace(" --no-stdio-init", "")
+                        .replace(" --ozone-platform=wayland", "")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect(),
+    )
+}
+
 pub fn install_command() -> String {
     format!(
         "apt-get update && apt-get install -y --no-remove --no-install-recommends {}",
