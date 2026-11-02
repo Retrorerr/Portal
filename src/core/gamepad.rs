@@ -195,6 +195,19 @@ impl PadState {
         true
     }
 
+    /// A button, trigger or d-pad direction is held, or a stick is pushed
+    /// past a small deadzone: the player is mid-action even while the pad
+    /// sends no new events (a held throttle, a stick kept at full lock).
+    pub fn engaged(&self) -> bool {
+        const STICK_DEADZONE: i32 = 8_000;
+        const TRIGGER_DEADZONE: i32 = 16;
+        self.buttons.iter().any(|&held| held)
+            || [0, 1, 3, 4].iter().any(|&axis| self.axes[axis].abs() > STICK_DEADZONE)
+            || [2, 5].iter().any(|&axis| self.axes[axis] > TRIGGER_DEADZONE)
+            || self.axes[6] != 0
+            || self.axes[7] != 0
+    }
+
     fn update_trigger(&mut self, side: usize) {
         let digital = if self.digital_triggers[side] { 255 } else { 0 };
         self.axes[2 + side * 3] = self.analog_triggers[side].max(digital);
@@ -404,6 +417,22 @@ mod tests {
         assert_eq!(pad.axes[2], 255); // LT from LTRIGGER
         assert_eq!(pad.axes[5], 128); // RT from GAS
         assert_eq!((pad.axes[6], pad.axes[7]), (-1, 1));
+    }
+
+    #[test]
+    fn engaged_ignores_resting_noise_and_sees_held_input() {
+        assert!(!PadState::default().engaged());
+        assert!(!axes([0.1, -0.1, 0.05, 0.0, 0.03, 0.02, 0.0, 0.0, 0.0, 0.0]).engaged());
+        assert!(axes([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]).engaged()); // GAS held
+        assert!(axes([0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]).engaged());
+        let mut pad = PadState::default();
+        pad.apply_key(KEYCODE_DPAD_LEFT, true);
+        assert!(pad.engaged());
+        pad.apply_key(KEYCODE_DPAD_LEFT, false);
+        pad.apply_key(KEYCODE_BUTTON_A, true);
+        assert!(pad.engaged());
+        pad.apply_key(KEYCODE_BUTTON_A, false);
+        assert!(!pad.engaged());
     }
 
     #[test]

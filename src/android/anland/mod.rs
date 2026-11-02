@@ -29,7 +29,9 @@ pub mod consumer;
 pub mod protocol;
 pub mod sys;
 
-pub use consumer::{AnlandConfig, AnlandKeySink, AnlandPointerSink, AnlandSession};
+pub use consumer::{
+    note_gamepad_input, AnlandConfig, AnlandKeySink, AnlandPointerSink, AnlandSession,
+};
 
 use std::ffi::c_void;
 use std::sync::Arc;

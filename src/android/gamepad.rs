@@ -315,7 +315,15 @@ fn with_pad(device_id: i32, change: impl FnOnce(&mut PadState) -> bool) -> bool 
     };
     let handled = change(&mut pad.state);
     flush(pad);
+    note_activity(&hub);
     handled
+}
+
+/// Pads reach the guest through their own evdev ptys, not the Anland
+/// session, so tell its presentation pacing that the player is active.
+fn note_activity(hub: &Hub) {
+    let engaged = hub.pads.values().any(|pad| pad.state.engaged());
+    crate::android::anland::note_gamepad_input(engaged);
 }
 
 #[no_mangle]
@@ -380,5 +388,6 @@ pub extern "system" fn Java_app_polarbear_GamepadBridge_nativeRemoved(
 ) {
     if let Ok(mut hub) = hub().lock() {
         remove_pad(&mut hub, device_id);
+        note_activity(&hub);
     }
 }

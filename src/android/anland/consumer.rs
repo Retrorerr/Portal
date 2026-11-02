@@ -75,6 +75,41 @@ const DAMAGE_STREAK_HIGH_REFRESH_NS: u64 = 100_000_000;
 /// How long the window keeps its high-refresh display-mode request after
 /// demand lapses (see `display_mode_request`).
 const HIGH_REFRESH_HOLD_NS: u64 = 1_000_000_000;
+/// How long after the user's last touch, pointer, key, text or gamepad input
+/// presentation stays interactive (full panel rate for damage, and sustained
+/// damage may request the high-refresh mode). Outlasts `INPUT_BURST_MS` so
+/// kinetic scrolling and fling tails keep the full rate.
+const INTERACTIVE_HOLD_NS: u64 = 3_000_000_000;
+/// Minimum spacing of damage-driven selects while nobody interacts: every
+/// 2nd vsync at 144 Hz (72 fps) and 120 Hz (60 fps), every vsync at 90 Hz and
+/// below. Browsers playing video pace to frame callbacks and repaint on every
+/// presented frame, so a panel pinned at 144 Hz (OxygenOS game mode) ran
+/// Firefox, KWin and SurfaceFlinger at 144 fps for a 24 fps video.
+const IDLE_SELECT_INTERVAL_NS: u64 = 10_000_000;
+
+/// Latest gamepad input (monotonic ns) and whether any pad is held off
+/// neutral. Pads reach the guest through their own evdev ptys, not through
+/// the session, so `gamepad` reports them here.
+static PAD_INPUT_NS: AtomicU64 = AtomicU64::new(0);
+static PAD_ENGAGED: AtomicBool = AtomicBool::new(false);
+
+/// A gamepad event reached the guest; `engaged` = a pad is still held.
+pub fn note_gamepad_input(engaged: bool) {
+    PAD_INPUT_NS.store(sys::now_ns(), Ordering::Release);
+    PAD_ENGAGED.store(engaged, Ordering::Release);
+}
+
+/// The user is driving the desktop: recent input, or a key, button or pad
+/// held down (a held throttle sends no events).
+fn interactive(inner: &Inner, now: u64) -> bool {
+    let last = inner
+        .user_input_ns
+        .load(Ordering::Acquire)
+        .max(PAD_INPUT_NS.load(Ordering::Acquire));
+    (last != 0 && now.saturating_sub(last) < INTERACTIVE_HOLD_NS)
+        || PAD_ENGAGED.load(Ordering::Acquire)
+        || !inner.held_inputs.lock().unwrap().is_empty()
+}
 /// Instrumentation window for the `anland.fps` line.
 const FPS_WINDOW_NS: u64 = 2_000_000_000;
 
@@ -231,6 +266,14 @@ struct Inner {
     /// animation), so an isolated repaint such as a blinking text cursor
     /// renders promptly without pinning the panel at its peak refresh.
     high_refresh_until_ns: AtomicU64,
+    /// Deadline of explicit full-rate presentation (input, connect and start
+    /// bursts): every vsync selects. Past it, damage-only demand selects one
+    /// frame per hint.
+    full_rate_until_ns: AtomicU64,
+    /// A KWin damage hint arrived since the last select.
+    damage_pending: AtomicBool,
+    /// Latest forwarded user input (monotonic ns), see `interactive`.
+    user_input_ns: AtomicU64,
     /// Last forwarded pointer position (buffer pixels) for relative-delta
     /// synthesis, tagged with the observing surface generation. The KWin
     /// backend emits both absolute and relative motion from each
@@ -265,6 +308,7 @@ fn kick(inner: &Arc<Inner>, burst_ms: u64) {
     inner
         .high_refresh_until_ns
         .fetch_max(until, Ordering::AcqRel);
+    inner.full_rate_until_ns.fetch_max(until, Ordering::AcqRel);
     let _ = sys::eventfd_write(&inner.wake, 1);
 }
 
@@ -501,6 +545,9 @@ impl AnlandSession {
             wake,
             demand_until_ns: AtomicU64::new(0),
             high_refresh_until_ns: AtomicU64::new(0),
+            full_rate_until_ns: AtomicU64::new(0),
+            damage_pending: AtomicBool::new(false),
+            user_input_ns: AtomicU64::new(0),
             last_pointer: Mutex::new(None),
             finger_axes: Mutex::new(0),
             wheel_carry: Mutex::new([0.0; 2]),
@@ -630,6 +677,7 @@ impl AnlandSession {
         inner.rebind_active.store(false, Ordering::Release);
         inner.demand_until_ns.store(0, Ordering::Release);
         inner.high_refresh_until_ns.store(0, Ordering::Release);
+        inner.full_rate_until_ns.store(0, Ordering::Release);
         *inner.screen.lock().unwrap() = (w, h);
         inner.refresh_mhz.store(cfg.refresh_mhz, Ordering::Release);
         inner.broker.set_screen(ScreenInfo {
@@ -723,6 +771,7 @@ impl AnlandSession {
         self.inner.rebind_request.lock().unwrap().take();
         self.inner.demand_until_ns.store(0, Ordering::Release);
         self.inner.high_refresh_until_ns.store(0, Ordering::Release);
+        self.inner.full_rate_until_ns.store(0, Ordering::Release);
         let _ = sys::eventfd_write(&self.inner.wake, 1);
 
         // Return the one dequeued spare before joining. This is the explicit
@@ -869,6 +918,7 @@ fn send_input_inner(inner: &Arc<Inner>, ev: &InputEvent) {
     // Input means the user is active: full-rate presentation window plus
     // an immediate wake (the select bypasses the vsync gate once, then
     // subsequent frames lock to ticks — low latency without free-spin).
+    inner.user_input_ns.store(sys::now_ns(), Ordering::Release);
     kick(inner, INPUT_BURST_MS);
     let _guard = inner.io_lock.lock().unwrap();
     let gen_guard = inner.gen.lock().unwrap();
@@ -957,6 +1007,7 @@ impl AnlandSession {
         if inner.rebind_active.load(Ordering::Acquire) {
             return false;
         }
+        inner.user_input_ns.store(sys::now_ns(), Ordering::Release);
         kick(inner, INPUT_BURST_MS);
         let _guard = inner.io_lock.lock().unwrap();
         let gen_guard = inner.gen.lock().unwrap();
@@ -1722,6 +1773,7 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
         }
         hints += 1;
         inner.damage_hints.fetch_add(1, Ordering::Relaxed);
+        inner.damage_pending.store(true, Ordering::Release);
         let until = now.wrapping_add(DAMAGE_BURST_NS);
         if inner.demand_until_ns.fetch_max(until, Ordering::AcqRel) <= now {
             wakes += 1;
@@ -1735,7 +1787,11 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
             streak_start_ns = now;
         }
         last_hint_ns = now;
-        if now.wrapping_sub(streak_start_ns) >= DAMAGE_STREAK_HIGH_REFRESH_NS {
+        // Only while the user drives the desktop: a video or animation
+        // nobody interacts with gains nothing from the panel's peak rate.
+        if now.wrapping_sub(streak_start_ns) >= DAMAGE_STREAK_HIGH_REFRESH_NS
+            && interactive(&inner, now)
+        {
             inner
                 .high_refresh_until_ns
                 .fetch_max(until, Ordering::AcqRel);
@@ -1885,8 +1941,15 @@ fn render_loop(inner: Arc<Inner>) {
                 > now,
         );
         let since_last = now.wrapping_sub(last_select_ns);
+        // Explicit bursts present every tick. Damage-only demand presents
+        // one frame per hint (a 24 fps player got ~89 identical frames/s at
+        // 144 Hz), at most every `IDLE_SELECT_INTERVAL_NS` while nobody
+        // interacts.
+        let paced = inner.full_rate_until_ns.load(Ordering::Acquire) > now
+            || (inner.damage_pending.load(Ordering::Acquire)
+                && (since_last >= IDLE_SELECT_INTERVAL_NS || interactive(&inner, now)));
         let want = wake_ready
-            || (tick_ready && (demanding || since_last >= HEARTBEAT_NS))
+            || (tick_ready && ((demanding && paced) || since_last >= HEARTBEAT_NS))
             || (!tick_ready && !wake_ready && !demanding && since_last >= HEARTBEAT_NS);
         iters += 1;
         if iters <= 30 {
@@ -2043,6 +2106,9 @@ fn render_loop(inner: Arc<Inner>) {
             match gen.as_ref() {
                 Some(g) if g.id == cur_gen => {
                     unsafe { *(g.shm_ptr as *mut u32) = idx as u32 };
+                    // KWin renders all damage scheduled so far into this
+                    // frame; hints from here on need the next one.
+                    inner.damage_pending.store(false, Ordering::Release);
                     if sys::eventfd_write(&g.buf_ready, 1).is_err() {
                         drop(gen);
                         drop(_guard);
