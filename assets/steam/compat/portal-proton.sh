@@ -148,25 +148,31 @@ esac
 # Ubisoft Connect's overlay inline-hooks the game's graphics DLLs with x86
 # code; Proton ARM64's DXVK/dxgi are ARM64EC, so the hooked entry point
 # raises SIGILL and the game reports "Corrupted installation (CODE 011)".
-# Keep the overlay off in this game's prefix (upc writes it back on).
+# Keep the overlay and upc's "enable the overlay" prompt (whose default
+# answer turns it back on) off in this game's prefix. upc creates its
+# settings on first start, after this runs, so seed them for every user as
+# soon as the launcher is installed.
 # Stopgap until FEX/Wine handle x86 hooks over ARM64EC code.
-if [ -n "$STEAM_COMPAT_DATA_PATH" ]; then
-    for upc in "$STEAM_COMPAT_DATA_PATH"/pfx/drive_c/users/*/AppData/Local/"Ubisoft Game Launcher"; do
-        [ -d "$upc" ] || continue
-        yaml="$upc/settings.yaml"
+ubisoft_overlay_off() {
+    [ -d "$1/pfx/drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher" ] || return 0
+    for appdata in "$1"/pfx/drive_c/users/*/AppData/Local; do
+        [ -d "$appdata" ] || continue
+        case "$appdata" in */users/Public/*) continue ;; esac
+        yaml="$appdata/Ubisoft Game Launcher/settings.yaml"
         if [ -f "$yaml" ]; then
             # upc writes CRLF line endings.
             awk '
                 /^[^ ]/ { in_overlay = ($0 ~ /^overlay:\r?$/) }
-                in_overlay && $0 ~ /^  enabled: true\r?$/ { sub(/true/, "false") }
+                in_overlay && $0 ~ /^  (enabled|warning_enabled): true\r?$/ { sub(/true/, "false") }
                 { print }
             ' "$yaml" > "$yaml.portal-tmp" && mv "$yaml.portal-tmp" "$yaml"
-        elif [ -d "$STEAM_COMPAT_DATA_PATH/pfx/drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher" ]; then
-            printf 'overlay:\n  enabled: false\n' > "$yaml"
+        else
+            mkdir -p "${yaml%/*}" && printf 'overlay:\n  enabled: false\n  warning_enabled: false\n' > "$yaml"
         fi
     done
-    unset upc yaml
-fi
+}
+[ -n "$STEAM_COMPAT_DATA_PATH" ] && ubisoft_overlay_off "$STEAM_COMPAT_DATA_PATH"
+unset appdata yaml
 
 if [ "$PORTAL_WOW64" = box64 ]; then
     if [ -f /opt/box64/wowbox64.dll ]; then

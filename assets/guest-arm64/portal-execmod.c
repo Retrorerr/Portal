@@ -8,10 +8,14 @@
  * in Wine's log) and the first call into ntdll.dll crashes. Every Proton
  * game dies about a second after launch, before it shows a window.
  *
- * When mprotect asks for PROT_EXEC on a private mapping and gets EACCES,
- * this preload copies the range into anonymous memory at the same address
- * (contents unchanged) and retries. Anonymous memory may become executable.
- * Shared mappings and every other error are left alone.
+ * When mprotect asks for PROT_EXEC on a private file mapping and gets
+ * EACCES, this preload copies the range into anonymous memory at the same
+ * address (contents unchanged) and retries. Anonymous memory may become
+ * executable. Anonymous and shared mappings and every other error are left
+ * alone: an EACCES there is not execmod (making the calling thread's own
+ * stack executable needs execstack), the copy cannot help, and remapping a
+ * stack in use pulls it out from under the thread. Wine falls back to
+ * non-executable pages by itself.
  *
  * Build (guest-native ARM64 glibc, no libc at link time):
  *   clang --target=aarch64-linux-gnu -shared -fPIC -nostdlib -O2 \
@@ -60,8 +64,14 @@ static uintptr_t parse_hex(const char **p) {
     }
 }
 
-/* True when every page of [start, end) lies in private mappings. */
-static int range_is_private(uintptr_t start, uintptr_t end) {
+static const char *skip_field(const char *p) {
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    return p;
+}
+
+/* True when every page of [start, end) lies in private file mappings. */
+static int range_is_private_file(uintptr_t start, uintptr_t end) {
     char buf[4096], line[512];
     size_t used = 0;
     long n;
@@ -83,6 +93,9 @@ static int range_is_private(uintptr_t start, uintptr_t end) {
             if (*p++ != ' ' || p[0] == 0 || p[1] == 0 || p[2] == 0) continue;
             if (hi <= covered || lo > covered) continue;
             if (p[3] != 'p') { close(fd); return 0; }
+            /* perms, offset, device, then the inode: 0 for anonymous memory. */
+            const char *inode = skip_field(skip_field(skip_field(p)));
+            if (inode[0] == '0' && (inode[1] == ' ' || inode[1] == 0)) { close(fd); return 0; }
             covered = hi;
             if (covered >= end) { close(fd); return 1; }
         }
@@ -101,7 +114,7 @@ int mprotect(void *addr, size_t len, int prot) {
     size_t page = (size_t)getpagesize();
     len = (len + page - 1) & ~(page - 1);
     uintptr_t start = (uintptr_t)addr;
-    if (!range_is_private(start, start + len)) {
+    if (!range_is_private_file(start, start + len)) {
         *__errno_location() = EACCES;
         return -1;
     }
