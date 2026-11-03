@@ -320,7 +320,7 @@ fn verify_archive(archive_path: &Path, pin: &LayerPin) -> anyhow::Result<()> {
     );
     let mut file = fs::File::open(archive_path)?;
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 256 * 1024];
+    let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
@@ -362,7 +362,7 @@ fn download_archive(
     let mut hasher = Sha256::new();
     let mut bytes: u64 = 0;
     let mut out = fs::File::create(archive_path)?;
-    let mut buf = [0u8; 256 * 1024];
+    let mut buf = vec![0u8; 256 * 1024];
     let start = Instant::now();
     let mut last_report = Instant::now();
     loop {

@@ -107,7 +107,7 @@ impl Broker {
             let slot = self
                 .slot
                 .lock()
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "broker slot poisoned"))?;
+                .map_err(|_| io::Error::other("broker slot poisoned"))?;
             (
                 slot.screen.width,
                 slot.screen.height,
@@ -141,10 +141,12 @@ impl Broker {
     fn serve_producer(&self, stream: std::os::unix::net::UnixStream) {
         use std::os::unix::io::AsRawFd;
         let raw = stream.as_raw_fd();
-        // Wrap without owning: the stream owns the fd; guard drops nothing.
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        // Wrap without owning: the stream owns the fd. ManuallyDrop also
+        // holds if the handshake panics, where a forget() after the call
+        // would be skipped and unwinding would close the fd twice.
+        // SAFETY: `stream` outlives the wrapper and keeps `raw` open.
+        let fd = std::mem::ManuallyDrop::new(unsafe { OwnedFd::from_raw_fd(raw) });
         let result = self.handshake_loop(&fd);
-        std::mem::forget(fd);
         if let Err(e) = result {
             log::info!("anland.broker producer session ended: {e}");
         }
@@ -198,7 +200,7 @@ impl Broker {
             let slot = self
                 .slot
                 .lock()
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "broker slot poisoned"))?;
+                .map_err(|_| io::Error::other("broker slot poisoned"))?;
             let deposit = match slot.deposit.as_ref() {
                 Some(d) => d,
                 None => return Ok(()), // no consumer yet; producer retries in 200ms
@@ -207,14 +209,19 @@ impl Broker {
             for (i, master) in deposit.fds.iter().enumerate() {
                 let dup = unsafe { libc::dup(master.as_raw_fd()) };
                 if dup < 0 {
-                    for j in 0..i {
-                        unsafe { libc::close(duped[j]) };
+                    for &earlier in &duped[..i] {
+                        unsafe { libc::close(earlier) };
                     }
                     return Err(io::Error::last_os_error());
                 }
                 duped[i] = dup;
             }
-            (deposit.generation, duped, slot.screen.width, slot.screen.height)
+            (
+                deposit.generation,
+                duped,
+                slot.screen.width,
+                slot.screen.height,
+            )
         };
         let hdr = {
             let mut h = [0u8; 8];

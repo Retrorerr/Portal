@@ -191,7 +191,9 @@ fn download_once(
     if let Some(response) = response.as_mut() {
         let mut out = OpenOptions::new().create(true).append(true).open(&part)?;
         let mut buffer = vec![0u8; 256 * 1024];
-        let mut last_report = Instant::now() - Duration::from_secs(1);
+        let mut last_report = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
         loop {
             let read = response
                 .read(&mut buffer)

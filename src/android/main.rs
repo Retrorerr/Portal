@@ -19,6 +19,7 @@ use winit::{
 
 #[no_mangle]
 fn android_main(android_app: AndroidApp) {
+    crate::android::proot::launch::note_process_start();
     std::env::set_var(
         "RUST_BACKTRACE",
         if cfg!(debug_assertions) { "1" } else { "0" },

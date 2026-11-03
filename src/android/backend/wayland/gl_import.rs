@@ -83,21 +83,61 @@ impl AhbTextureImporter {
                     .map_err(|e| format!("Failed to get GL symbol: {}", e))?;
                 Ok(*sym)
             };
+            // A null function pointer is undefined behaviour the moment it
+            // is transmuted, before any call: reject it here.
+            let load_proc = |name: &str| {
+                load_proc(name).and_then(|ptr| {
+                    if ptr.is_null() {
+                        Err(format!("Symbol {name} is null"))
+                    } else {
+                        Ok(ptr)
+                    }
+                })
+            };
+            let load_gl = |name: &[u8]| {
+                load_gl(name).and_then(|ptr| {
+                    if ptr.is_null() {
+                        Err("GL symbol is null".to_owned())
+                    } else {
+                        Ok(ptr)
+                    }
+                })
+            };
 
             let importer = Self {
-                egl_get_native_client_buffer: std::mem::transmute(load_proc(
+                egl_get_native_client_buffer: std::mem::transmute::<
+                    *const c_void,
+                    FnEglGetNativeClientBufferANDROID,
+                >(load_proc(
                     "eglGetNativeClientBufferANDROID",
                 )?),
-                egl_create_image: std::mem::transmute(load_proc("eglCreateImageKHR")?),
-                egl_destroy_image: std::mem::transmute(load_proc("eglDestroyImageKHR")?),
-                gl_gen_textures: std::mem::transmute(load_gl(b"glGenTextures\0")?),
-                gl_bind_texture: std::mem::transmute(load_gl(b"glBindTexture\0")?),
-                gl_delete_textures: std::mem::transmute(load_gl(b"glDeleteTextures\0")?),
-                gl_tex_parameteri: std::mem::transmute(load_gl(b"glTexParameteri\0")?),
-                gl_egl_image_target_texture_2d_oes: std::mem::transmute(load_proc(
+                egl_create_image: std::mem::transmute::<*const c_void, FnEglCreateImageKHR>(
+                    load_proc("eglCreateImageKHR")?,
+                ),
+                egl_destroy_image: std::mem::transmute::<*const c_void, FnEglDestroyImageKHR>(
+                    load_proc("eglDestroyImageKHR")?,
+                ),
+                gl_gen_textures: std::mem::transmute::<*const c_void, FnGlGenTextures>(load_gl(
+                    b"glGenTextures\0",
+                )?),
+                gl_bind_texture: std::mem::transmute::<*const c_void, FnGlBindTexture>(load_gl(
+                    b"glBindTexture\0",
+                )?),
+                gl_delete_textures: std::mem::transmute::<*const c_void, FnGlDeleteTextures>(
+                    load_gl(b"glDeleteTextures\0")?,
+                ),
+                gl_tex_parameteri: std::mem::transmute::<*const c_void, FnGlTexParameteri>(
+                    load_gl(b"glTexParameteri\0")?,
+                ),
+                gl_egl_image_target_texture_2d_oes: std::mem::transmute::<
+                    *const c_void,
+                    FnGlEGLImageTargetTexture2DOES,
+                >(load_proc(
                     "glEGLImageTargetTexture2DOES",
                 )?),
-                gl_get_error: std::mem::transmute(load_gl(b"glGetError\0")?),
+                gl_get_error: std::mem::transmute::<*const c_void, FnGlGetError>(load_gl(
+                    b"glGetError\0",
+                )?),
             };
 
             std::mem::forget(egl_lib);

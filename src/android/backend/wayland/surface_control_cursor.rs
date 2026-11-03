@@ -105,48 +105,50 @@ struct Api {
 
 impl Api {
     unsafe fn load() -> Option<Self> {
-        let library = Library::new("libandroid.so").ok()?;
-        macro_rules! required {
-            ($name:literal, $ty:ty) => {
-                *library.get::<$ty>(concat!($name, "\0").as_bytes()).ok()?
+        unsafe {
+            let library = Library::new("libandroid.so").ok()?;
+            macro_rules! required {
+                ($name:literal, $ty:ty) => {
+                    *library.get::<$ty>(concat!($name, "\0").as_bytes()).ok()?
+                };
+            }
+            let api = Self {
+                create_from_window: required!("ASurfaceControl_createFromWindow", CreateFromWindow),
+                release_surface: required!("ASurfaceControl_release", ReleaseSurface),
+                create_transaction: required!("ASurfaceTransaction_create", CreateTransaction),
+                delete_transaction: required!("ASurfaceTransaction_delete", DeleteTransaction),
+                apply_transaction: required!("ASurfaceTransaction_apply", ApplyTransaction),
+                set_visibility: required!("ASurfaceTransaction_setVisibility", SetVisibility),
+                set_z_order: required!("ASurfaceTransaction_setZOrder", SetZOrder),
+                set_position: required!("ASurfaceTransaction_setPosition", SetPosition),
+                set_scale: required!("ASurfaceTransaction_setScale", SetScale),
+                set_transparency: required!(
+                    "ASurfaceTransaction_setBufferTransparency",
+                    SetTransparency
+                ),
+                set_frame_timeline: library
+                    .get::<SetFrameTimeline>(b"ASurfaceTransaction_setFrameTimeline\0")
+                    .ok()
+                    .map(|symbol| *symbol),
+                set_desired_present_time: required!(
+                    "ASurfaceTransaction_setDesiredPresentTime",
+                    SetDesiredPresentTime
+                ),
+                // API 36 is deliberate: without a per-buffer release callback the
+                // cursor pool cannot prove safe reuse independently of EGL.
+                set_buffer_with_release: required!(
+                    "ASurfaceTransaction_setBufferWithRelease",
+                    SetBufferWithRelease
+                ),
+                allocate_buffer: required!("AHardwareBuffer_allocate", AllocateBuffer),
+                describe_buffer: required!("AHardwareBuffer_describe", DescribeBuffer),
+                release_buffer: required!("AHardwareBuffer_release", ReleaseBuffer),
+                lock_buffer: required!("AHardwareBuffer_lock", LockBuffer),
+                unlock_buffer: required!("AHardwareBuffer_unlock", UnlockBuffer),
+                _library: library,
             };
+            Some(api)
         }
-        let api = Self {
-            create_from_window: required!("ASurfaceControl_createFromWindow", CreateFromWindow),
-            release_surface: required!("ASurfaceControl_release", ReleaseSurface),
-            create_transaction: required!("ASurfaceTransaction_create", CreateTransaction),
-            delete_transaction: required!("ASurfaceTransaction_delete", DeleteTransaction),
-            apply_transaction: required!("ASurfaceTransaction_apply", ApplyTransaction),
-            set_visibility: required!("ASurfaceTransaction_setVisibility", SetVisibility),
-            set_z_order: required!("ASurfaceTransaction_setZOrder", SetZOrder),
-            set_position: required!("ASurfaceTransaction_setPosition", SetPosition),
-            set_scale: required!("ASurfaceTransaction_setScale", SetScale),
-            set_transparency: required!(
-                "ASurfaceTransaction_setBufferTransparency",
-                SetTransparency
-            ),
-            set_frame_timeline: library
-                .get::<SetFrameTimeline>(b"ASurfaceTransaction_setFrameTimeline\0")
-                .ok()
-                .map(|symbol| *symbol),
-            set_desired_present_time: required!(
-                "ASurfaceTransaction_setDesiredPresentTime",
-                SetDesiredPresentTime
-            ),
-            // API 36 is deliberate: without a per-buffer release callback the
-            // cursor pool cannot prove safe reuse independently of EGL.
-            set_buffer_with_release: required!(
-                "ASurfaceTransaction_setBufferWithRelease",
-                SetBufferWithRelease
-            ),
-            allocate_buffer: required!("AHardwareBuffer_allocate", AllocateBuffer),
-            describe_buffer: required!("AHardwareBuffer_describe", DescribeBuffer),
-            release_buffer: required!("AHardwareBuffer_release", ReleaseBuffer),
-            lock_buffer: required!("AHardwareBuffer_lock", LockBuffer),
-            unlock_buffer: required!("AHardwareBuffer_unlock", UnlockBuffer),
-            _library: library,
-        };
-        Some(api)
     }
 }
 
@@ -521,15 +523,20 @@ impl SurfaceControlCursor {
         transaction: NonNull<SurfaceTransaction>,
         timeline: Option<AndroidFrameTimeline>,
     ) {
-        let Some(timeline) = timeline else { return };
-        if timeline.is_precise() {
-            if let Some(set_timeline) = self.api.set_frame_timeline {
-                set_timeline(transaction.as_ptr(), timeline.vsync_id);
-                return;
+        unsafe {
+            let Some(timeline) = timeline else { return };
+            if timeline.is_precise() {
+                if let Some(set_timeline) = self.api.set_frame_timeline {
+                    set_timeline(transaction.as_ptr(), timeline.vsync_id);
+                    return;
+                }
             }
-        }
-        if timeline.expected_present_ns > 0 {
-            (self.api.set_desired_present_time)(transaction.as_ptr(), timeline.expected_present_ns);
+            if timeline.expected_present_ns > 0 {
+                (self.api.set_desired_present_time)(
+                    transaction.as_ptr(),
+                    timeline.expected_present_ns,
+                );
+            }
         }
     }
 
@@ -622,16 +629,18 @@ unsafe fn copy_bgra_to_rgba(
     height: usize,
     preserve_alpha: bool,
 ) {
-    for y in 0..height {
-        let src = source.add(y * source_stride);
-        let dst = destination.add(y * destination_stride);
-        for x in 0..width {
-            let s = src.add(x * 4);
-            let d = dst.add(x * 4);
-            *d = *s.add(2);
-            *d.add(1) = *s.add(1);
-            *d.add(2) = *s;
-            *d.add(3) = if preserve_alpha { *s.add(3) } else { 0xff };
+    unsafe {
+        for y in 0..height {
+            let src = source.add(y * source_stride);
+            let dst = destination.add(y * destination_stride);
+            for x in 0..width {
+                let s = src.add(x * 4);
+                let d = dst.add(x * 4);
+                *d = *s.add(2);
+                *d.add(1) = *s.add(1);
+                *d.add(2) = *s;
+                *d.add(3) = if preserve_alpha { *s.add(3) } else { 0xff };
+            }
         }
     }
 }

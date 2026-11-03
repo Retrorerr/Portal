@@ -183,7 +183,7 @@ fn install_attempt() -> anyhow::Result<()> {
         .build()?;
     let mut response = client.get(LAYER_URL).send()?.error_for_status()?;
     let mut compressed = Vec::with_capacity(LAYER_COMPRESSED_BYTES as usize);
-    let mut buf = [0u8; 256 * 1024];
+    let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = response.read(&mut buf)?;
         if n == 0 {

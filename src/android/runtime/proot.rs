@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read};
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
-#[cfg(target_os = "android")]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -15,6 +15,7 @@ use std::os::unix::process::CommandExt;
 
 use crate::android::diagnostics;
 use crate::android::utils::application_context::get_application_context;
+use crate::android::utils::thread::spawn_named;
 use crate::core::config;
 use crate::core::runtime::{LinuxRuntime, LogCallback, ProcessSpec, RuntimeHealth};
 use winit::platform::android::activity::AndroidApp;
@@ -211,23 +212,112 @@ impl PRootRuntime {
     }
 }
 
+/// Tells the output readers to stop. The eventfd stays readable once
+/// raised, so a reader blocked in `poll` wakes at once instead of the
+/// readers waking on a timer.
+struct ReaderStop {
+    raised: AtomicBool,
+    event: Option<OwnedFd>,
+}
+
+impl ReaderStop {
+    fn new() -> Self {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        Self {
+            raised: AtomicBool::new(false),
+            // SAFETY: a fresh descriptor this struct alone owns.
+            event: (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) }),
+        }
+    }
+
+    fn raise(&self) {
+        self.raised.store(true, Ordering::Release);
+        if let Some(event) = &self.event {
+            let one = 1u64.to_ne_bytes();
+            unsafe { libc::write(event.as_raw_fd(), one.as_ptr().cast(), one.len()) };
+        }
+    }
+
+    fn is_raised(&self) -> bool {
+        self.raised.load(Ordering::Acquire)
+    }
+
+    /// Block until `fd` has data (or hangs up) or the stop is raised.
+    fn wait_readable(&self, fd: RawFd) {
+        let mut fds = [
+            libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.event.as_ref().map_or(-1, AsRawFd::as_raw_fd),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // Without an eventfd the stop is only seen on a timeout.
+        let timeout = if self.event.is_some() { -1 } else { 50 };
+        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+    }
+}
+
+/// A pidfd for `pid` when the platform allows them (Android 12+; older
+/// app seccomp filters kill the process on unknown syscalls).
+#[cfg(target_os = "android")]
+fn open_pidfd(pid: u32) -> Option<OwnedFd> {
+    unsafe extern "C" {
+        fn android_get_device_api_level() -> libc::c_int;
+    }
+    if unsafe { android_get_device_api_level() } < 31 {
+        return None;
+    }
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    // SAFETY: a fresh descriptor the caller alone owns.
+    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+#[cfg(not(target_os = "android"))]
+fn open_pidfd(_pid: u32) -> Option<OwnedFd> {
+    None
+}
+
+/// Sleep until the child may have exited: on its pidfd, which the exit
+/// wakes, or else on a poll that slows down once the command has run a
+/// while. Either way cancellation is seen within 250 ms.
+fn wait_for_exit(pidfd: Option<&OwnedFd>, running: Duration) {
+    match pidfd {
+        Some(pidfd) => {
+            let mut fd = libc::pollfd {
+                fd: pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            unsafe { libc::poll(&mut fd, 1, 250) };
+        }
+        None if running < Duration::from_secs(2) => thread::sleep(Duration::from_millis(20)),
+        None => thread::sleep(Duration::from_millis(250)),
+    }
+}
+
 fn drain_stream<R>(
     reader: R,
     command: String,
     user: String,
     stream: &'static str,
     callback: Option<LogCallback>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<ReaderStop>,
 ) -> Vec<u8>
 where
-    R: Read + Send + 'static,
+    R: Read + AsRawFd + Send + 'static,
 {
+    let fd = reader.as_raw_fd();
     let mut reader = BufReader::new(reader);
     let mut output = Vec::new();
     let mut line = Vec::new();
 
     loop {
-        if stop.load(Ordering::Acquire) {
+        if stop.is_raised() {
             break;
         }
         // A WouldBlock keeps the partial line read so far; it is completed
@@ -270,9 +360,7 @@ where
                 }
                 line.clear();
             }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
-            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => stop.wait_readable(fd),
             Err(error) => {
                 let text = format!("stream-read-error={error}");
                 diagnostics::guest_process_line(&command, &user, stream, &text);
@@ -730,12 +818,12 @@ impl PRootRuntime {
                 log::warn!("Failed to make guest stderr nonblocking: {error}");
             }
         }
-        let reader_stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = Arc::new(ReaderStop::new());
         let stdout_command = command.clone();
         let stdout_user = user.clone();
         let stdout_callback = log;
         let stdout_stop = reader_stop.clone();
-        let stdout_thread = thread::spawn(move || {
+        let stdout_thread = spawn_named("guest-stdout", move || {
             let Some(stdout) = stdout else {
                 return Vec::new();
             };
@@ -752,7 +840,7 @@ impl PRootRuntime {
         let stderr_command = command.clone();
         let stderr_user = user.clone();
         let stderr_stop = reader_stop.clone();
-        let stderr_thread = thread::spawn(move || {
+        let stderr_thread = spawn_named("guest-stderr", move || {
             drain_stream(
                 stderr,
                 stderr_command,
@@ -763,6 +851,8 @@ impl PRootRuntime {
             )
         });
 
+        let exit_fd = open_pidfd(child.id());
+        let started = Instant::now();
         let mut terminate_deadline = None;
         let status = loop {
             if cancel
@@ -777,7 +867,7 @@ impl PRootRuntime {
                 if !signalled_group {
                     let _ = child.kill();
                 }
-                reader_stop.store(true, Ordering::Release);
+                reader_stop.raise();
                 terminate_deadline = Some(Instant::now() + Duration::from_secs(2));
                 diagnostics::host_event(
                     "guest-cancel",
@@ -845,11 +935,11 @@ impl PRootRuntime {
                         );
                         terminate_deadline = None;
                     }
-                    thread::sleep(Duration::from_millis(20));
+                    wait_for_exit(exit_fd.as_ref(), started.elapsed());
                 }
                 Err(error) => {
                     log::error!("Failed to poll guest command {command}: {error}");
-                    reader_stop.store(true, Ordering::Release);
+                    reader_stop.raise();
                     let _ = child.kill();
                     break child.wait().expect("Failed to reap guest command");
                 }
@@ -864,7 +954,7 @@ impl PRootRuntime {
         {
             thread::sleep(Duration::from_millis(10));
         }
-        reader_stop.store(true, Ordering::Release);
+        reader_stop.raise();
         let stdout = stdout_thread.join().unwrap_or_default();
         let stderr = stderr_thread.join().unwrap_or_default();
 

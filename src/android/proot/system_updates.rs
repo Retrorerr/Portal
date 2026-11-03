@@ -892,7 +892,11 @@ fn plan_steps(plan: &Plan) -> Vec<Arc<Step>> {
             let step = Arc::new(Step {
                 from,
                 to,
-                last: Mutex::new(Instant::now() - PUBLISH_INTERVAL),
+                last: Mutex::new(
+                    Instant::now()
+                        .checked_sub(PUBLISH_INTERVAL)
+                        .unwrap_or_else(Instant::now),
+                ),
             });
             from = to;
             step

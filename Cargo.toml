@@ -26,11 +26,40 @@ required-features = ["pipewire-sink"]
 pipewire-sink = ["dep:pipewire"]
 portal-debug = []
 
+# Portal Debug ships this profile: xbuild builds Debug without --release.
+# Optimize it so Debug runs (and profiles) like Stable, while keeping
+# overflow checks and debug assertions on to catch bugs on device.
+[profile.dev]
+opt-level = 2
+# Backtraces keep file:line; full debug info made the host library ~250 MB.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 strip = true      # Automatically strip symbols from the binary.
 opt-level = 3     # Daily-driver build: optimize the render/input hot paths.
 lto = true
 codegen-units = 1
+
+# Lints that catch real bugs (UB, panics, fd and lock misuse) fail the build.
+# Style lints stay at their defaults.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+missing_safety_doc = "deny"
+missing_transmute_annotations = "deny"
+cast_ptr_alignment = "deny"
+large_stack_arrays = "deny"
+significant_drop_in_scrutinee = "deny"
+unchecked_time_subtraction = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
 
 [target.'cfg(target_os = "android")'.dependencies] # Portal's Android host dependencies
 tracing = { version = "0.1.41", features = ["release_max_level_warn"] }

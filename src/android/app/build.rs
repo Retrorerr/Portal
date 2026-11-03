@@ -23,6 +23,8 @@ pub struct PolarBearFrontend {
     pub android_app: AndroidApp,
 }
 
+// One backend value lives for the whole process, so variant size is moot.
+#[allow(clippy::large_enum_variant)]
 pub enum PolarBearBackend {
     /// No desktop is running: setup, a setup failure, an unsupported device or
     /// a runtime failure. Compose screens report these to the user.

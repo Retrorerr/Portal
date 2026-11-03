@@ -433,7 +433,7 @@ impl RuntimeArtifact {
         );
         let mut file = fs::File::open(archive)?;
         let mut hash = Sha256::new();
-        let mut buffer = [0u8; 256 * 1024];
+        let mut buffer = vec![0u8; 256 * 1024];
         loop {
             let count = file.read(&mut buffer)?;
             if count == 0 {
@@ -656,7 +656,7 @@ impl RuntimeArtifact {
                 "Cannot check available storage. Reopen Portal to retry."
             );
             let stats = unsafe { stats.assume_init() };
-            let available = (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64);
+            let available = stats.f_bavail.saturating_mul(stats.f_frsize);
             let reusable = if self.verify(&archive).is_ok() {
                 self.compressed_bytes
             } else {
@@ -1183,6 +1183,7 @@ impl RuntimeArtifact {
             let file = fs::OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(false)
                 .open(partial)?;
             file.set_len(checkpoint_length)?;
             file.sync_all()?;
@@ -1254,7 +1255,7 @@ impl RuntimeArtifact {
             .append(resume)
             .truncate(!resume)
             .open(partial)?;
-        let mut buffer = [0u8; 256 * 1024];
+        let mut buffer = vec![0u8; 256 * 1024];
         let mut downloaded = if resume { offset } else { 0 };
         let mut checkpointed = if resume { offset } else { 0 };
         let mut last = Instant::now();
@@ -1275,7 +1276,7 @@ impl RuntimeArtifact {
             // it can never cause a later Range request to skip unknown bytes.
             if downloaded.saturating_sub(checkpointed) >= 4 * 1024 * 1024 {
                 file.sync_all()?;
-                write_atomic(&checkpoint, downloaded.to_string().as_bytes())?;
+                write_atomic(checkpoint, downloaded.to_string().as_bytes())?;
                 checkpointed = downloaded;
             }
             if last.elapsed() >= Duration::from_secs(1) {
@@ -1296,7 +1297,7 @@ impl RuntimeArtifact {
             }
         }
         file.sync_all()?;
-        write_atomic(&checkpoint, downloaded.to_string().as_bytes())?;
+        write_atomic(checkpoint, downloaded.to_string().as_bytes())?;
         if let Some(expected_end) = ranged_end {
             if downloaded > expected_end {
                 let _ = remove_path_synced(partial);

@@ -1215,7 +1215,7 @@ mod tests {
             h: 12,
         };
         let plan = decide_upload(vec![tiny], buffer, false, false, 4);
-        let stats = plan.stats().clone();
+        let stats = *plan.stats();
         assert!(!plan.is_full());
         assert_eq!(stats.damaged_pixels, 144);
         assert_eq!(stats.total_pixels, 3392 * 2400);

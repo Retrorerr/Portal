@@ -282,6 +282,12 @@ impl<C: Copy + PartialEq> KwinCommitGate<C> {
     }
 }
 
+impl<C: Copy + PartialEq> Default for KwinCommitGate<C> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

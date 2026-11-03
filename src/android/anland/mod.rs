@@ -368,7 +368,7 @@ pub fn kwin_glmode_flag_path() -> std::path::PathBuf {
 /// labels bare frames honestly and allows a long cold first-frame budget.
 pub fn software_gl_fallback_requested() -> bool {
     std::fs::read_to_string(kwin_glmode_flag_path())
-        .map(|s| s.trim().to_ascii_lowercase() == "sw")
+        .map(|s| s.trim().eq_ignore_ascii_case("sw"))
         .unwrap_or(false)
 }
 

@@ -164,7 +164,7 @@ fn emit_pointer_press(
         compositor.keyboard.set_focus(
             state,
             Some(surface.wl_surface().clone()),
-            SERIAL_COUNTER.next_serial().into(),
+            SERIAL_COUNTER.next_serial(),
         );
     }
 
@@ -358,7 +358,6 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                 backend.frame_timeline = None;
                 accessibility::set_runtime_active(false);
                 event_loop.set_control_flow(ControlFlow::Wait);
-                return;
             }
         }
         CentralizedEvent::Input(event) => {
@@ -837,7 +836,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
 
             if let Some(output) = &backend.compositor.output {
                 let mode = Mode {
-                    size: size.into(),
+                    size,
                     refresh: backend.refresh_rate_millihz,
                 };
                 output.set_preferred(mode);
@@ -862,7 +861,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                     output.enter(surface.wl_surface());
                 }
                 let serial =
-                    configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+                    configure_toplevel(surface, (configure_size.0, configure_size.1).into());
                 // Record the serial against the current request so later KWin
                 // commits attribute to their owning configure (ack tie-break).
                 if let Some(serial) = serial {
@@ -1089,7 +1088,7 @@ fn maybe_poll_plasma_scale(backend: &mut WaylandBackend) {
             .authoritative_display_state
             .configure_size();
         for surface in backend.compositor.state.xdg_shell_state.toplevel_surfaces() {
-            let serial = configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+            let serial = configure_toplevel(surface, (configure_size.0, configure_size.1).into());
             if let Some(serial) = serial {
                 backend
                     .compositor
@@ -1433,7 +1432,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                 if let Some(output) = &backend.compositor.output {
                     // Missed-resize convergence: nominal mode only.
                     let mode = Mode {
-                        size: size.into(),
+                        size,
                         refresh: backend.refresh_rate_millihz,
                     };
                     output.set_preferred(mode);
@@ -1454,7 +1453,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                         output.enter(surface.wl_surface());
                     }
                     let serial =
-                        configure_toplevel(&surface, (configure_size.0, configure_size.1).into());
+                        configure_toplevel(surface, (configure_size.0, configure_size.1).into());
                     if let Some(serial) = serial {
                         backend
                             .compositor

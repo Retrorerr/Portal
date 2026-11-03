@@ -164,7 +164,7 @@ pub fn centralize_injected_keyboard(
 
 pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> CentralizedEvent {
     let time = backend.clock.now().as_millis() as u64;
-    return match event {
+    match event {
         WindowEvent::Resized(size) => {
             let (w, h): (i32, i32) = size.into();
             backend.guest_scale_factor = ndk::scale_factor(&backend.android_app);
@@ -601,7 +601,7 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             log::info!("Unhandled event: {:?}", event);
             CentralizedEvent::Unsupported
         }
-    };
+    }
 }
 
 /// Normalize a window-relative pixel position into the 0..1 range the input backend expects.

@@ -264,7 +264,7 @@ impl WaylandBackend {
         // All fingers are gone on suspend: drop any border-suppressed ids too
         // (reset_touch_state preserves them for the partial-lift case above).
         self.suppressed_touch_ids.clear();
-        let time = self.clock.now().as_millis() as u32;
+        let time = self.clock.now().as_millis();
         self.stop_all_scrolls(time);
         if self.pointer_pressed {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();

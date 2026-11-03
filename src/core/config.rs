@@ -205,8 +205,8 @@ pub fn parse_config(full_config_path: String) -> LocalConfig {
         return config;
     }
     // Config malformed, use the default config and the user can modify it again
-    let default_config = LocalConfig::default();
-    default_config
+    
+    LocalConfig::default()
 }
 
 #[cfg(test)]
@@ -245,7 +245,7 @@ mod tests {
         ));
     }
 
-    fn with_config_file(content: &str, f: impl Fn(String)) -> () {
+    fn with_config_file(content: &str, f: impl Fn(String)) {
         let dir = tempdir().unwrap();
         let base_dir = dir.path().to_str().unwrap();
         let path = format!("{}/etc/localdesktop", base_dir);

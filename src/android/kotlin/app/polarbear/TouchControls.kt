@@ -25,7 +25,6 @@ import app.polarbear.gaming.ControllerLayout
 import app.polarbear.gaming.EditBar
 import app.polarbear.gaming.GamePanel
 import app.polarbear.gaming.LayoutStore
-import java.io.File
 import java.util.concurrent.Executors
 import kotlin.math.min
 
@@ -163,7 +162,6 @@ object TouchControls : ControlHost {
             } else if (ComposeOverlay.isShowing()) {
                 refresh(host)
             }
-            physicalPad.value = physicalPadConnected(host)
             main.postDelayed(this, POLL_MS)
         }
     }
@@ -183,42 +181,17 @@ object TouchControls : ControlHost {
      * Steam starts every game as `reaper SteamLaunch AppId=<id> -- ...`,
      * which lives exactly as long as the game; the client itself is
      * `steam` (with its `steamwebhelper` children). Guest processes run
-     * under Portal's own uid, so their command lines are readable.
+     * under Portal's own uid, so their command lines are readable. The
+     * /proc walk is native (steam_processes.rs): this one allocated enough
+     * every poll to keep the GC busy on an idle desktop.
      */
     private fun scanProcesses(): Scan {
-        val processes = File("/proc").listFiles() ?: return Scan(false, false, null, null).also { Log.w(TAG, "/proc unreadable") }
-        var steam = false
-        var game = false
-        var app: String? = null
-        var name: String? = null
-        for (entry in processes) {
-            val pid = entry.name
-            if (pid.isEmpty() || !pid[0].isDigit()) continue
-            try {
-                val cmdline = File(entry, "cmdline").readBytes()
-                if (cmdline.isEmpty()) continue
-                val end = cmdline.indexOf(0).let { if (it < 0) cmdline.size else it }
-                val arg0 = String(cmdline, 0, end).substringAfterLast('/')
-                if (arg0 == "steam" || arg0 == "steamwebhelper") {
-                    steam = true
-                } else if (arg0 == "reaper") {
-                    val args = String(cmdline).split('\u0000')
-                    if ("SteamLaunch" !in args) continue
-                    game = true
-                    steam = true
-                    app = args.firstOrNull { it.startsWith("AppId=") }?.removePrefix("AppId=")?.takeIf { id ->
-                        id.isNotEmpty() && id.all { it.isDigit() } && id != "0"
-                    } ?: app
-                    // The game's folder under steamapps/common is its readable name.
-                    name = args.firstNotNullOfOrNull { arg ->
-                        arg.substringAfter("/steamapps/common/", "").substringBefore('/').takeIf { it.isNotEmpty() }
-                    } ?: name
-                }
-            } catch (_: Exception) {
-            }
-        }
-        return Scan(steam, game, if (game) app else null, if (game) name else null)
+        val fields = (nativeScanSteam() ?: return Scan(false, false, null, null)).split('\t')
+        if (fields.size < 4) return Scan(false, false, null, null)
+        return Scan(fields[0] == "1", fields[1] == "1", fields[2].ifEmpty { null }, fields[3].ifEmpty { null })
     }
+
+    @JvmStatic private external fun nativeScanSteam(): String?
 
     private fun physicalPadConnected(context: Context): Boolean = try {
         val input = context.getSystemService(InputManager::class.java)

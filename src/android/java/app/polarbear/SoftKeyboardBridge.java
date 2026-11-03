@@ -453,6 +453,45 @@ public final class SoftKeyboardBridge {
             return true;
         }
 
+        /** Set while a key typed on a keyboard is passed on to the Activity. */
+        private boolean forwardingKey;
+
+        /**
+         * Keys typed on a keyboard (a physical one, scrcpy, adb) reach the guest as keys, as
+         * they do while the editor is not engaged. Given to the IME, Gboard retyped them with
+         * autocorrect, capitals and auto-spaces, and Ctrl/Alt shortcuts never reached the guest.
+         * Keys an IME sends itself arrive after this stage and still go through the mirror.
+         */
+        @Override
+        public boolean dispatchKeyEventPreIme(KeyEvent event) {
+            int code = event.getKeyCode();
+            // Back, volume, media and the like keep Android's own handling.
+            Context context = getContext();
+            if (forwardingKey || !(context instanceof Activity)
+                || event.isSystem() || KeyEvent.isGamepadButton(code)
+                || (event.getSource() & InputDevice.SOURCE_KEYBOARD) != InputDevice.SOURCE_KEYBOARD) {
+                return super.dispatchKeyEventPreIme(event);
+            }
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                // The guest text now changes without the mirror; restart the IME on empty.
+                postReset();
+            }
+            boolean handled;
+            forwardingKey = true;
+            try {
+                handled = ((Activity) context).dispatchKeyEvent(event);
+            } finally {
+                forwardingKey = false;
+            }
+            return handled || super.dispatchKeyEventPreIme(event);
+        }
+
+        @Override
+        public boolean dispatchKeyEvent(KeyEvent event) {
+            // Not consumed here, so the Activity's own key handling sends it to the guest.
+            return !forwardingKey && super.dispatchKeyEvent(event);
+        }
+
         void showSoftInputIfPending() {
             if (!pendingShow || getVisibility() != View.VISIBLE) {
                 return;

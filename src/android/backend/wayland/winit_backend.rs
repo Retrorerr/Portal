@@ -27,10 +27,7 @@ use smithay::{
             native::EGLNativeSurface,
             EGLContext, EGLSurface,
         },
-        renderer::{
-            gles::GlesRenderer,
-            Bind,
-        },
+        renderer::{gles::GlesRenderer, Bind},
         SwapBuffersError,
     },
     utils::{Physical, Rectangle, Size},
@@ -272,9 +269,7 @@ impl AndroidFrameTimestampProbe {
         surface_before: RawEglSurface,
         surface_after: RawEglSurface,
     ) -> Option<u64> {
-        let Some(frame_id) = frame_id else {
-            return None;
-        };
+        let frame_id = frame_id?;
         if surface_before.is_null() || surface_before != surface_after {
             // Smithay can recreate the EGLSurface after a bad-surface swap.
             // The frame id belongs to the old surface and must not be queried
@@ -465,16 +460,18 @@ unsafe impl EGLNativeSurface for AndroidNativeSurface {
         display: &Arc<smithay::backend::egl::display::EGLDisplayHandle>,
         config_id: smithay::backend::egl::ffi::egl::types::EGLConfig,
     ) -> Result<*const std::os::raw::c_void, smithay::backend::egl::EGLError> {
-        let surface = smithay::backend::egl::ffi::egl::CreateWindowSurface(
-            display.handle,
-            config_id,
-            self.handle.a_native_window.as_ptr(),
-            std::ptr::null(),
-        );
-        if surface.is_null() {
-            return Err(smithay::backend::egl::EGLError::BadSurface);
+        unsafe {
+            let surface = smithay::backend::egl::ffi::egl::CreateWindowSurface(
+                display.handle,
+                config_id,
+                self.handle.a_native_window.as_ptr(),
+                std::ptr::null(),
+            );
+            if surface.is_null() {
+                return Err(smithay::backend::egl::EGLError::BadSurface);
+            }
+            Ok(surface)
         }
-        Ok(surface)
     }
 }
 
@@ -500,13 +497,8 @@ fn create_egl_display(
         .expect("No suitable EGL config found");
 
     // Create the EGLDisplay from raw pointers
-    let egl_display = unsafe {
-        EGLDisplay::from_raw(
-            display.as_ptr() as *mut c_void,
-            config.as_ptr() as *mut c_void,
-        )
-    }
-    .expect("Failed to create EGL display");
+    let egl_display = unsafe { EGLDisplay::from_raw(display.as_ptr(), config.as_ptr()) }
+        .expect("Failed to create EGL display");
 
     Ok(egl_display)
 }

@@ -30,12 +30,13 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 import kotlin.coroutines.resume
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -96,11 +97,12 @@ internal class UtilityFrost(
 
 /**
  * Capture actual rendered windows, with a small crop while the edge tab is stationary. A parked
- * tab samples rarely and swaps samples without a crossfade: over a changing desktop (video, chat)
- * the 300 ms sample plus 100 ms fade kept Portal's own window redrawing nearly every frame.
+ * tab resamples its content every 2 s: over a changing desktop (video, chat) the 300 ms sample
+ * plus 100 ms fade kept Portal's own window redrawing nearly every frame. Layout changes wake
+ * the sampler at once, so a rotation or resize never leaves stale glass behind.
  */
 @Composable
-internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: () -> Boolean, parked: () -> Boolean = { false }): UtilityFrost {
+internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: () -> Boolean, parked: () -> Boolean): UtilityFrost {
     val view = LocalView.current
     val lifecycle = (LocalContext.current as? LifecycleOwner)?.lifecycle
     val requestedCrop by rememberUpdatedState(crop)
@@ -118,6 +120,42 @@ internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: ()
         var index = 0
         var last: Bitmap? = null
         var lastRegion: Rect? = null
+        var lastGeometry: List<Any?>? = null
+        var sampledAt = 0L
+        // Ticks and state changes arrive on one conflated channel: a
+        // withTimeoutOrNull + snapshotFlow per tick threw and unwound a
+        // timeout exception and rebuilt a snapshot observer three times a
+        // second on an idle desktop.
+        val wake = Channel<Unit>(Channel.CONFLATED)
+        // Rotation, window and surface resizes all relayout these views, so a
+        // parked tab learns of new geometry without polling for it.
+        val relayout = android.view.View.OnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+            if (l != ol || t != ot || r != or || b != ob) wake.trySend(Unit)
+        }
+        val root = view.rootView
+        root.addOnLayoutChangeListener(relayout)
+        surface.addOnLayoutChangeListener(relayout)
+        launch {
+            try { awaitCancellation() } finally {
+                root.removeOnLayoutChangeListener(relayout)
+                surface.removeOnLayoutChangeListener(relayout)
+            }
+        }
+        launch {
+            var previous: Pair<Boolean,Boolean>? = null
+            snapshotFlow { movingNow() to parkedNow() }.collectLatest { state ->
+                val last = previous
+                previous = state
+                // Wake at once when a drag starts or ends or the tab wakes;
+                // parking itself needs no fresh sample.
+                if (last != null && (state.first != last.first || (last.second && !state.second))) wake.trySend(Unit)
+                // Moving content refreshes at 30 Hz, an open surface every
+                // 300 ms and a parked tab every 2 s. Each Compose resume also
+                // schedules a frame, so the parked tab must not tick faster.
+                val interval = if (state.first) 32L else if (state.second) 2_000L else 300L
+                while (true) { delay(interval); wake.trySend(Unit) }
+            }
+        }
         while (isActive) {
             if (lifecycle != null && !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                 delay(500); continue
@@ -129,12 +167,16 @@ internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: ()
             val dx = sourceOrigin[0]-rootOrigin[0]
             val dy = sourceOrigin[1]-rootOrigin[1]
             val wanted = requestedCrop()
+            val geometry = listOf(wanted,width,height,dx,dy)
+            val now = android.os.SystemClock.uptimeMillis()
+            val due = !parkedNow() || geometry != lastGeometry || now-sampledAt >= 1_900L
             val source = if (wanted == null) AndroidRect(0,0,width,height) else AndroidRect(
                 floor(wanted.left-dx-CAPTURE_PADDING).toInt().coerceIn(0,width.coerceAtLeast(0)),
                 floor(wanted.top-dy-CAPTURE_PADDING).toInt().coerceIn(0,height.coerceAtLeast(0)),
                 ceil(wanted.right-dx+CAPTURE_PADDING).toInt().coerceIn(0,width.coerceAtLeast(0)),
                 ceil(wanted.bottom-dy+CAPTURE_PADDING).toInt().coerceIn(0,height.coerceAtLeast(0)))
-            if (source.width() >= FROST_SCALE*2 && source.height() >= FROST_SCALE*2 && surface.holder.surface?.isValid == true) {
+            if (due && source.width() >= FROST_SCALE*2 && source.height() >= FROST_SCALE*2 && surface.holder.surface?.isValid == true) {
+                lastGeometry = geometry; sampledAt = now
                 val w = (source.width()/FROST_SCALE).coerceAtLeast(2)
                 val h = (source.height()/FROST_SCALE).coerceAtLeast(2)
                 val bitmap = buffers[index]?.takeIf { it.width == w && it.height == h }
@@ -155,23 +197,17 @@ internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: ()
                 // A transient PixelCopy failure must not flash away the glass.
                 // Keep the last successful sample and retry on the next tick.
             }
-            val state = movingNow() to parkedNow()
-            // Wake immediately when a drag starts or the tab wakes, then
-            // refresh moving content at 30 Hz. Spatial sampling redraws at
-            // display rate.
-            withTimeoutOrNull(if (state.first) 32L else if (state.second) 2_000L else 300L) {
-                snapshotFlow { movingNow() to parkedNow() }.first { it != state }
-            }
+            wake.receive()
         }
     }
     LaunchedEffect(frost) {
         snapshotFlow { frame.value }.collectLatest { next ->
-            frost.previous = if (movingNow()) null else frost.current
+            val outgoing = frost.current
+            val fade = next != null && outgoing != null && !movingNow()
+            frost.previous = if (fade) outgoing else null
             frost.current = next
-            val fade = next != null && frost.previous != null && !parkedNow()
             frost.blend.snapTo(if (fade) 0f else 1f)
-            if (fade) frost.blend.animateTo(1f,tween(100))
-            frost.previous = null
+            if (fade) { frost.blend.animateTo(1f,tween(100)); frost.previous = null }
         }
     }
     return frost

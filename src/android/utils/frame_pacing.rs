@@ -92,7 +92,7 @@ pub fn monotonic_time_ns() -> i64 {
         value
             .tv_sec
             .saturating_mul(1_000_000_000)
-            .saturating_add(value.tv_nsec) as i64
+            .saturating_add(value.tv_nsec)
     } else {
         0
     }
@@ -128,7 +128,8 @@ struct TimelineFunctions {
 }
 
 unsafe fn load_timeline_functions(library: &Library) -> Option<TimelineFunctions> {
-    Some(TimelineFunctions {
+    unsafe {
+        Some(TimelineFunctions {
         post: *library
             .get::<PostVsyncCallback>(b"AChoreographer_postVsyncCallback\0")
             .ok()?,
@@ -157,6 +158,7 @@ unsafe fn load_timeline_functions(library: &Library) -> Option<TimelineFunctions
             .get::<GetTimelineVsyncId>(b"AChoreographerFrameCallbackData_getFrameTimelineVsyncId\0")
             .ok()?,
     })
+    }
 }
 
 struct CallbackState {

@@ -462,7 +462,7 @@ impl SetupFailure {
             stage: format!("{index} ({name})"),
             kind,
             diagnostic,
-            user_message: format!("{action}"),
+            user_message: action.to_string(),
         }
     }
 
@@ -1024,9 +1024,7 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
     if !options.install_optional_apps {
         return None;
     }
-    let Some(plan) = options.install_plan.as_ref() else {
-        return None;
-    };
+    let plan = options.install_plan.as_ref()?;
     let selected_apps = plan.selected_apps();
     if selected_apps.is_empty() {
         provision_ibus_packages(Path::new(PRODUCTION_FS_ROOT));
@@ -1955,7 +1953,7 @@ fn sync_anland_required_session_files(fs_root: &Path, ui_scale: i32) -> anyhow::
 fn setup_firefox_config(_: &SetupOptions) -> StageOutput {
     use crate::core::runtime::LinuxRuntime;
     let active_runtime = crate::android::runtime::proot::PRootRuntime::active();
-    browser::sync_firefox_config(&active_runtime.rootfs_path());
+    browser::sync_firefox_config(active_runtime.rootfs_path());
     None
 }
 
@@ -6248,7 +6246,7 @@ pub fn setup_with_completion(
         existing_operation,
         Some((InstallOperationState::Running, _))
     ) {
-        let _ = set_registration(
+        set_registration(
             registration,
             InstallOperationState::Running,
             ProvisioningSnapshot::update(

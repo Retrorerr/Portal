@@ -897,8 +897,7 @@ where
     let _commit_guard = INITIAL_PLAN_COMMIT_LOCK
         .lock()
         .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::Other,
+            io::Error::other(
                 "initial plan commit lock is poisoned",
             )
         })?;

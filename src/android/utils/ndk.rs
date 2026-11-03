@@ -18,6 +18,7 @@ where
             .expect("Failed to get JavaVM");
 
     let mut env = vm.attach_current_thread().expect("Failed to attach thread");
+    crate::android::utils::thread::restore_name();
     // The event-loop thread stays attached and never returns to Java, so local references made
     // by each callback (the Activity, class loaders, strings) would pile up for the life of the
     // process, pinning old Activities. A frame frees them when the callback is done; nothing

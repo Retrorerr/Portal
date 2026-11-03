@@ -1,4 +1,5 @@
 use super::process::ArchProcess;
+use crate::android::utils::thread::spawn_named;
 use crate::android::{diagnostics, utils::webview_handoff};
 use crate::core::runtime::LinuxRuntime;
 use std::fs;
@@ -7,24 +8,15 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 static LAUNCH_RUNNING: AtomicBool = AtomicBool::new(false);
 
+#[derive(Default)]
 struct LaunchState {
     cancel: Option<Arc<AtomicBool>>,
     handle: Option<JoinHandle<()>>,
     failure_monitor: Option<JoinHandle<()>>,
-}
-
-impl Default for LaunchState {
-    fn default() -> Self {
-        Self {
-            cancel: None,
-            handle: None,
-            failure_monitor: None,
-        }
-    }
 }
 
 static LAUNCH_STATE: OnceLock<Mutex<LaunchState>> = OnceLock::new();
@@ -97,13 +89,47 @@ fn marker_reason(path: &Path, name: &str) -> String {
     format!("Plasma startup failed ({name}): {details}")
 }
 
+/// When this app process started: Portal's "boot" for the guest.
+static PROCESS_STARTED: OnceLock<SystemTime> = OnceLock::new();
+static GUEST_TMP_CLEARED: AtomicBool = AtomicBool::new(false);
+
+/// Record the process start; called first thing in `android_main`, before
+/// any host component writes into the guest.
+pub fn note_process_start() {
+    PROCESS_STARTED.get_or_init(SystemTime::now);
+}
+
+/// Empty the guest's `/tmp` of earlier sessions' leftovers once per app
+/// process, as a tmpfs `/tmp` is at boot (see `core::guest_tmp`).
+fn clear_stale_guest_tmp(rootfs: &Path) {
+    let Some(&boot) = PROCESS_STARTED.get() else {
+        return;
+    };
+    if GUEST_TMP_CLEARED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let removed = crate::core::guest_tmp::clear_stale(&rootfs.join("tmp"), boot);
+    if removed > 0 {
+        diagnostics::host_event("guest-tmp", &format!("removed={removed}"));
+    }
+}
+
 /// Watch the guest's durable crash/failure markers independently of Wayland redraws. The monitor
 /// wakes the waiting winit loop as soon as a KWin startup attempt enters graphical recovery, so a
 /// blank/suspended surface cannot hide the actionable Android error page.
 fn spawn_failure_monitor(cancel: Arc<AtomicBool>) -> JoinHandle<()> {
-    thread::spawn(move || {
+    spawn_named("portal-monitor", move || {
         let runtime = crate::android::runtime::proot::PRootRuntime::active();
         let state_dir = runtime.rootfs_path().join("var/lib/localdesktop/session");
+        // The DNS sync below calls into Java every 5 s. Stay attached for the
+        // whole session: attaching and detaching each time built a new Java
+        // thread object per call. The attachment ends with this thread.
+        let app = crate::android::utils::application_context::get_application_context().android_app;
+        // SAFETY: the AndroidApp's VM pointer is valid for the process lifetime.
+        if let Ok(vm) = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut _) } {
+            let _ = vm.attach_current_thread_permanently();
+            crate::android::utils::thread::restore_name();
+        }
         let mut last_net_sync = Instant::now();
         let mut last_procfs = Instant::now();
         while !cancel.load(Ordering::Acquire) {
@@ -121,8 +147,11 @@ fn spawn_failure_monitor(cancel: Arc<AtomicBool>) -> JoinHandle<()> {
                 last_procfs = Instant::now();
                 crate::android::guest_procfs::refresh();
             }
-            thread::sleep(Duration::from_millis(100));
+            // Markers only need noticing promptly, not within 100 ms; stay
+            // well under STOP_JOIN_BUDGET so a stop still joins cleanly.
+            thread::sleep(Duration::from_millis(250));
         }
+        crate::android::guest_procfs::forget_steam();
     })
 }
 
@@ -213,7 +242,7 @@ pub fn launch() {
         // user's home and Plasma configuration too.
         log::info!("launch: using validated Anland repair handoff assets");
     } else if let Err(error) =
-        crate::android::proot::setup::try_sync_session_runtime_files(&rootfs, 1)
+        crate::android::proot::setup::try_sync_session_runtime_files(rootfs, 1)
     {
         log::error!("Portal session integration repair failed: {error:#}");
         report_failure(
@@ -221,7 +250,8 @@ pub fn launch() {
         );
         return;
     }
-    crate::android::ime::start_ime_fifo_listener(&rootfs);
+    clear_stale_guest_tmp(rootfs);
+    crate::android::ime::start_ime_fifo_listener(rootfs);
     let library_overlay_binds = crate::android::proot::setup::library_overlay_binds(rootfs);
 
     let cancel = Arc::new(AtomicBool::new(false));
@@ -240,7 +270,7 @@ pub fn launch() {
     state.failure_monitor = None;
 
     let thread_cancel = cancel.clone();
-    let handle = thread::spawn(move || {
+    let handle = spawn_named("desktop-launch", move || {
         let _guard = guard;
         diagnostics::host_event("desktop-launch", "starting configured Plasma session");
 

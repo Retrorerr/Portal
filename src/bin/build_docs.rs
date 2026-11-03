@@ -901,9 +901,9 @@ mod rustsrc {
         let n = b.len();
         let mut i = 0;
         let blank = |out: &mut Vec<u8>, a: usize, z: usize| {
-            for k in a..z.min(n) {
-                if out[k] != b'\n' {
-                    out[k] = b' ';
+            for byte in &mut out[a.min(n)..z.min(n)] {
+                if *byte != b'\n' {
+                    *byte = b' ';
                 }
             }
         };

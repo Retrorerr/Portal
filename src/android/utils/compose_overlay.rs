@@ -622,7 +622,7 @@ pub fn request_app_install(android_app: &AndroidApp, apk: &std::path::Path) -> b
     )
 }
 
-/// Publish the app manager's per-app state: one `id	state	progress	message`
+/// Publish the app manager's per-app state: one `id<TAB>state<TAB>progress<TAB>message`
 /// line per app (state codes in `optional_apps::AppState`).
 pub fn publish_optional_apps_state(android_app: &AndroidApp, text: &str) {
     let text = text.to_owned();

@@ -26,6 +26,7 @@ attached hardware keyboard keeps working and IBus never swallows typing.
 """
 import base64
 import os
+import select
 import signal
 import sys
 import threading
@@ -325,8 +326,13 @@ def main():
             return
         buf = b""
         while True:
+            # Block until the host writes; polling the empty FIFO woke this
+            # thread five times a second for the whole session.
             try:
+                select.select([fd], [], [])
                 chunk = os.read(fd, 4096)
+            except (BlockingIOError, InterruptedError):
+                continue
             except Exception:
                 time.sleep(0.2)
                 continue
@@ -336,6 +342,8 @@ def main():
                     line, buf = buf.split(b"\n", 1)
                     handle_command(line.decode("utf-8", errors="ignore").strip())
             else:
+                # O_RDWR keeps a writer open, so EOF should never happen;
+                # never let it turn into a busy loop.
                 time.sleep(0.1)
 
     def handle_command(line):

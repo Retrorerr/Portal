@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn splits_device_numbers_like_libc() {
         // makedev(456, 0) on 64-bit glibc/bionic.
-        let rdev = (456u64 & 0xfff) << 8 | (456u64 & !0xfff) << 32;
+        let rdev = (456u64 & 0xfff) << 8;
         assert_eq!(dev_major_minor(rdev), (456, 0));
         // makedev(226, 128), the conventional DRM render node.
         let rdev = 226u64 << 8 | 128;

@@ -317,7 +317,7 @@ fn stale_delayed_commit_cannot_overwrite_newer_host_generation() {
         ((1100.0 / PLASMA).round(), (900.0 / PLASMA).round())
     );
     assert!(
-        state.note_kwin_commit(None, Some(fresh_b), Some(BUFFER_SCALE)) == false
+        !state.note_kwin_commit(None, Some(fresh_b), Some(BUFFER_SCALE))
             || state.logical_geometry() == ((1100.0 / PLASMA).round(), (900.0 / PLASMA).round())
     );
     let fresh_a = simulated_buffer_commit((3392, 2400));

@@ -161,26 +161,6 @@ fn inverse_unit_transform(t: ViewportTransform, u: f64, v: f64) -> (f64, f64) {
     }
 }
 
-/// Authoritative state representing display geometry, density, configure size,
-/// observed KWin surface size, and derived coordinate transforms.
-///
-/// Dynamic-geometry invariants (fullscreen ↔ popup resizing):
-/// - `physical_size` is the current Android host target (always >0, last valid
-///   preserved — zero/invalid resizes never fabricate 1px geometry).
-/// - `requested_configure` is the last geometry actually requested from KWin.
-/// - `observed_surface_size` is the committed texture of the CURRENTLY RENDERED
-///   KWin frame (live surface, possibly stale relative to the host target).
-/// - `guest_logical_size` is the KWin logical desktop matching THAT rendered
-///   frame — never the logical of a different generation. A stale frame keeps
-///   its own correct logical while still targeting the newest host.
-/// - `rendered_host`/`rendered_generation` identify which request the rendered
-///   frame was attributed to (size match, newest-first, xdg-ack tie-break).
-/// - `resize_generation` increases monotonically; newer resizes never lose to
-///   obsolete state. No sleeps/timing guesses.
-/// - `kwin_scale` (Plasma UI scale) is stable across resizes, never derived
-///   from stale presentation state.
-/// One xdg configure sent (or coalesced) for a host request.
-
 /// Physical dimensions of the Android host surface / window in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HostPhysicalSize {
@@ -227,6 +207,8 @@ pub fn kwin_logical_to_physical_pixels(logical: (i32, i32), kwin_scale: f64) -> 
     (w, h)
 }
 
+/// One xdg configure sent (or coalesced) for a host request.
+///
 /// `serial` is the Wayland configure serial captured from `send_configure`
 /// (0 when the send site did not capture one). Bounded ring, newest last.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -241,9 +223,31 @@ pub struct ConfigureRequest {
     pub serial: u32,
 }
 
+/// A frame attributed to a configure request: generation, host size,
+/// guest logical size, and whether the logical came from the surface.
+type AttributedFrame = (u64, (i32, i32), (f64, f64), bool);
+
 /// How many configure requests the history ring retains.
 pub const REQUEST_HISTORY_LEN: usize = 16;
 
+/// Authoritative state representing display geometry, density, configure size,
+/// observed KWin surface size, and derived coordinate transforms.
+///
+/// Dynamic-geometry invariants (fullscreen ↔ popup resizing):
+/// - `physical_size` is the current Android host target (always >0, last valid
+///   preserved — zero/invalid resizes never fabricate 1px geometry).
+/// - `requested_configure` is the last geometry actually requested from KWin.
+/// - `observed_surface_size` is the committed texture of the CURRENTLY RENDERED
+///   KWin frame (live surface, possibly stale relative to the host target).
+/// - `guest_logical_size` is the KWin logical desktop matching THAT rendered
+///   frame — never the logical of a different generation. A stale frame keeps
+///   its own correct logical while still targeting the newest host.
+/// - `rendered_host`/`rendered_generation` identify which request the rendered
+///   frame was attributed to (size match, newest-first, xdg-ack tie-break).
+/// - `resize_generation` increases monotonically; newer resizes never lose to
+///   obsolete state. No sleeps/timing guesses.
+/// - `kwin_scale` (Plasma UI scale) is stable across resizes, never derived
+///   from stale presentation state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AuthoritativeDisplayState {
     /// Physical dimensions of the Android surface (W_phys, H_phys)
@@ -859,8 +863,8 @@ impl AuthoritativeDisplayState {
         let plasma = self.effective_kwin_scale();
 
         // Newest-first history scan; acked serial wins ties.
-        let mut best: Option<(u64, (i32, i32), (f64, f64), bool)> = None;
-        let mut acked_best: Option<(u64, (i32, i32), (f64, f64), bool)> = None;
+        let mut best: Option<AttributedFrame> = None;
+        let mut acked_best: Option<AttributedFrame> = None;
         for entry in self.request_history().iter().rev() {
             if let Some((guest, from_surface)) =
                 Self::attribute_frame(entry, surface, buffer, buffer_scale)
@@ -904,12 +908,11 @@ impl AuthoritativeDisplayState {
                 // logical — buffer-mirror derivation when a scale is known,
                 // verbatim surface otherwise — but NEVER claim currency and
                 // NEVER retain old generation/host ownership.
-                let (guest, from_surface) = if surface.is_some() {
+                let (guest, from_surface) = if let Some(s) = surface {
                     match buffer_scale {
                         Some(scale)
                             if (1..=4).contains(&scale) && plasma.is_finite() && plasma > 0.0 =>
                         {
-                            let s = surface.expect("surface branch");
                             (
                                 (
                                     (s.0 * scale as f64 / plasma).round().max(1.0),
@@ -918,7 +921,7 @@ impl AuthoritativeDisplayState {
                                 false,
                             )
                         }
-                        _ => (surface.expect("surface branch"), true),
+                        _ => (s, true),
                     }
                 } else if let (Some(b), Some(scale)) = (buffer, buffer_scale) {
                     if (1..=4).contains(&scale) && plasma.is_finite() && plasma > 0.0 {
@@ -979,6 +982,7 @@ impl AuthoritativeDisplayState {
     ///   (texture + logical + origin) is untouched: the old frame keeps
     ///   rendering letterboxed with its own correct logical until the matching
     ///   KWin commit is attributed back to it.
+    ///
     /// Returns true when host/generation actually changed.
     pub fn update_physical_size(&mut self, w: i32, h: i32) -> bool {
         self.try_update_physical_size(w, h).is_some()

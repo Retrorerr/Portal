@@ -1760,7 +1760,7 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
                 // Logged once per error streak: a dead socket must not
                 // flood the diagnostics log at 10 lines a second.
                 recv_failures += 1;
-                if recv_failures == 1 || recv_failures % 600 == 0 {
+                if recv_failures == 1 || recv_failures.is_multiple_of(600) {
                     log::warn!("anland.damage recv failed x{recv_failures} (retrying): {error}");
                 }
                 thread::sleep(Duration::from_millis(100));
@@ -2229,7 +2229,7 @@ fn render_loop(inner: Arc<Inner>) {
                 crate::android::utils::compose_overlay::notify_desktop_ready_cached();
             }
             let n = inner.frames_queued.load(Ordering::Relaxed);
-            if n == 1 || n % 120 == 0 {
+            if n == 1 || n.is_multiple_of(120) {
                 let f = inner.frames_fenced.load(Ordering::Relaxed);
                 log::info!(
                     "anland.frame queued={n} fenced={f} bare={} (zero-copy, fence->SurfaceFlinger)",
@@ -2292,8 +2292,8 @@ fn log_fps_window(
     let frames = *win_frames;
     let skips = *win_skips;
     let hz = frames as f64 * 1_000_000_000.0 / elapsed_ns as f64;
-    let avg_us = if frames > 0 { *win_comp_us / frames } else { 0 };
-    let acq_avg_us = if frames > 0 { *win_acq_us / frames } else { 0 };
+    let avg_us = win_comp_us.checked_div(frames).unwrap_or(0);
+    let acq_avg_us = win_acq_us.checked_div(frames).unwrap_or(0);
     let acq_ready_pct = *win_acq_ready * 100 / frames.max(1);
     let skip_pct = skips * 100 / (frames + skips).max(1);
     let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
@@ -2370,38 +2370,24 @@ fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, generation: u64) ->
     }
     // Non-blocking recvmsg: 1 byte + optional SCM_RIGHTS fence.
     let mut byte = [0u8; 1];
-    let mut iov = libc::iovec {
-        iov_base: byte.as_mut_ptr() as *mut libc::c_void,
-        iov_len: 1,
-    };
-    let mut cmsg_buf = [0u8; 32];
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = cmsg_buf.len() as _;
-    let n = unsafe { libc::recvmsg(fence.as_raw_fd(), &mut msg, libc::MSG_DONTWAIT) };
-    if n == 0 {
-        enter_fallback(inner, generation, "fence channel EOF (producer gone)");
-        return FENCE_LOST;
-    }
-    if n < 0 {
-        // EAGAIN after POLLIN (fd swapped under us) or error: treat as lost.
-        enter_fallback(inner, generation, "fence channel recv failed");
-        return FENCE_LOST;
-    }
-    let mut rfence = -1;
-    unsafe {
-        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
-        while !cmsg.is_null() {
-            if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
-                rfence = *(libc::CMSG_DATA(cmsg) as *const i32);
-                break;
+    let mut fds = [-1i32; 1];
+    loop {
+        return match sys::recv_fds(fence, &mut byte, &mut fds, libc::MSG_DONTWAIT) {
+            Ok(count) if count > 0 => fds[0],
+            Ok(_) => -1,
+            // A signal is not a dead producer.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                enter_fallback(inner, generation, "fence channel EOF (producer gone)");
+                FENCE_LOST
             }
-            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
-        }
+            Err(_) => {
+                // EAGAIN after POLLIN (fd swapped under us) or error: treat as lost.
+                enter_fallback(inner, generation, "fence channel recv failed");
+                FENCE_LOST
+            }
+        };
     }
-    rfence
 }
 
 fn event_loop(inner: Arc<Inner>) {
@@ -2519,7 +2505,7 @@ fn event_loop(inner: Arc<Inner>) {
 /// decode and raster burn client CPU here). Deliberately NOT watched: KWin (our selects drive its
 /// CPU — feedback loop) and our own process. Fail-quiet (no kick on error),
 /// never fail-busy.
-
+///
 /// utime+stime jiffies for one PID (0 on any read/parse failure).
 fn proc_jiffies(pid: u32) -> u64 {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {

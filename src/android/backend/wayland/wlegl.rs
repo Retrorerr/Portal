@@ -73,7 +73,8 @@ impl ExternalBuffer for WleglBufferData {
         _damage: &[Rectangle<i32, BufferCoord>],
     ) -> Option<Result<GlesTexture, ExternalBufferImportError>> {
         let renderer_id = renderer.id();
-        if let Some((cached_renderer_id, texture)) = self.texture.lock().unwrap().clone() {
+        let cached = self.texture.lock().unwrap().clone();
+        if let Some((cached_renderer_id, texture)) = cached {
             if cached_renderer_id == renderer_id {
                 return Some(Ok(texture));
             }
@@ -107,9 +108,7 @@ impl ExternalBuffer for WleglBufferData {
                     self.is_external,
                 )
             }
-            .map_err(|err| -> ExternalBufferImportError {
-                std::io::Error::new(std::io::ErrorKind::Other, err).into()
-            })
+            .map_err(|err| -> ExternalBufferImportError { std::io::Error::other(err).into() })
         })();
 
         let texture = match texture {
@@ -177,7 +176,7 @@ pub fn handle_wlegl_request<D>(
 {
     match request {
         android_wlegl::Request::CreateHandle { id, num_fds, ints } => {
-            if num_fds < 0 || num_fds > 64 {
+            if !(0..=64).contains(&num_fds) {
                 resource.post_error(android_wlegl::Error::BadValue, "num_fds out of range");
                 return;
             }
@@ -189,7 +188,9 @@ pub fn handle_wlegl_request<D>(
                 return;
             }
             let ints_i32: Vec<i32> = ints
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
 
@@ -289,7 +290,7 @@ pub fn handle_wlegl_request<D>(
                 ahb,
                 width,
                 height,
-                has_alpha: !matches!(fmt_u, 2 | 3 | 4),
+                has_alpha: !matches!(fmt_u, 2..=4),
                 // Android native buffers must always be sampled through
                 // GL_TEXTURE_EXTERNAL_OES in the compositor, regardless of
                 // whether the producer rendered into the EGLImage through a

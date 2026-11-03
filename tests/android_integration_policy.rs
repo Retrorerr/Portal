@@ -776,7 +776,8 @@ fn xwayland_variant_selection_policy() {
     // manifest (transcription slips fail closed here, not on the tablet).
     assert!(ANDROID_SETUP_SOURCE.contains("usr/local/lib/portal-xwayland-default"));
     assert!(KWIN_WRAPPER_SOURCE.contains("xwayland_cand_dir=/usr/local/lib/portal-xwayland-default"));
-    for pinned in ["f94c8d208efbe2690c21130feda006de9fe54bf673e662ff07629b885a189179"] {
+    {
+        let pinned = "f94c8d208efbe2690c21130feda006de9fe54bf673e662ff07629b885a189179";
         assert!(KWIN_WRAPPER_SOURCE.contains(pinned));
         assert!(XWAYLAND_PORTAL_SHA256SUMS_SOURCE.contains(pinned));
     }

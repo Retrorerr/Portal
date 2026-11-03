@@ -68,65 +68,94 @@ pub fn recv_all(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<()> {
 // fd passing (SCM_RIGHTS)
 // ---------------------------------------------------------------------------
 
-fn cmsg_space(fd_count: usize) -> usize {
-    // CMSG_SPACE(sizeof(int) * n); compute portably via libc macros is
-    // unavailable, so use the Linux/x86_64+aarch64 layout: header (16 bytes
-    // aligned) + payload aligned to 8. Matches CMSG_SPACE exactly on Android.
+/// Most fds one SCM_RIGHTS message carries here (the broker's buffer set).
+const MAX_PASSED_FDS: usize = 16;
+
+/// Control-message buffer with `cmsghdr` alignment. A plain `[u8]` buffer
+/// is only byte-aligned, which makes every `(*cmsg)` access undefined.
+#[repr(C, align(8))]
+struct CmsgBuf([u8; cmsg_space(MAX_PASSED_FDS)]);
+
+const fn cmsg_space(fd_count: usize) -> usize {
+    // CMSG_SPACE(sizeof(int) * n) for the Linux aarch64/x86_64 layout:
+    // 16-byte header + payload aligned to 8. Matches CMSG_SPACE on Android.
     const ALIGN: usize = 8;
-    let hdr: usize = 16;
-    hdr + (mem::size_of::<libc::c_int>() * fd_count).div_ceil(ALIGN) * ALIGN
+    16 + (mem::size_of::<libc::c_int>() * fd_count).div_ceil(ALIGN) * ALIGN
 }
 
-fn cmsg_len(fd_count: usize) -> usize {
+const fn cmsg_len(fd_count: usize) -> usize {
     16 + mem::size_of::<libc::c_int>() * fd_count
 }
 
 /// Send `data` plus `fds` as ancillary `SCM_RIGHTS` in one `sendmsg`.
 /// Mirrors `send_fds()`.
 pub fn send_fds(fd: &OwnedFd, data: &[u8], fds: &[i32]) -> io::Result<()> {
+    if fds.len() > MAX_PASSED_FDS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too many fds for one message",
+        ));
+    }
     let mut iov = libc::iovec {
         iov_base: data.as_ptr() as *mut libc::c_void,
         iov_len: data.len(),
     };
-    let cmsg_size = cmsg_space(fds.len()).max(16);
-    let mut cmsg_buf = vec![0u8; cmsg_size];
+    let mut cmsg_buf = CmsgBuf([0; cmsg_space(MAX_PASSED_FDS)]);
+    // SAFETY: msghdr is plain old data; all-zero is a valid empty header.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = cmsg_buf.len() as _;
-    unsafe {
+    msg.msg_control = cmsg_buf.0.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = cmsg_space(fds.len()) as _;
+    // SAFETY: the control buffer is 8-byte aligned and holds CMSG_SPACE for
+    // `fds.len()` ints, so the header and payload writes stay in bounds.
+    let n = unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         if cmsg.is_null() {
-            return Err(io::Error::new(io::ErrorKind::Other, "CMSG_FIRSTHDR null"));
+            return Err(io::Error::other("CMSG_FIRSTHDR null"));
         }
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
         (*cmsg).cmsg_len = cmsg_len(fds.len()) as _;
-        std::ptr::copy_nonoverlapping(fds.as_ptr(), libc::CMSG_DATA(cmsg) as *mut i32, fds.len());
-        let n = libc::sendmsg(fd.as_raw_fd(), &msg, libc::MSG_NOSIGNAL);
-        if n != data.len() as isize {
-            return Err(io::Error::last_os_error());
-        }
+        std::ptr::copy_nonoverlapping(
+            fds.as_ptr().cast::<u8>(),
+            libc::CMSG_DATA(cmsg),
+            mem::size_of_val(fds),
+        );
+        libc::sendmsg(fd.as_raw_fd(), &msg, libc::MSG_NOSIGNAL)
+    };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if n as usize != data.len() {
+        return Err(io::Error::new(io::ErrorKind::WriteZero, "short sendmsg"));
     }
     Ok(())
 }
 
-/// Receive `data.len()` bytes plus up to `fds.len()` file descriptors.
-/// Returns the number of fds received. Mirrors `recv_fds()`.
-pub fn recv_fds(fd: &OwnedFd, data: &mut [u8], fds: &mut [i32]) -> io::Result<usize> {
+/// Receive up to `data.len()` bytes plus up to `fds.len()` file descriptors,
+/// close-on-exec. Returns the number of fds received; fds beyond `fds.len()`
+/// are closed instead of leaked. `flags` adds e.g. `MSG_DONTWAIT`.
+/// Mirrors `recv_fds()`.
+pub fn recv_fds(
+    fd: &OwnedFd,
+    data: &mut [u8],
+    fds: &mut [i32],
+    flags: libc::c_int,
+) -> io::Result<usize> {
     let mut iov = libc::iovec {
         iov_base: data.as_mut_ptr() as *mut libc::c_void,
         iov_len: data.len(),
     };
-    let cmsg_size = cmsg_space(fds.len()).max(16);
-    let mut cmsg_buf = vec![0u8; cmsg_size];
+    let mut cmsg_buf = CmsgBuf([0; cmsg_space(MAX_PASSED_FDS)]);
+    // SAFETY: msghdr is plain old data; all-zero is a valid empty header.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = cmsg_buf.len() as _;
-    let n = unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC) };
+    msg.msg_control = cmsg_buf.0.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = mem::size_of::<CmsgBuf>() as _;
+    // SAFETY: iov and control point at live buffers of the stated lengths.
+    let n = unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC | flags) };
     if n <= 0 {
         return Err(if n == 0 {
             io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed")
@@ -135,19 +164,29 @@ pub fn recv_fds(fd: &OwnedFd, data: &mut [u8], fds: &mut [i32]) -> io::Result<us
         });
     }
     let mut received = 0usize;
+    // SAFETY: the kernel filled `msg_controllen` bytes of the aligned control
+    // buffer with well-formed headers; CMSG_* walk only within it.
     unsafe {
         let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
         while !cmsg.is_null() {
             if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
-                let bytes = (*cmsg).cmsg_len as usize - cmsg_len(0);
-                let count = (bytes / mem::size_of::<libc::c_int>()).min(fds.len());
-                std::ptr::copy_nonoverlapping(
-                    libc::CMSG_DATA(cmsg) as *const i32,
-                    fds.as_mut_ptr(),
-                    count,
-                );
-                received = count;
-                break;
+                let bytes = ((*cmsg).cmsg_len as usize).saturating_sub(cmsg_len(0));
+                let data_ptr = libc::CMSG_DATA(cmsg).cast_const();
+                for i in 0..bytes / mem::size_of::<libc::c_int>() {
+                    let mut raw = [0u8; mem::size_of::<libc::c_int>()];
+                    std::ptr::copy_nonoverlapping(
+                        data_ptr.add(i * raw.len()),
+                        raw.as_mut_ptr(),
+                        raw.len(),
+                    );
+                    let passed = libc::c_int::from_ne_bytes(raw);
+                    if received < fds.len() {
+                        fds[received] = passed;
+                        received += 1;
+                    } else {
+                        libc::close(passed);
+                    }
+                }
             }
             cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
         }
@@ -237,7 +276,7 @@ pub fn make_shm_index() -> io::Result<(OwnedFd, *mut u32)> {
     let fd = unsafe {
         libc::memfd_create(
             c"buf_select".as_ptr(),
-            (libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) as u32,
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
         )
     };
     if fd < 0 {
@@ -357,10 +396,7 @@ fn load_choreo() -> Option<ChoreoApi> {
         }
     }
     unsafe {
-        let lib = libc::dlopen(
-            b"libandroid.so\0".as_ptr() as *const libc::c_char,
-            libc::RTLD_NOW,
-        );
+        let lib = libc::dlopen(c"libandroid.so".as_ptr(), libc::RTLD_NOW);
         if lib.is_null() {
             return None;
         }
@@ -389,10 +425,7 @@ fn load_choreo() -> Option<ChoreoApi> {
                 b"ALooper_release\0",
                 unsafe extern "C" fn(*mut libc::c_void)
             ),
-            looper_wake: load!(
-                b"ALooper_wake\0",
-                unsafe extern "C" fn(*mut libc::c_void)
-            ),
+            looper_wake: load!(b"ALooper_wake\0", unsafe extern "C" fn(*mut libc::c_void)),
             get_instance: load!(
                 b"AChoreographer_getInstance\0",
                 unsafe extern "C" fn() -> *mut libc::c_void
@@ -429,11 +462,7 @@ unsafe extern "C" fn frame_trampoline(_when_ns: i64, data: *mut libc::c_void) {
     holder.count += 1;
     let one: u64 = 1;
     unsafe {
-        libc::write(
-            holder.tick_fd,
-            &one as *const u64 as *const libc::c_void,
-            8,
-        );
+        libc::write(holder.tick_fd, &one as *const u64 as *const libc::c_void, 8);
     }
 }
 
@@ -527,11 +556,7 @@ fn pump_thread_timer(tick_fd: libc::c_int, running: Arc<AtomicBool>, period_ns: 
         ticks += 1;
         let one: u64 = 1;
         unsafe {
-            libc::write(
-                tick_fd,
-                &one as *const u64 as *const libc::c_void,
-                8,
-            );
+            libc::write(tick_fd, &one as *const u64 as *const libc::c_void, 8);
         }
         let now = now_ns();
         if now.wrapping_sub(last_log_ns) >= 5_000_000_000 {
@@ -610,7 +635,7 @@ impl VsyncPump {
                 let h = std::thread::Builder::new()
                     .name("anland-vsync".into())
                     .spawn(move || pump_thread_choreo(api, tick_fd, running, gate))
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                    .map_err(|e| io::Error::other(e.to_string()))?;
                 ("choreographer", h)
             }
             None => {
@@ -618,7 +643,7 @@ impl VsyncPump {
                 let h = std::thread::Builder::new()
                     .name("anland-vsync-timer".into())
                     .spawn(move || pump_thread_timer(tick_fd, running, period_ns))
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                    .map_err(|e| io::Error::other(e.to_string()))?;
                 ("timer", h)
             }
         };

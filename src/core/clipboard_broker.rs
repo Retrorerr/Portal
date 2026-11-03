@@ -35,7 +35,7 @@ impl AuthToken {
             return Err(CodecError::InvalidToken);
         }
         let mut bytes = [0u8; TOKEN_BYTES];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high = hex_nibble(pair[0]).ok_or(CodecError::InvalidToken)?;
             let low = hex_nibble(pair[1]).ok_or(CodecError::InvalidToken)?;
             bytes[index] = (high << 4) | low;
@@ -219,7 +219,7 @@ pub fn decode_base64(encoded: &[u8], expected_len: usize) -> Result<Vec<u8>, Cod
     }
 
     let mut decoded = Vec::with_capacity(expected_len);
-    for (chunk_index, chunk) in encoded.chunks_exact(4).enumerate() {
+    for (chunk_index, chunk) in encoded.as_chunks::<4>().0.iter().enumerate() {
         let last = chunk_index + 1 == encoded.len() / 4;
         let first = base64_value(chunk[0]).ok_or(CodecError::InvalidBase64)?;
         let second = base64_value(chunk[1]).ok_or(CodecError::InvalidBase64)?;

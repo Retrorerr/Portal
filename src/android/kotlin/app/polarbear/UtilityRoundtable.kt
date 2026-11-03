@@ -83,13 +83,14 @@ internal fun UtilityRoundtable(
     val keyboardCaptureBounds = remember { android.graphics.RectF() }
     val moving = { dragging || directPosition || transition.isRunning || surfaceResizing || keyboardMotion.isMoving }
     var resting by remember { mutableStateOf(false) }
+    val parked = { resting && page == UtilityPage.Dock }
     val frost = rememberUtilityFrost(ready,
         crop = {
             if (page == UtilityPage.Keyboard && !moving() && !keyboardCaptureBounds.isEmpty)
                 androidx.compose.ui.geometry.Rect(keyboardCaptureBounds.left,keyboardCaptureBounds.top,keyboardCaptureBounds.right,keyboardCaptureBounds.bottom)
             else if (page != UtilityPage.Dock || moving() || dockCaptureBounds.isEmpty) null
             else androidx.compose.ui.geometry.Rect(dockCaptureBounds.left,dockCaptureBounds.top,dockCaptureBounds.right,dockCaptureBounds.bottom)
-        },moving = moving, parked = { resting && page == UtilityPage.Dock && !moving() })
+        },moving = moving, parked = parked)
     val hasFrost by remember(frost) { derivedStateOf { frost.current != null } }
     val surfaceBase by animateColorAsState(palette.background.copy(alpha = if (hasFrost) PortalFrostStyle.tint(palette.isDark) else 0.96f),
         tween(320,easing = PortalEmphasized),label = "utility glass tint")
@@ -125,7 +126,7 @@ internal fun UtilityRoundtable(
         resting = false
         if (page == UtilityPage.Dock && !dragging && !hovered && !focused) { delay(2200); resting = true }
     }
-    val opacityTarget = if (resting && page == UtilityPage.Dock) 0.48f else 1f
+    val opacityTarget = if (parked()) 0.48f else 1f
     val opacity by animateFloatAsState(opacityTarget, tween(620, easing = PortalEmphasized), label = "parked tab ink")
     val lift by animateFloatAsState(if (dragging) 1.045f else if (keyboardMotion.dragging) 1.006f else 1f, spring(dampingRatio = 0.86f, stiffness = 400f), label = "utility weight")
     val currentAnimating by rememberUpdatedState(onAnimating)

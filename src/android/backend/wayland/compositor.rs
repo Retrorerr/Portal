@@ -145,10 +145,9 @@ impl State {
             return false;
         };
         let wl_surface = surface.wl_surface().clone();
-        let is_new_identity = self
+        let is_new_identity = (self
             .kwin_surface
-            .as_ref()
-            .map_or(true, |known| known != &wl_surface)
+            .as_ref() != Some(&wl_surface))
             || self.kwin_client_id.as_ref() != Some(&client_id);
 
         if is_new_identity {
@@ -871,7 +870,7 @@ impl Compositor {
             self.keyboard.set_focus(
                 &mut self.state,
                 kwin_surface,
-                SERIAL_COUNTER.next_serial().into(),
+                SERIAL_COUNTER.next_serial(),
             );
         }
         self.sync_data_device_focus();

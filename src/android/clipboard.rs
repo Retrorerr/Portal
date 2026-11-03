@@ -14,7 +14,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Condvar, Mutex,
     },
-    thread,
     time::Duration,
 };
 use winit::event_loop::EventLoopProxy;
@@ -23,6 +22,7 @@ use winit::platform::android::activity::AndroidApp;
 use crate::android::accessibility::{event_loop_proxy, AppUserEvent};
 use crate::android::clipboard_broker::{self, BrokerHandle, GuestClipboardCallback};
 use crate::android::utils::ndk::run_in_jvm;
+use crate::android::utils::thread::spawn_named;
 use crate::core::clipboard_policy::{validate_clip_text, MAX_CLIPBOARD_BYTES};
 use crate::core::clipboard_sync::ExternalClipboardSync;
 
@@ -199,7 +199,7 @@ fn write_text_inner<'local>(
 
 /// Read the Android primary clipboard, coercing the first item to UTF-8 text.
 pub fn read_text(android_app: &AndroidApp) -> Result<Option<String>, ClipboardError> {
-    run_in_jvm(|env, app| read_text_inner(env, app), android_app.clone())
+    run_in_jvm(read_text_inner, android_app.clone())
 }
 
 /// Replace the Android primary clipboard with a plain-text item.
@@ -352,7 +352,7 @@ fn spawn_guest_android_writer(
     sync: Arc<Mutex<ExternalClipboardSync>>,
 ) -> Mutex<mpsc::Sender<String>> {
     let (sender, receiver) = mpsc::channel::<String>();
-    thread::spawn(move || {
+    spawn_named("clip-writer", move || {
         while let Ok(mut text) = receiver.recv() {
             while let Ok(newer) = receiver.try_recv() {
                 text = newer;
@@ -398,7 +398,7 @@ fn spawn_android_poller(
     resync_signal: Arc<(Mutex<bool>, Condvar)>,
     wake_proxy: Option<EventLoopProxy<AppUserEvent>>,
 ) {
-    thread::spawn(move || {
+    spawn_named("clip-reader", move || {
         let mut first_read = true;
         // Index into DENIED_READ_RETRY_MS while a denied resync read is
         // being retried; `None` sleeps until the next signal.

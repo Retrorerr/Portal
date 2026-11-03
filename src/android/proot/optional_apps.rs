@@ -386,7 +386,11 @@ fn log_tail(bytes: &[u8]) -> String {
 /// Run guest shell as root with apt status on fd 3 reported through
 /// `progress`, scaled into `[from, to]`.
 fn run_apt(command: &str, from: u16, to: u16, progress: Progress) -> anyhow::Result<()> {
-    let last_publish = Mutex::new(Instant::now() - PUBLISH_INTERVAL);
+    let last_publish = Mutex::new(
+        Instant::now()
+            .checked_sub(PUBLISH_INTERVAL)
+            .unwrap_or_else(Instant::now),
+    );
     run_apt_lines(command, move |line| {
         let Some(status) = parse_apt_status(line) else {
             return;
@@ -528,7 +532,11 @@ fn install_steam(progress: Progress) -> anyhow::Result<()> {
     write_file(&fs_root.join(STEAM_MARKER_REL), b"1\n", 0o644)?;
     sync_steam_files(fs_root)?;
     progress(42, "Downloading Steam for ARM64…".to_owned());
-    let last_publish = Mutex::new(Instant::now() - PUBLISH_INTERVAL);
+    let last_publish = Mutex::new(
+        Instant::now()
+            .checked_sub(PUBLISH_INTERVAL)
+            .unwrap_or_else(Instant::now),
+    );
     let output = PRootRuntime::active().execute(
         ProcessSpec::new(format!(
             "test -x \"$HOME/{STEAM_ROOT_HOME_REL}/steamrtarm64/steam\" || \
@@ -700,7 +708,11 @@ fn sync_steam_files(fs_root: &Path) -> anyhow::Result<()> {
     write_file(&fs_root.join(PORTAL_LSOF_REL), PORTAL_LSOF, 0o755)?;
     write_file(&fs_root.join(STEAM_TOUCHDRAG_REL), STEAM_TOUCHDRAG, 0o755)?;
     write_file(&fs_root.join(STEAM_EXECMOD_REL), STEAM_EXECMOD, 0o755)?;
-    write_file(&fs_root.join(STEAM_APPINDICATOR_REL), STEAM_APPINDICATOR, 0o755)?;
+    write_file(
+        &fs_root.join(STEAM_APPINDICATOR_REL),
+        STEAM_APPINDICATOR,
+        0o755,
+    )?;
     Ok(())
 }
 

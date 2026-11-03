@@ -198,6 +198,8 @@ impl Drop for BrokerHandle {
     }
 }
 
+// Each argument is one piece of shared broker state handed to every client.
+#[allow(clippy::too_many_arguments)]
 fn accept_loop(
     listener: TcpListener,
     stop: Arc<AtomicBool>,
@@ -231,7 +233,15 @@ fn accept_loop(
                 });
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                thread::park_timeout(std::time::Duration::from_millis(25));
+                // Sleep until a client connects; the timeout only rechecks
+                // `stop`. A 25 ms park woke this thread 40 times a second.
+                use std::os::fd::AsRawFd;
+                let mut fd = libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                unsafe { libc::poll(&mut fd, 1, 1000) };
             }
             Err(error) => {
                 log::warn!("clipdiag broker accept failed: {error}");
@@ -318,11 +328,7 @@ fn handle_client(
         });
     }
 
-    loop {
-        let request = match protocol::read_request(&mut reader) {
-            Ok(request) => request,
-            Err(_) => break,
-        };
+    while let Ok(request) = protocol::read_request(&mut reader) {
         let Some(kind) = apply_guest_request(request, &state, &host_echo, &on_guest_change) else {
             break;
         };

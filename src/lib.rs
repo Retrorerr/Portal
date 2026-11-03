@@ -10,6 +10,7 @@ pub mod core {
     pub mod guest_browser;
     pub mod guest_compat;
     pub mod guest_procfs;
+    pub mod guest_tmp;
     pub mod guest_locale;
     pub mod guest_sudo;
     #[cfg(unix)]
@@ -26,6 +27,7 @@ pub mod core {
     pub mod runtime;
     pub mod shm_damage;
     pub mod startup;
+    pub mod steam_processes;
     pub mod stylus;
     pub mod surface_geometry;
     pub mod system_updates;
@@ -46,6 +48,7 @@ pub mod android {
     pub mod gamepad;
     pub mod guest_procfs;
     pub mod ime;
+    pub mod steam_processes;
     pub mod tablet_mode_manager;
     pub mod update_net;
 
@@ -84,6 +87,7 @@ pub mod android {
         pub mod ndk;
         pub mod pointer_capture;
         pub mod recovery_screen;
+        pub mod thread;
         pub mod webview_handoff;
     }
 }

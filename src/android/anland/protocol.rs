@@ -407,6 +407,6 @@ mod tests {
     #[test]
     fn hello_slot_count_matches_producer() {
         assert_eq!(HELLO_FD_COUNT, 5);
-        assert!(MAX_BUFS <= 8);
+        const { assert!(MAX_BUFS <= 8) };
     }
 }

@@ -73,7 +73,11 @@ fn open_append(path: &Path) -> Option<(File, u64)> {
             let _ = fs::rename(path, rotated);
         }
     }
-    let file = OpenOptions::new().create(true).append(true).open(path).ok()?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     Some((file, len))
 }
@@ -83,7 +87,9 @@ fn append_line(path: &Path, line: &str) {
     let index = match files.iter().position(|(p, _, _)| p == path) {
         Some(index) => index,
         None => {
-            let Some((file, len)) = open_append(path) else { return };
+            let Some((file, len)) = open_append(path) else {
+                return;
+            };
             files.push((path.to_path_buf(), file, len));
             files.len() - 1
         }
@@ -419,7 +425,7 @@ fn add_file(
     }
     writer
         .start_file(archive_name, FileOptions::default())
-        .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let mut file = File::open(source)?;
     let mut buf = [0u8; 16 * 1024];
     loop {
@@ -513,16 +519,9 @@ fn kgsl_device_info() -> String {
     }
     const KGSL_PROP_DEVICE_INFO: libc::c_uint = 1;
     // _IOWR(KGSL_IOC_TYPE, 0x2, struct kgsl_device_getproperty)
-    let request = (3u32 << 30)
-        | ((std::mem::size_of::<GetProperty>() as u32) << 16)
-        | (0x09 << 8)
-        | 0x02;
-    let fd = unsafe {
-        libc::open(
-            c"/dev/kgsl-3d0".as_ptr(),
-            libc::O_RDWR | libc::O_CLOEXEC,
-        )
-    };
+    let request =
+        (3u32 << 30) | ((std::mem::size_of::<GetProperty>() as u32) << 16) | (0x09 << 8) | 0x02;
+    let fd = unsafe { libc::open(c"/dev/kgsl-3d0".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if fd < 0 {
         return format!("unavailable ({})", io::Error::last_os_error());
     }
@@ -785,7 +784,7 @@ fn copy_archive_to_content_uri<'local>(
         return Err("Android content resolver returned no output stream".into());
     }
 
-    let buffer = match env.byte_array_from_slice(&[0u8; 64 * 1024]) {
+    let buffer = match env.byte_array_from_slice(&vec![0u8; 64 * 1024]) {
         Ok(buffer) => buffer,
         Err(error) => {
             clear_pending_exception(env, "allocate diagnostics export buffer");

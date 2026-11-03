@@ -84,6 +84,7 @@ pub extern "system" fn Java_app_polarbear_FileTransfers_nativeRun(
                 let Ok(mut env) = vm.attach_current_thread() else {
                     return;
                 };
+                crate::android::utils::thread::restore_name();
                 let Ok(job) = env.new_string(&job) else {
                     return;
                 };
