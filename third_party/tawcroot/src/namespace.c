@@ -226,6 +226,7 @@ static long clone_namespace(const tawcroot_syscall_args *a, ucontext_t *uc)
             tawcroot_namespace.init_pid = (int)tawc_getpid();
         tawcroot_namespace.pid_pending = 0;
         if (flags & CLONE_NEWNET) tawcroot_namespace.net = 1;
+        if (flags & CLONE_NEWNS) tawcroot_namespace.mnt = 1;
         if ((flags & CLONE_NEWUSER) && new_user() < 0) tawc_exit_group(125);
         if (a->b) {
 #if defined(__aarch64__)
@@ -250,6 +251,7 @@ static long unshare_namespace(const tawcroot_syscall_args *a, ucontext_t *uc)
     long result = (flags & real) ? TAWC_RAW(TAWC_SYS_unshare, flags & real, 0, 0, 0, 0, 0) : 0;
     if (!result && (flags & CLONE_NEWPID)) tawcroot_namespace.pid_pending = 1;
     if (!result && (flags & CLONE_NEWNET)) tawcroot_namespace.net = 1;
+    if (!result && (flags & CLONE_NEWNS)) tawcroot_namespace.mnt = 1;
     if (!result && (flags & CLONE_FS)) tawcroot_fs_detach();
     if (!result && (flags & CLONE_NEWUSER)) result = charge_user();
     if (!result && (flags & CLONE_NEWUSER)) result = new_user();

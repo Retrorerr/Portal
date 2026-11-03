@@ -14,6 +14,9 @@ struct tawc_namespace {
     uint32_t userns_limited;
     uint32_t userns_left;
     int32_t sysctl_fd1;    /* 1 + reserved dup of the written sysctl memfd */
+    /* Unshared a mount namespace (root's bubblewrap needs no user ns):
+     * mountinfo is the path view, as inside a user ns. */
+    uint32_t mnt;
 };
 extern struct tawc_namespace tawcroot_namespace;
 void tawcroot_namespace_register(void);

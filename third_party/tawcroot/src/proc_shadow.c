@@ -994,8 +994,8 @@ long tawcroot_proc_alias(int dirfd, const char *path, char *out, size_t cap)
 
 /* ---------- /proc/self/mountinfo, /proc/self/mounts ----------
  *
- * Inside an emulated user namespace (sandbox helpers: bubblewrap,
- * Flatpak), the mount table is the path view: the root plus every
+ * Inside an emulated user or mount namespace (sandbox helpers:
+ * bubblewrap, Flatpak, root's bubblewrap with no user ns), the mount table is the path view: the root plus every
  * active bind, mount(2)-made ones included. bwrap re-reads mountinfo
  * after each bind to find the mount it just made (bind-mount.c
  * parse_mountinfo) and dies when it isn't listed; Android's own table
@@ -1058,7 +1058,8 @@ long tawcroot_proc_mounts_open(const char *path)
 	if (!tail) return TAWC_ENOSYS;
 	int info = tawc_streq(tail, "mountinfo");
 	if (!info && !tawc_streq(tail, "mounts")) return TAWC_ENOSYS;
-	if (!tawcroot_namespace.user || !resolve_mine(tid)) return TAWC_ENOSYS;
+	if (!(tawcroot_namespace.user || tawcroot_namespace.mnt) ||
+	    !resolve_mine(tid)) return TAWC_ENOSYS;
 
 	size_t cap = (size_t)TAWCROOT_MAX_BINDS * 640 + 256;
 	long map = maps_mmap(cap);
