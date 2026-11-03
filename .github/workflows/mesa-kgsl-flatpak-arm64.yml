@@ -37,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: ['24.08', '25.08']
+        branch: ['24.08', '25.08', '26.08']
     steps:
       - uses: actions/checkout@v5
         with:

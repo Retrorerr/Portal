@@ -30,7 +30,7 @@ EXT_ID=org.freedesktop.Platform.GL.portal
 PREFIX=/usr/lib/aarch64-linux-gnu/GL/portal
 
 case "$BRANCH" in
-    24.08 | 25.08) ;;
+    24.08 | 25.08 | 26.08) ;;
     *) echo "unsupported runtime branch: $BRANCH" >&2; exit 2 ;;
 esac
 
