@@ -294,6 +294,10 @@ long tawcroot_proc_fd_to_host_path(int fd, char *out, size_t out_cap);
 long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap);
 /* Remember the guest name `fd` was opened by (see path.c). */
 void tawcroot_fd_name_note(int fd, const char *guest_abs);
+/* Open a listing of the bind children beneath the unreadable guest
+ * directory `guest_abs` (folded, absolute) in place of the directory
+ * itself (see path.c). -ENOENT when there is none to show. */
+long tawcroot_bind_listing_open(const char *guest_abs, int flags);
 /* That name, while it still holds for `fd`; 0 if none. */
 long tawcroot_fd_name_lookup(int fd, char *out, size_t out_cap);
 

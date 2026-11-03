@@ -309,10 +309,23 @@ static int same_inode(int fd, const char *guest, uint64_t dev, uint64_t ino)
 	if (TAWC_RAW(TAWC_SYS_fstatat, r.base_fd, (long)(*s ? s : "."),
 		     (long)&st, AT_SYMLINK_NOFOLLOW, 0, 0) != 0)
 		return 0;
+	if (S_ISLNK(st.st_mode) && !tawc_starts_with(guest, "/proc/")) {
+		/* Opened through a symlink leaf: the name holds when it
+		 * still leads to the fd's inode. Not for /proc's magic fd
+		 * links: those lead anywhere and name nothing. */
+		if (tawc_str_copy(name, TAWCROOT_PATH_SCRATCH_SIZE, guest) < 0)
+			return 0;
+		r = tawcroot_path_translate(name, scratch->buf[1],
+			TAWCROOT_PATH_SCRATCH_SIZE, TAWCROOT_PATH_FOLLOW,
+			TAWCROOT_PATH_INTENT_READ);
+		if (r.err || TAWC_RAW(TAWC_SYS_fstatat, r.base_fd,
+				      (long)(*s ? s : "."), (long)&st, 0, 0, 0) != 0)
+			return 0;
+	}
 	return (uint64_t)st.st_dev == dev && (uint64_t)st.st_ino == ino;
 }
 
-void tawcroot_fd_name_note(int fd, const char *guest_abs)
+static void fd_name_record(int fd, const char *guest_abs, int covered)
 {
 	if (fd < 0 || !guest_abs || guest_abs[0] != '/' ||
 	    tawc_strlen(guest_abs) >= sizeof g_fdname[0].path)
@@ -324,9 +337,14 @@ void tawcroot_fd_name_note(int fd, const char *guest_abs)
 	g_fdname[i].fd = fd;
 	g_fdname[i].dev = (uint64_t)st.st_dev;
 	g_fdname[i].ino = (uint64_t)st.st_ino;
-	g_fdname[i].covered = 0;
+	g_fdname[i].covered = covered;
 	(void)tawc_str_copy(g_fdname[i].path, sizeof g_fdname[i].path, guest_abs);
 	__atomic_store_n(&g_fdname_lock, 0, __ATOMIC_RELEASE);
+}
+
+void tawcroot_fd_name_note(int fd, const char *guest_abs)
+{
+	fd_name_record(fd, guest_abs, 0);
 }
 
 static long fd_name_lookup(int fd, char *out, size_t out_cap)
@@ -365,6 +383,93 @@ static void fd_name_cover(const char *guest_abs)
 long tawcroot_fd_name_lookup(int fd, char *out, size_t out_cap)
 {
 	return fd_name_lookup(fd, out, out_cap);
+}
+
+/* Listing an unreadable sysfs directory that has binds beneath it.
+ *
+ * Android's SELinux policy lets an app reach /sys/class/<name> by path
+ * but not list /sys/class or /sys/bus. A guest that enumerates devices
+ * by listing (systemd's sd-device: GStreamer's VA plugin, libinput,
+ * wlroots) then sees nothing, not even a bind the runtime mounted there
+ * (Portal's render node under /sys/class/drm). Like a mount point, a
+ * bind shows in its parent's listing: the directory opens as a real
+ * one kept under the link store's tmp/, holding one empty entry per
+ * bind child, and its fd keeps the guest name so dirfd-relative
+ * lookups reach the real entries. Entries the host hides stay
+ * reachable by path. Limited to /sys, where enumeration by listing is
+ * the norm. */
+long tawcroot_bind_listing_open(const char *guest_abs, int flags)
+{
+	if (!tawc_starts_with(guest_abs, "/sys/")) return TAWC_ENOENT;
+	const char *rel = guest_abs + 1;
+	size_t rel_len = tawc_strlen(rel);
+	while (rel_len && rel[rel_len - 1] == '/') rel_len--;
+
+	/* Named after the guest path ('/' as '%') and a hash of the
+	 * children, so processes with other bind sets never share (or
+	 * rewrite) one listing. */
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *name = scratch->buf[0];
+	char *child = scratch->buf[1];
+	if (rel_len + 24 >= TAWCROOT_PATH_SCRATCH_SIZE) return TAWC_ENAMETOOLONG;
+	size_t pos = 0;
+	for (size_t i = 0; i < rel_len; i++)
+		name[pos++] = rel[i] == '/' ? '%' : rel[i];
+	name[pos++] = '.';
+	unsigned long hash = 1469598103934665603UL;
+	int children = 0;
+	for (size_t b = 0; b < tawcroot_n_binds; b++) {
+		const struct tawcroot_bind *bd = &tawcroot_binds[b];
+		if (!bd->active || bd->dst_len <= rel_len + 1 ||
+		    memcmp(bd->dst, rel, rel_len) || bd->dst[rel_len] != '/')
+			continue;
+		const char *c = bd->dst + rel_len + 1;
+		for (; *c && *c != '/'; c++)
+			hash = (hash ^ (unsigned char)*c) * 1099511628211UL;
+		hash = (hash ^ (*c || !bd->leaf[0] ? 'd' : 'f')) * 1099511628211UL;
+		children++;
+	}
+	if (!children) return TAWC_ENOENT;
+	for (int i = 0; i < 16; i++)
+		name[pos++] = "0123456789abcdef"[(hash >> (60 - 4 * i)) & 15];
+	name[pos] = 0;
+
+	long tmp = tawcroot_linkstore_tmp_dirfd();
+	if (tmp < 0) return tmp;
+	long mr = TAWC_RAW(TAWC_SYS_mkdirat, tmp, (long)name, 0755, 0, 0, 0);
+	if (mr != 0 && mr != TAWC_EEXIST) return mr;
+	long dir = tawc_openat((int)tmp, name, O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+	if (dir < 0) return dir;
+	for (size_t b = 0; b < tawcroot_n_binds; b++) {
+		const struct tawcroot_bind *bd = &tawcroot_binds[b];
+		if (!bd->active || bd->dst_len <= rel_len + 1 ||
+		    memcmp(bd->dst, rel, rel_len) || bd->dst[rel_len] != '/')
+			continue;
+		const char *c = bd->dst + rel_len + 1;
+		size_t k = 0;
+		while (c[k] && c[k] != '/' && k + 1 < TAWCROOT_PATH_SCRATCH_SIZE) {
+			child[k] = c[k];
+			k++;
+		}
+		child[k] = 0;
+		if (c[k] || !bd->leaf[0]) {
+			(void)TAWC_RAW(TAWC_SYS_mkdirat, dir, (long)child, 0755, 0, 0, 0);
+		} else {
+			long f = tawc_openat((int)dir, child,
+					     O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+			if (f >= 0) tawc_close((int)f);
+		}
+	}
+	long fd = tawc_openat((int)dir, ".", O_RDONLY | O_DIRECTORY |
+			      (flags & (O_CLOEXEC | O_NONBLOCK)), 0);
+	tawc_close((int)dir);
+	if (fd < 0) return fd;
+	/* The guest's spelling, folded, with the trailing slashes gone. */
+	if (tawc_str_copy(child, TAWCROOT_PATH_SCRATCH_SIZE, guest_abs) >= 0) {
+		child[rel_len + 1] = 0;
+		fd_name_record((int)fd, child, 1);
+	}
+	return fd;
 }
 
 long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap)

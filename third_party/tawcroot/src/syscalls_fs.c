@@ -549,10 +549,13 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * not read them. A read-only directory open serves as a dirfd
 	 * (bubblewrap's mount point walk, *at calls, fchdir); an O_PATH
 	 * fd does all that, and listing it answers EACCES as before. */
+	int path_fallback = 0;
 	if (fd == TAWC_EACCES && (flags & O_DIRECTORY) &&
-	    (flags & O_ACCMODE) == O_RDONLY && !(flags & (O_CREAT | O_PATH)))
+	    (flags & O_ACCMODE) == O_RDONLY && !(flags & (O_CREAT | O_PATH))) {
 		fd = tawc_openat(t.fd, p, O_PATH | (flags & (O_DIRECTORY |
 				 O_NOFOLLOW | O_CLOEXEC)), 0);
+		path_fallback = fd >= 0;
+	}
 
 	/* Reactive O_NOFOLLOW: the kernel just ELOOPed a leaf symlink; if
 	 * it is an emulated name, open the object KEEPING O_NOFOLLOW — a
@@ -567,8 +570,20 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	/* See the O_CREAT retry above: the leaf turned out not to exist,
 	 * so the create the guest asked for would have been real — EROFS. */
 	if (erofs_creat_retry && fd == TAWC_ENOENT) return TAWC_EROFS;
-	if (fd >= 0 && (flags & O_PATH) && t.fd != tawcroot_rootfs_fd)
+	if (fd >= 0 && ((flags & O_PATH) || path_fallback) &&
+	    t.fd != tawcroot_rootfs_fd)
 		note_fd_name((int)fd, dirfd, gpath);
+	if (path_fallback) {
+		TAWCROOT_PATH_SCRATCH_AUTO(ls);
+		long gl = tawcroot_fd_to_guest_abs((int)fd, ls->buf[0],
+						   TAWCROOT_PATH_SCRATCH_SIZE);
+		long lfd = gl > 0 ? tawcroot_bind_listing_open(ls->buf[0], flags)
+				  : TAWC_ENOENT;
+		if (lfd >= 0) {
+			tawc_close((int)fd);
+			return lfd;
+		}
+	}
 	return fd;
 }
 
@@ -3057,6 +3072,25 @@ struct tawc_statfs64 {
 	long f_namelen, f_frsize, f_flags, f_spare[4];
 };
 #define TAWC_ST_RDONLY 0x0001
+#define TAWC_SYSFS_MAGIC 0x62656572L
+#define TAWC_PROC_MAGIC  0x9fa0L
+
+/* The pseudo-filesystem a guest path (no leading '/') lies in: sysfs
+ * under sys/, procfs under proc/, else 0. `inside` set: the path itself
+ * may be the mount point. */
+static long pseudo_fs_type(const char *rel, int inside)
+{
+	static const struct { const char *dir; size_t len; long type; } roots[] = {
+		{ "sys",  3, TAWC_SYSFS_MAGIC },
+		{ "proc", 4, TAWC_PROC_MAGIC },
+	};
+	for (size_t i = 0; i < sizeof roots / sizeof roots[0]; i++) {
+		if (memcmp(rel, roots[i].dir, roots[i].len)) continue;
+		char next = rel[roots[i].len];
+		if (next == '/' || (inside && next == 0)) return roots[i].type;
+	}
+	return 0;
+}
 
 static long handle_statfs(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
@@ -3084,6 +3118,53 @@ static long handle_statfs(const tawcroot_syscall_args *args, ucontext_t *uc)
 			   0, 0, 0, 0);
 	if (rv != 0) return rv;
 	if (t.ro) local.f_flags |= TAWC_ST_RDONLY;
+	for (size_t i = 0; i < tawcroot_n_binds; i++) {
+		const struct tawcroot_bind *b = &tawcroot_binds[i];
+		if (b->active && b->src_fd == t.fd) {
+			long type = pseudo_fs_type(b->dst, 0);
+			if (type) local.f_type = type;
+			break;
+		}
+	}
+	long ce = tawc_copy_to_guest(out, &local, sizeof local);
+	return ce < 0 ? ce : 0;
+}
+
+/* fstatfs(fd, buf): the kernel's answer, except for a file reached
+ * through a bind into /sys or /proc. Those binds stand in for kernel
+ * files (Portal's fake DRM render node under /sys/class/drm and
+ * /sys/dev/char), and readers check the filesystem before trusting
+ * them: systemd's sd-device refuses a syspath whose fstatfs is not
+ * sysfs, so udev enumeration (GStreamer's VA plugin, libinput,
+ * wlroots) would never see the node. Fds on the host's own /sys and
+ * /proc already report the real type and skip the lookup. */
+static long handle_fstatfs(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	int   fd  = (int)args->a;
+	void *out = (void *)(uintptr_t)args->b;
+	if (!out) return TAWC_EFAULT;
+	if (tawcroot_fd_is_reserved(fd)) return TAWC_EBADF;
+	struct tawc_statfs64 local;
+	long rv = TAWC_RAW(TAWC_SYS_fstatfs, fd, (long)&local, 0, 0, 0, 0);
+	if (rv == TAWC_EBADF) {
+		/* Older kernels refuse fstatfs on O_PATH fds; the
+		 * /proc/self/fd path resolves through the fd instead. */
+		char link[64];
+		if (tawc_proc_fd_path(link, sizeof link, fd, 0) >= 0)
+			rv = TAWC_RAW(TAWC_SYS_statfs, (long)link,
+				      (long)&local, 0, 0, 0, 0);
+	}
+	if (rv != 0) return rv;
+	if (local.f_type != TAWC_SYSFS_MAGIC && local.f_type != TAWC_PROC_MAGIC) {
+		TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+		char *guest = scratch->buf[0];
+		if (tawcroot_fd_to_guest_abs(fd, guest,
+					     TAWCROOT_PATH_SCRATCH_SIZE) > 0) {
+			long type = pseudo_fs_type(guest + 1, 1);
+			if (type) local.f_type = type;
+		}
+	}
 	long ce = tawc_copy_to_guest(out, &local, sizeof local);
 	return ce < 0 ? ce : 0;
 }
@@ -3374,6 +3455,7 @@ void tawcroot_fs_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_truncate,    handle_truncate);
 	tawcroot_dispatch_install(TAWC_SYS_mknodat,     handle_mknodat);
 	tawcroot_dispatch_install(TAWC_SYS_statfs,      handle_statfs);
+	tawcroot_dispatch_install(TAWC_SYS_fstatfs,     handle_fstatfs);
 
 	/* Path-bearing xattr family. f*xattr variants take an fd and stay
 	 * untrapped — the kernel's fd-based resolution is already correct.

@@ -15,8 +15,18 @@
 //! ```text
 //! <base>/dri/renderD128 -> /dev/kgsl-3d0        bound over /dev/dri
 //! <base>/sysfs/uevent                            bound over /sys/dev/char/M:m/device/uevent
-//! <base>/sysfs/drm/                              bound over /sys/dev/char/M:m/device/drm
+//! <base>/sysfs/drm/renderD128 -> /sys/class/drm/renderD128
+//!                                                bound over /sys/dev/char/M:m/device/drm
+//! <base>/sysfs/class-drm/renderD128/             bound over /sys/class/drm
 //! ```
+//!
+//! `/sys/class/drm/renderD128` is the node's sysfs device for udev: systemd's
+//! sd-device enumerates the `drm` subsystem by listing `/sys/class` and
+//! reads the node's name and number from its `uevent`. GStreamer's VA
+//! plugin finds VA devices only that way. Android's own entries there (the
+//! display's card0 and renderD128) are unreadable to apps, as is the
+//! `/sys/class` listing itself; tawcroot lists binds beneath an unreadable
+//! sysfs directory and reports them as sysfs, which sd-device checks.
 //!
 //! PRoot's `--bind=host:guest` splits on the FIRST colon only, so the guest
 //! half may contain colons (`/sys/dev/char/456:0/...`) unescaped; escaping
@@ -60,12 +70,18 @@ pub fn fake_uevent() -> &'static str {
      OF_COMPATIBLE_N=1\n"
 }
 
-/// The three bind mounts (`host`, `guest`) that expose the tree.
+/// `uevent` of the render node's own sysfs device, as udev reads it.
+pub fn class_uevent(major: u32, minor: u32) -> String {
+    format!("MAJOR={major}\nMINOR={minor}\nDEVNAME=dri/{RENDER_NODE_NAME}\nDEVTYPE=drm_minor\n")
+}
+
+/// The bind mounts (`host`, `guest`) that expose the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FakeDrmBinds {
     pub dri_dir: PathBuf,
     pub uevent_file: PathBuf,
     pub drm_dir: PathBuf,
+    pub class_dir: PathBuf,
     pub major: u32,
     pub minor: u32,
 }
@@ -84,6 +100,7 @@ impl FakeDrmBinds {
                 self.drm_dir.clone(),
                 PathBuf::from(format!("{device_dir}/drm")),
             ),
+            (self.class_dir.clone(), PathBuf::from("/sys/class/drm")),
         ]
     }
 }
@@ -100,25 +117,44 @@ pub fn build_fake_drm_tree(base: &Path, kgsl_rdev: u64) -> std::io::Result<FakeD
     let sysfs_dir = base.join("sysfs");
     let drm_dir = sysfs_dir.join("drm");
     let uevent_file = sysfs_dir.join("uevent");
+    let class_dir = sysfs_dir.join("class-drm");
+    let class_node = class_dir.join(RENDER_NODE_NAME);
     fs::create_dir_all(&dri_dir)?;
     fs::create_dir_all(&drm_dir)?;
+    fs::create_dir_all(&class_node)?;
 
-    let node = dri_dir.join(RENDER_NODE_NAME);
-    let current = fs::read_link(&node).ok();
-    if current.as_deref() != Some(Path::new(KGSL_DEVICE)) {
-        let _ = fs::remove_file(&node);
-        symlink(KGSL_DEVICE, &node)?;
-    }
+    let ensure_link = |target: &str, link: &Path| -> std::io::Result<()> {
+        if fs::read_link(link).ok().as_deref() != Some(Path::new(target)) {
+            let _ = fs::remove_file(link);
+            symlink(target, link)?;
+        }
+        Ok(())
+    };
+    let ensure_file = |path: &Path, contents: &str| -> std::io::Result<()> {
+        if fs::read_to_string(path).ok().as_deref() != Some(contents) {
+            fs::write(path, contents)?;
+        }
+        Ok(())
+    };
 
-    let uevent = fake_uevent();
-    if fs::read_to_string(&uevent_file).ok().as_deref() != Some(uevent) {
-        fs::write(&uevent_file, uevent)?;
-    }
+    ensure_link(KGSL_DEVICE, &dri_dir.join(RENDER_NODE_NAME))?;
+    ensure_file(&uevent_file, fake_uevent())?;
+    let class_path = format!("/sys/class/drm/{RENDER_NODE_NAME}");
+    ensure_link(&class_path, &drm_dir.join(RENDER_NODE_NAME))?;
+    ensure_file(&class_dir.join("version"), "drm 1.1.0 20060810\n")?;
+    ensure_file(&class_node.join("uevent"), &class_uevent(major, minor))?;
+    ensure_file(&class_node.join("dev"), &format!("{major}:{minor}\n"))?;
+    ensure_link("/sys/class/drm", &class_node.join("subsystem"))?;
+    ensure_link(
+        &guest_sysfs_device_dir(major, minor),
+        &class_node.join("device"),
+    )?;
 
     Ok(FakeDrmBinds {
         dri_dir,
         uevent_file,
         drm_dir,
+        class_dir,
         major,
         minor,
     })
@@ -143,10 +179,7 @@ mod tests {
 
     #[test]
     fn guest_paths_follow_the_device_number() {
-        assert_eq!(
-            guest_sysfs_device_dir(456, 0),
-            "/sys/dev/char/456:0/device"
-        );
+        assert_eq!(guest_sysfs_device_dir(456, 0), "/sys/dev/char/456:0/device");
     }
 
     #[test]
@@ -159,22 +192,32 @@ mod tests {
     }
 
     #[test]
-    fn bind_pairs_cover_dev_dri_and_both_sysfs_entries() {
+    fn bind_pairs_cover_dev_dri_and_the_sysfs_entries() {
         let binds = FakeDrmBinds {
             dri_dir: PathBuf::from("/h/dri"),
             uevent_file: PathBuf::from("/h/sysfs/uevent"),
             drm_dir: PathBuf::from("/h/sysfs/drm"),
+            class_dir: PathBuf::from("/h/sysfs/class-drm"),
             major: 456,
             minor: 0,
         };
         let pairs = binds.pairs();
-        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs.len(), 4);
         assert_eq!(pairs[0].1, PathBuf::from("/dev/dri"));
         assert_eq!(
             pairs[1].1,
             PathBuf::from("/sys/dev/char/456:0/device/uevent")
         );
         assert_eq!(pairs[2].1, PathBuf::from("/sys/dev/char/456:0/device/drm"));
+        assert_eq!(pairs[3].1, PathBuf::from("/sys/class/drm"));
+    }
+
+    #[test]
+    fn class_uevent_names_the_render_node_for_udev() {
+        let text = class_uevent(456, 0);
+        assert!(text.lines().any(|l| l == "MAJOR=456"));
+        assert!(text.lines().any(|l| l == "MINOR=0"));
+        assert!(text.lines().any(|l| l == "DEVNAME=dri/renderD128"));
     }
 
     #[cfg(unix)]
@@ -197,6 +240,27 @@ mod tests {
             fake_uevent()
         );
         assert!(first.drm_dir.is_dir());
+        assert_eq!(
+            std::fs::read_link(first.drm_dir.join(RENDER_NODE_NAME)).unwrap(),
+            std::path::PathBuf::from("/sys/class/drm/renderD128")
+        );
+        let class_node = first.class_dir.join(RENDER_NODE_NAME);
+        assert_eq!(
+            std::fs::read_to_string(class_node.join("uevent")).unwrap(),
+            class_uevent(456, 0)
+        );
+        assert_eq!(
+            std::fs::read_to_string(class_node.join("dev")).unwrap(),
+            "456:0\n"
+        );
+        assert_eq!(
+            std::fs::read_link(class_node.join("subsystem")).unwrap(),
+            std::path::PathBuf::from("/sys/class/drm")
+        );
+        assert_eq!(
+            std::fs::read_link(class_node.join("device")).unwrap(),
+            std::path::PathBuf::from("/sys/dev/char/456:0/device")
+        );
     }
 
     #[cfg(unix)]
