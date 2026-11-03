@@ -32,6 +32,17 @@ int tawcroot_namespace_probe(const char *path)
         tawc_streq(path, "/proc/self/ns/pid") || tawc_streq(path, "/proc/self/ns/net");
 }
 
+/* What readlink answers for a probe path whose namespace the kernel lacks:
+ * the init namespaces' well-known inode numbers. Shell checks (`[ -L ]`)
+ * and readlink then see the namespace the emulation provides. */
+const char *tawcroot_namespace_link_target(const char *path)
+{
+    if (tawc_streq(path, "/proc/self/ns/user")) return "user:[4026531837]";
+    if (tawc_streq(path, "/proc/self/ns/pid")) return "pid:[4026531836]";
+    if (tawc_streq(path, "/proc/self/ns/net")) return "net:[4026531840]";
+    return 0;
+}
+
 static long new_user(void)
 {
     struct tawc_namespace *ns = &tawcroot_namespace;

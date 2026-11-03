@@ -783,6 +783,8 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 	tawcroot_path_mode pmode = (flags & AT_SYMLINK_NOFOLLOW)
 		? TAWCROOT_PATH_NOFOLLOW
 		: TAWCROOT_PATH_FOLLOW;
+	const char *ns_link = pmode == TAWCROOT_PATH_NOFOLLOW
+		? tawcroot_namespace_link_target(scratch->buf[0]) : 0;
 
 	struct fs_path t;
 	long e = translate_local(scratch, 0, dirfd, pmode,
@@ -798,6 +800,13 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 
 	long rv = TAWC_RAW(TAWC_SYS_fstatat, t.fd, (long)resolved,
 			   (long)&local, rv_flags, 0, 0);
+	/* A namespace the kernel lacks but the emulation provides: lstat
+	 * shows a link like the ones the kernel has (cgroup's, always
+	 * present), so `[ -L /proc/self/ns/user ]` agrees with access(2). */
+	if (rv == TAWC_ENOENT && ns_link)
+		rv = TAWC_RAW(TAWC_SYS_fstatat, AT_FDCWD,
+			      (long)"/proc/self/ns/cgroup", (long)&local,
+			      AT_SYMLINK_NOFOLLOW, 0, 0);
 	if (rv == 0) {
 		if (pmode == TAWCROOT_PATH_NOFOLLOW)
 			(void)stat_fixup_emulated(t.fd, t.path, &local);
@@ -1068,6 +1077,9 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 		return cn;
 	}
 
+	const char *ns_link = dirfd == AT_FDCWD
+		? tawcroot_namespace_link_target(path) : 0;
+
 	struct fs_path t;
 	long e = translate_local(scratch, 0, dirfd,
 				 TAWCROOT_PATH_NOFOLLOW,
@@ -1119,6 +1131,13 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 	char *readlink_scratch = scratch->buf[0];
 	long n = tawc_readlinkat(t.fd, p, readlink_scratch,
 				 TAWCROOT_PATH_SCRATCH_SIZE);
+	if (n == TAWC_ENOENT && ns_link) {  /* see handle_newfstatat */
+		n = (long)tawc_strlen(ns_link);
+		if (n > (long)size) n = size;
+		long ce = tawc_copy_to_guest(buf, ns_link, (size_t)n);
+		if (ce < 0) return ce;
+		return n;
+	}
 	if (n < 0) return n;
 	/* Same view the resolver walks, so userspace realpath agrees. */
 	if (n > 0 && n < (long)TAWCROOT_PATH_SCRATCH_SIZE) {
@@ -2168,6 +2187,8 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 	tawcroot_path_mode pmode = (flags & AT_SYMLINK_NOFOLLOW)
 		? TAWCROOT_PATH_NOFOLLOW
 		: TAWCROOT_PATH_FOLLOW;
+	const char *ns_link = pmode == TAWCROOT_PATH_NOFOLLOW
+		? tawcroot_namespace_link_target(scratch->buf[0]) : 0;
 
 	struct fs_path t;
 	long e = translate_local(scratch, 0, dirfd, pmode,
@@ -2180,6 +2201,9 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 
 	long rv = tawc_statx(t.fd, resolved,
 			   rv_flags, mask, &local);
+	if (rv == TAWC_ENOENT && ns_link)  /* see handle_newfstatat */
+		rv = tawc_statx(AT_FDCWD, "/proc/self/ns/cgroup",
+				AT_SYMLINK_NOFOLLOW, mask, &local);
 	/* Hardlink emulation — same two fixups as handle_newfstatat:
 	 * NOFOLLOW leaf that is an emulated name → statx the object and
 	 * report the sidecar count; FOLLOW result landing in the store →

@@ -91,7 +91,7 @@ const KWIN_SCRIPT_BORDERLESS_FULLSCREEN: [(&str, &str); 2] = [
     ),
 ];
 /// Opt-in helper deriving user desktop entries for Chromium/Electron apps
-/// (see `setup_chromium_no_sandbox`). PRoot emulates the user and PID
+/// (see `setup_chromium_no_sandbox`). Both guest engines emulate the user and PID
 /// namespaces their sandbox needs; `--no-sandbox` is only added where that
 /// emulation is unavailable, which `/proc/self/ns/user` tells.
 const CHROMIUM_ENTRIES_HELPER: &str = r#"#!/bin/sh
@@ -2168,7 +2168,7 @@ fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(PRODUCTION_FS_ROOT);
 
     // Chromium's sandbox needs user and PID namespaces, which the kernel lacks;
-    // PRoot emulates them (syscall/fakens.c), so it only runs without one where
+    // both guest engines emulate them, so it only runs without one where
     // /proc/self/ns/user is missing.  Electron also initializes Node against
     // inherited descriptors that PRoot cannot faithfully expose, and Xwayland
     // authentication is not a reliable boundary for guest-launched clients.

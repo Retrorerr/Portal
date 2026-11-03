@@ -20,3 +20,4 @@ void tawcroot_namespace_register(void);
 void tawcroot_namespace_restore(void);
 long tawcroot_namespace_open(const char *path, int flags);
 int tawcroot_namespace_probe(const char *path);
+const char *tawcroot_namespace_link_target(const char *path);
