@@ -12,7 +12,18 @@
 # - The GPU is /dev/kgsl-3d0. Portal's /dev/dri/renderD128 is a symlink to
 #   it, so a sandbox that only gets /dev/dri finds a dangling node. It gets
 #   the kgsl node too, next to /dev/dri, and the DMA heaps (ION on older
-#   kernels) Mesa's kgsl winsys allocates shared buffers from.
+#   kernels) Mesa's kgsl winsys allocates shared buffers from. The sysfs
+#   directories Flatpak shares are unreadable on Android (their binds are
+#   dropped above), so the entries libdrm, Mesa's loader and Chromium
+#   identify the GPU through (Portal's /sys/class/drm and the device's
+#   uevent, drm/ and subsystem) are shared one by one, with the sysfs
+#   symlinks on the way to them recreated as they are.
+# - Video decoding goes through Portal's VA driver (termuxva, a bridge to
+#   Android's MediaCodec), which lives outside the runtime. A GPU sandbox
+#   that inherits Portal's LIBVA_DRIVERS_PATH gets the driver directory
+#   read-only at /run/portal-va and the path pointed there. It is built
+#   against glibc 2.38 and the X11/DRM libraries every freedesktop runtime
+#   carries, and ships with the APK, so it always matches the bridge.
 #
 # Flatpak passes its arguments through `--args FD`; those are read here and
 # handed on in a new file. Arguments this does not understand go to bwrap
@@ -23,6 +34,8 @@ import sys
 
 BWRAP = "/usr/bin/bwrap"
 GPU_NODES = (b"/dev/kgsl-3d0", b"/dev/dma_heap", b"/dev/ion")
+VA_DRIVERS = b"/usr/local/lib/portal/va"
+VA_SANDBOX = b"/run/portal-va"
 
 # bwrap 0.11 options and how many arguments each takes.
 ARITY = {
@@ -105,21 +118,93 @@ def hidden(path):
     return False
 
 
+def drm_sysfs():
+    try:
+        rdev = os.stat(GPU_NODES[0]).st_rdev
+    except OSError:
+        return []
+    device = b"/sys/dev/char/%d:%d/device" % (os.major(rdev), os.minor(rdev))
+    return [b"/sys/class/drm", device + b"/uevent", device + b"/drm",
+            device + b"/subsystem"]
+
+
+def mirror(path, groups, depth=0):
+    """Options that make `path` resolve in the sandbox as it does here:
+    each symlink on the way is recreated and the end is bound."""
+    parts = path.strip(b"/").split(b"/")
+    for i in range(len(parts)):
+        prefix = b"/" + b"/".join(parts[:i + 1])
+        try:
+            target = os.readlink(prefix)
+        except OSError:
+            continue
+        if depth > 8:
+            return
+        groups.append([b"--symlink", target, prefix])
+        rest = parts[i + 1:]
+        resolved = os.path.normpath(
+            os.path.join(os.path.dirname(prefix), target))
+        mirror(b"/".join([resolved] + rest), groups, depth + 1)
+        return
+    if os.path.exists(path):
+        groups.append([b"--ro-bind", path, path])
+
+
+def shared(path, groups):
+    """Whether a bind already provides `path` or a parent."""
+    for group in groups:
+        if group[0] in BINDS:
+            dest = group[2].rstrip(b"/")
+            if path == dest or path.startswith(dest + b"/"):
+                return True
+    return False
+
+
+def sandbox_env(groups, name):
+    """The value bwrap leaves `name` at for the sandboxed command."""
+    value = os.environb.get(name)
+    for group in groups:
+        if group[0] == b"--clearenv":
+            value = None
+        elif group[0] == b"--setenv" and group[1] == name:
+            value = group[2]
+        elif group[0] == b"--unsetenv" and group[1] == name:
+            value = None
+    return value
+
+
 def adapt(groups):
     out, changed = [], False
     whole_dev = any(g[0] == b"--dev-bind" and g[1] == b"/dev" for g in groups)
+    gpu = whole_dev
     for group in groups:
         if group[0] in BINDS and hidden(group[1]):
             changed = True
             continue
         out.append(group)
-        if (group[0] == b"--dev-bind" and group[2] == b"/dev/dri"
-                and not whole_dev):
-            bound = {g[2] for g in groups if g[0] in BINDS}
-            for node in GPU_NODES:
-                if node not in bound and os.path.exists(node):
-                    out.append([b"--dev-bind", node, node])
-                    changed = True
+        if group[0] == b"--dev-bind" and group[2] == b"/dev/dri":
+            gpu = True
+            if not whole_dev:
+                bound = {g[2] for g in groups if g[0] in BINDS}
+                for node in GPU_NODES:
+                    if node not in bound and os.path.exists(node):
+                        out.append([b"--dev-bind", node, node])
+                        changed = True
+    if gpu:
+        extra = []
+        for path in drm_sysfs():
+            if not shared(path, out):
+                mirror(path, extra)
+        # One path per destination: the chains share their first links.
+        for group in extra:
+            if not any(g[0] == group[0] and g[2] == group[2] for g in out):
+                out.append(group)
+                changed = True
+    if (gpu and sandbox_env(groups, b"LIBVA_DRIVERS_PATH") == VA_DRIVERS
+            and os.path.isdir(VA_DRIVERS)):
+        out.append([b"--ro-bind", VA_DRIVERS, VA_SANDBOX])
+        out.append([b"--setenv", b"LIBVA_DRIVERS_PATH", VA_SANDBOX])
+        changed = True
     return out, changed
 
 

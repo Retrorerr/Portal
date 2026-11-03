@@ -20,6 +20,12 @@
 //! <base>/sysfs/class-drm/renderD128/             bound over /sys/class/drm
 //! ```
 //!
+//! `uevent` and `drm/` are also bound in the device's canonical directory
+//! (`/sys/devices/platform/soc/<addr>.qcom,kgsl-3d0`), where
+//! `/sys/dev/char/M:m/device` really leads. `realpath()` follows those real
+//! sysfs links, so sd-device (which wants the canonical syspath) and
+//! bubblewrap (which canonicalizes bind sources) reach the fake entries too.
+//!
 //! `/sys/class/drm/renderD128` is the node's sysfs device for udev: systemd's
 //! sd-device enumerates the `drm` subsystem by listing `/sys/class` and
 //! reads the node's name and number from its `uevent`. GStreamer's VA
@@ -82,6 +88,8 @@ pub struct FakeDrmBinds {
     pub uevent_file: PathBuf,
     pub drm_dir: PathBuf,
     pub class_dir: PathBuf,
+    /// Guest path `/sys/dev/char/M:m/device` resolves to, when readable.
+    pub canonical_device_dir: Option<PathBuf>,
     pub major: u32,
     pub minor: u32,
 }
@@ -90,7 +98,7 @@ impl FakeDrmBinds {
     /// `(host path, guest path)` pairs in bind order.
     pub fn pairs(&self) -> Vec<(PathBuf, PathBuf)> {
         let device_dir = guest_sysfs_device_dir(self.major, self.minor);
-        vec![
+        let mut pairs = vec![
             (self.dri_dir.clone(), PathBuf::from("/dev/dri")),
             (
                 self.uevent_file.clone(),
@@ -101,8 +109,25 @@ impl FakeDrmBinds {
                 PathBuf::from(format!("{device_dir}/drm")),
             ),
             (self.class_dir.clone(), PathBuf::from("/sys/class/drm")),
-        ]
+        ];
+        if let Some(canonical) = &self.canonical_device_dir {
+            pairs.push((self.uevent_file.clone(), canonical.join("uevent")));
+            pairs.push((self.drm_dir.clone(), canonical.join("drm")));
+        }
+        pairs
     }
+}
+
+/// Where `/sys/dev/char/M:m/device` leads under the sysfs mounted at
+/// `sys` (`/sys` on the device), as a `/sys/...` path; `None` when it cannot
+/// be resolved or is the same directory.
+#[cfg(unix)]
+pub fn canonical_device_dir(sys: &Path, major: u32, minor: u32) -> Option<PathBuf> {
+    let link = sys.join(format!("dev/char/{major}:{minor}/device"));
+    let real = std::fs::canonicalize(&link).ok()?;
+    let sys = std::fs::canonicalize(sys).ok()?;
+    let canonical = Path::new("/sys").join(real.strip_prefix(&sys).ok()?);
+    (canonical != Path::new(&guest_sysfs_device_dir(major, minor))).then_some(canonical)
 }
 
 /// Build (or refresh) the fake tree under `base` for a kgsl node with the
@@ -155,6 +180,7 @@ pub fn build_fake_drm_tree(base: &Path, kgsl_rdev: u64) -> std::io::Result<FakeD
         uevent_file,
         drm_dir,
         class_dir,
+        canonical_device_dir: canonical_device_dir(Path::new("/sys"), major, minor),
         major,
         minor,
     })
@@ -198,6 +224,7 @@ mod tests {
             uevent_file: PathBuf::from("/h/sysfs/uevent"),
             drm_dir: PathBuf::from("/h/sysfs/drm"),
             class_dir: PathBuf::from("/h/sysfs/class-drm"),
+            canonical_device_dir: None,
             major: 456,
             minor: 0,
         };
@@ -210,6 +237,60 @@ mod tests {
         );
         assert_eq!(pairs[2].1, PathBuf::from("/sys/dev/char/456:0/device/drm"));
         assert_eq!(pairs[3].1, PathBuf::from("/sys/class/drm"));
+    }
+
+    #[test]
+    fn canonical_device_dir_gets_the_sysfs_entries_too() {
+        let binds = FakeDrmBinds {
+            dri_dir: PathBuf::from("/h/dri"),
+            uevent_file: PathBuf::from("/h/sysfs/uevent"),
+            drm_dir: PathBuf::from("/h/sysfs/drm"),
+            class_dir: PathBuf::from("/h/sysfs/class-drm"),
+            canonical_device_dir: Some(PathBuf::from("/sys/devices/platform/soc/gpu")),
+            major: 456,
+            minor: 0,
+        };
+        let pairs = binds.pairs();
+        assert_eq!(pairs.len(), 6);
+        assert_eq!(
+            pairs[4],
+            (
+                PathBuf::from("/h/sysfs/uevent"),
+                PathBuf::from("/sys/devices/platform/soc/gpu/uevent")
+            )
+        );
+        assert_eq!(
+            pairs[5],
+            (
+                PathBuf::from("/h/sysfs/drm"),
+                PathBuf::from("/sys/devices/platform/soc/gpu/drm")
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_device_dir_follows_the_sysfs_links() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let sys = temp.path();
+        std::fs::create_dir_all(sys.join("devices/platform/soc/gpu/kgsl/kgsl-3d0")).unwrap();
+        std::fs::create_dir_all(sys.join("dev/char")).unwrap();
+        symlink(
+            "../../devices/platform/soc/gpu/kgsl/kgsl-3d0",
+            sys.join("dev/char/456:0"),
+        )
+        .unwrap();
+        symlink(
+            "../../../gpu",
+            sys.join("devices/platform/soc/gpu/kgsl/kgsl-3d0/device"),
+        )
+        .unwrap();
+        assert_eq!(
+            canonical_device_dir(sys, 456, 0),
+            Some(PathBuf::from("/sys/devices/platform/soc/gpu"))
+        );
+        assert_eq!(canonical_device_dir(sys, 456, 1), None);
     }
 
     #[test]
