@@ -1660,6 +1660,7 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     sync_default_menu(fs_root);
     browser::sync_firefox_config(fs_root);
     browser::sync_firefox_prefs_hook(fs_root);
+    crate::core::guest_media::sync_player_defaults(fs_root);
     sync_thunderbird_defaults(fs_root);
     sync_sudo_access(fs_root);
 }

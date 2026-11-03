@@ -12,6 +12,7 @@ pub mod core {
     pub mod guest_procfs;
     pub mod guest_tmp;
     pub mod guest_locale;
+    pub mod guest_media;
     pub mod guest_sudo;
     #[cfg(unix)]
     pub mod guest_timezone;
