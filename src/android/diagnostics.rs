@@ -613,7 +613,7 @@ fn device_report() -> String {
 /// GPU and may run the engine's first probe, so never on the main thread.
 #[no_mangle]
 pub extern "system" fn Java_app_polarbear_PortalReport_nativeSummary(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JObject,
 ) -> jni::sys::jstring {
     let summary = format!("portal={VERSION}\n{}", device_report());
