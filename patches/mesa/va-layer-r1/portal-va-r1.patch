@@ -1085,7 +1085,7 @@ index c55dc811..b5ec201e 100644
                expected_fourcc, (void *)prime_desc, (void *)memory_attribute,
                modifiers_count, templat.bind);
 diff --git a/src/gallium/frontends/va/tva_bridge.c b/src/gallium/frontends/va/tva_bridge.c
-index 31b3aade..27226e1b 100644
+index 31b3aade..4903c9ac 100644
 --- a/src/gallium/frontends/va/tva_bridge.c
 +++ b/src/gallium/frontends/va/tva_bridge.c
 @@ -57,6 +57,8 @@
@@ -1176,7 +1176,20 @@ index 31b3aade..27226e1b 100644
          default:
              return 0;
          }
-@@ -493,7 +533,20 @@ struct tva_av1_picture {
+@@ -468,6 +508,12 @@ struct tva_fence {
+ #define TVA_HEVC_MAX_RPS 64
+ #define TVA_HEVC_BOOTSTRAP_MAX_UNITS 32
+ #define TVA_H264_BOOTSTRAP_MAX_UNITS 8
++/* 200 ms wait timeouts before a blocked client gives up on a session.  Each
++ * stuck wait occupies a thread of the client's decoder pool, so one that never
++ * returns ends up stalling every video in the browser.  Timeouts rather than
++ * wall time, so a frozen process doesn't count. */
++#define TVA_QUEUED_WAIT_TIMEOUTS 15
++#define TVA_STALLED_WAIT_TIMEOUTS 75
+ 
+ struct tva_h265_rps {
+     bool valid;
+@@ -493,8 +539,21 @@ struct tva_av1_picture {
      size_t tile_bytes;
      unsigned tile_count;
      uint8_t refresh_frame_flags;
@@ -1184,20 +1197,21 @@ index 31b3aade..27226e1b 100644
 +    int skip_mode_allowed;
 +    /* PrevGmParams for the header writer */
 +    int32_t prev_gm[7][6];
-+};
-+
+ };
+ 
 +/* Order hint and global motion parameters last decoded into each surface,
 + * for skipModeAllowed and PrevGmParams */
 +struct tva_av1_hint {
 +    struct pipe_video_buffer *buffer;
 +    uint8_t order_hint;
 +    int32_t gm[7][6];
- };
++};
 +#define TVA_AV1_MAX_HINTS 32
- 
++
  struct tva_av1_frame {
      bool valid;
-@@ -543,6 +596,9 @@ struct tva_codec {
+     struct tva_av1_picture pictures[TVA_AV1_GROUP_MAX_FRAMES];
+@@ -543,6 +602,9 @@ struct tva_codec {
      bool h264_pps_defaults_valid;
      unsigned h264_pps_l0_default;
      unsigned h264_pps_l1_default;
@@ -1207,7 +1221,7 @@ index 31b3aade..27226e1b 100644
      /* The VA HEVC picture descriptor omits max_sub_layers_minus1.  Keep the
       * largest temporal id observed in the access units so synthesized VPS/SPS
       * parameter sets accept streams which use temporal scalability. */
-@@ -556,12 +612,19 @@ struct tva_codec {
+@@ -556,12 +618,19 @@ struct tva_codec {
      bool h264_bootstrap_done;
      bool av1_sequence_sent;
      bool av1_enable_restoration;
@@ -1227,7 +1241,7 @@ index 31b3aade..27226e1b 100644
  
      bool broken;                  /* session error, further decodes fail */
  
-@@ -624,6 +687,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
+@@ -624,6 +693,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
     if (!c || !c->sess)
        return TVA_ERR_STATE;
     mtx_lock(&c->io_mutex);
@@ -1246,7 +1260,7 @@ index 31b3aade..27226e1b 100644
     ret = tva_session_send_unit(c->sess, data, len);
     mtx_unlock(&c->io_mutex);
     return ret;
-@@ -1104,6 +1179,146 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
+@@ -1104,6 +1185,146 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
      return 0;
  }
  
@@ -1393,7 +1407,7 @@ index 31b3aade..27226e1b 100644
  /* AV1 show_existing_frame packets do not enter the VA decode callbacks.  A
   * hidden reference picture therefore has no consumer-visible callback even
   * though its surface must still contain decoded pixels before a later
-@@ -1256,8 +1471,8 @@ tva_drm_render_node_present(void)
+@@ -1256,8 +1477,8 @@ tva_drm_render_node_present(void)
  /* Chromium's Vulkan importer currently expects all NV12 planes to refer to
   * one dma-buf object.  The normal Gallium video-buffer allocator creates one
   * object per plane, which is valid for VA-API but cannot be consumed by that
@@ -1404,7 +1418,7 @@ index 31b3aade..27226e1b 100644
  static bool
  tva_contiguous_dmabuf_enabled(void)
  {
-@@ -1268,14 +1483,15 @@ tva_contiguous_dmabuf_enabled(void)
+@@ -1268,14 +1489,15 @@ tva_contiguous_dmabuf_enabled(void)
          return !strcmp(e, "1") || !strcmp(e, "true") || !strcmp(e, "on");
  
  #if defined(__linux__)
@@ -1425,7 +1439,7 @@ index 31b3aade..27226e1b 100644
          return true;
  #endif
  
-@@ -2065,6 +2281,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
+@@ -2065,6 +2287,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
             profile == PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444;
  }
  
@@ -1534,7 +1548,7 @@ index 31b3aade..27226e1b 100644
  /*
   * Build the SPS NALU (with NAL header + emulation prevention) from the
   * frontend-parsed struct.  Returns the RBSP size; the NAL header byte is
-@@ -3286,6 +3604,15 @@ tva_av1_to_va_picture(const struct pipe_av1_picture_desc *src,
+@@ -3286,6 +3610,15 @@ tva_av1_to_va_picture(const struct pipe_av1_picture_desc *src,
      dst->loop_restoration_fields.bits.lr_uv_shift =
          p->loop_restoration_fields.lr_uv_shift;
  
@@ -1550,7 +1564,7 @@ index 31b3aade..27226e1b 100644
      return true;
  }
  
-@@ -3311,7 +3638,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
+@@ -3311,7 +3644,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
          return;
      }
  
@@ -1559,7 +1573,7 @@ index 31b3aade..27226e1b 100644
          p->pic_info_fields.bits.frame_type != 0 &&
          !p->pic_info_fields.bits.show_frame &&
          p->mode_control_fields.bits.tx_mode == 2 &&
-@@ -3412,6 +3739,8 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3412,6 +3745,8 @@ tva_av1_send_pending(struct tva_codec *c)
                                      (int)pic->tile_count,
                                      pic->refresh_frame_flags,
                                      c->av1_enable_restoration,
@@ -1568,7 +1582,7 @@ index 31b3aade..27226e1b 100644
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3546,24 +3875,16 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3546,24 +3881,16 @@ tva_av1_send_pending(struct tva_codec *c)
              }
  
              VADecPictureParameterBufferAV1 picture = pic->picture;
@@ -1598,7 +1612,7 @@ index 31b3aade..27226e1b 100644
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3649,6 +3970,8 @@ too_large:
+@@ -3649,6 +3976,8 @@ too_large:
                                  (int)pic->tile_count,
                                  pic->refresh_frame_flags,
                                  c->av1_enable_restoration,
@@ -1607,7 +1621,7 @@ index 31b3aade..27226e1b 100644
                                  unit + unit_len, unit_cap - unit_len);
          if (!n)
              goto failed;
-@@ -3776,15 +4099,99 @@ tva_av1_flush_pending(struct tva_codec *c, bool terminal)
+@@ -3776,15 +4105,99 @@ tva_av1_flush_pending(struct tva_codec *c, bool terminal)
      return ret;
  }
  
@@ -1710,7 +1724,33 @@ index 31b3aade..27226e1b 100644
  {
      struct tva_codec *c = tva_codec(codec);
  
-@@ -3857,7 +4264,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
+@@ -3817,19 +4230,12 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
+             struct pipe_h264_picture_desc *h264 =
+                 (struct pipe_h264_picture_desc *)picture;
+             if (h264 && h264->pps && h264->pps->sps) {
+-                if (!c->h264_bootstrap_done &&
+-                    c->base.max_references >= 5) {
+-                    if (h264->num_ref_idx_l0_active_minus1 >=
+-                            c->base.max_references - 1 ||
+-                        c->h264_bootstrap_count + 1 >=
+-                            ARRAY_SIZE(c->h264_bootstrap)) {
+-                        c->h264_bootstrap_done = true;
+-                    } else {
+-                        h264_hold = true;
+-                    }
+-                } else {
+-                    c->h264_bootstrap_done = true;
+-                }
++                /* Never hold pictures back to learn the PPS defaults: a client
++                 * like Firefox waits on its first output before sending more,
++                 * so the held picture's fence would block its decode thread
++                 * forever.  Slices without an override teach the exact default
++                 * below, before their PPS is sent. */
++                c->h264_bootstrap_done = true;
+                 if (h264_hold)
+                     goto h264_csd_done;
+                 uint8_t *sps_rbsp = NULL, *pps_rbsp = NULL;
+@@ -3857,7 +4263,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
                   * with a two-reference PPS default unchanged while allowing
                   * the five-reference vertical AVC stream to select its
                   * five-entry default before subsequent no-override slices. */
@@ -1735,7 +1775,7 @@ index 31b3aade..27226e1b 100644
                      h264->num_ref_idx_l0_active_minus1 >=
                      c->base.max_references - 1 &&
                      c->h264_pps_l0_default < c->base.max_references - 1) {
-@@ -4228,6 +4651,10 @@ hevc_csd_done:
+@@ -4228,6 +4650,10 @@ hevc_csd_done:
          bool boundary = frame->valid && frame->picture_count &&
                          frame->have_show_frame &&
                          !frame->hidden_since_show_frame;
@@ -1746,7 +1786,7 @@ index 31b3aade..27226e1b 100644
          if (frame->valid && frame->picture_count) {
              struct tva_av1_picture *previous =
                  &frame->pictures[frame->picture_count - 1];
-@@ -4249,15 +4676,18 @@ hevc_csd_done:
+@@ -4249,15 +4675,18 @@ hevc_csd_done:
           * no restoration themselves while later frames in the same sequence
           * still do. */
          const char *restoration = getenv("DMD_AV1_ENABLE_RESTORATION");
@@ -1769,7 +1809,7 @@ index 31b3aade..27226e1b 100644
          }
          if (frame->picture_count >= TVA_AV1_GROUP_MAX_FRAMES) {
              debug_printf("tva: AV1 temporal unit has too many frames (%u)\n",
-@@ -4287,6 +4717,9 @@ hevc_csd_done:
+@@ -4287,6 +4716,9 @@ hevc_csd_done:
          current->target = target;
          tva_av1_normalize_picture(c, &va_pic);
          current->picture = va_pic;
@@ -1779,7 +1819,7 @@ index 31b3aade..27226e1b 100644
          current->tile_data = tile_data;
          current->tile_bytes = tile_bytes;
          current->tile_count = tile_count;
-@@ -4389,6 +4822,13 @@ hevc_csd_done:
+@@ -4389,6 +4821,13 @@ hevc_csd_done:
              tva_av1_inline_show_existing())
              last_vcl = pending && pending->unit_seq ? pending->unit_seq :
                         (uint32_t)(c->next_unit + 1);
@@ -1793,7 +1833,7 @@ index 31b3aade..27226e1b 100644
      } else {
          /* Chromium splits VP9 superframes into individual pictures.  Hidden
           * reference pictures must reach MediaCodec, but they do not produce
-@@ -4456,6 +4896,20 @@ hevc_csd_done:
+@@ -4456,6 +4895,20 @@ hevc_csd_done:
      return 0;
  }
  
@@ -1814,7 +1854,7 @@ index 31b3aade..27226e1b 100644
  static void
  tva_codec_flush(struct pipe_video_codec *codec)
  {
-@@ -4463,7 +4917,9 @@ tva_codec_flush(struct pipe_video_codec *codec)
+@@ -4463,7 +4916,9 @@ tva_codec_flush(struct pipe_video_codec *codec)
      if (!c->av1_pending.valid || tva_codec_is_broken(c))
          return;
  
@@ -1825,7 +1865,32 @@ index 31b3aade..27226e1b 100644
  }
  
  /*
-@@ -4529,36 +4985,21 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4497,6 +4952,8 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+     const bool av1 = u_reduce_video_profile(c->base.profile) ==
+                      PIPE_VIDEO_FORMAT_AV1;
+ 
++    unsigned wait_timeouts = 0;
++
+     mtx_lock(&c->pend_mutex);
+     while (fence->queued && !c->broken) {
+         if (!infinite && timeout == 0) {
+@@ -4512,7 +4969,14 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+                            MIN2(deadline_ns, now + 200000000ull);
+         struct timespec ts;
+         timespec_from_nsec(&ts, wake_ns);
+-        u_cnd_monotonic_timedwait(&c->pend_cond, &c->pend_mutex, &ts);
++        if (u_cnd_monotonic_timedwait(&c->pend_cond, &c->pend_mutex, &ts) ==
++                thrd_timedout &&
++            ++wait_timeouts >= TVA_QUEUED_WAIT_TIMEOUTS) {
++            /* The client is blocked on a picture that only a later picture
++             * can release. */
++            TVA_TRACE("queued fence never submitted; giving up");
++            tva_mark_broken_locked(c);
++        }
+     }
+     if (fence->queued) {
+         fence->failed = true;
+@@ -4529,36 +4993,22 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
          return 1;
      }
      p->waiters++;
@@ -1833,6 +1898,7 @@ index 31b3aade..27226e1b 100644
 +    uint64_t wait_start_ns = os_time_get_nano();
      const uint64_t drain_after_ns = (uint64_t)tva_av1_drain_idle_ms() * 1000000ull;
      uint64_t reorder_drain_start_ns = 0;
++    uint64_t seen_frames = c->frames_done;
      while (!p->ready) {
 -        if (!infinite && timeout == 0) {
 -            ret = 0;
@@ -1871,7 +1937,7 @@ index 31b3aade..27226e1b 100644
                  c->broken = true;
                  p->ready = true;
                  p->failed = true;
-@@ -4566,8 +5007,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4566,8 +5016,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
                  ret = 0;
                  break;
              }
@@ -1890,7 +1956,36 @@ index 31b3aade..27226e1b 100644
  
          /* Qualcomm's AV1 decoder may hold the terminal showable picture until
           * input EOS.  VA-API does not expose an explicit decoder flush, and
-@@ -4785,6 +5236,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
+@@ -4646,11 +5106,27 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+                 break;
+             }
+         }
++        /* The decoder dropped this picture without an error: nothing else
++         * would ever end this wait. */
++        if (c->frames_done != seen_frames) {
++            seen_frames = c->frames_done;
++            wait_timeouts = 0;
++        } else if (wait_timeouts >= TVA_STALLED_WAIT_TIMEOUTS) {
++            TVA_TRACE("fence unit=%u stalled; giving up", p->unit_seq);
++            tva_mark_broken_locked(c);
++            p->ready = true;
++            p->failed = true;
++            u_cnd_monotonic_broadcast(&c->pend_cond);
++            ret = 0;
++            break;
++        }
+         uint64_t wake_ns = infinite ? now + 200000000ull :
+                            MIN2(deadline_ns, now + 200000000ull);
+         struct timespec ts;
+         timespec_from_nsec(&ts, wake_ns);
+-        u_cnd_monotonic_timedwait(&c->pend_cond, &c->pend_mutex, &ts);
++        if (u_cnd_monotonic_timedwait(&c->pend_cond, &c->pend_mutex, &ts) ==
++                thrd_timedout)
++            wait_timeouts++;
+     }
+ 
+     TVA_TRACE("fence unit=%u ready=%d failed=%d copied=%d staging=%p",
+@@ -4785,6 +5261,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
      }
      c->h264_bootstrap_count = 0;
      tva_av1_pending_clear(&c->av1_pending);
@@ -1898,7 +1993,7 @@ index 31b3aade..27226e1b 100644
      mtx_destroy(&c->io_mutex);
      mtx_destroy(&c->av1_mutex);
      mtx_destroy(&c->pend_mutex);
-@@ -4844,7 +5296,7 @@ static struct pipe_video_buffer *
+@@ -4844,7 +5321,7 @@ static struct pipe_video_buffer *
  tva_pipe_create_video_buffer(struct pipe_context *context,
                               const struct pipe_video_buffer *templat)
  {
@@ -1907,7 +2002,7 @@ index 31b3aade..27226e1b 100644
              templat ? templat->buffer_format : -1,
              templat ? templat->width : 0, templat ? templat->height : 0,
              templat ? templat->bind : 0);
-@@ -4854,7 +5306,7 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
+@@ -4854,7 +5331,7 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
              tva_create_contiguous_video_buffer(context, templat);
          if (buffer)
          {
@@ -1916,7 +2011,7 @@ index 31b3aade..27226e1b 100644
              return buffer;
          }
          fprintf(stderr, "tva: contiguous video buffer failed\n");
-@@ -4876,7 +5328,10 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
+@@ -4876,7 +5353,10 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
          bridge_templ.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR;
      struct pipe_video_buffer *buffer =
          vl_video_buffer_create(context, &bridge_templ);
@@ -1928,7 +2023,7 @@ index 31b3aade..27226e1b 100644
      return buffer;
  }
  
-@@ -4895,7 +5350,7 @@ static struct pipe_video_codec *
+@@ -4895,7 +5375,7 @@ static struct pipe_video_codec *
  tva_pipe_create_video_codec(struct pipe_context *context,
                              const struct pipe_video_codec *templat)
  {
@@ -1937,7 +2032,7 @@ index 31b3aade..27226e1b 100644
              templat ? templat->profile : -1,
              templat ? templat->entrypoint : -1,
              templat ? templat->width : 0, templat ? templat->height : 0);
-@@ -4976,7 +5431,7 @@ tva_pipe_create_video_codec(struct pipe_context *context,
+@@ -4976,7 +5456,7 @@ tva_pipe_create_video_codec(struct pipe_context *context,
      c->strict_pending = codec_id == CODEC_AV1 && tva_av1_strict_pending();
  
      mtx_init(&c->io_mutex, mtx_plain);

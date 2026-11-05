@@ -39,6 +39,16 @@ frontend. `portal-va-r1.patch` adds:
   the rest of the header, so MediaCodec dropped screen-content frames
   without an error and the client hung waiting for the surface (YouTube AV1
   stopped after a few minutes).
+- H.264: stop holding the first pictures of streams with five or more
+  references until a slice shows the full reference list. Firefox waits for
+  its first output before sending more, so the held picture's fence never
+  signaled; each such stream (common on X and Twitch) took one of Firefox's
+  four decoder threads for good, and with all four gone no video loaded on any
+  site. The PPS defaults learned from slices make the hold unnecessary.
+- Give up on a VA wait that cannot finish: 3 s on a picture still queued for
+  submission (HEVC can still hold one), 15 s with no decoder output. The session
+  fails and the client takes its software path. Counted in wait timeouts,
+  so a frozen process doesn't trip them.
 - Gate the per-call `tva-va:` traces behind `DMD_VA_LOG=1`; they wrote
   several lines per decoded frame to every VA client's stderr.
 - `vaDeriveImage` on contiguous NV12 surfaces (`DMD_VA_CONTIGUOUS_DMABUF=1`):
