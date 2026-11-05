@@ -59,6 +59,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.google.androidgamesdk.GameActivity
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 open class PortalActivity : GameActivity() {
@@ -81,6 +82,18 @@ open class PortalActivity : GameActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // The native side serves one Activity per process (see onDestroy), and
+        // GameActivity.onCreate blocks forever on a second one: a black screen
+        // until Android kills the app as not responding. Android can do this
+        // when a clear-task launch arrives before the previous Activity is
+        // destroyed (OxygenOS relaunches Portal this way during an update).
+        // End the process; Android restarts this not-yet-resumed Activity in a
+        // fresh one, the same as when onDestroy wins that race.
+        if (!processHostsActivity.compareAndSet(false, true)) {
+            Log.w(TAG, "second Activity in one process; restarting in a fresh process")
+            SessionService.endProcess(this)
+            Process.killProcess(Process.myPid())
+        }
         try {
             installSplashScreen().apply {
                 setKeepOnScreenCondition {
@@ -533,6 +546,7 @@ open class PortalActivity : GameActivity() {
 
     companion object {
         private const val TAG = "PortalActivity"
+        private val processHostsActivity = AtomicBoolean(false)
 
         @JvmStatic private external fun nativeCapturedMotion(dx: Float, dy: Float)
         // Also carries mouse side buttons, captured or not.

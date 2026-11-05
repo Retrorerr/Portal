@@ -59,9 +59,11 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import kotlin.math.ceil
 import kotlin.math.hypot
+import kotlinx.coroutines.delay
 
 private const val TAG = "PortalLaunch"
 private const val DURATION_MS = 1200
+private const val SPLASH_EXIT_GRACE_MS = 2500L
 private const val CAPTURE_SCALE = 0.25f
 private val TravelEase = CubicBezierEasing(0.42f, 0f, 0.18f, 1f)
 private val ApertureEase = CubicBezierEasing(0.58f, 0f, 0.30f, 1f)
@@ -166,6 +168,14 @@ fun PortalLaunchTransition(
             // over initial charcoal/frost) so no animation progress hides
             // behind the exiting splash and no frame lacks a mark.
             Log.i(TAG, "Compose pre-draw ready; holding intro at t=0 until system splash removed")
+            // Android only calls the exit listener when it hands a splash over
+            // to the app, and a launch can have none (a system relaunch during
+            // a package update). Nothing else ends this hold, and the guard
+            // below swallows all input, so stop waiting after the platform's
+            // own hand-over timeout has passed.
+            delay(SPLASH_EXIT_GRACE_MS)
+            Log.w(TAG, "no splash exit callback after ${SPLASH_EXIT_GRACE_MS}ms; starting the intro")
+            app.polarbear.ComposeOverlay.markSystemSplashRemoved()
         }
     }
     LaunchedEffect(resolved, setupReady, returnRepairBlocked) {

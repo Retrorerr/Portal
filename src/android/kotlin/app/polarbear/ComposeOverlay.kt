@@ -232,9 +232,10 @@ object ComposeOverlay {
     // System-splash layer signal: set once by PortalActivity's splash exit
     // listener when the platform splash view is actually removed (or
     // immediately if splash install failed and there is nothing to wait
-    // for). The launch intro stays frozen at t=0 until this AND the
+    // for, or by the launch intro when a launch had no splash to hand over).
+    // The launch intro stays frozen at t=0 until this AND the
     // CONFIGURE/destination pre-draw gate both hold. Observed by composition via
-    // systemSplashRemovedState; the exit callback runs on the main thread.
+    // systemSplashRemovedState; every caller runs on the main thread.
     private val systemSplashRemoved = AtomicBoolean(false)
     private val systemSplashRemovedState = mutableStateOf(false)
     private val revealCommitted = AtomicBoolean(false)
