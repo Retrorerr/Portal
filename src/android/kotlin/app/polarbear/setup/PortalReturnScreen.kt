@@ -45,6 +45,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -55,6 +56,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -72,6 +74,25 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.SideEffect
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.animation.expandIn
+import androidx.compose.animation.shrinkOut
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.platform.LocalContext
 import app.polarbear.setup.components.LocalPortalVeil
 import app.polarbear.setup.components.SetupChecklist
@@ -79,6 +100,7 @@ import app.polarbear.setup.components.UsageTips
 import app.polarbear.setup.components.usageTipsPending
 import app.polarbear.setup.components.setupChecklistPending
 import app.polarbear.setup.components.PortalEmphasized
+import app.polarbear.setup.components.PortalPanelSizeSpring
 import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
 import app.polarbear.setup.components.dissolveBlur
@@ -87,6 +109,19 @@ import kotlinx.coroutines.delay
 
 private const val TAG = "PortalReturn"
 private const val RETURN_READY_DELAY_MS = 3_000L
+private const val UNBOUNDED_CARD_HEIGHT = 1_000_000
+
+// The swipe instruction and its handle, with their margins.
+private val VEIL_HINT_RESERVE = 60.dp
+private val SCROLL_FADE = 24.dp
+private val STACKED_CARD_GAP = 28.dp
+private val SHORT_SCREEN_HEIGHT = 560.dp
+// Wide screens too short to stack the header over a card put them side by side.
+private val SIDE_BY_SIDE_MIN_WIDTH = 680.dp
+private val SIDE_BY_SIDE_MAX_HEIGHT = 960.dp
+private val SIDE_BY_SIDE_GUTTER = 36.dp
+// An open panel scrolls inside what the screen has left, down to this much.
+private val PANEL_HEADER_MIN_HEIGHT = 240.dp
 
 private enum class ReturnRepairPhase {
     Hidden,
@@ -339,6 +374,49 @@ private fun ReturnRepairProgress(
     }
 }
 
+/**
+ * A scroller inside the veil: edges fade where more content waits, and while it
+ * can scroll it keeps upward swipes, which would otherwise lift the veil.
+ */
+@Composable
+private fun Modifier.veilScrollRegion(state: ScrollState): Modifier {
+    val veil = LocalPortalVeil.current
+    val key = remember { Any() }
+    val bounds = remember { arrayOfNulls<Rect>(1) }
+    // Derived: the limit moves every frame while a panel or card resizes.
+    val scrollable by remember(state) { derivedStateOf { state.maxValue > 0 } }
+    DisposableEffect(veil) { onDispose { veil.gestureExclusions.remove(key) } }
+    LaunchedEffect(scrollable) {
+        val known = bounds[0]
+        if (scrollable && known != null) veil.gestureExclusions[key] = known
+        else veil.gestureExclusions.remove(key)
+    }
+    return onGloballyPositioned {
+        val inRoot = it.boundsInRoot()
+        bounds[0] = inRoot
+        if (scrollable) veil.gestureExclusions[key] = inRoot
+    }
+        .graphicsLayer {
+            compositingStrategy = if (scrollable) CompositingStrategy.Offscreen else CompositingStrategy.Auto
+        }
+        .drawWithContent {
+            drawContent()
+            if (!scrollable) return@drawWithContent
+            val edge = SCROLL_FADE.toPx()
+            val top = (state.value / edge).coerceIn(0f, 1f)
+            val bottom = ((state.maxValue - state.value) / edge).coerceIn(0f, 1f)
+            drawRect(
+                brush = Brush.verticalGradient(
+                    0f to Color.Black.copy(alpha = 1f - top),
+                    edge / size.height to Color.Black,
+                    1f - edge / size.height to Color.Black,
+                    1f to Color.Black.copy(alpha = 1f - bottom),
+                ),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+}
+
 @Composable
 internal fun PortalReturnScreen(
     launchMarkModifier: Modifier,
@@ -388,14 +466,30 @@ internal fun PortalReturnScreen(
             cardBounds = { Rect.Zero },
             readyPrelude = returnReady && !repairBlocked && !updateBlocked,
         )
-        Column(
+        // The swipe hint keeps its own band at the bottom; nothing scrolls under it.
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 32.dp, vertical = 24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
+                .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
+                .padding(bottom = VEIL_HINT_RESERVE),
         ) {
+            val shortScreen = maxHeight < SHORT_SCREEN_HEIGHT
+            val sideBySide = maxWidth >= SIDE_BY_SIDE_MIN_WIDTH && maxHeight < SIDE_BY_SIDE_MAX_HEIGHT
+            val verticalPadding = if (shortScreen) 12.dp else 24.dp
+            val pageScroll = rememberScrollState()
+            val cardScroll = rememberScrollState()
+            val panelOpen = ComposeOverlay.activePanel != null
+            val viewportHeight = constraints.maxHeight
+            Layout(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .veilScrollRegion(pageScroll)
+                    .verticalScroll(pageScroll)
+                    .padding(
+                        horizontal = if (maxWidth < PortalDimens.CompactBreakpoint) 20.dp else 32.dp,
+                        vertical = verticalPadding,
+                    ),
+                content = {
             // No animateContentSize here: it anchors top-start and clips, which
             // cut off the update card's bottom-right edge while it grew. The
             // affordances below animate their own size instead.
@@ -408,17 +502,19 @@ internal fun PortalReturnScreen(
                         threshold = palette.logoThreshold,
                     ),
                     contentDescription = "Portal logo",
-                    modifier = Modifier.size(PortalDimens.LogoSize).then(launchMarkModifier),
+                    modifier = Modifier
+                        .size(if (shortScreen) 56.dp else PortalDimens.LogoSize)
+                        .then(launchMarkModifier),
                 )
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(if (shortScreen) 10.dp else 20.dp))
                 Text(
                     text = if (sessionControls) "Portal" else "Returning to Plasma",
-                    fontSize = PortalDimens.TitleSize,
+                    fontSize = if (shortScreen) 24.sp else PortalDimens.TitleSize,
                     fontWeight = FontWeight.SemiBold,
                     color = palette.textPrimary,
                     textAlign = TextAlign.Center,
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(if (shortScreen) 4.dp else 8.dp))
                 // The line settles from "restoring" to "ready" the moment the
                 // veil may be lifted, dissolving through a soft blur.
                 AnimatedContent(
@@ -474,30 +570,78 @@ internal fun PortalReturnScreen(
                     suppressed = repairPhase != ReturnRepairPhase.Hidden || updateBlocked,
                     immediate = sessionControls,
                 )
-                // Installs from before the checklist existed, or that skipped
-                // a step, see it here until every step is done.
-                AnimatedVisibility(checklistPending && ComposeOverlay.activePanel == null,
-                    enter = expandVertically(tween(420, easing = PortalEmphasized)) + fadeIn(tween(300)),
-                    exit = shrinkVertically(tween(420, easing = PortalEmphasized)) + fadeOut(tween(140))) {
+            }
+            // Installs from before the checklist existed, or that skipped a
+            // step, see their card here until every step is done. Optional
+            // tips wait until then, so the screen never stacks two cards.
+            Box {
+                // The gap belongs to the card so it grows and shrinks with it.
+                val cardModifier = Modifier
+                    .padding(
+                        start = if (sideBySide) SIDE_BY_SIDE_GUTTER else 0.dp,
+                        top = if (sideBySide) 0.dp else STACKED_CARD_GAP,
+                    )
+                    .widthIn(max = PortalDimens.PickerMaxWidth)
+                    // One width for the card's life, however few tips remain.
+                    .fillMaxWidth()
+                    .veilScrollRegion(cardScroll)
+                    .verticalScroll(cardScroll)
+                AnimatedVisibility(checklistPending && !panelOpen,
+                    enter = expandIn(PortalPanelSizeSpring, expandFrom = Alignment.Center) + fadeIn(tween(300)),
+                    exit = shrinkOut(PortalPanelSizeSpring, shrinkTowards = Alignment.Center) + fadeOut(tween(140))) {
                     SetupChecklist(
                         palette = palette,
                         title = "Finish setting up Android",
-                        modifier = Modifier
-                            .padding(top = 28.dp)
-                            .widthIn(max = PortalDimens.PickerMaxWidth),
+                        modifier = cardModifier,
                     )
                 }
-                // Optional tips wait until the checklist is done, so the
-                // screen never stacks two cards.
-                AnimatedVisibility(tipsPending && ComposeOverlay.activePanel == null,
-                    enter = expandVertically(tween(420, easing = PortalEmphasized)) + fadeIn(tween(300)),
-                    exit = shrinkVertically(tween(420, easing = PortalEmphasized)) + fadeOut(tween(140))) {
+                AnimatedVisibility(tipsPending && !panelOpen,
+                    enter = expandIn(PortalPanelSizeSpring, expandFrom = Alignment.Center) + fadeIn(tween(300)),
+                    exit = shrinkOut(PortalPanelSizeSpring, shrinkTowards = Alignment.Center) + fadeOut(tween(140))) {
                     UsageTips(
                         palette = palette,
-                        modifier = Modifier
-                            .padding(top = 28.dp)
-                            .widthIn(max = PortalDimens.PickerMaxWidth),
+                        modifier = cardModifier,
                     )
+                }
+            }
+                },
+            ) { measurables, outer ->
+                val width = outer.maxWidth
+                val available = (viewportHeight - 2 * verticalPadding.roundToPx()).coerceAtLeast(0)
+                val gutter = SIDE_BY_SIDE_GUTTER.roundToPx()
+                val cardWidth = if (sideBySide) minOf(width * 56 / 100, PortalDimens.PickerMaxWidth.roundToPx()) + gutter else width
+                // A panel scrolls inside the space left instead of overflowing the
+                // page, which would stop the logo dead against the top on the way.
+                val headerHeight = if (panelOpen) maxOf(available, PANEL_HEADER_MIN_HEIGHT.roundToPx()) else Constraints.Infinity
+                val card = measurables[1].measure(
+                    // A finite height the card's scroller can measure against
+                    // when the whole page scrolls instead; the page has no limit.
+                    Constraints.fitPrioritizingWidth(
+                        minWidth = 0,
+                        maxWidth = cardWidth,
+                        minHeight = 0,
+                        maxHeight = if (sideBySide) available else UNBOUNDED_CARD_HEIGHT,
+                    ),
+                )
+                if (sideBySide) {
+                    // An open panel takes the card's place, so it may use the whole width.
+                    val headerWidth = if (panelOpen) width else (width - cardWidth).coerceAtLeast(0)
+                    val header = measurables[0].measure(Constraints(maxWidth = headerWidth, maxHeight = headerHeight))
+                    val height = maxOf(available, header.height, card.height)
+                    layout(width, height) {
+                        val x = ((width - header.width - card.width) / 2).coerceAtLeast(0)
+                        header.placeRelative(x, (height - header.height) / 2)
+                        card.placeRelative(x + header.width, (height - card.height) / 2)
+                    }
+                } else {
+                    val header = measurables[0].measure(Constraints(maxWidth = width, maxHeight = headerHeight))
+                    val total = header.height + card.height
+                    val height = maxOf(available, total)
+                    layout(width, height) {
+                        val y = (height - total) / 2
+                        header.placeRelative((width - header.width) / 2, y)
+                        card.placeRelative((width - card.width) / 2, y + header.height)
+                    }
                 }
             }
         }

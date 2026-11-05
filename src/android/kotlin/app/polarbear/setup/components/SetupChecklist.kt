@@ -18,6 +18,7 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
@@ -230,8 +231,7 @@ fun SetupChecklist(
     AnimatedVisibility(
         visible = childShown || gamesShown,
         enter = EnterTransition.None,
-        exit = fadeOut(tween(260, easing = PortalEmphasizedAccelerate)) +
-            shrinkVertically(tween(480, easing = PortalEmphasized), shrinkTowards = Alignment.Top),
+        exit = ChecklistCardExit,
         label = "checklist card",
     ) {
         Column(
@@ -257,7 +257,8 @@ fun SetupChecklist(
             // While the card itself folds, its last step stays inside it
             // rather than collapsing twice.
             val cardLeaving = !childShown && !gamesShown
-            CollapsingStep(visible = childStep && (!childGone || cardLeaving)) {
+            val lastStep = rememberLastStep(childShown, gamesShown)
+            CollapsingStep(visible = childShown || (cardLeaving && lastStep == 0)) {
                 ChecklistStep(
                     number = 1,
                     title = "Keep desktop apps running",
@@ -275,7 +276,7 @@ fun SetupChecklist(
                     palette = palette,
                 )
             }
-            CollapsingStep(visible = gamesStep && (!gamesGone || cardLeaving)) {
+            CollapsingStep(visible = gamesShown || (cardLeaving && lastStep == 1)) {
                 ChecklistStep(
                     number = if (childShown) 2 else 1,
                     title = "Add Portal to Games",
@@ -312,14 +313,29 @@ private fun rememberSettled(done: Boolean): Boolean {
     return settled
 }
 
+/**
+ * A card leaving the screen. Both axes move: the layouts around it centre on its
+ * size, so a width that only dropped at the end would snap them across the screen.
+ */
+internal val ChecklistCardExit = fadeOut(tween(260, easing = PortalEmphasizedAccelerate)) +
+    shrinkOut(PortalPanelSizeSpring, shrinkTowards = Alignment.Center)
+
+/** The step that was alone in the card last, which stays while the card folds. */
+@Composable
+internal fun rememberLastStep(vararg shown: Boolean): Int {
+    val last = remember { intArrayOf(-1) }
+    if (shown.count { it } == 1) last[0] = shown.indexOf(true)
+    return last[0]
+}
+
 /** A step with its top gap, folding up and fading when it leaves. */
 @Composable
-private fun CollapsingStep(visible: Boolean, content: @Composable () -> Unit) {
+internal fun CollapsingStep(visible: Boolean, content: @Composable () -> Unit) {
     AnimatedVisibility(
         visible = visible,
         enter = EnterTransition.None,
         exit = fadeOut(tween(220, easing = PortalEmphasizedAccelerate)) +
-            shrinkVertically(tween(440, easing = PortalEmphasized), shrinkTowards = Alignment.Top),
+            shrinkVertically(PortalPanelSizeSpring, shrinkTowards = Alignment.Top),
         label = "checklist step",
     ) {
         Column {

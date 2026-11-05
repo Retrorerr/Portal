@@ -12,6 +12,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Column
@@ -124,9 +126,21 @@ fun UsageTips(
     // Decided once: a tip completed while the card is up stays, showing done.
     val keysTip = remember { keyServiceState(context) != KeyServiceState.On }
     val filesTip = remember { !allFilesGranted() }
-    if (controlsDismissed && (!keysTip || keysDismissed) && (!filesTip || filesDismissed)) return
+    val controlsShown = !controlsDismissed
+    val keysShown = keysTip && !keysDismissed
+    val filesShown = filesTip && !filesDismissed
+    // While the card itself folds, its last tip stays inside it rather than
+    // collapsing twice.
+    val cardLeaving = !controlsShown && !keysShown && !filesShown
+    val lastStep = rememberLastStep(controlsShown, keysShown, filesShown)
 
     val shape = RoundedCornerShape(24.dp)
+    AnimatedVisibility(
+        visible = !cardLeaving,
+        enter = EnterTransition.None,
+        exit = ChecklistCardExit,
+        label = "tips card",
+    ) {
     Column(
         modifier = modifier
             .clip(shape)
@@ -147,11 +161,9 @@ fun UsageTips(
             lineHeight = 16.sp,
             color = palette.textMuted,
         )
-        var number = 0
-        if (!controlsDismissed) {
-            Spacer(Modifier.height(16.dp))
+        CollapsingStep(visible = controlsShown || (cardLeaving && lastStep == 0)) {
             ChecklistStep(
-                number = ++number,
+                number = 1,
                 title = "Bring Portal back",
                 body = "Tap the icon at the screen edge to open Portal’s labelled controls. " +
                     "Drag it to either edge; it remembers the position. Ctrl+Alt+P opens the veil directly.",
@@ -164,10 +176,9 @@ fun UsageTips(
                 palette = palette,
             )
         }
-        if (keysTip && !keysDismissed) {
-            Spacer(Modifier.height(16.dp))
+        CollapsingStep(visible = keysShown || (cardLeaving && lastStep == 1)) {
             ChecklistStep(
-                number = ++number,
+                number = if (controlsShown) 2 else 1,
                 title = "Shortcuts and background",
                 body = if (keys == KeyServiceState.NotRunning) {
                     "Portal’s accessibility switch is on, but Android isn’t running it. " +
@@ -188,10 +199,9 @@ fun UsageTips(
                 palette = palette,
             )
         }
-        if (filesTip && !filesDismissed) {
-            Spacer(Modifier.height(16.dp))
+        CollapsingStep(visible = filesShown || (cardLeaving && lastStep == 2)) {
             ChecklistStep(
-                number = ++number,
+                number = 1 + (if (controlsShown) 1 else 0) + (if (keysShown) 1 else 0),
                 title = "Open your Android files",
                 body = "Allow all files access to reach Downloads, Pictures and other shared folders from Linux.",
                 state = if (filesGranted) StepState.Done else StepState.Todo,
@@ -205,5 +215,6 @@ fun UsageTips(
                 palette = palette,
             )
         }
+    }
     }
 }

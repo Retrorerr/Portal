@@ -4,6 +4,10 @@ package app.polarbear.setup.components
 // the veil's live motion state. Every blur is a GPU RenderEffect on API 31+
 // and a silent no-op below it; nothing here allocates per frame.
 
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.Spring
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.EnterExitState
@@ -34,6 +38,18 @@ import androidx.compose.ui.unit.dp
 val PortalEmphasized = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 val PortalEmphasizedDecelerate = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f)
 val PortalEmphasizedAccelerate = CubicBezierEasing(0.3f, 0f, 0.8f, 0.15f)
+
+/**
+ * The Return screen's panels and cards resize on this one spring. Everything
+ * else is centred from their summed size, so a second curve would make the logo
+ * change direction halfway through a move.
+ */
+const val PortalPanelStiffness = 380f
+val PortalPanelSizeSpring = spring(
+    dampingRatio = Spring.DampingRatioNoBouncy,
+    stiffness = PortalPanelStiffness,
+    visibilityThreshold = IntSize.VisibilityThreshold,
+)
 
 /** Apply a Gaussian blur of [radiusPx] to this layer; clears the effect at ~0. */
 fun GraphicsLayerScope.portalBlur(radiusPx: Float) {

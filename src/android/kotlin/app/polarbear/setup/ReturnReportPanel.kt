@@ -100,7 +100,7 @@ internal fun ReturnReportPanel(palette: PortalPalette, onClose: () -> Unit) {
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
                 .background(palette.textPrimary.copy(alpha = 0.05f))
-                .heightIn(max = 120.dp)
+                .heightIn(max = 96.dp)
                 .verticalScroll(rememberScrollState())
                 .padding(8.dp),
             color = palette.textPrimary.copy(alpha = 0.8f),

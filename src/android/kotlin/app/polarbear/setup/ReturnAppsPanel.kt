@@ -19,10 +19,12 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandIn
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
+import androidx.compose.animation.shrinkOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
@@ -85,10 +87,13 @@ import app.polarbear.setup.components.CategoryLabel
 import app.polarbear.setup.components.PortalEmphasized
 import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
+import app.polarbear.setup.components.PortalPanelSizeSpring
+import app.polarbear.setup.components.PortalPanelStiffness
 import app.polarbear.setup.components.dissolveBlur
 import app.polarbear.setup.components.formatInstalledSize
 import app.polarbear.setup.components.rememberAppIcons
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 /** After the update capsule, so the two never arrive in the same frame. */
 private const val APPS_ENTRANCE_DELAY_MS = 800L
@@ -126,12 +131,15 @@ internal fun ReturnAppsPanel(
         exit = fadeOut(tween(220, easing = PortalEmphasizedAccelerate)) +
             shrinkVertically(tween(420, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top),
     ) {
-        Column(Modifier.dissolveBlur(this, radius = 10.dp).widthIn(max = AppsCardWidth).padding(top = 14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(Modifier.dissolveBlur(this, radius = 10.dp).widthIn(max = AppsCardWidth).padding(top = 14.dp)) {
             // Measure the retreating capsule first. Its animated width gives the
             // growing surface space without overflowing a narrow window.
             val gap by animateDpAsState(if (panel == null) 10.dp else 0.dp,
-                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f), label = "controls capsule spacing")
+                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness), label = "controls capsule spacing")
+            // The report card takes the capsules' place, and the stack's height
+            // has to travel with it or the logo snaps when either one settles.
+            val capsuleRow by animateFloatAsState(if (panel == "report") 0f else 1f,
+                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness), label = "controls capsule row")
             androidx.compose.ui.layout.Layout(content = {
                 SessionActionSlot(visible = panel != "files" && panel != "report" && catalog.isNotEmpty()) {
                     SessionActionSurface(panel == "apps", palette, "apps surface") { expanded ->
@@ -147,6 +155,12 @@ internal fun ReturnAppsPanel(
                         else FilesCapsule(palette) { if (ComposeOverlay.activePanel == null) ComposeOverlay.activePanel = "files" }
                     }
                 }
+                // Opened only from the pill's menu, so it never competes with Apps and Files.
+                SessionActionSlot(visible = panel == "report", fromEdge = false) {
+                    SessionActionSurface(true, palette, "report surface") { _ ->
+                        ReturnReportPanel(palette) { ComposeOverlay.activePanel = null }
+                    }
+                }
             }) { children, constraints ->
                 val relaxed = constraints.copy(minWidth = 0, minHeight = 0)
                 val peerIndex = if (panel == "files") 0 else 1
@@ -158,17 +172,15 @@ internal fun ReturnAppsPanel(
                 val growing = children[1 - peerIndex].measure(relaxed)
                 val left = if (peerIndex == 0) peer else growing
                 val right = if (peerIndex == 1) peer else growing
-                val width = constraints.constrainWidth(left.width + right.width + spacing)
-                layout(width, constraints.constrainHeight(maxOf(left.height, right.height))) {
-                    val x = (width - left.width - right.width - spacing) / 2
+                val report = children[2].measure(relaxed)
+                val rowWidth = left.width + right.width + spacing
+                val rowHeight = (maxOf(left.height, right.height) * capsuleRow).roundToInt()
+                val width = constraints.constrainWidth(maxOf(rowWidth, report.width))
+                layout(width, constraints.constrainHeight(rowHeight + report.height)) {
+                    val x = (width - rowWidth) / 2
                     left.placeRelative(x, 0)
                     right.placeRelative(x + left.width + spacing, 0)
-                }
-            }
-            // Opened only from the pill's menu, so it never competes with Apps and Files.
-            SessionActionSlot(visible = panel == "report") {
-                SessionActionSurface(true, palette, "report surface") { _ ->
-                    ReturnReportPanel(palette) { ComposeOverlay.activePanel = null }
+                    report.placeRelative((width - report.width) / 2, rowHeight)
                 }
             }
         }
@@ -176,13 +188,17 @@ internal fun ReturnAppsPanel(
 }
 
 @Composable
-private fun SessionActionSlot(visible: Boolean, content: @Composable () -> Unit) {
+private fun SessionActionSlot(visible: Boolean, fromEdge: Boolean = true, content: @Composable () -> Unit) {
     // Keep one measurable per slot after AnimatedVisibility removes its content.
     Box {
         AnimatedVisibility(visible,
-            enter = androidx.compose.animation.expandHorizontally(spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f)) +
+            // A capsule only needs its width animated, its row's height is shared.
+            // A slot with no capsule to morph from also owns its height.
+            enter = (if (fromEdge) androidx.compose.animation.expandHorizontally(PortalPanelSizeSpring)
+                else expandIn(PortalPanelSizeSpring, expandFrom = Alignment.TopCenter)) +
                 fadeIn(tween(300, delayMillis = 110, easing = PortalEmphasizedDecelerate)),
-            exit = androidx.compose.animation.shrinkHorizontally(spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f)) +
+            exit = (if (fromEdge) androidx.compose.animation.shrinkHorizontally(PortalPanelSizeSpring)
+                else shrinkOut(PortalPanelSizeSpring, shrinkTowards = Alignment.TopCenter)) +
                 fadeOut(tween(140, easing = PortalEmphasizedAccelerate))) {
             Box(Modifier.dissolveBlur(this, radius = 8.dp)) { content() }
         }
@@ -204,9 +220,7 @@ private fun SessionActionSurface(expanded: Boolean, palette: PortalPalette, labe
             (fadeIn(tween(300, delayMillis = 110, easing = PortalEmphasizedDecelerate)) +
                 scaleIn(tween(420, easing = PortalEmphasized), initialScale = 0.985f))
                 .togetherWith(fadeOut(tween(140, easing = PortalEmphasizedAccelerate)))
-                .using(SizeTransform(clip = true) { _, _ ->
-                    spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f)
-                })
+                .using(SizeTransform(clip = true) { _, _ -> PortalPanelSizeSpring })
         }, contentAlignment = Alignment.TopCenter, label = label, content = content)
 }
 
