@@ -27,7 +27,9 @@
  * select, so skipping the hint never skips owed damage.
  *
  * A hint is one byte on a non-blocking datagram socket (ANLAND_DAMAGE_SOCKET,
- * default /tmp/anland/damage.sock), sent at most once per 2 ms. Any failure
+ * default /tmp/anland/damage.sock). Every repaint request sends one: the host
+ * presents one frame per hint, so a hint dropped after the host took the last
+ * one leaves the client waiting for its frame callback. Any failure
  * (host not listening, socket gone) is silent and retried at most once per
  * second: without the host listener KWin behaves exactly as before.
  *
@@ -73,7 +75,6 @@ static add_repaint_fn real_add_repaint;
 /* KWin's compositing is single-threaded; set only around the muted call. */
 static int muting_catch_up;
 static int hint_fd = -1;
-static long long last_hint_ns;
 static long long last_connect_ns = -1000000000LL;
 
 static long long now_ns(void)
@@ -114,13 +115,8 @@ static void hint_connect(long long now)
 
 static void damage_hint(void)
 {
-    long long now = now_ns();
-    if (now - last_hint_ns < 2000000LL) {
-        return;
-    }
-    last_hint_ns = now;
     if (hint_fd < 0) {
-        hint_connect(now);
+        hint_connect(now_ns());
         if (hint_fd < 0) {
             return;
         }

@@ -62,7 +62,8 @@ const HEARTBEAT_NS: u64 = 1_000_000_000;
 /// re-hint every frame (each presented frame releases the client's next
 /// frame callback), so this only needs to bridge one frame at the slowest
 /// panel rate (50 Hz). A hint after the burst lapsed wakes the loop at once
-/// (see `damage_listener`), so a late frame costs no heartbeat. KWin's
+/// (see `damage_listener`), and a hint stays pending past its burst until a
+/// frame serves it, so a late frame costs no heartbeat. KWin's
 /// catch-up repaints of the other window buffers need no extra selects: they
 /// render with the next one. 40 ms bursts presented ~6 identical frames at
 /// 144 Hz for every isolated hint (clock, tray widgets).
@@ -1775,7 +1776,8 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
         inner.damage_hints.fetch_add(1, Ordering::Relaxed);
         inner.damage_pending.store(true, Ordering::Release);
         let until = now.wrapping_add(DAMAGE_BURST_NS);
-        if inner.demand_until_ns.fetch_max(until, Ordering::AcqRel) <= now {
+        // A fresh clock: the loop may have seen the burst lapse since `now`.
+        if inner.demand_until_ns.fetch_max(until, Ordering::AcqRel) <= sys::now_ns() {
             wakes += 1;
             let _ = sys::eventfd_write(&inner.wake, 1);
         }
@@ -1907,7 +1909,8 @@ fn render_loop(inner: Arc<Inner>) {
             continue;
         }
         let now = sys::now_ns();
-        let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
+        let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now
+            || inner.damage_pending.load(Ordering::Acquire);
         let timeout_ms = if demanding { 50 } else { 500 };
         let (tick_ready, wake_ready) = match sys::poll_two(&tick, &wake, timeout_ms) {
             Ok(v) => v,
@@ -1924,7 +1927,12 @@ fn render_loop(inner: Arc<Inner>) {
             drain_fd(&wake);
         }
         let now = sys::now_ns();
-        let demanding = inner.demand_until_ns.load(Ordering::Acquire) > now;
+        let burst = inner.demand_until_ns.load(Ordering::Acquire) > now;
+        // An unserved hint outlives its burst: the client that sent it waits
+        // for a frame callback and sends no other, so dropping it here would
+        // stall the client until the heartbeat. A tick can land after the burst
+        // (a frame at the panel's 50 Hz idle rate, or a late vsync).
+        let demanding = burst || inner.damage_pending.load(Ordering::Acquire);
         // Display ticks only while presenting at full rate: an idle desktop
         // otherwise woke this thread and the pump on every vsync (144/s)
         // just to skip. The heartbeat below runs off the poll timeout, and a
@@ -1950,7 +1958,7 @@ fn render_loop(inner: Arc<Inner>) {
                 && (since_last >= IDLE_SELECT_INTERVAL_NS || interactive(&inner, now)));
         let want = wake_ready
             || (tick_ready && ((demanding && paced) || since_last >= HEARTBEAT_NS))
-            || (!tick_ready && !wake_ready && !demanding && since_last >= HEARTBEAT_NS);
+            || (!tick_ready && !wake_ready && !burst && since_last >= HEARTBEAT_NS);
         iters += 1;
         if iters <= 30 {
             log::info!(
