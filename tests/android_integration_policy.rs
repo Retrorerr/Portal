@@ -494,8 +494,8 @@ fn mesa_kgsl_layer_is_pinned_and_matches_session_binds() {
     // silently stops engaging.
     for pin in [
         "mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz",
-        "11649463",
-        "a82acfbfd080f72c073fc9d3660fbbe05dc7a32bc6ecd26e557b7891930ca231",
+        "11647718",
+        "29cc81aa1654b8b5be88e672b4a018be5ff9c8e453f9e7b4edcb3c889452b69b",
         "mesa-kgsl-layer.complete",
         "libgallium-",
         "libgbm.so.1",
