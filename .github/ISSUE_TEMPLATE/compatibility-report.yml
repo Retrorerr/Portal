@@ -1,0 +1,91 @@
+name: Compatibility report
+description: Tell us how Portal runs on your device, good or bad
+title: "[Compatibility]: "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Portal is mainly tested on one device, so results from anything else help, including "it all works". Open the floating pill on the desktop, tap **Report**, then **Share what works** to fill in the details below for you.
+  - type: textarea
+    id: device-info
+    attributes:
+      label: Portal and device details
+      description: Filled in for you by the app. Otherwise give your Portal version, device model, chipset and Android version.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: setup
+    attributes:
+      label: First setup
+      options:
+        - Worked
+        - Worked after retrying
+        - Failed
+        - Upgraded, not a fresh setup
+    validations:
+      required: true
+  - type: dropdown
+    id: desktop
+    attributes:
+      label: Desktop and graphics
+      description: Plasma starts, and windows draw and move smoothly.
+      options:
+        - Works well
+        - Works with problems
+        - Does not work
+        - Did not try
+    validations:
+      required: true
+  - type: dropdown
+    id: video
+    attributes:
+      label: Video
+      description: YouTube or another site in Firefox. Try a few clips, and a 1080p one if you can.
+      options:
+        - Works well
+        - Works with problems
+        - Does not work
+        - Did not try
+    validations:
+      required: true
+  - type: dropdown
+    id: audio
+    attributes:
+      label: Sound
+      options:
+        - Works well
+        - Works with problems
+        - Does not work
+        - Did not try
+    validations:
+      required: true
+  - type: dropdown
+    id: input
+    attributes:
+      label: Touch, keyboard and mouse
+      options:
+        - Works well
+        - Works with problems
+        - Does not work
+        - Did not try
+    validations:
+      required: true
+  - type: dropdown
+    id: games
+    attributes:
+      label: Games
+      description: Steam, Proton or native Linux games.
+      options:
+        - Works well
+        - Works with problems
+        - Does not work
+        - Did not try
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: What went wrong, what you ran, how hot or how long it lasted. Add screenshots or the logs zip from the app if you have them.

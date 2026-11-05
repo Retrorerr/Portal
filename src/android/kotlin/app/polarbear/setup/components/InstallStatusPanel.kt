@@ -431,6 +431,22 @@ private fun FailureFooter(
                     if (exportStatus != null) {
                         FooterText(exportStatus, palette.textMuted, Modifier.padding(top = 2.dp))
                     }
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    Text(
+                        text = "Report this on GitHub →",
+                        modifier = Modifier
+                            .padding(top = 8.dp)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                role = Role.Button,
+                                onClick = { app.polarbear.PortalReport.reportFailure(context, errorMessage) },
+                            ),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = palette.textMuted.copy(alpha = 0.9f),
+                    )
                 }
             }
         }

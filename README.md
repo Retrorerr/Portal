@@ -52,7 +52,7 @@ Portal is a fork of [Local Desktop](https://github.com/localdesktop/localdesktop
 
 Portal is made for **Android tablets with a Snapdragon chip**. That's where it's built and tested, and where it runs best.
 
-- **Tested on:** OnePlus Pad 3 (Snapdragon 8 Elite, Adreno 830). This is the main test device.
+- **Tested on:** OnePlus Pad 3 (Snapdragon 8 Elite, Adreno 830). This is the main test device. If you try another one, [tell us how it went](#running-portal-on-another-device).
 - **Should work on:** other 64-bit (arm64) Android devices with a Qualcomm Adreno GPU. The GPU path goes through Mesa's freedreno and Turnip drivers, which cover recent Adreno chips. Most of them are untested, so reports are welcome.
 - **Other GPUs** (Mali, PowerVR, Xclipse): GPU acceleration is built around Adreno, so these get Portal's slower fallback renderer at best. Untested so far; proper support is planned.
 - **Storage:** around 6 GB free. Debian itself is about a 1 GB download.
@@ -127,12 +127,15 @@ Pick Steam during setup and you get the ARM64 Steam client running natively.
 
 ## Something broke?
 
-If Plasma fails to start, Portal shows a recovery screen with **Export diagnostics**, which bundles Portal's logs and setup state (not your personal files). Please [open an issue](https://github.com/Retrorerr/Portal/issues) with:
+Open the floating pill on the desktop and tap **Report**. It shows the device details it will fill in, can save your logs to attach, and opens a ready-made GitHub issue for you to finish. Portal uploads nothing on its own, and posting needs a free GitHub account.
 
-- your device and Android version
-- your Portal version
-- what you did and what happened
-- the diagnostics file, if you have one
+If Plasma or setup fails, the recovery screen has **Export diagnostics** and **Report this on GitHub**. Exported logs have file paths, web addresses, emails and IP addresses removed where Portal can spot them, and they leave out your personal files. Apps can print anything, so look them over before posting.
+
+Prefer to write it up yourself? [Open an issue](https://github.com/Retrorerr/Portal/issues/new/choose) with your device, Android version, Portal version and what happened.
+
+### Running Portal on another device?
+
+Portal is mainly tested on one tablet, so results from other devices are what let it support more of them. Open the floating pill, tap **Report**, then **Share what works**, and pick how each part did. "It all works" is just as useful as a bug.
 
 ## How it works
 

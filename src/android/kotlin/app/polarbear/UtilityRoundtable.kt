@@ -61,7 +61,7 @@ internal fun UtilityRoundtable(
         UtilitySuggestion.Veil -> PortalGlyph.Veil
     }
     val actions = buildList {
-        add(UtilityAction("veil", "Portal veil", PortalGlyph.Veil))
+        add(UtilityAction("report", "Report", PortalGlyph.Report))
         add(UtilityAction("files", "Files", PortalGlyph.Files, if (active > 0) "$active copying" else if (failed) "Needs attention" else ""))
         add(UtilityAction("apps", "Apps", PortalGlyph.Apps))
         add(UtilityAction("keyboard", "Keyboard", PortalGlyph.Keyboard))
@@ -233,7 +233,7 @@ internal fun UtilityRoundtable(
                                     UtilitySuggestion.Keyboard -> "Keyboard suggested"
                                     UtilitySuggestion.Gaming -> "Game options suggested"
                                     UtilitySuggestion.Files -> "Files suggested"
-                                    UtilitySuggestion.Veil -> "Portal veil suggested"
+                                    UtilitySuggestion.Veil -> "No suggestion"
                                 }
                             },
                             contentAlignment = Alignment.Center) {

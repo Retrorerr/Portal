@@ -30,8 +30,9 @@ Portal 2.4.x predates the updater, so install the current version once by hand f
 
 Tap the tab at the screen edge to open Portal's labelled controls. Its icon
 suggests the keyboard when a text field is focused, game options while Steam
-or a game is running, Files during a transfer, and the veil otherwise. The
-bubbles open the Portal veil, Files, Apps, the desktop keyboard, or Game settings.
+or a game is running, and Files during a transfer. The bubbles open Report,
+Files, Apps, the desktop keyboard, or Game settings. Report, Files and Apps open
+on the veil.
 The controller toggle appears while a game is running.
 
 The desktop keyboard sends real keys to Linux, including shortcuts. Esc, Tab,
@@ -171,19 +172,20 @@ Grant **All files access** only if you want the Linux guest to work with shared 
 
 Uninstalling Portal removes that private storage. Export important files before uninstalling, changing signing keys, or moving between incompatible builds.
 
+## Reporting problems and compatibility
+
+Open the floating pill and tap **Report**, or use **Report this on GitHub** on the recovery and failed-setup screens. Portal never uploads anything itself: it opens a GitHub issue form in your browser, and nothing is sent until you post it. Posting needs a free GitHub account. Without one, use **Copy details** and send them any way you like.
+
+- **Report a bug** fills in the bug form. Add the shortest steps that reliably cause the problem, and whether the install is fresh or upgraded.
+- **Share what works** fills in the compatibility form. Choose how setup, graphics, video, sound, input and games behaved. Reports from devices that work well are wanted too.
+
+The device details are shown before you continue: Portal version, device model, chipset, Android and kernel versions, memory, GPU, renderer, guest engine, driver versions and the video codecs the chip has in hardware. They contain no serial numbers, account names or logs.
+
 ## Diagnostics and recovery
 
-Use Portal's diagnostics export before reinstalling. Reports are bounded to Portal's host logs, setup state, and guest state directory; unrelated personal files are excluded.
+Use Portal's diagnostics export before reinstalling, through **Save logs** in **Report** or **Export diagnostics** on the recovery screen. The zip is saved to `Download/Portal` and holds the device details, Portal's host logs, setup state and guest state directory. Unrelated personal files are not included, and binary files are left out.
 
-When reporting a problem, include:
-
-- device model and Android version;
-- Portal version and build source;
-- whether the installation is fresh or upgraded;
-- the shortest reliable reproduction sequence;
-- the exported diagnostics archive, after reviewing it.
-
-Open reports through the repository's [issue tracker](https://github.com/Retrorerr/Portal/issues).
+Reports are meant to be posted publicly, so Portal removes file paths, web addresses (other than its own download sources), email addresses, IP and MAC addresses from the logs where it can spot them. Apps can print anything, though, so look the logs over before attaching them.
 
 ## Android process limits
 

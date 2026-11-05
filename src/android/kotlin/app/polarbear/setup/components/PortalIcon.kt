@@ -15,7 +15,7 @@ import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-internal enum class PortalGlyph { Veil, Files, Apps, Keyboard, Controller, Options, Close, Import, Export, Parent, Home }
+internal enum class PortalGlyph { Veil, Report, Files, Apps, Keyboard, Controller, Options, Close, Import, Export, Parent, Home }
 
 /** The same small stroke, corner and proportions across Portal's utility actions. */
 @Composable
@@ -38,6 +38,10 @@ internal fun PortalIcon(glyph: PortalGlyph, color: Color, modifier: Modifier = M
                     line(7f,16f,17f,16f)
                 }
                 PortalGlyph.Veil -> { box(4f,2f,16f,20f,3f); line(8f,7f,12f,11f); line(12f,11f,16f,7f); line(8f,16f,16f,16f) }
+                PortalGlyph.Report -> {
+                    line(6f,3f,6f,21f); line(6f,4f,18f,4f); line(18f,4f,15f,8.5f)
+                    line(15f,8.5f,18f,13f); line(18f,13f,6f,13f)
+                }
                 PortalGlyph.Controller -> {
                     box(2f,6f,20f,12f,5f); line(6f,12f,10f,12f); line(8f,10f,8f,14f)
                     line(15f,10f,17f,10f); line(17f,14f,19f,14f)

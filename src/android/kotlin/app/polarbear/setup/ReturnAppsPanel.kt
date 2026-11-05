@@ -133,7 +133,7 @@ internal fun ReturnAppsPanel(
             val gap by animateDpAsState(if (panel == null) 10.dp else 0.dp,
                 spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f), label = "controls capsule spacing")
             androidx.compose.ui.layout.Layout(content = {
-                SessionActionSlot(visible = panel != "files" && catalog.isNotEmpty()) {
+                SessionActionSlot(visible = panel != "files" && panel != "report" && catalog.isNotEmpty()) {
                     SessionActionSurface(panel == "apps", palette, "apps surface") { expanded ->
                         if (expanded) AppsCard(catalog, states, icons, palette) { ComposeOverlay.activePanel = null }
                         else AppsCapsule(catalog, states, icons, states.values.count { it.busy }, palette) {
@@ -141,7 +141,7 @@ internal fun ReturnAppsPanel(
                         }
                     }
                 }
-                SessionActionSlot(visible = panel != "apps") {
+                SessionActionSlot(visible = panel != "apps" && panel != "report") {
                     SessionActionSurface(panel == "files", palette, "files surface") { expanded ->
                         if (expanded) ReturnFilesPanel(palette) { ComposeOverlay.activePanel = null }
                         else FilesCapsule(palette) { if (ComposeOverlay.activePanel == null) ComposeOverlay.activePanel = "files" }
@@ -165,7 +165,12 @@ internal fun ReturnAppsPanel(
                     right.placeRelative(x + left.width + spacing, 0)
                 }
             }
-
+            // Opened only from the pill's menu, so it never competes with Apps and Files.
+            SessionActionSlot(visible = panel == "report") {
+                SessionActionSurface(true, palette, "report surface") { _ ->
+                    ReturnReportPanel(palette) { ComposeOverlay.activePanel = null }
+                }
+            }
         }
     }
 }

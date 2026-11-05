@@ -281,6 +281,13 @@ private fun PortalRecoveryScreen(
                     modifier = Modifier.width(PortalDimens.BeginMaxWidth),
                 )
             }
+            val context = androidx.compose.ui.platform.LocalContext.current
+            QuietAction(
+                text = "Report this on GitHub →",
+                enabled = !state.retrying,
+                palette = palette,
+                onClick = { app.polarbear.PortalReport.reportFailure(context, state.reason) },
+            )
             AnimatedContent(
                 targetState = state.exportStatus,
                 transitionSpec = {

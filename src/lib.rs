@@ -25,6 +25,7 @@ pub mod core {
     pub mod presentation;
     pub mod provisioning;
     pub mod renderer_policy;
+    pub mod report_privacy;
     pub mod runtime;
     pub mod shm_damage;
     pub mod startup;

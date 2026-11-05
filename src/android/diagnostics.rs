@@ -8,7 +8,10 @@
 
 use crate::{
     android::utils::{application_context::get_application_context, ndk::run_in_jvm},
-    core::config::{PRODUCTION_FS_ROOT, VERSION},
+    core::{
+        config::{PRODUCTION_FS_ROOT, VERSION},
+        report_privacy,
+    },
 };
 use jni::{
     objects::{JObject, JValue},
@@ -18,7 +21,7 @@ use jni::{
 use log::Record;
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -423,18 +426,16 @@ fn add_file(
     if !meta.is_file() || meta.len() > MAX_FILE_BYTES || *total + meta.len() > MAX_ARCHIVE_BYTES {
         return Ok(());
     }
+    // Reports get posted publicly: text is scrubbed, and a binary file could
+    // hold anything, so it isn't exported at all.
+    let bytes = fs::read(source)?;
+    if report_privacy::looks_binary(&bytes) {
+        return Ok(());
+    }
     writer
         .start_file(archive_name, FileOptions::default())
         .map_err(|error| io::Error::other(error.to_string()))?;
-    let mut file = File::open(source)?;
-    let mut buf = [0u8; 16 * 1024];
-    loop {
-        let read = file.read(&mut buf)?;
-        if read == 0 {
-            break;
-        }
-        writer.write_all(&buf[..read])?;
-    }
+    writer.write_all(report_privacy::scrub(&String::from_utf8_lossy(&bytes)).as_bytes())?;
     *total += meta.len();
     Ok(())
 }
@@ -577,11 +578,23 @@ fn device_report() -> String {
     report.push_str(&format!("page_size={}\n", unsafe {
         libc::sysconf(libc::_SC_PAGESIZE)
     }));
+    report.push_str(&format!("memory_mb={}\n", unsafe {
+        (libc::sysconf(libc::_SC_PHYS_PAGES) as i64 * libc::sysconf(libc::_SC_PAGESIZE) as i64)
+            / (1024 * 1024)
+    }));
     report.push_str(&format!("kgsl={}\n", kgsl_device_info()));
     let renderer_mode = fs::read_to_string(crate::android::anland::mode_flag_path())
         .map(|mode| mode.trim().to_owned())
         .unwrap_or_else(|_| "unset".to_owned());
     report.push_str(&format!("renderer_mode={renderer_mode}\n"));
+    report.push_str(&format!(
+        "guest_engine={}\n",
+        if crate::android::runtime::tawcroot::selected() {
+            "tawcroot"
+        } else {
+            "proot"
+        }
+    ));
     report.push_str(&format!(
         "mesa_layer={} provisioned={}\n",
         crate::android::proot::mesa_layer::active_pin().version,
@@ -595,10 +608,67 @@ fn device_report() -> String {
     report
 }
 
+/// JNI: what the report screen shows and fills into the GitHub form. Holds no
+/// logs or identifiers, only what kind of device and build this is. Probes the
+/// GPU and may run the engine's first probe, so never on the main thread.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_PortalReport_nativeSummary(
+    mut env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jstring {
+    let summary = format!("portal={VERSION}\n{}", device_report());
+    match env.new_string(summary) {
+        Ok(value) => value.into_raw(),
+        Err(error) => {
+            log::warn!("Could not allocate the report summary: {error}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// The hardware codecs Android lists, from `PortalReport`: which decoders a
+/// chip really has is what the video path needs to know from new devices.
+fn hardware_codecs(env: &mut JNIEnv, android_app: &AndroidApp) -> Result<String, String> {
+    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _jobject) };
+    let loader = env
+        .call_method(
+            &activity,
+            "getClassLoader",
+            "()Ljava/lang/ClassLoader;",
+            &[],
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| error.to_string())?;
+    let name = env
+        .new_string("app.polarbear.PortalReport")
+        .map_err(|error| error.to_string())?;
+    let class = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&name)],
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| error.to_string())?;
+    let text = env
+        .call_static_method(
+            jni::objects::JClass::from(class),
+            "hardwareCodecs",
+            "()Ljava/lang/String;",
+            &[],
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| error.to_string())?;
+    env.get_string(&text.into())
+        .map(String::from)
+        .map_err(|error| error.to_string())
+}
+
 /// Build one bounded, shareable diagnostics archive.  Only app diagnostics
 /// and the guest's Portal state directory are included; unrelated user
 /// files in the guest are never traversed.
-pub fn export_archive() -> Result<PathBuf, String> {
+pub fn export_archive(codecs: &str) -> Result<PathBuf, String> {
     let paths = paths().ok_or_else(|| "Diagnostics are not initialized yet".to_string())?;
     let _ = fs::create_dir_all(&paths.archive_dir);
     let archive = paths
@@ -678,7 +748,7 @@ pub fn export_archive() -> Result<PathBuf, String> {
         .start_file("device.txt", FileOptions::default())
         .map_err(|error| error.to_string())?;
     writer
-        .write_all(device_report().as_bytes())
+        .write_all(format!("{}{codecs}\n", device_report()).as_bytes())
         .map_err(|error| error.to_string())?;
 
     let metadata = format!(
@@ -710,7 +780,9 @@ pub fn export_archive() -> Result<PathBuf, String> {
 /// the user after sharing. Android 10 (API 29) is the minimum API for this
 /// MediaStore publication path; older devices receive an actionable error.
 pub fn export_and_share(android_app: &AndroidApp) -> Result<PathBuf, String> {
-    let archive = export_archive()?;
+    let codecs = run_in_jvm(hardware_codecs, android_app.clone())
+        .unwrap_or_else(|error| format!("hw_codecs=unavailable ({error})"));
+    let archive = export_archive(&codecs)?;
     let path = archive.clone();
     run_in_jvm(
         move |env, app| share_file(env, app, &path),

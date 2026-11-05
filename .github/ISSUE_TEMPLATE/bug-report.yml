@@ -7,19 +7,12 @@ body:
     attributes:
       value: |
         Thanks for helping improve Portal. Please separate physical-device results from emulator observations.
-  - type: input
-    id: build
+  - type: textarea
+    id: device-info
     attributes:
-      label: Portal build
-      description: Release version or full commit SHA.
-      placeholder: v2.2.0 or 0123456789abcdef...
-    validations:
-      required: true
-  - type: input
-    id: device
-    attributes:
-      label: Device and Android version
-      placeholder: OnePlus Pad 3, Android 16
+      label: Portal and device details
+      description: Filled in for you when you use **Report** in the app. Otherwise give your Portal version, where you got it, device model and Android version.
+      render: text
     validations:
       required: true
   - type: dropdown
