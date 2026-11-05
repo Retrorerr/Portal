@@ -81,7 +81,9 @@ mod tests {
     fn clears_what_earlier_sessions_left_and_keeps_this_one() {
         let root = tempfile::tempdir().unwrap();
         let tmp = root.path();
-        let boot = SystemTime::now();
+        // File times come from the kernel's coarse clock, which can read a few
+        // ms behind this one: a file written just after `now` may predate it.
+        let boot = SystemTime::now() - Duration::from_secs(1);
         let before = boot.checked_sub(Duration::from_secs(3600)).unwrap();
 
         fs::write(tmp.join("u1000-Shm_old"), b"x").unwrap();
