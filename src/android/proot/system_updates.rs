@@ -70,9 +70,11 @@ use std::{
 };
 use winit::platform::android::activity::AndroidApp;
 
-/// Wait after the first desktop frame before checking, so startup work
-/// (Plasma, Baloo, the first app launch) has the device to itself.
-const CHECK_DELAY: Duration = Duration::from_secs(90);
+/// Wait after the first desktop frame before refreshing apt's lists, so
+/// startup work (Plasma, Baloo, the first app launch) has the device to
+/// itself. The other sources are a few small requests and run at once, while
+/// the veil is still up to show what they find.
+const APT_REFRESH_DELAY: Duration = Duration::from_secs(90);
 /// How often the background loop asks whether a check is due.
 const CHECK_TICK: Duration = Duration::from_secs(30 * 60);
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(150);
@@ -574,7 +576,32 @@ fn check_chatgpt(installed: &HashMap<String, String>) -> anyhow::Result<bool> {
 /// Check every source once. Each source is independent: one that fails is
 /// reported and the others still count. Returns an error listing the
 /// failed sources, so the caller retries sooner.
-fn run_check(android_app: &AndroidApp) -> anyhow::Result<()> {
+/// Record what a check found and show it, unless the user's update is running.
+fn apply_findings(cache: HostCache, fs_root: &Path) -> anyhow::Result<HostCache> {
+    let installed = read_installed(fs_root).ok();
+    let cache = still_relevant(cache, installed.as_ref());
+    write_host_cache(&cache)?;
+    if let Ok(mut coordinator) = coordinator().lock() {
+        ensure_loaded(&mut coordinator);
+        let snapshot = &mut coordinator.snapshot;
+        if snapshot.status != UpdateStatus::Running {
+            snapshot.app = cache.app.clone();
+            snapshot.driver = cache.driver.clone();
+            snapshot.chatgpt = cache.chatgpt;
+            // A finished run's result gives way to whatever is still due.
+            if matches!(
+                snapshot.status,
+                UpdateStatus::None | UpdateStatus::Available | UpdateStatus::Complete
+            ) {
+                snapshot.status = idle_status(snapshot);
+            }
+        }
+    }
+    publish();
+    Ok(cache)
+}
+
+fn run_check(android_app: &AndroidApp, desktop_ready: Instant) -> anyhow::Result<()> {
     let runs = runs_started();
     let metered = crate::android::utils::ndk::is_active_network_metered(android_app);
     let policy = refresh_policy();
@@ -614,16 +641,31 @@ fn run_check(android_app: &AndroidApp) -> anyhow::Result<()> {
         Err(error) => errors.push(format!("{error:#}")),
     }
 
+    // Show these now: apt's lists wait for startup to settle and can take
+    // minutes. Only a complete check below counts as checked.
+    if runs_started() == runs && !update_in_progress() {
+        cache = apply_findings(cache, fs_root)?;
+    }
+    log::info!(
+        "updates: sources checked {} ms after the desktop appeared",
+        desktop_ready.elapsed().as_millis()
+    );
+
     // apt's package lists are tens of megabytes: never on a metered
     // network, and not while an app install owns apt.
+    let debian_due = || {
+        check_due(read_cache(fs_root).as_ref(), now_secs())
+            && !crate::android::proot::optional_apps::is_busy()
+    };
     if metered {
         log::info!("updates: skipping Debian's package lists on a metered network");
-    } else if check_due(read_cache(fs_root).as_ref(), now_secs())
-        && !crate::android::proot::optional_apps::is_busy()
-    {
-        match check_debian() {
-            Ok(count) => log::info!("updates: {count} Debian updates available"),
-            Err(error) => errors.push(format!("Debian: {error:#}")),
+    } else if debian_due() {
+        thread::sleep(APT_REFRESH_DELAY.saturating_sub(desktop_ready.elapsed()));
+        if debian_due() && runs_started() == runs && !update_in_progress() {
+            match check_debian() {
+                Ok(count) => log::info!("updates: {count} Debian updates available"),
+                Err(error) => errors.push(format!("Debian: {error:#}")),
+            }
         }
     }
 
@@ -639,26 +681,7 @@ fn run_check(android_app: &AndroidApp) -> anyhow::Result<()> {
     if errors.is_empty() {
         cache.checked_at = now_secs();
     }
-    let installed = read_installed(fs_root).ok();
-    let cache = still_relevant(cache, installed.as_ref());
-    write_host_cache(&cache)?;
-    if let Ok(mut coordinator) = coordinator().lock() {
-        ensure_loaded(&mut coordinator);
-        let snapshot = &mut coordinator.snapshot;
-        if snapshot.status != UpdateStatus::Running {
-            snapshot.app = cache.app.clone();
-            snapshot.driver = cache.driver.clone();
-            snapshot.chatgpt = cache.chatgpt;
-            // A finished run's result gives way to whatever is still due.
-            if matches!(
-                snapshot.status,
-                UpdateStatus::None | UpdateStatus::Available | UpdateStatus::Complete
-            ) {
-                snapshot.status = idle_status(snapshot);
-            }
-        }
-    }
-    publish();
+    let cache = apply_findings(cache, fs_root)?;
     diagnostics::host_event(
         "updates-check",
         &format!(
@@ -700,8 +723,8 @@ fn retry_delay(failures: u32) -> Duration {
     Duration::from_secs(15 * 60 * (1u64 << failures.saturating_sub(1).min(3)))
 }
 
-/// Check for updates while Portal runs: first a while after the desktop
-/// appears, then whenever the last complete check is older than
+/// Check for updates while Portal runs: as soon as the desktop appears, then
+/// whenever the last complete check is older than
 /// [`SOURCE_CHECK_INTERVAL_SECS`] (apt's lists only every six hours),
 /// retrying failures with a growing delay. Results show on the
 /// Return-to-Plasma screen.
@@ -712,19 +735,24 @@ pub fn schedule_background_check(android_app: &AndroidApp) {
     }
     let android_app = android_app.clone();
     thread::spawn(move || {
+        let desktop_ready = Instant::now();
         app_update::discard_installed();
-        thread::sleep(CHECK_DELAY);
         let mut failures = 0u32;
         loop {
             let ready = crate::core::provisioning::RuntimeArtifact::production().is_bootable(root())
                 && !update_in_progress();
             if ready && (failures > 0 || check_is_due()) {
-                match run_check(&android_app) {
+                match run_check(&android_app, desktop_ready) {
                     Ok(()) => failures = 0,
                     Err(error) => {
-                        failures += 1;
                         log::warn!("updates: check incomplete: {error:#}");
                         diagnostics::host_event("updates-check-failed", &format!("{error:#}"));
+                        // The network may still be coming up right after launch.
+                        if let Some(rest) = APT_REFRESH_DELAY.checked_sub(desktop_ready.elapsed()) {
+                            thread::sleep(rest);
+                            continue;
+                        }
+                        failures += 1;
                     }
                 }
             }
