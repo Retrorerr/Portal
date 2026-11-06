@@ -52,6 +52,7 @@ export "CARGO_TARGET_${TARGET_SHOUT}_LINKER=$CC"
 # scripts/check_elf_alignment.sh verifies the result.
 export "CARGO_TARGET_${TARGET_SHOUT}_RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384"
 export "CC_${TARGET_SNAKE}=$CC"
+export "CXX_${TARGET_SNAKE}=${CC}++"
 export "AR_${TARGET_SNAKE}=$TOOLCHAIN/bin/llvm-ar"
 export BINDGEN_EXTRA_CLANG_ARGS="--target=${TARGET}${API} --sysroot=$TOOLCHAIN/sysroot ${BINDGEN_EXTRA_CLANG_ARGS:-}"
 

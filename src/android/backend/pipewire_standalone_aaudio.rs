@@ -1173,6 +1173,7 @@ fn supervise_capture(
 }
 
 fn spawn_logged(mut command: Command, name: &'static str) -> Result<Child, String> {
+    crate::android::utils::child_fds::close_inherited_fds(&mut command);
     let mut child = command.spawn().map_err(|e| format!("spawn {name}: {e}"))?;
     let pid = child.id();
     pw_info!("spawn", "{name} child pid={pid}");

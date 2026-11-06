@@ -233,6 +233,30 @@ fn install_attempt() -> anyhow::Result<()> {
 /// Start the decode daemon and restart it whenever it exits. The daemon
 /// serves any number of sessions and holds no codec while idle, so it runs
 /// for the life of the process.
+/// Copy the daemon's log to the host log, the only record of a decoder stall
+/// after the fact. A page full of short clips opens sessions quickly, so lines
+/// beyond the budget are counted and dropped.
+fn forward_daemon_log(stderr: impl std::io::Read) {
+    const LINES_PER_MINUTE: u32 = 240;
+    let mut window = Instant::now();
+    let (mut lines, mut dropped) = (0u32, 0u32);
+    for line in std::io::BufRead::lines(std::io::BufReader::new(stderr)).map_while(Result::ok) {
+        if window.elapsed() >= Duration::from_secs(60) {
+            if dropped > 0 {
+                log::warn!("[VideoDecode] daemon: {dropped} log lines dropped");
+            }
+            window = Instant::now();
+            (lines, dropped) = (0, 0);
+        }
+        lines += 1;
+        if lines <= LINES_PER_MINUTE {
+            log::info!("[VideoDecode] daemon: {line}");
+        } else {
+            dropped += 1;
+        }
+    }
+}
+
 fn spawn_daemon() {
     if SUPERVISOR_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -252,15 +276,24 @@ fn spawn_daemon() {
                 log::error!("[VideoDecode] create {}: {error}", dir.display());
             }
             let started = Instant::now();
-            let status = Command::new(&binary)
+            let mut command = Command::new(&binary);
+            command
                 .arg("--sock")
                 .arg(&dir)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            match status {
-                Ok(status) => log::warn!("[VideoDecode] daemon exited: {status}"),
+                .stderr(Stdio::piped());
+            crate::android::utils::child_fds::close_inherited_fds(&mut command);
+            match command.spawn() {
+                Ok(mut child) => {
+                    if let Some(stderr) = child.stderr.take() {
+                        thread::spawn(move || forward_daemon_log(stderr));
+                    }
+                    match child.wait() {
+                        Ok(status) => log::warn!("[VideoDecode] daemon exited: {status}"),
+                        Err(error) => log::error!("[VideoDecode] wait {DAEMON_LIB}: {error}"),
+                    }
+                }
                 Err(error) => log::error!("[VideoDecode] spawn {DAEMON_LIB}: {error}"),
             }
             if started.elapsed() > Duration::from_secs(60) {

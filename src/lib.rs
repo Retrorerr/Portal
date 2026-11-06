@@ -81,6 +81,7 @@ pub mod android {
     pub mod utils {
         pub mod application_context;
         pub mod capture_permissions;
+        pub mod child_fds;
         pub mod compose_overlay;
         pub mod display_mode_request;
         pub mod frame_pacing;

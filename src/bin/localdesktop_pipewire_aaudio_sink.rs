@@ -15,7 +15,7 @@
 //! covers them without an Android sysroot.
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 const DEFAULT_NODE_NAME: &str = "portal-audio-output";
 const DEFAULT_RATE: u32 = 48000;
@@ -47,6 +47,16 @@ struct Sink {
     dropped_frames: AtomicU64,
     drive_enabled: AtomicBool,
     process_pending: AtomicBool,
+    /// Frames played since the pending graph cycle was requested.
+    pending_frames: AtomicU64,
+    /// Requests that a graph cycle never answered and that were sent again.
+    lost_cycles: AtomicU64,
+    /// Finished graph cycles and AAudio data callbacks, watched by the health
+    /// timer.
+    process_cycles: AtomicU64,
+    data_callbacks: AtomicU64,
+    /// The last error from asking the graph for a cycle, 0 if none.
+    trigger_error: AtomicI32,
     pipewire_buffer_frames: AtomicU32,
     /// The `pw_stream` this sink drives, or null before it is connected.
     stream: AtomicPtr<std::ffi::c_void>,
@@ -72,6 +82,11 @@ impl Sink {
             dropped_frames: AtomicU64::new(0),
             drive_enabled: AtomicBool::new(false),
             process_pending: AtomicBool::new(false),
+            pending_frames: AtomicU64::new(0),
+            lost_cycles: AtomicU64::new(0),
+            process_cycles: AtomicU64::new(0),
+            data_callbacks: AtomicU64::new(0),
+            trigger_error: AtomicI32::new(0),
             pipewire_buffer_frames: AtomicU32::new(rate / 50),
             stream: AtomicPtr::new(std::ptr::null_mut()),
         }
@@ -90,6 +105,48 @@ impl Sink {
     fn clear(&self) {
         let write = self.write_frame.load(Ordering::Acquire);
         self.read_frame.store(write, Ordering::Release);
+    }
+
+    /// How long a requested graph cycle may stay unanswered before it counts
+    /// as lost: 200 ms, or four quanta when the graph runs a long quantum.
+    fn lost_cycle_frames(&self) -> u64 {
+        let quantum = self.pipewire_buffer_frames.load(Ordering::Acquire) as u64;
+        (self.rate as u64 / 5).max(quantum * 4)
+    }
+
+    /// Whether the AAudio callback should ask the graph for a cycle after
+    /// playing `played` more frames.
+    ///
+    /// This sink is the graph's only clock. PipeWire calls `process` only for
+    /// a cycle that delivers a buffer, so a cycle that ends without one would
+    /// otherwise leave the request pending forever: the graph stops, while
+    /// AAudio plays silence and every client's audio clock, and with it any
+    /// video synced to audio, stands still until the sink restarts.
+    fn should_request_cycle(&self, played: u64) -> bool {
+        if self.process_pending.load(Ordering::Acquire) {
+            let waited = self.pending_frames.fetch_add(played, Ordering::AcqRel) + played;
+            if waited < self.lost_cycle_frames() {
+                return false;
+            }
+            self.pending_frames.store(0, Ordering::Release);
+            self.lost_cycles.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+
+        let quantum = self.pipewire_buffer_frames.load(Ordering::Acquire);
+        if self.buffered_frames() > (quantum / 2).max(256) as u64 {
+            return false;
+        }
+        self.pending_frames.store(0, Ordering::Release);
+        self.process_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// A graph cycle reached this sink.
+    fn cycle_finished(&self) {
+        self.process_cycles.fetch_add(1, Ordering::Relaxed);
+        self.process_pending.store(false, Ordering::Release);
     }
 
     /// Append interleaved frames, dropping the oldest when the ring is full.
@@ -385,6 +442,13 @@ mod android {
     /// Ticks of idle before AAudio is stopped (3 s), so pauses between short
     /// sounds don't restart the output each time.
     const IDLE_STOP_TICKS: u32 = 6;
+    /// Streaming ticks without an AAudio data callback (3 s) or a finished
+    /// graph cycle (10 s) before the sink gives up. Exiting is safe: the
+    /// supervisor starts a new sink and the guest's connections stay up.
+    const CALLBACK_DEAD_TICKS: u32 = 6;
+    const GRAPH_DEAD_TICKS: u32 = 20;
+    /// Why the sink gave up, set before it quits the main loop.
+    static GAVE_UP: OnceLock<String> = OnceLock::new();
     /// Portal's tone chain (`--tone on`), set before `SINK`. Only the AAudio
     /// callback thread touches it after that.
     static TONE: OnceLock<ToneCell> = OnceLock::new();
@@ -394,27 +458,17 @@ mod android {
 
     impl Sink {
         /// Ask the graph for another quantum once the ring runs low. Called
-        /// from the AAudio callback thread, exactly like the C original.
-        fn maybe_trigger_process(&self) {
+        /// from the AAudio callback thread with the frames it just played.
+        fn maybe_trigger_process(&self, played: u64) {
             let stream = self.stream.load(Ordering::Acquire);
             if !self.drive_enabled.load(Ordering::Acquire) || stream.is_null() {
                 return;
             }
-
-            let mut pw_frames = self.pipewire_buffer_frames.load(Ordering::Acquire);
-            if pw_frames == 0 {
-                pw_frames = self.rate / 50;
-            }
-            if self.buffered_frames() > (pw_frames / 2).max(256) as u64 {
-                return;
-            }
-
-            if self
-                .process_pending
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                unsafe { pw::sys::pw_stream_trigger_process(stream.cast()) };
+            if self.should_request_cycle(played) {
+                let res = unsafe { pw::sys::pw_stream_trigger_process(stream.cast()) };
+                if res < 0 {
+                    self.trigger_error.store(res, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -469,7 +523,7 @@ mod android {
         }
 
         unsafe fn sym<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
-            lib.get::<T>(name).map(|s| *s).map_err(|e| {
+            unsafe { lib.get::<T>(name) }.map(|s| *s).map_err(|e| {
                 format!(
                     "missing AAudio symbol {}: {e}",
                     String::from_utf8_lossy(&name[..name.len() - 1])
@@ -523,16 +577,19 @@ mod android {
     ) -> i32 {
         let frames = num_frames.max(0) as usize;
         let channels = AAUDIO_CHANNELS.load(Ordering::Acquire);
-        let dst = std::slice::from_raw_parts_mut(audio_data as *mut f32, frames * channels);
+        // SAFETY: AAudio passes a buffer of `num_frames` frames of the stream's format.
+        let dst = unsafe { std::slice::from_raw_parts_mut(audio_data as *mut f32, frames * channels) };
 
         match SINK.get() {
             // The stream starts before the ring exists; play silence until then.
             None => dst.fill(0.0),
             Some(sink) => {
                 sink.read(dst);
-                sink.maybe_trigger_process();
+                sink.data_callbacks.fetch_add(1, Ordering::Relaxed);
+                sink.maybe_trigger_process(frames as u64);
                 if let Some(tone) = TONE.get() {
-                    (*tone.0.get()).process(dst);
+                    // SAFETY: only this callback thread touches the tone chain.
+                    unsafe { (*tone.0.get()).process(dst) };
                 }
             }
         }
@@ -546,7 +603,8 @@ mod android {
         error: aaudio::Res,
     ) {
         let text = match AAUDIO.get() {
-            Some(api) => CStr::from_ptr((api.result_text)(error))
+            // SAFETY: AAudio returns a static string for any result code.
+            Some(api) => unsafe { CStr::from_ptr((api.result_text)(error)) }
                 .to_string_lossy()
                 .into_owned(),
             None => "unknown".to_string(),
@@ -801,7 +859,7 @@ mod android {
             sink.clear();
             sink.process_pending.store(false, Ordering::Release);
             sink.drive_enabled.store(true, Ordering::Release);
-            sink.maybe_trigger_process();
+            sink.maybe_trigger_process(0);
         } else {
             sink.drive_enabled.store(false, Ordering::Release);
             sink.process_pending.store(false, Ordering::Release);
@@ -859,6 +917,7 @@ mod android {
     fn on_process(stream: &pw::stream::Stream, sink: &mut &'static Sink) {
         let Some(mut buffer) = stream.dequeue_buffer() else {
             note!("out of buffers");
+            sink.cycle_finished();
             return;
         };
 
@@ -886,7 +945,7 @@ mod android {
         }
 
         drop(buffer);
-        sink.process_pending.store(false, Ordering::Release);
+        sink.cycle_finished();
     }
 
     // -- Entry point ---------------------------------------------------------
@@ -960,6 +1019,8 @@ mod android {
         let latency_stream = stream.clone();
         let samples = std::cell::RefCell::new(std::collections::VecDeque::with_capacity(8));
         let reported_ns = std::cell::Cell::new(0i64);
+        let give_up_loop = mainloop.clone();
+        let health = std::cell::RefCell::new(Health::default());
         let latency_timer = mainloop.loop_().add_timer(move |_| {
             if !sink.drive_enabled.load(Ordering::Acquire) {
                 // Node idle: stop AAudio once the hold has passed. The
@@ -967,6 +1028,14 @@ mod android {
                 if IDLE_TICKS.fetch_add(1, Ordering::AcqRel) + 1 >= IDLE_STOP_TICKS {
                     set_aaudio_started(false);
                 }
+                *health.borrow_mut() = Health::default();
+                return;
+            }
+            let reason = health.borrow_mut().check(sink);
+            if let Some(reason) = reason {
+                note!("{reason}; exiting so the supervisor starts a new sink");
+                let _ = GAVE_UP.set(reason);
+                give_up_loop.quit();
                 return;
             }
             let Some(sample) = output_latency_ns(sink) else { return };
@@ -1004,7 +1073,66 @@ mod android {
             sink.ring_frames
         );
         mainloop.run();
-        Ok(())
+        match GAVE_UP.get() {
+            Some(reason) => Err(reason.clone()),
+            None => Ok(()),
+        }
+    }
+
+    /// Watches a streaming sink from the half-second timer.
+    #[derive(Default)]
+    struct Health {
+        callbacks: u64,
+        cycles: u64,
+        lost_cycles: u64,
+        callback_idle_ticks: u32,
+        graph_idle_ticks: u32,
+        ticks_since_note: u32,
+    }
+
+    impl Health {
+        /// Log lost cycles (at most every 10 s) and return why the sink should
+        /// give up, if it should.
+        fn check(&mut self, sink: &Sink) -> Option<String> {
+            let callbacks = sink.data_callbacks.load(Ordering::Relaxed);
+            let cycles = sink.process_cycles.load(Ordering::Relaxed);
+            let lost_cycles = sink.lost_cycles.load(Ordering::Relaxed);
+            self.callback_idle_ticks = if callbacks == self.callbacks {
+                self.callback_idle_ticks + 1
+            } else {
+                0
+            };
+            self.graph_idle_ticks = if cycles == self.cycles {
+                self.graph_idle_ticks + 1
+            } else {
+                0
+            };
+            self.callbacks = callbacks;
+            self.cycles = cycles;
+            self.ticks_since_note = self.ticks_since_note.saturating_add(1);
+            if lost_cycles != self.lost_cycles && self.ticks_since_note >= 20 {
+                self.lost_cycles = lost_cycles;
+                self.ticks_since_note = 0;
+                note!(
+                    "recovered lost graph cycles total={lost_cycles} cycles={cycles} trigger_error={}",
+                    sink.trigger_error.load(Ordering::Relaxed)
+                );
+            }
+            if self.callback_idle_ticks >= CALLBACK_DEAD_TICKS {
+                return Some(format!(
+                    "no AAudio callback for {} ms",
+                    self.callback_idle_ticks * 500
+                ));
+            }
+            if self.graph_idle_ticks >= GRAPH_DEAD_TICKS {
+                return Some(format!(
+                    "no graph cycle for {} ms lost_cycles={lost_cycles} trigger_error={}",
+                    self.graph_idle_ticks * 500,
+                    sink.trigger_error.load(Ordering::Relaxed)
+                ));
+            }
+            None
+        }
     }
 
     pub fn run(args: Args) -> Result<(), String> {
@@ -1109,6 +1237,49 @@ mod tests {
     /// 48 kHz × 120 ms × 2ch, the values the supervisor passes.
     fn sink() -> Sink {
         Sink::new(48000, 2, 120)
+    }
+
+    #[test]
+    fn a_cycle_is_requested_when_the_ring_runs_low() {
+        let sink = sink();
+        assert!(sink.should_request_cycle(0));
+        sink.cycle_finished();
+        sink.write(&vec![0.0; 2048 * 2]);
+        assert!(!sink.should_request_cycle(192), "ring is full enough");
+        assert_eq!(sink.lost_cycles.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn an_unanswered_cycle_is_requested_again() {
+        let sink = sink();
+        assert!(sink.should_request_cycle(0));
+        // 200 ms at 48 kHz in 192-frame callbacks: not lost until the 50th.
+        for _ in 0..49 {
+            assert!(!sink.should_request_cycle(192));
+        }
+        assert!(sink.should_request_cycle(192));
+        assert_eq!(sink.lost_cycles.load(Ordering::Relaxed), 1);
+
+        // Still unanswered: it keeps asking, one request per timeout.
+        for _ in 0..49 {
+            assert!(!sink.should_request_cycle(192));
+        }
+        assert!(sink.should_request_cycle(192));
+        assert_eq!(sink.lost_cycles.load(Ordering::Relaxed), 2);
+
+        // Answered: back to asking as soon as the ring runs low.
+        sink.cycle_finished();
+        assert!(sink.should_request_cycle(192));
+        assert_eq!(sink.lost_cycles.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_long_quantum_gets_a_longer_timeout() {
+        let sink = sink();
+        sink.pipewire_buffer_frames.store(8192, Ordering::Release);
+        assert_eq!(sink.lost_cycle_frames(), 8192 * 4);
+        sink.pipewire_buffer_frames.store(256, Ordering::Release);
+        assert_eq!(sink.lost_cycle_frames(), 9600);
     }
 
     #[test]
