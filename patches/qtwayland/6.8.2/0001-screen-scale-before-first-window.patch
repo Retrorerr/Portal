@@ -1,10 +1,45 @@
+--- a/src/client/qwaylanddisplay.cpp
++++ b/src/client/qwaylanddisplay.cpp
+@@ -57,6 +57,7 @@
+ 
+ #include <QtCore/QAbstractEventDispatcher>
+ #include <QtGui/qpa/qwindowsysteminterface.h>
++#include <QtGui/QGuiApplication>
+ #include <QtGui/private/qguiapplication_p.h>
+ 
+ #include <QtCore/QDebug>
+@@ -400,6 +401,12 @@
+     return qEnvironmentVariableIntValue("QT_WAYLAND_DONT_CHECK_SHELL_INTEGRATION") || shellIntegration();
+ }
+ 
++bool QWaylandDisplay::usesFractionalScale() const
++{
++    return fractionalScaleManager()
++            && QGuiApplication::highDpiScaleFactorRoundingPolicy() == Qt::HighDpiScaleFactorRoundingPolicy::PassThrough;
++}
++
+ void QWaylandDisplay::ensureScreen()
+ {
+     if (!mScreens.empty() || mPlaceholderScreen)
+--- a/src/client/qwaylanddisplay_p.h
++++ b/src/client/qwaylanddisplay_p.h
+@@ -199,6 +199,9 @@
+     {
+         return mGlobals.fractionalScaleManager.get();
+     }
++    // Whether windows scale fractionally. Anything estimating a scale before
++    // a window's surface exists must agree with this.
++    bool usesFractionalScale() const;
+     QtWayland::wp_viewporter *viewporter() const
+     {
+         return mGlobals.viewporter.get();
 --- a/src/client/qwaylandscreen.cpp
 +++ b/src/client/qwaylandscreen.cpp
 @@ -189,6 +189,22 @@
  
  qreal QWaylandScreen::devicePixelRatio() const
  {
-+    if (zxdg_output_v1::isInitialized() && !mXdgGeometry.isEmpty()) {
++    if (mWaylandDisplay->usesFractionalScale() && zxdg_output_v1::isInitialized() && !mXdgGeometry.isEmpty()) {
 +        QSize native = mGeometry.size();
 +        // wl_output modes are untransformed; xdg-output is transformed.
 +        const QSize logical = mXdgGeometry.size();
@@ -25,6 +60,15 @@
  
 --- a/src/client/qwaylandwindow.cpp
 +++ b/src/client/qwaylandwindow.cpp
+@@ -106,7 +106,7 @@
+         initializeWlSurface();
+     }
+ 
+-    if (mDisplay->fractionalScaleManager() && qApp->highDpiScaleFactorRoundingPolicy() == Qt::HighDpiScaleFactorRoundingPolicy::PassThrough) {
++    if (mDisplay->usesFractionalScale()) {
+         mFractionalScale.reset(new QWaylandFractionalScale(mDisplay->fractionalScaleManager()->get_fractional_scale(mSurface->object())));
+ 
+         connect(mFractionalScale.data(), &QWaylandFractionalScale::preferredScaleChanged,
 @@ -1465,7 +1465,7 @@
  void QWaylandWindow::updateScale()
  {
@@ -34,15 +78,16 @@
          preferredScale = std::max<qreal>(1.0, preferredScale);
          Q_ASSERT(mViewport);
          setScale(preferredScale);
-@@ -1556,7 +1556,11 @@
+@@ -1556,7 +1556,12 @@
  
  qreal QWaylandWindow::devicePixelRatio() const
  {
 -    return mScale.value_or(waylandScreen() ? waylandScreen()->scale() : 1);
 +    const auto *output = waylandScreen();
 +    // Match the screen's pre-surface estimate until preferred_scale arrives.
-+    // Without fractional-scale support, retain the integer buffer scale.
-+    const qreal fallback = output ? (mFractionalScale ? output->devicePixelRatio() : output->scale()) : 1;
++    // mFractionalScale only exists once the surface does, and widgets receive
++    // their first resize before that, so key this on the compositor's support.
++    const qreal fallback = output ? (mDisplay->usesFractionalScale() ? output->devicePixelRatio() : output->scale()) : 1;
 +    return mScale.value_or(fallback);
  }
  

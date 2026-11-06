@@ -18,6 +18,10 @@ QtWayland source in `patches/qtwayland/6.8.2`. Its overlay is used only when
 the installed QtCore and original QtWayland library match the tested hashes.
 An upgraded or independently bundled Qt is left intact. The former managed
 LibreOffice preload launcher is retired without removing custom launchers.
+The same overlay reports the final fractional scale from a window's first resize
+and merges pointer and touch motion within one Wayland dispatch. Applications
+that size buffers from that resize, such as LibreOffice's dialogs, keep their
+full layout, and applications that repaint per input event keep up with touch.
 Portal-derived Electron launchers no longer force `--ozone-platform=wayland`
 or `--no-stdio-init`. Existing entries lose those options only when their
 contents still match the vendor entry plus Portal's known additions. Modified
@@ -216,7 +220,8 @@ applications which reject debugging require separate native launch checks.
 bundle's own Qt 5/6 headers and libraries, without replacing system Qt. Run
 that binary through `guest_exec.py` in the live desktop context, with library
 and plugin paths scoped to that process. It reports the actual Qt version,
-backend, animation count and resize result; Qt 4 needs a separate fixture.
+backend, animation count, resize result and the scale seen by the first resize,
+which should match `window_dpr`; Qt 4 needs a separate fixture.
 
 Portable tests use isolated caches and Proton prefixes. LibreOffice uses
 disposable profiles and documents; VLC uses a disposable configuration.

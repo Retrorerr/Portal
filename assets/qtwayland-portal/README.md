@@ -2,9 +2,11 @@
 
 Debian ARM64 Qt Wayland 6.8.2 client library with the source patches and build
 recipe in `patches/qtwayland/6.8.2/`. It fixes initial fractional screen/window
-scaling and batches complete continuous pointer events within a single Wayland
-dispatch. Qt's public compression opt-out, discrete events, wheel distance,
-scroll phases and native tablet samples are preserved.
+scaling, so a window never reports one scale before its surface exists and
+another after, and batches complete continuous pointer and touch events within
+a single Wayland dispatch. Compression is on by default as it is on xcb. Qt's
+public compression opt-out, discrete events, touch press and release, wheel
+distance, scroll phases and native tablet samples are preserved.
 
 Source archive:
 https://download.qt.io/archive/qt/6.8/6.8.2/submodules/qtwayland-everywhere-src-6.8.2.tar.xz
@@ -28,5 +30,6 @@ bash patches/qtwayland/6.8.2/build.sh /tmp/qtwayland-build /tmp/qtwayland-output
 ```
 
 `tests/compat/qt_pointer_batch.cpp` exercises the actual QPA boundary, including
-mixed press/drag/release, wheel-direction changes, phase boundaries and the
-compression opt-out used by drawing applications.
+mixed press/drag/release, multi-touch frames, wheel-direction changes, phase
+boundaries and the compression opt-out used by drawing applications.
+`tests/compat/qt_widgets_probe.cpp` reports the scale seen by the first resize.

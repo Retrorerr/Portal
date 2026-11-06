@@ -21,6 +21,13 @@ class Canvas : public QWidget {
 public:
     unsigned frames = 0;
     long long first_frame = 0;
+    qreal first_resize_dpr = 0;
+    void resizeEvent(QResizeEvent *event) override
+    {
+        // Toolkits that size their own buffers from this event keep this ratio.
+        if (first_resize_dpr == 0) first_resize_dpr = devicePixelRatioF();
+        QWidget::resizeEvent(event);
+    }
     void paintEvent(QPaintEvent *) override
     {
         if (!first_frame) first_frame = now_ns();
@@ -52,10 +59,10 @@ int main(int argc, char **argv)
         const bool resized = window.width() == 800 && window.height() == 540
             && handle->width() == 800 && handle->height() == 540;
         std::printf("{\"toolkit\":\"bundled Qt Widgets\",\"version\":\"%s\","
-                    "\"backend\":\"%s\",\"frames\":%u,\"window_dpr\":%.6f,"
+                    "\"backend\":\"%s\",\"frames\":%u,\"window_dpr\":%.6f,\"first_resize_dpr\":%.6f,"
                     "\"resize_consistent\":%s,\"flow_start_ns\":%lld,\"flow_end_ns\":%lld}\n",
                     qVersion(), qPrintable(QApplication::platformName()), canvas.frames,
-                    handle->devicePixelRatio(), resized ? "true" : "false",
+                    handle->devicePixelRatio(), canvas.first_resize_dpr, resized ? "true" : "false",
                     canvas.first_frame, now_ns());
         app.exit(resized && canvas.frames ? 0 : 1);
     });

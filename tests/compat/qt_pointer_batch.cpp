@@ -7,6 +7,7 @@
 #include <QtGui/QWindow>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QWheelEvent>
+#include <QtGui/QTouchEvent>
 #include <QtGui/private/qwindow_p.h>
 #include <QtWaylandClient/private/qwaylandwindow_p.h>
 #include <QtWaylandClient/private/qwaylandinputdevice_p.h>
@@ -21,14 +22,29 @@ void flushPointerEventBatch();
 }
 using namespace QtWaylandClient;
 
+struct SeatAccess : QWaylandInputDevice {
+    static Touch *touch(QWaylandInputDevice *seat) { return (seat->*(&SeatAccess::mTouch)).data(); }
+};
+
 class Probe : public QWindow {
 public:
     QStringList events;
+    QList<QEventPoint> points;
     QPoint wheel;
     QList<int> wheelPhases;
     QPointF position;
     bool event(QEvent *e) override {
         switch (e->type()) {
+        case QEvent::TouchBegin:
+        case QEvent::TouchUpdate:
+        case QEvent::TouchEnd: {
+            auto *touch = static_cast<QTouchEvent *>(e);
+            events << (e->type() == QEvent::TouchBegin ? "touch-begin"
+                : e->type() == QEvent::TouchUpdate ? "touch-update" : "touch-end");
+            points = touch->points();
+            e->accept();
+            return true;
+        }
         case QEvent::MouseMove:
             events << "move";
             position = static_cast<QMouseEvent *>(e)->position();
@@ -78,7 +94,7 @@ int main(int argc, char **argv) {
                 qPrintable(window.events.join(','))); std::exit(1); }
         };
         drain(); window.events.clear();
-        QCoreApplication::setAttribute(Qt::AA_CompressHighFrequencyEvents, true);
+        require(QCoreApplication::testAttribute(Qt::AA_CompressHighFrequencyEvents), "compression on by default, as on xcb");
         beginPointerEventBatch();
         for (int i = 1; i <= 100; ++i) move(i);
         button(true);
@@ -101,6 +117,34 @@ int main(int argc, char **argv) {
         // Qt's QPA emits vertical + horizontal compatibility events for
         // zero-delta begin/end frames. Preserve those existing semantics.
         require(window.wheelPhases == QList<int>({1, 1, 2, 3, 3}), "scroll begin/update/end boundaries");
+        auto *touch = SeatAccess::touch(seat);
+        require(touch, "seat has touch");
+        const auto fixed = [](int value) { return wl_fixed_from_int(value); };
+        auto touchDown = [&](int id, int x) {
+            touch->touch_down(1, 1, native->wlSurface(), id, fixed(x), fixed(20));
+            touch->touch_frame();
+        };
+        auto touchMove = [&](int id, int x) { touch->touch_motion(2, id, fixed(x), fixed(20)); touch->touch_frame(); };
+        auto touchUp = [&](int id) { touch->touch_up(3, 3, id); touch->touch_frame(); };
+        window.events.clear();
+        beginPointerEventBatch();
+        touchDown(0, 10);
+        for (int i = 11; i <= 110; ++i) touchMove(0, i);
+        touchUp(0);
+        endPointerEventBatch(); drain();
+        require(window.events == QStringList({"touch-begin", "touch-update", "touch-end"}), "touch edge ordering / bounded update delivery");
+        require(window.points.first().position() == QPointF(110, 20), "final touch position");
+        // A point that moved earlier in the burst must still report moving.
+        window.events.clear();
+        touchDown(0, 10); touchDown(1, 50); drain(); window.events.clear();
+        beginPointerEventBatch();
+        touchMove(0, 20);
+        touchMove(1, 60);
+        endPointerEventBatch(); drain();
+        require(window.events == QStringList({"touch-update"}), "multi-touch frames merge");
+        require(window.points.size() == 2 && window.points.at(0).state() == QEventPoint::Updated
+                && window.points.at(1).state() == QEventPoint::Updated, "both moved points stay updated");
+        touchUp(0); touchUp(1); drain();
         // Drawing apps can opt out using Qt's standard public attribute.
         window.events.clear();
         QCoreApplication::setAttribute(Qt::AA_CompressHighFrequencyEvents, false);
@@ -108,7 +152,14 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 10; ++i) move(i);
         endPointerEventBatch(); drain();
         require(window.events.size() == 10, "compression opt-out preserves samples");
-        std::puts("{\"pointer_ordering\":true,\"wheel_distance\":true,\"scroll_phases\":true,\"compression_opt_out\":true}");
+        window.events.clear();
+        touchDown(0, 10); drain(); window.events.clear();
+        beginPointerEventBatch();
+        for (int i = 11; i <= 20; ++i) touchMove(0, i);
+        endPointerEventBatch(); drain();
+        require(window.events.size() == 10, "compression opt-out preserves touch samples");
+        touchUp(0); drain();
+        std::puts("{\"pointer_ordering\":true,\"wheel_distance\":true,\"scroll_phases\":true,\"touch_ordering\":true,\"multi_touch\":true,\"compression_opt_out\":true}");
         app.quit();
     });
     return app.exec();

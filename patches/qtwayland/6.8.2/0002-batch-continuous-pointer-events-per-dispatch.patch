@@ -9,11 +9,10 @@
  #include <QtCore/QFileInfo>
  #include <QtCore/QPointer>
  #include <QtCore/QRegularExpression>
-@@ -40,6 +42,48 @@
- using namespace Qt::StringLiterals;
+@@ -41,6 +43,56 @@
  
  namespace QtWaylandClient {
-+
+ 
 +namespace {
 +int pointerBatchDepth = 0;
 +bool deliveringPointerBatch = false;
@@ -39,6 +38,14 @@
 +
 +void flushPointerEventBatch()
 +{
++    flushHeldPointerEvent();
++    flushTouchEventBatch();
++}
++
++bool pointerEventBatchActive() { return pointerBatchDepth > 0; }
++
++void flushHeldPointerEvent()
++{
 +    HeldPointerEvent event = std::move(heldPointer);
 +    heldPointer = {};
 +    if (!event.window || !event.input || !event.event)
@@ -55,21 +62,23 @@
 +    if (--pointerBatchDepth == 0)
 +        flushPointerEventBatch();
 +}
- 
++
  Q_LOGGING_CATEGORY(lcWaylandBackingstore, "qt.qpa.wayland.backingstore")
  
-@@ -1189,6 +1233,31 @@
+ QWaylandWindow *QWaylandWindow::mMouseGrab = nullptr;
+@@ -1189,6 +1241,32 @@
  
  void QWaylandWindow::handleMouse(QWaylandInputDevice *inputDevice, const QWaylandPointerEvent &e)
  {
 +    if (!deliveringPointerBatch) {
++        flushTouchEventBatch();
 +        const bool continuous = e.type == QEvent::MouseMove
 +            || (e.type == QEvent::Wheel && (e.phase == Qt::ScrollUpdate || e.phase == Qt::NoScrollPhase));
 +        if (pointerBatchDepth && continuous
 +                && QCoreApplication::testAttribute(Qt::AA_CompressHighFrequencyEvents)) {
 +            if (heldPointer.event && (heldPointer.window != this || heldPointer.input != inputDevice
 +                    || !canMergePointer(*heldPointer.event, e)))
-+                flushPointerEventBatch();
++                flushHeldPointerEvent();
 +            if (heldPointer.event && e.type == QEvent::Wheel) {
 +                const QPoint pixels = heldPointer.event->pixelDelta + e.pixelDelta;
 +                const QPoint angles = heldPointer.event->angleDelta + e.angleDelta;
@@ -84,7 +93,7 @@
 +            return;
 +        }
 +        // Press/release, enter/leave and scroll begin/end are barriers.
-+        flushPointerEventBatch();
++        flushHeldPointerEvent();
 +    }
 +
      // There's currently no way to get info about the actual hardware device in use.
@@ -92,7 +101,7 @@
      const QPointingDevice *device = QPointingDevice::primaryPointingDevice(inputDevice->seatname());
 --- a/src/client/qwaylandwindow_p.h
 +++ b/src/client/qwaylandwindow_p.h
-@@ -42,6 +42,11 @@
+@@ -42,6 +42,14 @@
  QT_BEGIN_NAMESPACE
  
  namespace QtWaylandClient {
@@ -101,12 +110,26 @@
 +Q_WAYLANDCLIENT_EXPORT void beginPointerEventBatch();
 +Q_WAYLANDCLIENT_EXPORT void endPointerEventBatch();
 +Q_WAYLANDCLIENT_EXPORT void flushPointerEventBatch();
++Q_WAYLANDCLIENT_EXPORT void flushHeldPointerEvent();
++Q_WAYLANDCLIENT_EXPORT bool pointerEventBatchActive();
++Q_WAYLANDCLIENT_EXPORT void flushTouchEventBatch();
  
  Q_DECLARE_LOGGING_CATEGORY(lcWaylandBackingstore)
  
 --- a/src/client/qwaylandinputdevice.cpp
 +++ b/src/client/qwaylandinputdevice.cpp
-@@ -1193,6 +1193,7 @@
+@@ -50,6 +50,10 @@
+ #include <QtGui/QGuiApplication>
+ #include <QtGui/QPointingDevice>
+ 
++#include <QtCore/QCoreApplication>
++#include <QtCore/QPointer>
++#include <utility>
++
+ QT_BEGIN_NAMESPACE
+ 
+ namespace QtWaylandClient {
+@@ -1193,6 +1197,7 @@
  
  void QWaylandInputDevice::Keyboard::keyboard_enter(uint32_t time, struct wl_surface *surface, struct wl_array *keys)
  {
@@ -114,7 +137,7 @@
      Q_UNUSED(time);
      Q_UNUSED(keys);
  
-@@ -1219,6 +1220,7 @@
+@@ -1219,6 +1224,7 @@
  
  void QWaylandInputDevice::Keyboard::keyboard_leave(uint32_t time, struct wl_surface *surface)
  {
@@ -122,7 +145,7 @@
      Q_UNUSED(time);
  
      if (!surface) {
-@@ -1245,6 +1247,7 @@
+@@ -1245,6 +1251,7 @@
                                                quint32 nativeVirtualKey, quint32 nativeModifiers,
                                                const QString &text, bool autorepeat, ushort count)
  {
@@ -130,7 +153,7 @@
      QPlatformInputContext *inputContext = QGuiApplicationPrivate::platformIntegration()->inputContext();
      bool filtered = false;
  
-@@ -1349,6 +1352,7 @@
+@@ -1349,6 +1356,7 @@
                                               uint32_t mods_locked,
                                               uint32_t group)
  {
@@ -138,7 +161,7 @@
      Q_UNUSED(serial);
  #if QT_CONFIG(xkbcommon)
      if (mXkbState)
-@@ -1377,6 +1381,7 @@
+@@ -1377,6 +1385,7 @@
                                       wl_fixed_t x,
                                       wl_fixed_t y)
  {
@@ -146,7 +169,7 @@
      if (!surface)
          return;
  
-@@ -1394,6 +1399,7 @@
+@@ -1394,6 +1403,7 @@
  
  void QWaylandInputDevice::Touch::touch_up(uint32_t serial, uint32_t time, int32_t id)
  {
@@ -154,15 +177,16 @@
      Q_UNUSED(serial);
      mParent->mTime = time;
      mParent->handleTouchPoint(id, QEventPoint::Released);
-@@ -1414,6 +1420,7 @@
+@@ -1414,6 +1424,8 @@
  
  void QWaylandInputDevice::Touch::touch_motion(uint32_t time, int32_t id, wl_fixed_t x, wl_fixed_t y)
  {
-+    flushPointerEventBatch();
++    // Only pointer events are ordered against this; a held touch frame merges.
++    flushHeldPointerEvent();
      QPointF position(wl_fixed_to_double(x), wl_fixed_to_double(y));
      mParent->mTime = time;
      mParent->handleTouchPoint(id, QEventPoint::Updated, position);
-@@ -1421,6 +1428,7 @@
+@@ -1421,6 +1433,7 @@
  
  void QWaylandInputDevice::Touch::touch_cancel()
  {
@@ -170,9 +194,95 @@
      mPendingTouchPoints.clear();
  
      QWaylandTouchExtension *touchExt = mParent->mQDisplay->touchExtension();
+@@ -1498,6 +1511,65 @@
+     touch_frame();
+ }
+ 
++namespace {
++// Touch frames of one dispatch burst merge like pointer motion. The application
++// sees every press and release, and the latest position of every moved point.
++struct HeldTouchFrame {
++    QPointer<QWindow> window;
++    ulong time = 0;
++    const QPointingDevice *device = nullptr;
++    QList<QWindowSystemInterface::TouchPoint> points;
++    Qt::KeyboardModifiers modifiers;
++} heldTouch;
++
++bool holdTouchFrame(QWindow *window, ulong time, const QPointingDevice *device,
++                    const QList<QWindowSystemInterface::TouchPoint> &points,
++                    Qt::KeyboardModifiers modifiers)
++{
++    if (!window || !pointerEventBatchActive()
++            || !QCoreApplication::testAttribute(Qt::AA_CompressHighFrequencyEvents))
++        return false;
++    bool moved = false;
++    for (const auto &point : points) {
++        if (point.state != QEventPoint::Updated && point.state != QEventPoint::Stationary)
++            return false;
++        moved |= point.state == QEventPoint::Updated;
++    }
++    if (!moved)
++        return false;
++    bool sameIds = heldTouch.window == window && heldTouch.device == device
++        && heldTouch.modifiers == modifiers && heldTouch.points.size() == points.size();
++    for (qsizetype i = 0; sameIds && i < points.size(); ++i)
++        sameIds = heldTouch.points.at(i).id == points.at(i).id;
++    QList<QWindowSystemInterface::TouchPoint> merged = points;
++    if (sameIds) {
++        // A point that moved earlier in the burst still moved.
++        for (qsizetype i = 0; i < merged.size(); ++i) {
++            if (heldTouch.points.at(i).state == QEventPoint::Updated)
++                merged[i].state = QEventPoint::Updated;
++        }
++    } else {
++        flushTouchEventBatch();
++    }
++    heldTouch.window = window;
++    heldTouch.time = time;
++    heldTouch.device = device;
++    heldTouch.points = std::move(merged);
++    heldTouch.modifiers = modifiers;
++    return true;
++}
++}
++
++void flushTouchEventBatch()
++{
++    if (heldTouch.points.isEmpty())
++        return;
++    HeldTouchFrame frame = std::move(heldTouch);
++    heldTouch = {};
++    if (frame.window)
++        QWindowSystemInterface::handleTouchEvent(frame.window, frame.time, frame.device, frame.points, frame.modifiers);
++}
++
+ void QWaylandInputDevice::Touch::touch_frame()
+ {
+     // TODO: early return if no events?
+@@ -1520,7 +1592,10 @@
+             return;
+     }
+ 
+-    QWindowSystemInterface::handleTouchEvent(window, mParent->mTime, mParent->mTouchDevice, mPendingTouchPoints, mParent->modifiers());
++    if (!holdTouchFrame(window, mParent->mTime, mParent->mTouchDevice, mPendingTouchPoints, mParent->modifiers())) {
++        flushTouchEventBatch();
++        QWindowSystemInterface::handleTouchEvent(window, mParent->mTime, mParent->mTouchDevice, mPendingTouchPoints, mParent->modifiers());
++    }
+ 
+     // Prepare state for next frame
+     const auto prevTouchPoints = mPendingTouchPoints;
 --- a/src/client/qwaylanddisplay.cpp
 +++ b/src/client/qwaylanddisplay.cpp
-@@ -502,7 +502,9 @@
+@@ -56,6 +56,7 @@
+ #include <QtCore/private/qcore_unix_p.h>
+ 
+ #include <QtCore/QAbstractEventDispatcher>
++#include <QtCore/QScopeGuard>
+ #include <QtGui/qpa/qwindowsysteminterface.h>
+ #include <QtGui/QGuiApplication>
+ #include <QtGui/private/qguiapplication_p.h>
+@@ -509,7 +510,9 @@
  
  void QWaylandDisplay::flushRequests()
  {
@@ -182,6 +292,16 @@
  }
  
  // We have to wait until we have an eventDispatcher before creating the eventThread,
+@@ -549,6 +552,9 @@
+ 
+ void QWaylandDisplay::blockingReadEvents()
+ {
++    // A paint waiting here for a free buffer drains all input that piled up.
++    const auto endBatch = qScopeGuard([] { endPointerEventBatch(); });
++    beginPointerEventBatch();
+     if (wl_display_dispatch(mDisplay) < 0) {
+         int ecode = wl_display_get_error(mDisplay);
+         if ((ecode == EPIPE || ecode == ECONNRESET))
 --- a/src/client/qwaylandtabletv2.cpp
 +++ b/src/client/qwaylandtabletv2.cpp
 @@ -194,6 +194,7 @@
@@ -362,4 +482,16 @@
 +    flushPointerEventBatch();
      delete this;
  }
+ 
+--- a/src/client/qwaylandintegration.cpp
++++ b/src/client/qwaylandintegration.cpp
+@@ -83,6 +83,9 @@
+     : mFontDb(new QGenericUnixFontDatabase())
+ #endif
+ {
++    // As on xcb. Applications that need every sample turn it off again.
++    QCoreApplication::setAttribute(Qt::AA_CompressHighFrequencyEvents);
++
+     mDisplay.reset(new QWaylandDisplay(this));
+     mPlatformServices.reset(new QWaylandPlatformServices(mDisplay.data()));
  
