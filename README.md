@@ -184,6 +184,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the rest, and [SECURITY.md](SECURITY.
 
 ## Credits
 
-Portal is a fork of [Local Desktop](https://github.com/localdesktop/localdesktop.github.io), and its history and GPL-3.0 license are kept intact. The GPU path builds on [lfdevs' Anland](https://github.com/lfdevs/anland-termux) KWin work and Mesa's freedreno and Turnip drivers.
+Portal is a fork of [Local Desktop](https://github.com/localdesktop/localdesktop.github.io), and its history and GPL-3.0 license are kept intact. The GPU path builds on [lfdevs' Anland](https://github.com/lfdevs/anland-termux) KWin work and Mesa's freedreno and Turnip drivers. Hardware video builds on lfdevs' [termux-va](https://github.com/lfdevs/termux-va) and [Mesa for Android containers](https://github.com/lfdevs/mesa-for-android-container), and termux-va's daemon derives from [droidspaces-media-decode](https://github.com/Re-s/droidspaces-media-decode).
 
 App names and logos shown in Portal (Firefox, LibreOffice, ChatGPT, Claude and others) belong to their owners. Portal only uses them to show which apps it installs and isn't affiliated with any of them. Icon sources and licenses are in [third_party/app-icons](third_party/app-icons/README.md).
