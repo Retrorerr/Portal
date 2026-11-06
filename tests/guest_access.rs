@@ -785,3 +785,23 @@ fn every_gecko_profile_gets_portals_prefs_and_keeps_the_users_own() {
     assert!(ff_js.starts_with("user_pref(\"a.b\", 1);\n"));
     assert_eq!(ff_js.matches("BEGIN Portal preferences").count(), 1);
 }
+
+#[test]
+fn sync_reads_a_gshadow_only_root_could_read_and_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("portal-gshadow-{}", std::process::id()));
+    let etc = root.join("etc");
+    std::fs::create_dir_all(&etc).unwrap();
+    let gshadow = etc.join("gshadow");
+    std::fs::write(&gshadow, "sudo:*::\n").unwrap();
+    std::fs::set_permissions(&gshadow, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let report = localdesktop::core::guest_sudo::sync_sudo_access(&root);
+    assert!(!report.failed.iter().any(|(step, _)| *step == "gshadow"));
+    let mode = std::fs::metadata(&gshadow).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o000);
+
+    std::fs::set_permissions(&gshadow, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}

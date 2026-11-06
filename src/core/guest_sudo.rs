@@ -28,6 +28,7 @@
 
 use std::fs;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 pub const DESKTOP_USER: &str = "desktop";
@@ -89,7 +90,7 @@ pub fn sync_sudo_access(fs_root: &Path) -> SudoAccessReport {
 /// the file's own permissions. A missing file is not an error: the account
 /// databases only exist once the image has been configured.
 fn edit_file(path: &Path, edit: impl FnOnce(&str) -> Option<String>) -> io::Result<bool> {
-    let text = match fs::read_to_string(path) {
+    let text = match read_guest_private(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
@@ -107,6 +108,23 @@ fn edit_file(path: &Path, edit: impl FnOnce(&str) -> Option<String>) -> io::Resu
         let _ = fs::remove_file(&temporary);
     })?;
     Ok(true)
+}
+
+/// Read a file the app owns but Debian installs without owner read, such as
+/// `/etc/gshadow` (mode 000, which only root could read), restoring its mode.
+fn read_guest_private(path: &Path) -> io::Result<String> {
+    match fs::read_to_string(path) {
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            let original = fs::metadata(path)?.permissions();
+            let mut readable = original.clone();
+            readable.set_mode(original.mode() | 0o400);
+            fs::set_permissions(path, readable)?;
+            let text = fs::read_to_string(path);
+            fs::set_permissions(path, original)?;
+            text
+        }
+        result => result,
+    }
 }
 
 /// Create `path` empty with `mode` when it does not exist, so `edit_file`
