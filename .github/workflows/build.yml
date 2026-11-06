@@ -1,4 +1,4 @@
-name: Build APK & AAB
+name: Build APK
 
 on:
   workflow_dispatch:
@@ -197,19 +197,6 @@ jobs:
           if-no-files-found: error
           archive: false
 
-      - name: Build AAB
-        if: github.event_name != 'pull_request'
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: x build --release --platform=android --arch=arm64 --format=aab
-
-      - name: Rename AAB
-        if: github.event_name != 'pull_request'
-        run: |
-          mv target/x/release/android/gradle/app/build/outputs/bundle/release/app-release.aab target/x/Portal-${{ steps.extract_version.outputs.version }}.aab
-
       # Portal Debug is a separate app (app.polarbear, "Portal Debug", blue-dot
       # icon, portal-debug feature), built from manifest.debug.yaml like
       # scripts/build_android_variants.ps1 does. Gradle signs debug builds with
@@ -273,4 +260,3 @@ jobs:
             target/x/Portal-${{ steps.extract_version.outputs.version }}.apk
             target/x/Portal.apk
             target/x/Portal-${{ steps.extract_version.outputs.version }}-debug.apk
-            target/x/Portal-${{ steps.extract_version.outputs.version }}.aab
