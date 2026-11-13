@@ -45,8 +45,11 @@ you can also hold modifiers while pressing another key. Holding a key uses
 the desktop's normal key repeat. Drag the small strip at the keyboard's bottom
 to move it; it coasts and settles within the screen. The surrounding desktop
 remains interactive. The keyboard adapts to rotation and smaller windows;
-extra rows scroll vertically when space is limited. **×** or Android **Back**
-returns to Portal controls and releases held keys. Key positions follow the
+extra rows scroll vertically when space is limited. **▾**, or a quick downward
+flick of the bottom strip, minimises the keyboard to a small button that stays
+out of the way; tap it to bring the keyboard back, or drag it elsewhere. **×**
+closes the keyboard and the controls together, and Android **Back** returns to
+Portal controls. All three release held keys. Key positions follow the
 desktop's XKB layout (the printed letter and symbol legends use US QWERTY).
 
 Drag the tab to move it. It coasts briefly, settles against the nearest edge,
@@ -57,6 +60,19 @@ treatment as the veil.
 **Open Portal controls**. **Escape**, **Back**, or a tap outside
 closes the utility menu. With the desktop keyboard open, Escape reaches Linux
 and Back returns to Portal controls.
+
+Open **Portal settings** from the pill to change **Hide cursor** or **Use Android
+screen timeout**. Both are on by default. Android handles the idle timeout, and
+an app that requests to keep the display awake can hold it on. Turn the timeout
+off in Portal settings to keep the display on whenever Portal is visible.
+
+**Use Portal keyboard** (off by default) shows the desktop keyboard wherever
+Android's keyboard would otherwise appear. It opens when you tap a text field,
+leaves when the field loses focus, and stays away while a hardware keyboard is
+connected. If you minimise it, it returns as the small button for later fields
+until you tap that or close it. Android's keyboard is not shown while this is
+on.
+
 Swipe up or activate the bottom veil affordance to return to the desktop.
 Tap outside an expanded Apps or Files card to collapse it. The veil's idle
 motion pauses while either card is open.

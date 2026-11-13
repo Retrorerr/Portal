@@ -1,12 +1,15 @@
 package app.polarbear
 
 import android.annotation.SuppressLint
-import android.content.Context
+import android.os.Build
+import android.view.InputDevice
 import android.view.MotionEvent
+import android.view.PointerIcon
 import android.view.VelocityTracker
 import android.view.View
 import android.view.ViewConfiguration
 import android.widget.FrameLayout
+import androidx.annotation.RequiresApi
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.spring
@@ -18,18 +21,22 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.*
 
-internal enum class UtilityPage { Dock, Menu, Keyboard, Gaming }
+internal enum class UtilityPage {
+    Dock, Menu, Keyboard, Gaming, Settings;
+
+    val isSettings get() = this == Gaming || this == Settings
+}
 
 /** The host is transparent outside its actual controls; guest touches pass through. */
 @SuppressLint("ViewConstructor")
 internal class PortalCapsuleView(
-    context: Context,
+    private val host: PortalActivity,
     private val onPositionChanged: (Float, Float) -> Unit,
     private val onSizeChanged: () -> Unit,
     private val onOpen: (String?) -> Unit,
     private val onEditController: () -> Unit,
     private val onToggleController: () -> Unit,
-) : FrameLayout(context) {
+) : FrameLayout(host) {
     private val density get() = resources.displayMetrics.density
     private val slop get() = ViewConfiguration.get(context).scaledTouchSlop
     private var scope = CoroutineScope(AndroidUiDispatcher.Main + SupervisorJob())
@@ -56,13 +63,19 @@ internal class PortalCapsuleView(
     private var highRefresh: Boolean? = null
     private var hubBounds = android.graphics.RectF()
     private var keyboardBounds = android.graphics.RectF()
+    private var keyboardMinimized by mutableStateOf(false)
+    // Opened in place of Android's keyboard, so it also leaves with the text focus.
+    private var keyboardForText = false
+    // The user minimised that keyboard: it returns as the chip until they tap it or close it.
+    private var textKeyboardTucked = false
     private val composition = ComposeView(context).apply {
         setContent { app.polarbear.setup.PortalTheme {
             app.polarbear.setup.components.PortalUiDensity {
-            UtilityRoundtable(ready, page, presentationId, { if (dragging) dragPoint else anchor.value }, area,
-                dockRight, dragging, directPosition = freeMotion,
+            UtilityRoundtable(host, ready, page, presentationId, { if (dragging) dragPoint else anchor.value }, area,
+                dockRight, { dragging }, directPosition = { freeMotion },
                 onHub = { if (page == UtilityPage.Dock) reveal() else dismiss() },
                 onAction = { action -> when (action) {
+                    "settings" -> changePage(UtilityPage.Settings)
                     "keyboard" -> changePage(UtilityPage.Keyboard)
                     "controller" -> onToggleController()
                     "game" -> changePage(UtilityPage.Gaming)
@@ -74,6 +87,12 @@ internal class PortalCapsuleView(
                 onHubBounds = { hubBounds = it }, onActionBounds = { id, rect -> actionBounds[id] = rect },
                 onKeyboardBounds = { keyboardBounds = it },
                 onEditController = { handoff(onEditController) },
+                keyboardMinimized = keyboardMinimized,
+                onKeyboardMinimized = { minimized ->
+                    keyboardMinimized = minimized
+                    if (keyboardForText) textKeyboardTucked = minimized
+                },
+                onClose = { textKeyboardTucked = false; pendingAction = null; requestPage(UtilityPage.Dock) },
                 onSettled = ::onPresentationSettled)
         } } }
     }
@@ -123,12 +142,13 @@ internal class PortalCapsuleView(
         pendingAction = null
         freeMotion = false
         requestPage(next)
-        if (next == UtilityPage.Menu) composition.requestFocus() else composition.clearFocus()
+        if (next == UtilityPage.Menu || next == UtilityPage.Settings) composition.requestFocus() else composition.clearFocus()
     }
     private fun requestPage(next: UtilityPage) {
         if (next != page) {
             TouchControls.cancelInput()
             SessionControls.setDesktopKeyboard(next == UtilityPage.Keyboard)
+            if (next != UtilityPage.Keyboard) { keyboardMinimized = false; keyboardForText = false }
         }
         presentationId++
         settledPage = null
@@ -149,8 +169,25 @@ internal class PortalCapsuleView(
     fun dismiss(): Boolean {
         if (page == UtilityPage.Dock) return false
         pendingAction = null
-        requestPage(if (page == UtilityPage.Keyboard || page == UtilityPage.Gaming) UtilityPage.Menu else UtilityPage.Dock)
+        requestPage(if (page == UtilityPage.Keyboard && keyboardForText) UtilityPage.Dock
+            else if (page == UtilityPage.Keyboard || page.isSettings) UtilityPage.Menu else UtilityPage.Dock)
         return true
+    }
+    /** A guest text field wants a keyboard and Portal's stands in for Android's. */
+    fun showTextKeyboard() {
+        if (page != UtilityPage.Dock || !ready || dragging || freeMotion) return
+        if (!SessionControls.acquireUtility(inputOwner, keyboard = true)) return
+        pendingAction = null
+        keyboardForText = true
+        keyboardMinimized = textKeyboardTucked
+        requestPage(UtilityPage.Keyboard)
+        composition.clearFocus()
+    }
+    /** That field lost focus, or a hardware keyboard took over. */
+    fun closeTextKeyboard() {
+        if (page != UtilityPage.Keyboard || !keyboardForText) return
+        pendingAction = null
+        requestPage(UtilityPage.Dock)
     }
     fun openVeil() { handoff { onOpen(null) } }
     private fun handoff(action: () -> Unit) {
@@ -162,6 +199,20 @@ internal class PortalCapsuleView(
         composition.clearFocus()
         if (released || !SessionControls.isUtilityVisible()) updateFrameRate(false)
     }
+    private fun ownsPointerAt(x: Float, y: Float): Boolean =
+        if (page == UtilityPage.Keyboard) keyboardBounds.contains(x, y)
+        else SessionControls.isUtilityVisible() || hubBounds.contains(x, y)
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    override fun onResolvePointerIcon(event: MotionEvent, pointerIndex: Int): PointerIcon? {
+        if (!event.isFromSource(InputDevice.SOURCE_MOUSE)) return super.onResolvePointerIcon(event, pointerIndex)
+        // This Compose host fills the screen. Let the desktop surface resolve
+        // the icon wherever the controls let pointer input through.
+        if (!ownsPointerAt(event.getX(pointerIndex), event.getY(pointerIndex))) return null
+        return super.onResolvePointerIcon(event, pointerIndex)
+            ?: PointerIcon.getSystemIcon(context, PointerIcon.TYPE_ARROW)
+    }
+
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         if (page == UtilityPage.Keyboard && !keyboardBounds.contains(event.x,event.y)) return false
         if (!SessionControls.isUtilityVisible() && !hubBounds.contains(event.x,event.y)) return false
@@ -169,8 +220,7 @@ internal class PortalCapsuleView(
     }
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-            touchOwned = if (page == UtilityPage.Keyboard) keyboardBounds.contains(event.x,event.y)
-                else SessionControls.isUtilityVisible() || hubBounds.contains(event.x,event.y)
+            touchOwned = ownsPointerAt(event.x, event.y)
             if (!touchOwned) return false
         }
         if (!touchOwned) return false

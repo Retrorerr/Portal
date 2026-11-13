@@ -693,6 +693,17 @@ pub extern "system" fn Java_app_polarbear_SessionControls_nativeTextInputActive(
     is_wayland_text_input_active() as jni::sys::jboolean
 }
 
+/// JNI query for Portal's own keyboard when it stands in for Android's: a guest field is
+/// focused and no hardware keyboard can type into it. Portal's controls do not count against
+/// it, since that keyboard is one of them.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SessionControls_nativeKeyboardWanted(
+    _env: JNIEnv,
+    _controls: JObject,
+) -> jni::sys::jboolean {
+    (is_wayland_text_input_active() && !is_hardware_keyboard_present()) as jni::sys::jboolean
+}
+
 /// JNI callback from Android's InputDeviceListener. Device classification is
 /// performed with InputDevice source/type flags, never device names.
 #[no_mangle]

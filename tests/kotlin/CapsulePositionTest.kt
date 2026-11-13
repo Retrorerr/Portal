@@ -15,7 +15,7 @@ fun main() {
     val rotated = CapsulePosition.bounds(700f,1000f,180f,48f,0f,30f,0f,25f,8f)
     check(CapsulePosition.remembered(rotated,700f,1000f,180f,0.98f,0.98f) == 512f to 919f)
     val area = UtilityMenuGeometry.Area(20f,30f,980f,670f)
-    for (count in 4..6) for (font in listOf(1f,1.5f,2f)) {
+    for (count in 4..7) for (font in listOf(1f,1.5f,2f)) {
         val menu = UtilityMenuGeometry.menu(area,UtilityMenuGeometry.Point(970f,70f),count,1f,font)
         check(!menu.compact)
         menu.offsets.forEach { p ->
@@ -26,7 +26,7 @@ fun main() {
         }
         for (i in menu.offsets.indices) for (j in 0 until i) {
             val a=menu.offsets[i]; val b=menu.offsets[j]
-            check(hypot(a.x-b.x,a.y-b.y) >= 90f)
+            check(hypot(a.x-b.x,a.y-b.y) + 0.01f >= menu.tileWidth + 8f)
         }
     }
     for (narrow in listOf(UtilityMenuGeometry.Area(0f,20f,300f,200f),UtilityMenuGeometry.Area(0f,0f,180f,500f))) {

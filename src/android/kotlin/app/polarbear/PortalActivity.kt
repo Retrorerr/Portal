@@ -52,8 +52,12 @@ import android.view.Display
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.PointerIcon
 import android.view.WindowManager
 import android.widget.FrameLayout
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -127,6 +131,14 @@ open class PortalActivity : GameActivity() {
             ComposeOverlay.markSystemSplashRemoved()
         }
         super.onCreate(savedInstanceState)
+        val preferences = getPreferences(MODE_PRIVATE)
+        androidCursorHidden = preferences.getBoolean(PREF_HIDE_ANDROID_CURSOR, true)
+        useAndroidScreenTimeout = preferences.getBoolean(PREF_USE_ANDROID_SCREEN_TIMEOUT, true)
+        usePortalKeyboard = preferences.getBoolean(PREF_USE_PORTAL_KEYBOARD, false)
+        SessionControls.replaceAndroidKeyboard = usePortalKeyboard
+        screenInhibition.start()
+        applyScreenTimeout()
+        applyDesktopPointerIcon()
         ComposeOverlay.attachContext(this)
         SessionControls.attach(this)
         FileTransfers.attach(this)
@@ -320,7 +332,54 @@ open class PortalActivity : GameActivity() {
         }
     }
 
-    fun overlayInputChanged() { applyPointerCapture() }
+    internal var androidCursorHidden by mutableStateOf(true)
+        private set
+
+    internal fun setHideAndroidCursor(hidden: Boolean) {
+        androidCursorHidden = hidden
+        getPreferences(MODE_PRIVATE).edit().putBoolean(PREF_HIDE_ANDROID_CURSOR, hidden).apply()
+        applyDesktopPointerIcon()
+    }
+
+    private val screenInhibition = ScreenInhibition { runOnUiThread(::applyScreenTimeout) }
+
+    internal var useAndroidScreenTimeout by mutableStateOf(true)
+        private set
+
+    internal fun setAndroidScreenTimeoutEnabled(enabled: Boolean) {
+        useAndroidScreenTimeout = enabled
+        getPreferences(MODE_PRIVATE).edit().putBoolean(PREF_USE_ANDROID_SCREEN_TIMEOUT, enabled).apply()
+        applyScreenTimeout()
+    }
+
+    internal var usePortalKeyboard by mutableStateOf(false)
+        private set
+
+    internal fun setPortalKeyboardEnabled(enabled: Boolean) {
+        usePortalKeyboard = enabled
+        getPreferences(MODE_PRIVATE).edit().putBoolean(PREF_USE_PORTAL_KEYBOARD, enabled).apply()
+        SessionControls.replaceAndroidKeyboard = enabled
+    }
+
+    private fun applyScreenTimeout() {
+        val flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        if (useAndroidScreenTimeout && !screenInhibition.active) window.clearFlags(flag) else window.addFlags(flag)
+    }
+
+    private fun applyDesktopPointerIcon() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+        // Plasma draws the desktop cursor. TYPE_NULL only changes Android's icon.
+        mSurfaceView?.pointerIcon = if (androidCursorHidden && !ComposeOverlay.isShowing()) {
+            PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
+        } else {
+            null
+        }
+    }
+
+    fun overlayInputChanged() {
+        applyDesktopPointerIcon()
+        applyPointerCapture()
+    }
 
     override fun onPointerCaptureChanged(hasCapture: Boolean) {
         super.onPointerCaptureChanged(hasCapture)
@@ -454,16 +513,82 @@ open class PortalActivity : GameActivity() {
 
     private fun applyHighRefresh() {
         val enable = desktopHighRefresh || overlayHighRefresh || utilityHighRefresh
+        refreshHandler.removeCallbacks(idleRefreshCheck)
+        requestDisplayMode(if (enable) highRefreshModeId() else 0, "enable=$enable")
+        if (!enable) {
+            refreshHandler.postDelayed(idleRefreshCheck, IDLE_REFRESH_CHECK_MS)
+        }
+    }
+
+    private fun requestDisplayMode(modeId: Int, reason: String) {
         try {
-            val modeId = if (enable) highRefreshModeId() else 0
             val attributes = window.attributes
             if (attributes.preferredDisplayModeId != modeId) {
                 window.attributes = attributes.apply { preferredDisplayModeId = modeId }
-                Log.i(TAG, "display mode request: enable=$enable modeId=$modeId")
+                Log.i(TAG, "display mode request: $reason modeId=$modeId")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "display mode request failed (enable=$enable)", e)
+            Log.e(TAG, "display mode request failed ($reason)", e)
         }
+    }
+
+    private val refreshHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * Releasing the request normally lets the system drop an idle panel to
+     * its low rate. A per-app refresh override (OxygenOS's per-app setting,
+     * game lists) instead holds a minimum of the panel's peak for as long as
+     * Portal is in front, however idle the desktop is. When the panel is
+     * still fast some time after the release, ask for the idle mode
+     * explicitly; the next interaction replaces it with the peak mode.
+     */
+    private val idleRefreshCheck = Runnable {
+        if (desktopHighRefresh || overlayHighRefresh || utilityHighRefresh) return@Runnable
+        try {
+            val modeId = idleRefreshModeId()
+            if (modeId != 0) requestDisplayMode(modeId, "idle panel still fast")
+        } catch (e: Exception) {
+            Log.e(TAG, "idle display mode check failed", e)
+        }
+    }
+
+    /**
+     * The mode to hold on an idle desktop when the system keeps the panel
+     * fast by itself: same size as the active mode, seamless, and the slowest
+     * rate that still shows 60 fps content. 0 when the panel is already slow,
+     * varies its own rate (ARR), or has no such mode.
+     */
+    private fun idleRefreshModeId(): Int {
+        @Suppress("DEPRECATION")
+        val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display
+        } else {
+            windowManager.defaultDisplay
+        } ?: return 0
+        if (display.refreshRate <= IDLE_REFRESH_HZ + 0.5f) return 0
+        if (Build.VERSION.SDK_INT >= 36) {
+            val arr = try {
+                Display::class.java.getMethod("hasArrSupport").invoke(display) as? Boolean
+            } catch (e: Exception) {
+                null
+            }
+            if (arr == true) return 0
+        }
+        val active = display.mode
+        val seamless = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            active.alternativeRefreshRates
+        } else {
+            return 0
+        }
+        return display.supportedModes
+            .filter {
+                it.physicalWidth == active.physicalWidth &&
+                    it.physicalHeight == active.physicalHeight &&
+                    abs(it.refreshRate - IDLE_REFRESH_HZ) <= 0.5f &&
+                    seamless.any { rate -> abs(rate - it.refreshRate) < 0.5f }
+            }
+            .maxByOrNull { it.refreshRate }
+            ?.modeId ?: 0
     }
 
     /**
@@ -546,6 +671,11 @@ open class PortalActivity : GameActivity() {
 
     companion object {
         private const val TAG = "PortalActivity"
+        private const val PREF_HIDE_ANDROID_CURSOR = "hide_android_cursor"
+        private const val PREF_USE_ANDROID_SCREEN_TIMEOUT = "use_android_screen_timeout"
+        private const val PREF_USE_PORTAL_KEYBOARD = "use_portal_keyboard"
+        private const val IDLE_REFRESH_CHECK_MS = 1000L
+        private const val IDLE_REFRESH_HZ = 60f
         private val processHostsActivity = AtomicBoolean(false)
 
         @JvmStatic private external fun nativeCapturedMotion(dx: Float, dy: Float)

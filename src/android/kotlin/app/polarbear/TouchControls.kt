@@ -623,6 +623,9 @@ object TouchControls : ControlHost {
     fun overlayChanged() { activity?.let(::refresh) }
 
     fun closeUtilityMenu(): Boolean = handle?.dismiss() ?: false
+    /** False only when there is no Portal keyboard to show, so Android's may. */
+    fun showTextKeyboard(): Boolean = handle?.also { it.showTextKeyboard() } != null
+    fun textKeyboardUnwanted() { handle?.closeTextKeyboard() }
     fun openVeilFromUtility() { handle?.openVeil() }
     fun dispatchUtilityKey(event: KeyEvent): Boolean {
         if (!SessionControls.isUtilityVisible()) return false

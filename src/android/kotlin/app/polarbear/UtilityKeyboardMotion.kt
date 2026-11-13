@@ -30,6 +30,9 @@ internal class UtilityKeyboardMotion(private val scope: CoroutineScope) {
     private var size = IntSize.Zero
     private var area = UtilityMenuGeometry.Area(0f,0f,0f,0f)
     private var density = 1f
+    private var compact = false
+    /** A downward flick of the full keyboard's grip; null while there is nothing to minimise. */
+    var onFlickDown: (() -> Unit)? = null
     private fun bound(value: Offset): Offset {
         val x = minOf(size.width / 2f + 12 * density, area.width / 2)
         val y = minOf(size.height / 2f + 12 * density, area.height / 2)
@@ -43,11 +46,14 @@ internal class UtilityKeyboardMotion(private val scope: CoroutineScope) {
         area = next; density = scale
         if (initialized) relocate(current, bound(current))
     }
-    fun resize(next: IntSize) {
-        if (size == next) return
+    fun resize(next: IntSize, compactNow: Boolean = false) {
+        if (size == next && compact == compactNow) return
         val current = center()
-        size = next
-        val target = if (initialized) bound(current) else initialCenter()
+        // Minimising and restoring keep the bottom edge in place: the chip lands where the
+        // grip was, and the keyboard grows back up from it.
+        val shift = if (initialized && compact != compactNow) (size.height-next.height)/2f else 0f
+        size = next; compact = compactNow
+        val target = if (initialized) bound(current + Offset(0f,shift)) else initialCenter()
         relocate(if (initialized) current else target, target)
     }
     private fun relocate(current: Offset, target: Offset) {
@@ -64,7 +70,9 @@ internal class UtilityKeyboardMotion(private val scope: CoroutineScope) {
             position.snapTo(current); initialized = true; dragging = false
         }
     }
-    fun grip(enabled: Boolean): Modifier = Modifier.onGloballyPositioned { coordinates = it }.semantics {
+    fun grip(enabled: Boolean, chip: Boolean = false): Modifier = Modifier.onGloballyPositioned {
+        if (chip) chipCoordinates = it else coordinates = it
+    }.semantics {
         if (enabled) customActions = listOf(
             "Move left" to Offset(-64f,0f), "Move right" to Offset(64f,0f),
             "Move up" to Offset(0f,-64f), "Move down" to Offset(0f,64f),
@@ -74,7 +82,7 @@ internal class UtilityKeyboardMotion(private val scope: CoroutineScope) {
         val velocity = VelocityTracker()
         var origin = Offset.Zero
         var finger = Offset.Zero
-        fun root(local: Offset) = coordinates?.takeIf { it.isAttached }?.localToRoot(local) ?: local
+        fun root(local: Offset) = (if (chip) chipCoordinates else coordinates)?.takeIf { it.isAttached }?.localToRoot(local) ?: local
         detectDragGestures(
             onDragStart = { local ->
                 val current = center()
@@ -92,11 +100,13 @@ internal class UtilityKeyboardMotion(private val scope: CoroutineScope) {
             onDragCancel = { settle(Offset.Zero) },
             onDragEnd = {
                 val v = velocity.calculateVelocity()
-                settle(Offset(v.x,v.y))
+                val flick = onFlickDown?.takeIf { v.y > 1000*density && v.y > 2*kotlin.math.abs(v.x) }
+                if (flick != null) { settle(Offset.Zero); flick() } else settle(Offset(v.x,v.y))
             },
         )
     }
     private var coordinates: LayoutCoordinates? = null
+    private var chipCoordinates: LayoutCoordinates? = null
     private fun moveBy(delta: Offset) {
         val target = bound(center()+delta)
         settling?.cancel()

@@ -25,7 +25,8 @@ internal object UtilityMenuGeometry {
     fun menu(area: Area, anchor: Point, count: Int, density: Float, fontScale: Float): Menu {
         val tileWidth = (88f + 48f*(fontScale-1f).coerceAtLeast(0f))*density
         val tileHeight = tileWidth
-        val radius = maxOf(120f*density, tileWidth + 16f*density)
+        val spacingRadius = if (count > 1) (tileWidth + 8f*density) / (2 * sin(Math.PI / count)).toFloat() else 0f
+        val radius = maxOf(120f*density, tileWidth + 16f*density, spacingRadius)
         val halfW = radius + tileWidth/2 + 8*density
         val halfH = radius + tileHeight/2 + 8*density
         val compact = area.width < halfW*2 || area.height < halfH*2

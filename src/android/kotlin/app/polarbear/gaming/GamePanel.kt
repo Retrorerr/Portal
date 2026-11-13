@@ -12,8 +12,6 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
@@ -30,10 +28,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitHorizontalTouchSlopOrCancellation
 import androidx.compose.foundation.gestures.horizontalDrag
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -45,15 +41,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -90,8 +83,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.polarbear.TouchControls
 import app.polarbear.LocalUtilityContentActive
+import app.polarbear.QuietButton
+import app.polarbear.SettingsDivider
+import app.polarbear.SettingsGroup
+import app.polarbear.SettingsRowText
+import app.polarbear.SettingsToggle
+import app.polarbear.UtilitySettingsCard
+import app.polarbear.UtilitySettingsWidth
+import app.polarbear.TouchControls
 import app.polarbear.setup.PortalColors
 import app.polarbear.setup.PortalPalette
 import app.polarbear.setup.components.PortalEmphasized
@@ -101,7 +101,6 @@ import app.polarbear.setup.components.SlidingSegmentedControl
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
-private val PanelWidth = 440.dp
 private val EditBarWidth = 540.dp
 private val CardCorner = 24.dp
 
@@ -154,9 +153,9 @@ fun GamePanel(onClosed: () -> Unit) {
                 fadeOut(tween(180, easing = PortalEmphasizedAccelerate)) +
                 scaleOut(tween(220, easing = PortalEmphasizedAccelerate), targetScale = 0.97f),
         ) {
-            Box(Modifier.padding(top = 12.dp, start = 16.dp, end = 16.dp).widthIn(max = PanelWidth)
+            Box(Modifier.padding(top = 12.dp, start = 16.dp, end = 16.dp).widthIn(max = UtilitySettingsWidth)
                 .fillMaxWidth().heightIn(max = maxCardHeight).gameCard(palette, RoundedCornerShape(CardCorner))) {
-                GameSettingsContent(palette, PanelWidth, maxCardHeight,
+                GameSettingsContent(palette, UtilitySettingsWidth, maxCardHeight,
                     onBack = { TouchControls.closePanel() }, onEditController = { TouchControls.startEditing() })
             }
         }
@@ -166,7 +165,6 @@ fun GamePanel(onClosed: () -> Unit) {
 @Composable
 internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: Dp, onBack: () -> Unit, onEditController: () -> Unit) {
     val context = LocalContext.current
-    val active = LocalUtilityContentActive.current
     val appId by TouchControls.appId
     val gameName by TouchControls.gameName
     val gameRunning by TouchControls.gameRunning
@@ -187,48 +185,32 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
         GameSettings.save(context, appId, next)
     }
 
-    Column(
-        modifier = Modifier
-            .widthIn(max = PanelWidth)
-            .width(width)
-            .heightIn(max = maxHeight)
-            // Taps on the card's own blank space must not reach the scrim.
-            .pointerInput(Unit) { detectTapGestures { } }
-            .padding(top = 18.dp),
-    ) {
-        Row(Modifier.padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                AnimatedContent(gameName ?: if (gameRunning) "Game settings" else "Gaming",
-                    transitionSpec = { fadeIn(tween(220, delayMillis = 60)).togetherWith(fadeOut(tween(120))) }, label = "current game") { name -> Text(
-                    text = name,
-                    fontSize = 19.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                ) }
-                AnimatedContent(when {
-                        appId != null -> "Running · Steam app $appId"
-                        gameRunning -> "Running"
-                        else -> "No game running · settings apply to the next one"
-                    }, transitionSpec = { fadeIn(tween(220)).togetherWith(fadeOut(tween(120))) }, label = "game status") { status -> Text(
-                    text = status,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.textMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                ) }
-            }
-            Spacer(Modifier.width(12.dp))
-            QuietButton("Done", palette, onClick = onBack)
-        }
-
-        Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState(), enabled = active)
-            .padding(start = 20.dp, end = 20.dp, bottom = 18.dp)) {
+    UtilitySettingsCard(palette, width, maxHeight, onBack, header = {
+        AnimatedContent(gameName ?: if (gameRunning) "Game settings" else "Gaming",
+            transitionSpec = { fadeIn(tween(220, delayMillis = 60)).togetherWith(fadeOut(tween(120))) }, label = "current game") { name -> Text(
+            text = name,
+            fontSize = 19.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = palette.textPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        ) }
+        AnimatedContent(when {
+                appId != null -> "Running · Steam app $appId"
+                gameRunning -> "Running"
+                else -> "No game running · settings apply to the next one"
+            }, transitionSpec = { fadeIn(tween(220)).togetherWith(fadeOut(tween(120))) }, label = "game status") { status -> Text(
+            text = status,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = palette.textMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        ) }
+    }) {
         SectionHeading("On-screen controller", palette)
-        Group(palette) {
-            ToggleRow(
+        SettingsGroup(palette) {
+            SettingsToggle(
                 title = "Show controller",
                 subtitle = when {
                     physicalPad && !visible -> "Hidden while a controller is connected"
@@ -240,7 +222,7 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                 palette = palette,
                 onChange = { TouchControls.toggleController() },
             )
-            GroupDivider()
+            SettingsDivider(GamePalette)
             SliderRow(
                 title = "Opacity",
                 value = layout.opacity,
@@ -259,7 +241,7 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                 onChange = { TouchControls.updateLayout(layout.copy(scale = it), persist = false) },
                 onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
             )
-            GroupDivider()
+            SettingsDivider(GamePalette)
             NavRow(
                 title = "Edit layout",
                 subtitle = if (TouchControls.appLayout.value) "Using this game's own layout" else "Move, resize and hide controls",
@@ -268,26 +250,26 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
         }
 
         SectionHeading("Feel", palette)
-        Group(palette) {
-            ToggleRow("Button vibration", "A tap you can feel on every press", haptics, palette) {
+        SettingsGroup(palette) {
+            SettingsToggle("Button vibration", "A tap you can feel on every press", haptics, palette) {
                 TouchControls.setHaptics(it)
             }
-            GroupDivider()
-            ToggleRow("Rumble", "The tablet vibrates when a game rumbles", rumble, palette) {
+            SettingsDivider(GamePalette)
+            SettingsToggle("Rumble", "The tablet vibrates when a game rumbles", rumble, palette) {
                 TouchControls.setRumble(it)
             }
-            GroupDivider()
-            ToggleRow("Analog triggers", "Press LT and RT lower down to press harder", analog, palette) {
+            SettingsDivider(GamePalette)
+            SettingsToggle("Analog triggers", "Press LT and RT lower down to press harder", analog, palette) {
                 TouchControls.setAnalogTriggers(it)
             }
         }
 
         SectionHeading("Game settings", palette)
-        Group(palette) {
+        SettingsGroup(palette) {
             val id = appId
             AnimatedVisibility(id != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                 Column {
-                ToggleRow(
+                SettingsToggle(
                     title = "Only for this game",
                     subtitle = if (ownSettings) "${gameName ?: "This game"} keeps its own settings" else "Off: every game shares these settings",
                     checked = ownSettings,
@@ -296,7 +278,7 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                     if (id != null) GameSettings.setAppConfig(context, id, own)
                     ownSettings = own
                 }
-                GroupDivider()
+                SettingsDivider(GamePalette)
                 }
             }
             OptionRow(
@@ -307,7 +289,7 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                 label = { "${it / 1024f}".removeSuffix(".0") + " GB" },
                 palette = palette,
             ) { update(config.copy(vramMb = it)) }
-            GroupDivider()
+            SettingsDivider(GamePalette)
             OptionRow(
                 title = "Frame-rate cap",
                 subtitle = "Steadier pacing and less heat (DirectX games)",
@@ -316,14 +298,14 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                 label = { if (it == 0) "Off" else "$it" },
                 palette = palette,
             ) { update(config.copy(fpsLimit = it)) }
-            GroupDivider()
-            ToggleRow("Frame-rate counter", "DXVK's FPS readout in the corner", config.hud, palette) {
+            SettingsDivider(GamePalette)
+            SettingsToggle("Frame-rate counter", "DXVK's FPS readout in the corner", config.hud, palette) {
                 update(config.copy(hud = it))
             }
         }
 
         SectionHeading("Compatibility", palette)
-        Group(palette) {
+        SettingsGroup(palette) {
             OptionRow(
                 title = "Proton",
                 subtitle = "Which installed Proton for ARM64 runs Windows games",
@@ -339,7 +321,7 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                 },
                 palette = palette,
             ) { update(config.copy(proton = it)) }
-            GroupDivider()
+            SettingsDivider(GamePalette)
             OptionRow(
                 title = "32-bit Windows code",
                 subtitle = "Translator for 32-bit games and launchers",
@@ -348,8 +330,8 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                 label = { if (it == "box64") "Box64" else "FEX" },
                 palette = palette,
             ) { update(config.copy(wow64 = it)) }
-            GroupDivider()
-            ToggleRow("FEX code cache", "Keep translated x86 code between runs for faster starts", config.fexCache, palette) {
+            SettingsDivider(GamePalette)
+            SettingsToggle("FEX code cache", "Keep translated x86 code between runs for faster starts", config.fexCache, palette) {
                 update(config.copy(fexCache = it))
             }
         }
@@ -361,7 +343,6 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
             color = palette.textMuted.copy(alpha = 0.7f),
             lineHeight = 15.sp,
         )
-    }
     }
 }
 
@@ -465,7 +446,7 @@ fun EditBar() {
             }
         }
         AnimatedVisibility(appId != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-            ToggleRow(
+            SettingsToggle(
                 title = "Layout only for ${gameName ?: "this game"}",
                 subtitle = if (appLayout) "Other games keep the shared layout" else "Off: every game shares this layout",
                 checked = appLayout,
@@ -473,26 +454,6 @@ fun EditBar() {
             ) { TouchControls.setAppLayout(it) }
         }
     }
-}
-
-/** Grouped rows: one soft inset surface per section, like a settings list. */
-@Composable
-private fun Group(palette: PortalPalette, content: @Composable () -> Unit) {
-    val shape = RoundedCornerShape(16.dp)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .animateContentSize(spring(dampingRatio = 1f, stiffness = 380f))
-            .clip(shape)
-            .background(palette.textPrimary.copy(alpha = 0.035f))
-            .border(1.dp, palette.surfaceBorder, shape)
-            .padding(horizontal = 14.dp, vertical = 4.dp),
-    ) { content() }
-}
-
-@Composable
-private fun GroupDivider() {
-    Box(Modifier.fillMaxWidth().padding(vertical = 2.dp).height(1.dp).background(GamePalette.surfaceBorder))
 }
 
 @Composable
@@ -509,39 +470,6 @@ private fun SectionHeading(text: String, palette: PortalPalette) {
 }
 
 @Composable
-private fun RowText(title: String, subtitle: String?, palette: PortalPalette, modifier: Modifier) {
-    Column(modifier.animateContentSize(spring(dampingRatio = 1f, stiffness = 380f))) {
-        Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = palette.textPrimary)
-        AnimatedContent(subtitle, transitionSpec = { fadeIn(tween(200)).togetherWith(fadeOut(tween(100))) }, label = "setting detail") { text ->
-            if (text != null) Text(text, fontSize = 11.5.sp, fontWeight = FontWeight.Normal, color = palette.textMuted, lineHeight = 15.sp)
-        }
-    }
-}
-
-/** A small, quiet pill for secondary actions (Done, Reset, Hide). */
-@Composable
-private fun QuietButton(text: String, palette: PortalPalette, accent: Boolean = false, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(50)
-    val fill by animateColorAsState(if (accent) palette.accent else palette.surfaceTop, tween(180), label = "game button fill")
-    Box(
-        Modifier
-            .clip(shape)
-            .background(fill)
-            .heightIn(min = 44.dp)
-            .clickable(enabled = LocalUtilityContentActive.current, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        AnimatedContent(text, transitionSpec = { fadeIn(tween(180)).togetherWith(fadeOut(tween(100))) }, label = "game button label") { label -> Text(
-            label,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = if (accent) PortalColors.Charcoal else palette.textPrimary,
-        ) }
-    }
-}
-
-@Composable
 private fun NavRow(title: String, subtitle: String?, palette: PortalPalette, onClick: () -> Unit) {
     Row(
         modifier = Modifier
@@ -550,7 +478,7 @@ private fun NavRow(title: String, subtitle: String?, palette: PortalPalette, onC
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RowText(title, subtitle, palette, Modifier.weight(1f).padding(end = 12.dp))
+        SettingsRowText(title, subtitle, palette, Modifier.weight(1f).padding(end = 12.dp))
         Canvas(Modifier.size(width = 8.dp, height = 14.dp)) {
             val stroke = 1.8.dp.toPx()
             val path = Path().apply {
@@ -560,56 +488,6 @@ private fun NavRow(title: String, subtitle: String?, palette: PortalPalette, onC
             }
             drawPath(path, palette.textMuted, style = Stroke(stroke, cap = StrokeCap.Round, join = StrokeJoin.Round))
         }
-    }
-}
-
-@Composable
-private fun ToggleRow(
-    title: String,
-    subtitle: String?,
-    checked: Boolean,
-    palette: PortalPalette,
-    onChange: (Boolean) -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .toggleable(
-                value = checked,
-                enabled = LocalUtilityContentActive.current,
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                role = Role.Switch,
-                onValueChange = onChange,
-            )
-            .padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RowText(title, subtitle, palette, Modifier.weight(1f).padding(end = 12.dp))
-        PortalSwitch(checked, palette)
-    }
-}
-
-/** A compact switch; the row around it takes the tap. */
-@Composable
-private fun PortalSwitch(checked: Boolean, palette: PortalPalette) {
-    val travel by animateDpAsState(if (checked) 18.dp else 0.dp, spring(dampingRatio = 0.8f, stiffness = 700f), label = "switch thumb")
-    val track by animateColorAsState(if (checked) palette.accent else palette.textMuted.copy(alpha = 0.25f), tween(160), label = "switch track")
-    Box(
-        Modifier
-            .size(width = 42.dp, height = 24.dp)
-            .clip(RoundedCornerShape(50))
-            .background(track)
-            .padding(3.dp),
-    ) {
-        Box(
-            Modifier
-                .offset(x = travel)
-                .size(18.dp)
-                .shadow(2.dp, CircleShape)
-                .clip(CircleShape)
-                .background(PortalColors.Ivory),
-        )
     }
 }
 
@@ -718,7 +596,7 @@ private fun <T> OptionRow(
     onSelect: (T) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
-        RowText(title, subtitle, palette, Modifier)
+        SettingsRowText(title, subtitle, palette, Modifier)
         Spacer(Modifier.height(8.dp))
         // Preserve custom values instead of displaying a different setting as selected.
         val choices = if (selected in options) options else options + selected

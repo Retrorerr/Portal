@@ -86,6 +86,8 @@ fun rememberPlasmaSnapshot(active: Boolean): State<ImageBitmap?> {
         var index = 0
         var failureLogged = false
         var firstLogged = false
+        // A still desktop needs no new copy (see SessionControls.desktopFrames).
+        var sampled: Triple<Long, Int, Int>? = null
         while (isActive) {
             // Only copy while Portal is on screen; the last copy stays drawn.
             if (lifecycle != null && !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
@@ -94,7 +96,9 @@ fun rememberPlasmaSnapshot(active: Boolean): State<ImageBitmap?> {
             }
             val width = surface.width / PortalFrostStyle.SnapshotDivisor
             val height = surface.height / PortalFrostStyle.SnapshotDivisor
-            if (width >= 8 && height >= 8 && surface.holder.surface?.isValid == true) {
+            val frames = app.polarbear.SessionControls.desktopFrames()
+            val sample = Triple(frames, width, height)
+            if ((frames == 0L || sample != sampled) && width >= 8 && height >= 8 && surface.holder.surface?.isValid == true) {
                 val existing = buffers[index]
                 val bitmap = if (existing != null && existing.width == width && existing.height == height) {
                     existing
@@ -109,6 +113,7 @@ fun rememberPlasmaSnapshot(active: Boolean): State<ImageBitmap?> {
                     }
                 }
                 if (result == PixelCopy.SUCCESS) {
+                    sampled = sample
                     // A fresh wrapper per copy: HWUI re-uploads the texture.
                     bitmap.prepareToDraw()
                     snapshot.value = bitmap.asImageBitmap()

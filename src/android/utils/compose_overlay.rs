@@ -159,6 +159,21 @@ pub extern "system" fn Java_app_polarbear_SessionControls_nativeUtilityInput(
     1
 }
 
+/// Open the floating keyboard without the modal controls in between. The desktop stays
+/// interactive throughout, so the touch that focused a text field is not released under it.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_SessionControls_nativeUtilityKeyboardInput(
+    _env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jboolean {
+    if !DESKTOP_READY.load(Ordering::Acquire) || !is_hidden() {
+        return 0;
+    }
+    UTILITY_INPUT.store(true, Ordering::Release);
+    UTILITY_KEYBOARD.store(true, Ordering::Release);
+    1
+}
+
 /// Whether the overlay hierarchy is fully gone. This is the only state in
 /// which resume/recovery paths may act as if no overlay exists; in
 /// particular `Dismissing` still counts as present.

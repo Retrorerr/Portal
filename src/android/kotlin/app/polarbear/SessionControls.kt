@@ -17,7 +17,12 @@ object SessionControls {
     @JvmStatic private external fun nativeUtilityInput(open: Boolean): Boolean
     @JvmStatic private external fun nativeTextInputActive(): Boolean
     @JvmStatic private external fun nativeUtilityKeyboard(active: Boolean)
+    @JvmStatic private external fun nativeUtilityKeyboardInput(): Boolean
+    @JvmStatic private external fun nativeKeyboardWanted(): Boolean
     @JvmStatic private external fun nativeDesktopKey(code: Int, down: Boolean)
+    @JvmStatic private external fun nativeDesktopFrames(): Long
+    /** Frames Portal presented to the desktop surface; 0 (unknown) means sample anyway. */
+    internal fun desktopFrames(): Long = try { nativeDesktopFrames() } catch (_: UnsatisfiedLinkError) { 0L }
     var desktopKeyboardVisible by androidx.compose.runtime.mutableStateOf(false)
         private set
     internal var desktopKeyboardRevision by androidx.compose.runtime.mutableIntStateOf(0)
@@ -30,6 +35,18 @@ object SessionControls {
     }
     fun resetDesktopKeyboard() { desktopKeyboard.reset() }
     val textInputFocused = mutableStateOf(false)
+    /** Portal's keyboard stands in for Android's wherever that one would appear. */
+    @Volatile internal var replaceAndroidKeyboard = false
+    private val main = Handler(Looper.getMainLooper())
+    // Focus hopping between two fields reports the loss first. Wait for the gain.
+    private val closeTextKeyboard = Runnable { if (!nativeKeyboardWanted()) TouchControls.textKeyboardUnwanted() }
+
+    /** Called where Android's keyboard is about to show; true when Portal's took its place. */
+    @JvmStatic fun showPortalKeyboard(): Boolean {
+        if (!replaceAndroidKeyboard) return false
+        main.removeCallbacks(closeTextKeyboard)
+        return TouchControls.showTextKeyboard()
+    }
     @Volatile private var utilityVisible = false
     private var utilityOwner: Any? = null
     private var activity = WeakReference<PortalActivity>(null)
@@ -54,6 +71,9 @@ object SessionControls {
             return
         }
         textInputFocused.value = nativeTextInputActive()
+        if (!replaceAndroidKeyboard) return
+        main.removeCallbacks(closeTextKeyboard)
+        if (!nativeKeyboardWanted()) main.postDelayed(closeTextKeyboard, 150)
     }
 
     fun requestFiles(host: PortalActivity) = requestPanel(host, "files")
@@ -65,9 +85,9 @@ object SessionControls {
         else if (!ComposeOverlay.isShowing()) open(host)
     }
     @JvmStatic fun isUtilityVisible() = utilityVisible
-    fun acquireUtility(owner: Any): Boolean {
+    fun acquireUtility(owner: Any, keyboard: Boolean = false): Boolean {
         if (utilityOwner === owner) return true
-        if (!nativeUtilityInput(true)) return false
+        if (!(if (keyboard) nativeUtilityKeyboardInput() else nativeUtilityInput(true))) return false
         utilityOwner = owner
         publishUtilityVisible(true)
         return true

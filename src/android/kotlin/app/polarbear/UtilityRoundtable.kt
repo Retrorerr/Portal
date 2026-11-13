@@ -31,20 +31,27 @@ import androidx.compose.ui.unit.*
 import app.polarbear.setup.*
 import app.polarbear.setup.components.*
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlin.math.roundToInt
 
-private data class UtilityAction(val id: String, val title: String, val glyph: PortalGlyph, val detail: String = "", val available: Boolean = true)
+private data class UtilityAction(
+    val id: String, val title: String, val glyph: PortalGlyph, val detail: String = "", val available: Boolean = true,
+)
 
 @Composable
 internal fun UtilityRoundtable(
-    ready: Boolean, page: UtilityPage, presentationId: Int, anchor: () -> Offset, area: UtilityMenuGeometry.Area,
-    dockRight: Boolean, dragging: Boolean, directPosition: Boolean = dragging,
+    host: PortalActivity, ready: Boolean, page: UtilityPage, presentationId: Int, anchor: () -> Offset, area: UtilityMenuGeometry.Area,
+    // Motion arrives as lambdas read only in layout, draw and effects: a drag
+    // starting, ending or settling used to rebuild the whole roundtable,
+    // stalling the UI thread for a frame or two each time.
+    dockRight: Boolean, dragging: () -> Boolean, directPosition: () -> Boolean = dragging,
     onHub: () -> Unit, onAction: (String) -> Unit, onBack: () -> Unit, onOutside: () -> Unit,
     onHubBounds: (android.graphics.RectF) -> Unit, onActionBounds: (String, android.graphics.RectF) -> Unit = { _, _ -> },
     onAnimating: (Boolean) -> Unit = {}, onSettled: (UtilityPage,Int) -> Unit,
     onKeyboardBounds: (android.graphics.RectF) -> Unit = {},
     onEditController: () -> Unit = {},
+    keyboardMinimized: Boolean = false, onKeyboardMinimized: (Boolean) -> Unit = {}, onClose: () -> Unit = onBack,
 ) {
     if (!ready) return
     val palette = resolvePalette(AppearanceMode.System)
@@ -66,6 +73,7 @@ internal fun UtilityRoundtable(
         add(UtilityAction("apps", "Apps", PortalGlyph.Apps))
         add(UtilityAction("keyboard", "Keyboard", PortalGlyph.Keyboard))
         add(UtilityAction("game", "Game settings", PortalGlyph.Options))
+        add(UtilityAction("settings", "Portal settings", PortalGlyph.Settings))
         add(UtilityAction("controller", if (TouchControls.controllerVisible) "Hide controls" else "Show controls", PortalGlyph.Controller, available = TouchControls.gameRunning.value))
     }
     val available = actions.filter { it.available }
@@ -76,12 +84,15 @@ internal fun UtilityRoundtable(
     var surfaceResizing by remember { mutableStateOf(false) }
     val keyboardScope = rememberCoroutineScope()
     val keyboardMotion = remember { UtilityKeyboardMotion(keyboardScope) }
-    SideEffect { keyboardMotion.updateArea(area, density.density) }
+    SideEffect {
+        keyboardMotion.updateArea(area, density.density)
+        keyboardMotion.onFlickDown = if (page == UtilityPage.Keyboard && !keyboardMinimized) ({ onKeyboardMinimized(true) }) else null
+    }
     LaunchedEffect(page) { keyboardMotion.stop() }
     val transition = updateTransition(page, label = "utility presentation")
     val dockCaptureBounds = remember { android.graphics.RectF() }
     val keyboardCaptureBounds = remember { android.graphics.RectF() }
-    val moving = { dragging || directPosition || transition.isRunning || surfaceResizing || keyboardMotion.isMoving }
+    val moving = { dragging() || directPosition() || transition.isRunning || surfaceResizing || keyboardMotion.isMoving }
     var resting by remember { mutableStateOf(false) }
     val parked = { resting && page == UtilityPage.Dock }
     val frost = rememberUtilityFrost(ready,
@@ -100,8 +111,8 @@ internal fun UtilityRoundtable(
     val keyboardTravel by transition.animateFloat(transitionSpec = { spring(dampingRatio = 1f, stiffness = 230f) }, label = "keyboard travel") {
         if (it == UtilityPage.Keyboard) 1f else 0f
     }
-    val gamingTravel by transition.animateFloat(transitionSpec = { spring(dampingRatio = 1f, stiffness = 230f) }, label = "game settings travel") {
-        if (it == UtilityPage.Gaming) 1f else 0f
+    val settingsTravel by transition.animateFloat(transitionSpec = { spring(dampingRatio = 1f, stiffness = 230f) }, label = "settings travel") {
+        if (it.isSettings) 1f else 0f
     }
     val menuReveal by transition.animateFloat(transitionSpec = { spring(dampingRatio = 0.88f, stiffness = 300f) }, label = "bubble orbit") {
         if (it == UtilityPage.Menu) 1f else 0f
@@ -112,39 +123,54 @@ internal fun UtilityRoundtable(
     // animation frame needlessly competes with the running desktop for UI time.
     val center = {
         val position = anchor()
-        val gamingCenter = Offset((area.left + area.right) / 2, (area.top + area.bottom) / 2)
-        if (directPosition) position else position * (1f - centering) +
-            menuCenter * (centering - keyboardTravel - gamingTravel) +
-            keyboardMotion.center() * keyboardTravel + gamingCenter * gamingTravel
+        val settingsCenter = Offset((area.left + area.right) / 2, (area.top + area.bottom) / 2)
+        if (directPosition()) position else position * (1f - centering) +
+            menuCenter * (centering - keyboardTravel - settingsTravel) +
+            keyboardMotion.center() * keyboardTravel + settingsCenter * settingsTravel
     }
     val arrival = remember { Animatable(0f) }
     LaunchedEffect(Unit) { arrival.animateTo(1f, tween(520, easing = PortalEmphasizedDecelerate)) }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val focused by interaction.collectIsFocusedAsState()
-    LaunchedEffect(page, dragging, hovered, focused) {
-        resting = false
-        if (page == UtilityPage.Dock && !dragging && !hovered && !focused) { delay(2200); resting = true }
+    val draggingNow by rememberUpdatedState(dragging)
+    val directNow by rememberUpdatedState(directPosition)
+    LaunchedEffect(page, hovered, focused) {
+        snapshotFlow { draggingNow() }.collectLatest { held ->
+            resting = false
+            if (page == UtilityPage.Dock && !held && !hovered && !focused) { delay(2200); resting = true }
+        }
     }
-    val opacityTarget = if (parked()) 0.48f else 1f
-    val opacity by animateFloatAsState(opacityTarget, tween(620, easing = PortalEmphasized), label = "parked tab ink")
-    val lift by animateFloatAsState(if (dragging) 1.045f else if (keyboardMotion.dragging) 1.006f else 1f, spring(dampingRatio = 0.86f, stiffness = 400f), label = "utility weight")
+    // Parking and lift animate from effects, never from composition: reading
+    // them there rebuilt the roundtable as the tab parked or a drag began.
+    val parkedNow by rememberUpdatedState(parked)
+    val opacity = remember { Animatable(1f) }
+    LaunchedEffect(opacity) {
+        snapshotFlow { parkedNow() }.collectLatest { opacity.animateTo(if (it) 0.48f else 1f, tween(620, easing = PortalEmphasized)) }
+    }
+    val lift = remember { Animatable(1f) }
+    LaunchedEffect(lift) {
+        snapshotFlow { if (draggingNow()) 1.045f else if (keyboardMotion.dragging) 1.006f else 1f }
+            .collectLatest { lift.animateTo(it, spring(dampingRatio = 0.86f, stiffness = 400f)) }
+    }
     val currentAnimating by rememberUpdatedState(onAnimating)
-    LaunchedEffect(transition, opacityTarget, radialTarget, dragging, directPosition, surfaceResizing) {
-        snapshotFlow { transition.isRunning || arrival.isRunning || opacity != opacityTarget || radial != radialTarget || dragging || directPosition || surfaceResizing || keyboardMotion.isMoving }
+    LaunchedEffect(transition, radialTarget, surfaceResizing) {
+        snapshotFlow { transition.isRunning || arrival.isRunning || opacity.isRunning || radial != radialTarget || draggingNow() || directNow() || surfaceResizing || keyboardMotion.isMoving }
             .distinctUntilChanged().collect { currentAnimating(it) }
     }
     val currentSettled by rememberUpdatedState(onSettled)
-    LaunchedEffect(presentationId, transition.currentState, transition.targetState, transition.isRunning, dragging, directPosition, arrival.isRunning, surfaceResizing) {
-        if (!transition.isRunning && transition.currentState == transition.targetState && !dragging && !directPosition && !arrival.isRunning && arrival.value == 1f && !surfaceResizing) currentSettled(transition.currentState,presentationId)
+    LaunchedEffect(presentationId, transition.currentState, transition.targetState, transition.isRunning, arrival.isRunning, surfaceResizing) {
+        if (transition.isRunning || transition.currentState != transition.targetState || arrival.isRunning || arrival.value != 1f || surfaceResizing) return@LaunchedEffect
+        snapshotFlow { !draggingNow() && !directNow() }.distinctUntilChanged()
+            .collect { if (it) currentSettled(transition.currentState,presentationId) }
     }
     Box(Modifier.fillMaxSize().recordUtilityFrost(frost).pointerInput(page) {
         detectTapGestures {
             if (page == UtilityPage.Menu) onOutside()
-            else if (page == UtilityPage.Gaming) onBack()
+            else if (page.isSettings) onBack()
         }
     }) {
-        Box(Modifier.fillMaxSize().graphicsLayer { alpha = gamingTravel.coerceIn(0f, 1f) }
+        Box(Modifier.fillMaxSize().graphicsLayer { alpha = settingsTravel.coerceIn(0f, 1f) }
             .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.18f)))
         actions.forEach { action ->
             key(action.id) {
@@ -154,7 +180,12 @@ internal fun UtilityRoundtable(
                 val present by animateFloatAsState(if (action.available) 1f else 0f,spring(dampingRatio = 1f,stiffness = 380f),label = "${action.id} availability")
                 UtilityBubble(action, palette, frost, page == UtilityPage.Menu && action.available && !geometry.compact,
                     Modifier.offset {
-                        val tileCenter = center() + orbit*menuReveal*radial
+                        // A closed menu's bubbles are invisible; leaving them
+                        // parked keeps a dragged tab from laying out and
+                        // redrawing hidden surfaces every frame.
+                        val reveal = menuReveal*radial
+                        if (reveal == 0f) return@offset IntOffset.Zero
+                        val tileCenter = center() + orbit*reveal
                         IntOffset((tileCenter.x-geometry.tileWidth/2).roundToInt(), (tileCenter.y-geometry.tileHeight/2).roundToInt())
                     }
                         .width(with(density) { geometry.tileWidth.toDp() }).height(with(density) { geometry.tileHeight.toDp() })
@@ -168,7 +199,12 @@ internal fun UtilityRoundtable(
                     onClick = { onAction(action.id) })
             }
         }
-        val corner = animateDpAsState(when (page) { UtilityPage.Dock -> (24+8*(density.fontScale-1f).coerceAtLeast(0f)).dp; UtilityPage.Menu -> if (geometry.compact) 26.dp else (32+6*(density.fontScale-1f).coerceAtLeast(0f)).dp; UtilityPage.Keyboard -> 18.dp; UtilityPage.Gaming -> 24.dp },
+        val corner = animateDpAsState(when (page) {
+            UtilityPage.Dock -> (24+8*(density.fontScale-1f).coerceAtLeast(0f)).dp
+            UtilityPage.Menu -> if (geometry.compact) 26.dp else (32+6*(density.fontScale-1f).coerceAtLeast(0f)).dp
+            UtilityPage.Keyboard -> if (keyboardMinimized) 28.dp else 18.dp
+            UtilityPage.Gaming, UtilityPage.Settings -> 24.dp
+        },
             tween(420, easing = PortalEmphasized), label = "utility surface corner")
         val elevation = animateDpAsState(if (page == UtilityPage.Dock) 3.dp else 12.dp, tween(420, easing = PortalEmphasized), label = "utility lift")
         val shape = remember {
@@ -178,13 +214,13 @@ internal fun UtilityRoundtable(
             }
         }
         Layout(content = {
-            UtilitySurfaceContent(page to (page == UtilityPage.Menu && geometry.compact),
+            UtilitySurfaceContent(page to (page == UtilityPage.Menu && geometry.compact || page == UtilityPage.Keyboard && keyboardMinimized),
                 prepareKeyboard = page == UtilityPage.Menu && !transition.isRunning && !surfaceResizing,
                 onResizing = { surfaceResizing = it },
-                onTargetSize = { shown, size -> if (shown == UtilityPage.Keyboard) keyboardMotion.resize(size) },
+                onTargetSize = { shown, size -> if (shown == UtilityPage.Keyboard) keyboardMotion.resize(size, keyboardMinimized) },
                 modifier = Modifier.graphicsLayer {
-                    alpha = arrival.value * opacity
-                    scaleX = lift; scaleY = lift
+                    alpha = arrival.value * opacity.value
+                    scaleX = lift.value; scaleY = lift.value
                     shadowElevation = elevation.value.toPx()
                     this.shape = RoundedCornerShape(corner.value); clip = true
                     ambientShadowColor = palette.pillShadow; spotShadowColor = palette.pillShadow
@@ -199,14 +235,21 @@ internal fun UtilityRoundtable(
                     },
             ) { (shown, compact) ->
                 when {
+                    shown == UtilityPage.Keyboard && compact -> UtilityKeyboardChip(palette,
+                        keyboardMotion.grip(page == UtilityPage.Keyboard && LocalUtilityContentActive.current, chip = true)) { onKeyboardMinimized(false) }
                     shown == UtilityPage.Keyboard -> UtilityKeyboard(palette,
                         with(density) { (area.width-24*density.density).coerceAtLeast(120*density.density).toDp() },
-                        with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() }, onBack,
+                        with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() }, onClose,
+                        onMinimize = { onKeyboardMinimized(true) },
                         grip = keyboardMotion.grip(page == UtilityPage.Keyboard && LocalUtilityContentActive.current))
                     shown == UtilityPage.Gaming -> app.polarbear.gaming.GameSettingsContent(palette,
                         with(density) { (area.width-24*density.density).coerceAtLeast(1f).toDp() },
                         with(density) { (area.height-24*density.density).coerceAtLeast(1f).toDp() },
                         onBack = onBack, onEditController = onEditController)
+                    shown == UtilityPage.Settings -> PortalSettingsContent(host, palette,
+                        with(density) { (area.width-24*density.density).coerceAtLeast(1f).toDp() },
+                        with(density) { (area.height-24*density.density).coerceAtLeast(1f).toDp() },
+                        onBack = onBack)
                     shown == UtilityPage.Menu && compact -> CompactRoundtable(actions,palette,frost,
                         with(density) { (area.width-24*density.density).coerceAtLeast(120*density.density).toDp() },
                         with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() },
@@ -220,7 +263,7 @@ internal fun UtilityRoundtable(
                         val hub = (64+12*(density.fontScale-1f).coerceAtLeast(0f)).dp
                         val hiddenEdge = dockWidth/2-20.dp
                         val labelInset by animateDpAsState(
-                            if (!docked || dragging) 0.dp else if (dockRight) -hiddenEdge/2 else hiddenEdge/2,
+                            if (!docked || dragging()) 0.dp else if (dockRight) -hiddenEdge/2 else hiddenEdge/2,
                             spring(dampingRatio = 0.9f,stiffness = 420f),label = "tab label docking")
                         Box(Modifier.size(width = if (docked) dockWidth else hub, height = if (docked) dockHeight else hub)
                             .graphicsLayer { scaleX = press; scaleY = press }
@@ -285,7 +328,7 @@ private fun UtilityBubble(action: UtilityAction,palette: PortalPalette,frost: Ut
         Column(Modifier.size(diameter).shadow(6.dp,CircleShape,ambientColor = palette.pillShadow,spotColor = palette.pillShadow)
             .clip(CircleShape).utilityFrost(frost).background(base).background(fill)
             .border(1.dp,palette.surfaceBorder,CircleShape)
-            .clickable(interactionSource = interaction,indication = null,enabled = enabled,role = Role.Button,onClick = onClick)
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
             .padding(8.dp),horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp,Alignment.CenterVertically)) {
             PortalIcon(action.glyph,palette.textPrimary,size = 20.dp)

@@ -267,6 +267,10 @@ public final class SoftKeyboardBridge {
                     hide(activity);
                     return;
                 }
+                if (SessionControls.showPortalKeyboard()) {
+                    hide(activity);
+                    return;
+                }
                 // A show starts a new guest text context (another field, or the window came
                 // back), so text mirrored from the previous one must not be editable anymore.
                 input.flushPreedit();
@@ -362,6 +366,9 @@ public final class SoftKeyboardBridge {
                     public void run() {
                         if (editor != input || !nativeWantsSoftKeyboard() || hasPhysicalKeyboard()
                             || input.isImeShown()) {
+                            return;
+                        }
+                        if (SessionControls.showPortalKeyboard()) {
                             return;
                         }
                         Log.i(TAG, "Tap on the desktop with a focused guest field; showing soft input");

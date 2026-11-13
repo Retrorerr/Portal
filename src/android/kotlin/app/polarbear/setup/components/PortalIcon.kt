@@ -15,7 +15,7 @@ import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-internal enum class PortalGlyph { Veil, Report, Files, Apps, Keyboard, Controller, Options, Close, Import, Export, Parent, Home }
+internal enum class PortalGlyph { Veil, Report, Files, Apps, Keyboard, Controller, Options, Settings, Close, Import, Export, Parent, Home }
 
 /** The same small stroke, corner and proportions across Portal's utility actions. */
 @Composable
@@ -48,6 +48,22 @@ internal fun PortalIcon(glyph: PortalGlyph, color: Color, modifier: Modifier = M
                 }
                 PortalGlyph.Options -> for ((y,x) in listOf(5f to 8f,12f to 16f,19f to 10f)) {
                     line(3f,y,x-2f,y); line(x+2f,y,21f,y); box(x-2f,y-2f,4f,4f,1f)
+                }
+                PortalGlyph.Settings -> {
+                    val gear = Path().apply {
+                        moveTo(10f, 2f)
+                        lineTo(14f, 2f); lineTo(14.7f, 5f); lineTo(16.5f, 6f)
+                        lineTo(19.5f, 5.2f); lineTo(21.5f, 8.8f); lineTo(19.3f, 11f)
+                        lineTo(19.3f, 13f); lineTo(21.5f, 15.2f); lineTo(19.5f, 18.8f)
+                        lineTo(16.5f, 18f); lineTo(14.7f, 19f); lineTo(14f, 22f)
+                        lineTo(10f, 22f); lineTo(9.3f, 19f); lineTo(7.5f, 18f)
+                        lineTo(4.5f, 18.8f); lineTo(2.5f, 15.2f); lineTo(4.7f, 13f)
+                        lineTo(4.7f, 11f); lineTo(2.5f, 8.8f); lineTo(4.5f, 5.2f)
+                        lineTo(7.5f, 6f); lineTo(9.3f, 5f)
+                        close()
+                    }
+                    drawPath(gear, color, style = stroke)
+                    drawCircle(color, radius = 3f, center = Offset(12f, 12f), style = stroke)
                 }
                 PortalGlyph.Close -> { line(6f,6f,18f,18f); line(6f,18f,18f,6f) }
                 PortalGlyph.Import, PortalGlyph.Export -> {

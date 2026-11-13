@@ -24,12 +24,14 @@ internal fun UtilitySurfaceContent(
 ) {
     var keyboardCreated by remember { mutableStateOf(false) }
     var gamingCreated by remember { mutableStateOf(false) }
+    var settingsCreated by remember { mutableStateOf(false) }
     LaunchedEffect(prepareKeyboard, target.first) {
         if (prepareKeyboard || target.first == UtilityPage.Keyboard) keyboardCreated = true
         if (target.first == UtilityPage.Gaming) gamingCreated = true
+        if (target.first == UtilityPage.Settings) settingsCreated = true
     }
     val states = remember { listOf(UtilityPage.Dock to false,UtilityPage.Menu to false,UtilityPage.Menu to true,
-        UtilityPage.Keyboard to false,UtilityPage.Gaming to false) }
+        UtilityPage.Keyboard to false,UtilityPage.Keyboard to true,UtilityPage.Gaming to false,UtilityPage.Settings to false) }
     var wanted by remember { mutableStateOf(IntSize.Zero) }
     var measuredSize by remember { mutableStateOf(IntSize.Zero) }
     val resizing = wanted != measuredSize
@@ -50,8 +52,13 @@ internal fun UtilitySurfaceContent(
                     // Enumerating every moving key each frame causes stalls
                     // with Android accessibility services connected.
                     .then(if (!selected || resizing) Modifier.clearAndSetSemantics {} else Modifier)) {
-                    if ((state.first != UtilityPage.Keyboard || keyboardCreated || target.first == UtilityPage.Keyboard) &&
-                        (state.first != UtilityPage.Gaming || gamingCreated || target.first == UtilityPage.Gaming)) content(state)
+                    val created = when (state.first) {
+                        UtilityPage.Keyboard -> keyboardCreated
+                        UtilityPage.Gaming -> gamingCreated
+                        UtilityPage.Settings -> settingsCreated
+                        else -> true
+                    }
+                    if (selected || created) content(state)
                 }
             }
         } }

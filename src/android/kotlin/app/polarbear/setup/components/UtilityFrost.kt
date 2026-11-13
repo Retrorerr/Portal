@@ -122,6 +122,7 @@ internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: ()
         var lastRegion: Rect? = null
         var lastGeometry: List<Any?>? = null
         var sampledAt = 0L
+        var sampledFrames = 0L
         // Ticks and state changes arrive on one conflated channel: a
         // withTimeoutOrNull + snapshotFlow per tick threw and unwound a
         // timeout exception and rebuilt a snapshot observer three times a
@@ -146,9 +147,11 @@ internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: ()
             snapshotFlow { movingNow() to parkedNow() }.collectLatest { state ->
                 val last = previous
                 previous = state
-                // Wake at once when a drag starts or ends or the tab wakes;
-                // parking itself needs no fresh sample.
-                if (last != null && (state.first != last.first || (last.second && !state.second))) wake.trySend(Unit)
+                // Wake at once when motion ends or the tab wakes; parking
+                // itself needs no fresh sample. Starting motion waits for its
+                // first tick: the cropped sample's padding covers those frames,
+                // and the full copy stays off the frame that starts a drag.
+                if (last != null && !state.first && (last.first || (last.second && !state.second))) wake.trySend(Unit)
                 // Moving content refreshes at 30 Hz, an open surface every
                 // 300 ms and a parked tab every 2 s. Each Compose resume also
                 // schedules a frame, so the parked tab must not tick faster.
@@ -169,14 +172,20 @@ internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: ()
             val wanted = requestedCrop()
             val geometry = listOf(wanted,width,height,dx,dy)
             val now = android.os.SystemClock.uptimeMillis()
-            val due = !parkedNow() || geometry != lastGeometry || now-sampledAt >= 1_900L
+            // Copy only once the desktop presented a new frame: PixelCopy runs
+            // on the UI's RenderThread, and 30 full-desktop copies a second
+            // over a still desktop delayed the dragged control's own frames.
+            // An unknown count (0) samples on every tick as before.
+            val frames = app.polarbear.SessionControls.desktopFrames()
+            val changed = frames == 0L || frames != sampledFrames
+            val due = geometry != lastGeometry || changed && (!parkedNow() || now-sampledAt >= 1_900L)
             val source = if (wanted == null) AndroidRect(0,0,width,height) else AndroidRect(
                 floor(wanted.left-dx-CAPTURE_PADDING).toInt().coerceIn(0,width.coerceAtLeast(0)),
                 floor(wanted.top-dy-CAPTURE_PADDING).toInt().coerceIn(0,height.coerceAtLeast(0)),
                 ceil(wanted.right-dx+CAPTURE_PADDING).toInt().coerceIn(0,width.coerceAtLeast(0)),
                 ceil(wanted.bottom-dy+CAPTURE_PADDING).toInt().coerceIn(0,height.coerceAtLeast(0)))
             if (due && source.width() >= FROST_SCALE*2 && source.height() >= FROST_SCALE*2 && surface.holder.surface?.isValid == true) {
-                lastGeometry = geometry; sampledAt = now
+                sampledAt = now
                 val w = (source.width()/FROST_SCALE).coerceAtLeast(2)
                 val h = (source.height()/FROST_SCALE).coerceAtLeast(2)
                 val bitmap = buffers[index]?.takeIf { it.width == w && it.height == h }
@@ -186,6 +195,8 @@ internal fun rememberUtilityFrost(active: Boolean, crop: () -> Rect?, moving: ()
                     catch (_: IllegalArgumentException) { continuation.resume(PixelCopy.ERROR_SOURCE_INVALID) }
                 }
                 if (result == PixelCopy.SUCCESS) {
+                    // Read before the copy: a frame queued meanwhile copies again.
+                    lastGeometry = geometry; sampledFrames = frames
                     val region = Rect((source.left+dx).toFloat(),(source.top+dy).toFloat(),(source.right+dx).toFloat(),(source.bottom+dy).toFloat())
                     // Static desktops incur no texture upload or animation between samples.
                     if (lastRegion != region || last?.sameAs(bitmap) != true) {

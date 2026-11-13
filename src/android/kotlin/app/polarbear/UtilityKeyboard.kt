@@ -39,8 +39,8 @@ private val KeyboardShortcuts = listOf(
 
 /** Typing stays in place; the desktop keys unfold beneath it in their own tray. */
 @Composable
-internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onBack: () -> Unit,
-    grip: Modifier = Modifier,
+internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onClose: () -> Unit,
+    onMinimize: () -> Unit, grip: Modifier = Modifier,
 ) {
     val active = LocalUtilityContentActive.current
     var expanded by remember { mutableStateOf(false) }
@@ -66,7 +66,16 @@ internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onBa
             KeyboardAction(if (page == KeyboardPage.Symbols) "ABC" else "#+=", "Symbols", palette, active, page == KeyboardPage.Symbols) { select(KeyboardPage.Symbols) }
             KeyboardAction("123", "Number pad", palette, active, page == KeyboardPage.Numpad) { select(KeyboardPage.Numpad) }
             KeyboardAction(if (expanded) "−" else "+", "Extra desktop keys", palette, active, expanded) { expanded = !expanded }
-            KeyboardAction("×", "Close keyboard", palette, active, onClick = onBack)
+            KeyboardAction("", "Minimise keyboard", palette, active, onClick = onMinimize, glyph = {
+                // Drawn, because the system fonts render the small triangle glyphs as a dot.
+                Canvas(Modifier.size(12.dp)) {
+                    val stroke = 1.5.dp.toPx()
+                    val tip = androidx.compose.ui.geometry.Offset(size.width/2, size.height*0.72f)
+                    drawLine(palette.textPrimary, androidx.compose.ui.geometry.Offset(size.width*0.12f, size.height*0.3f), tip, stroke, androidx.compose.ui.graphics.StrokeCap.Round)
+                    drawLine(palette.textPrimary, androidx.compose.ui.geometry.Offset(size.width*0.88f, size.height*0.3f), tip, stroke, androidx.compose.ui.graphics.StrokeCap.Round)
+                }
+            })
+            KeyboardAction("×", "Close keyboard", palette, active, onClick = onClose)
         }
         Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState(), enabled = active && shortWindow)
             .padding(horizontal = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -118,6 +127,20 @@ internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onBa
         Box(grip.fillMaxWidth().height(24.dp).semantics { contentDescription = "Move keyboard" }, contentAlignment = Alignment.Center) {
             Box(Modifier.width(58.dp).height(4.dp).clip(RoundedCornerShape(2.dp)).background(palette.textMuted.copy(alpha = 0.5f)))
         }
+    }
+}
+
+/** The minimised keyboard: out of the way until tapped, and movable like the keyboard itself. */
+@Composable
+internal fun UtilityKeyboardChip(palette: PortalPalette, grip: Modifier, onRestore: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val press by animateFloatAsState(if (pressed) 0.94f else 1f, spring(dampingRatio = 0.85f, stiffness = 650f), label = "keyboard chip press")
+    Box(grip.size(56.dp).graphicsLayer { scaleX = press; scaleY = press }
+        .clickable(interactionSource = interaction, indication = null, enabled = LocalUtilityContentActive.current,
+            role = Role.Button, onClickLabel = "Show keyboard", onClick = onRestore)
+        .semantics { contentDescription = "Show keyboard" }, contentAlignment = Alignment.Center) {
+        app.polarbear.setup.components.PortalIcon(app.polarbear.setup.components.PortalGlyph.Keyboard, palette.textPrimary, size = 22.dp)
     }
 }
 
@@ -202,7 +225,8 @@ private fun KeyboardKey(label: String, description: String, palette: PortalPalet
 }
 
 @Composable
-private fun KeyboardAction(label: String, description: String, palette: PortalPalette, enabled: Boolean, selected: Boolean = false, onClick: () -> Unit) {
+private fun KeyboardAction(label: String, description: String, palette: PortalPalette, enabled: Boolean, selected: Boolean = false,
+    glyph: (@Composable () -> Unit)? = null, onClick: () -> Unit) {
     val shape = RoundedCornerShape(10.dp)
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -212,7 +236,8 @@ private fun KeyboardAction(label: String, description: String, palette: PortalPa
         .semantics { contentDescription = description; this.selected = selected }
         .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
         .padding(horizontal = 9.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
-        AnimatedContent(label, transitionSpec = { fadeIn(tween(180)).togetherWith(fadeOut(tween(100))) }, label = "keyboard action label") { text ->
+        if (glyph != null) glyph()
+        else AnimatedContent(label, transitionSpec = { fadeIn(tween(180)).togetherWith(fadeOut(tween(100))) }, label = "keyboard action label") { text ->
             Text(text, color = palette.textPrimary, fontSize = 12.sp, maxLines = 1)
         }
     }
