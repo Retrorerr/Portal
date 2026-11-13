@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,9 +37,15 @@ pub(crate) use crate::icon::NoIcon as PlatformIcon;
 
 static HAS_FOCUS: AtomicBool = AtomicBool::new(true);
 static STYLUS_EVENTS: AtomicBool = AtomicBool::new(false);
+/// `CLOCK_MONOTONIC` ns of the Android input event being dispatched, 0 outside.
+static INPUT_EVENT_TIME_NS: AtomicI64 = AtomicI64::new(0);
 
 pub fn set_stylus_events(enabled: bool) {
     STYLUS_EVENTS.store(enabled, Ordering::Relaxed);
+}
+
+pub fn input_event_time_ns() -> i64 {
+    INPUT_EVENT_TIME_NS.load(Ordering::Relaxed)
 }
 
 /// Motion axes a stylus sample carries beyond X/Y.
@@ -814,6 +820,28 @@ impl<T: 'static> EventLoop<T> {
         F: FnMut(Event<T>, &RootAEL),
     {
         let mut input_status = InputStatus::Handled;
+        // Window events derived from this input event carry its sample time
+        // (see `platform::android::input_event_time_ns`).
+        let event_time = match event {
+            InputEvent::MotionEvent(motion_event) => motion_event.event_time(),
+            InputEvent::KeyEvent(key) => key.event_time(),
+            _ => 0,
+        };
+        INPUT_EVENT_TIME_NS.store(event_time, Ordering::Relaxed);
+        self.dispatch_input_event(android_app, event, callback, &mut input_status);
+        INPUT_EVENT_TIME_NS.store(0, Ordering::Relaxed);
+        input_status
+    }
+
+    fn dispatch_input_event<F>(
+        &mut self,
+        android_app: &AndroidApp,
+        event: &InputEvent<'_>,
+        callback: &mut F,
+        input_status: &mut InputStatus,
+    ) where
+        F: FnMut(Event<T>, &RootAEL),
+    {
         match event {
             InputEvent::MotionEvent(motion_event) => {
                 let action = motion_event.action();
@@ -824,7 +852,7 @@ impl<T: 'static> EventLoop<T> {
                 // Zero-pointer events carry nothing to classify or forward:
                 // consume them quietly instead of panicking.
                 let Some(pointer) = action_pointer(motion_event) else {
-                    return input_status;
+                    return;
                 };
 
                 let tool_type = pointer.tool_type();
@@ -832,7 +860,7 @@ impl<T: 'static> EventLoop<T> {
                     && STYLUS_EVENTS.load(Ordering::Relaxed)
                 {
                     self.dispatch_stylus(motion_event, &pointer, action, tool_type, callback);
-                    return input_status;
+                    return;
                 }
                 // On Samsung Dex, `tool_type()` still reports `Finger` when using built-in trackpad
                 // So we also check for `source()`, as it correctly reports `Mouse` (although other devices such as Desktop AVDs report `Unknown``)
@@ -1212,7 +1240,7 @@ impl<T: 'static> EventLoop<T> {
                     Keycode::VolumeUp | Keycode::VolumeDown | Keycode::VolumeMute
                         if self.ignore_volume_keys =>
                     {
-                        input_status = InputStatus::Unhandled
+                        *input_status = InputStatus::Unhandled
                     },
                     keycode => {
                         let state = match key.action() {
@@ -1254,8 +1282,6 @@ impl<T: 'static> EventLoop<T> {
                 warn!("Unknown android_activity input event {event:?}")
             },
         }
-
-        input_status
     }
 
     pub fn run<F>(mut self, event_handler: F) -> Result<(), EventLoopError>

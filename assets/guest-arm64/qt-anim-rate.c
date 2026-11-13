@@ -24,20 +24,20 @@ extern int atoi(const char *);
 #define CORE_EXEC "_ZN16QCoreApplication4execEv"
 #define GUI_EXEC "_ZN15QGuiApplication4execEv"
 #define WIDGETS_EXEC "_ZN12QApplication4execEv"
-#define VERSION "_Z8qVersionv"
 #define TIMER_INSTANCE "_ZN13QUnifiedTimer8instanceEb"
 #define TIMER_INTERVAL "_ZN13QUnifiedTimer17setTimingIntervalEi"
 #define PRIMARY_SCREEN "_ZN15QGuiApplication13primaryScreenEv"
 #define REFRESH_RATE "_ZNK7QScreen11refreshRateEv"
 
+/* qVersion() is C++-mangled in Qt 5 and extern "C" since Qt 6. */
 struct runtime {
-    const char *tag, *private_tag;
+    const char *tag, *private_tag, *version;
     const char *libraries[3];
     int major, minor, tuned;
 };
-static struct runtime qt5 = {"Qt_5", "Qt_5_PRIVATE_API",
+static struct runtime qt5 = {"Qt_5", "Qt_5_PRIVATE_API", "_Z8qVersionv",
     {"libQt5Core.so.5", "libQt5Gui.so.5", "libQt5Widgets.so.5"}, 5, 15, 0};
-static struct runtime qt6 = {"Qt_6", "Qt_6_PRIVATE_API",
+static struct runtime qt6 = {"Qt_6", "Qt_6_PRIVATE_API", "qVersion",
     {"libQt6Core.so.6", "libQt6Gui.so.6", "libQt6Widgets.so.6"}, 6, 8, 0};
 
 /* Stable public prefix of glibc's dl_phdr_info on the shipped 64-bit ABIs.
@@ -109,7 +109,7 @@ static void *symbol(struct runtime *rt, int library, const char *name, const cha
 
 static int tested_version(struct runtime *rt)
 {
-    const char *(*version)(void) = symbol(rt, 0, VERSION, rt->tag);
+    const char *(*version)(void) = symbol(rt, 0, rt->version, rt->tag);
     if (!version)
         return 0;
     const char *p = version();

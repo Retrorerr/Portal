@@ -86,6 +86,16 @@ pub fn set_stylus_events(enabled: bool) {
     let _ = enabled;
 }
 
+/// The `CLOCK_MONOTONIC` time, in nanoseconds, at which Android sampled the
+/// input event whose window events are being delivered; 0 outside of one.
+pub fn input_event_time_ns() -> i64 {
+    #[cfg(android_platform)]
+    let time = crate::platform_impl::input_event_time_ns();
+    #[cfg(not(android_platform))]
+    let time = 0;
+    time
+}
+
 /// Additional methods on [`EventLoop`] that are specific to Android.
 pub trait EventLoopExtAndroid {
     /// Get the [`AndroidApp`] which was used to create this event loop.

@@ -1,0 +1,278 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Portal <116828772+Retrorerr@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 12:30:00 +0000
+Subject: [PATCH] backends/anland: Let the consumer choose the output transform
+
+A tablet panel is mounted in landscape. Held in portrait, the consumer's
+window is a quarter turn from the panel, and window-sized buffers make
+the Android compositor rotate every frame on the GPU, because display
+controllers do not rotate RGBA layers. Buffers in the panel's
+orientation, rendered rotated, go straight to the display controller.
+
+The consumer says which rotation its buffers need with a new
+INPUT_TYPE_DISPLAY_TRANSFORM message, written right after each buffer
+set. The reconnect takes it before importing the buffers and applies it
+with their size as one output change, so the Workspace lays windows out
+once. From then on the consumer owns the output transform: an output
+configuration cannot replace it, and input positions, which the consumer
+sends in its window's space, are no longer mapped through it.
+---
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -28,6 +28,7 @@
+ #include "wayland/surface.h"
+ #include "wayland_server.h"
+ 
++#include <QElapsedTimer>
+ #include <QFutureWatcher>
+ #include <QScopeGuard>
+ #include <QSocketNotifier>
+@@ -361,6 +362,11 @@
+     // so the inverse maps device -> logical with the inverted transform bounded by
+     // the device-space size (modeSize, the buffer's native landscape extent).
+     // Then divide out the output scale to land in global logical coordinates.
++    if (output->consumerTransform()) {
++        // A consumer that chose the transform sends positions in its window's
++        // space, which is already upright.
++        return devicePoint / output->scale();
++    }
+     const QPointF logical = output->transform().inverted().map(devicePoint, QSizeF(output->modeSize()));
+     return logical / output->scale();
+ }
+@@ -468,6 +474,29 @@
+         // for scale above).
+         m_outputs[0]->setRefreshRate(static_cast<int>(ev.display.refresh_mhz));
+         break;
++    case INPUT_TYPE_DISPLAY_TRANSFORM: {
++        OutputTransform transform = OutputTransform::Normal;
++        switch (ev.display_transform.transform) {
++        case DISPLAY_TRANSFORM_90:
++            transform = OutputTransform::Rotate90;
++            break;
++        case DISPLAY_TRANSFORM_180:
++            transform = OutputTransform::Rotate180;
++            break;
++        case DISPLAY_TRANSFORM_270:
++            transform = OutputTransform::Rotate270;
++            break;
++        default:
++            break;
++        }
++        m_outputs[0]->setConsumerTransform(transform);
++        // On a reconnect the transform is applied together with the size of
++        // the new buffers (onReconnectTimer).
++        if (!m_reconnecting) {
++            m_outputs[0]->reconfigure(m_outputs[0]->modeSize(), transform);
++        }
++        break;
++    }
+     case INPUT_TYPE_CLIPBOARD: {
+         // The clipboard event carries the raw text data as inline payload after the
+         // InputEvent header.  ev.clipboard.size tells us how many bytes follow.
+@@ -632,6 +661,36 @@
+     // composite() paints into the new dmabufs even on an idle desktop.
+     // resumeRendering() runs unconditionally to keep inhibit/uninhibit
+     // balanced regardless of whether the GL layer is attached yet.
++    //
++    // The consumer writes the transform of the new buffers right after them.
++    // Take it first and apply it with their size, as one change: applied apart,
++    // the Workspace would lay every window out twice, once for a size that
++    // never shows.
++    {
++        m_reconnecting = true;
++        QElapsedTimer waited;
++        waited.start();
++        InputEvent ev;
++        bool seen = false;
++        while (!seen && !m_inFallback) {
++            const int left = 100 - int(waited.elapsed());
++            if (left <= 0 || poll_input_event(m_display, &ev, left) <= 0) {
++                break;
++            }
++            seen = ev.type == INPUT_TYPE_DISPLAY_TRANSFORM;
++            processInputEvent(ev);
++        }
++        setAnlandEventTime(std::nullopt);
++        m_reconnecting = false;
++        if (m_inFallback) {
++            return;
++        }
++        buf_info info;
++        if (get_buf_count(m_display) > 0 && get_dmabuf_info_at(m_display, 0, &info) == 0) {
++            AnlandOutput *output = m_outputs[0];
++            output->reconfigure(QSize(info.width, info.height), output->consumerTransform().value_or(output->transform()));
++        }
++    }
+     AnlandEglLayer *layer = m_outputs[0]->eglLayer();
+     if (layer) {
+         const int bufferCount = get_buf_count(m_display);
+diff --git a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
+--- a/src/backends/anland/anland_backend.h
++++ b/src/backends/anland/anland_backend.h
+@@ -131,6 +131,8 @@
+ 
+     bool m_consumerReady = false;
+     bool m_inFallback = false;
++    // Inside onReconnectTimer(), before the new buffers are imported.
++    bool m_reconnecting = false;
+     bool m_noDrmDeviceMode = false;
+     // Last CONSUMER_VAR_CAPTURE_MOUSE value sent to the connected consumer.
+     bool m_pointerCaptured = false;
+diff --git a/src/backends/anland/anland_output.cpp b/src/backends/anland/anland_output.cpp
+--- a/src/backends/anland/anland_output.cpp
++++ b/src/backends/anland/anland_output.cpp
+@@ -8,6 +8,8 @@
+ #include "anland_backend.h"
+ #include "anland_logging.h"
+ 
++#include "core/iccprofile.h"
++#include "core/outputconfiguration.h"
+ #include "core/renderbackend.h" // OutputFrame
+ #include "core/renderloop.h"
+ 
+@@ -129,18 +131,63 @@
+ 
+ void AnlandOutput::resize(const QSize &newSize)
+ {
+-    if (newSize == modeSize() || !newSize.isValid())
++    reconfigure(newSize, m_state.transform);
++}
++
++void AnlandOutput::setConsumerTransform(OutputTransform transform)
++{
++    m_consumerTransform = transform;
++}
++
++void AnlandOutput::applyChanges(const OutputConfiguration &config)
++{
++    // Output::applyChanges() with the transform pinned to the consumer's.
++    auto props = config.constChangeSet(this);
++    if (!props) {
+         return;
++    }
++    Q_EMIT aboutToChange(props.get());
+ 
+-    qCInfo(KWIN_ANLAND) << "resizing output to" << newSize;
++    State next = m_state;
++    next.enabled = props->enabled.value_or(m_state.enabled);
++    next.transform = m_consumerTransform.value_or(props->transform.value_or(m_state.transform));
++    next.position = props->pos.value_or(m_state.position);
++    next.scale = props->scale.value_or(m_state.scale);
++    next.rgbRange = props->rgbRange.value_or(m_state.rgbRange);
++    next.autoRotatePolicy = props->autoRotationPolicy.value_or(m_state.autoRotatePolicy);
++    next.iccProfilePath = props->iccProfilePath.value_or(m_state.iccProfilePath);
++    if (props->iccProfilePath) {
++        next.iccProfile = IccProfile::load(*props->iccProfilePath).profile.value_or(nullptr);
++    }
++    next.vrrPolicy = props->vrrPolicy.value_or(m_state.vrrPolicy);
++    next.desiredModeSize = props->desiredModeSize.value_or(m_state.desiredModeSize);
++    next.desiredModeRefreshRate = props->desiredModeRefreshRate.value_or(m_state.desiredModeRefreshRate);
++
++    setState(next);
++
++    Q_EMIT changed();
++}
++
++void AnlandOutput::reconfigure(const QSize &newSize, OutputTransform transform)
++{
++    const bool sizeChanged = newSize.isValid() && newSize != modeSize();
++    if (!sizeChanged && transform == m_state.transform) {
++        return;
++    }
++
++    qCInfo(KWIN_ANLAND) << "reconfiguring output to" << (sizeChanged ? newSize : modeSize())
++                        << "transform" << int(transform.kind());
+ 
+-    // Keep the same refresh rate; update both the OutputMode and the RenderLoop
+-    // pacing. Mirroring setRefreshRate() / init().
+-    const int refresh = m_renderLoop->refreshRate();
+-    auto mode = std::make_shared<OutputMode>(newSize, refresh, OutputMode::Flag::Preferred);
+     State next = m_state;
+-    next.modes = {mode};
+-    next.currentMode = mode;
++    next.transform = transform;
++    if (sizeChanged) {
++        // Keep the same refresh rate; update both the OutputMode and the
++        // RenderLoop pacing. Mirroring setRefreshRate() / init().
++        const int refresh = m_renderLoop->refreshRate();
++        auto mode = std::make_shared<OutputMode>(newSize, refresh, OutputMode::Flag::Preferred);
++        next.modes = {mode};
++        next.currentMode = mode;
++    }
+     setState(next);
+ 
+     // setState() only emits currentModeChanged(); that does NOT re-lay-out windows.
+diff --git a/src/backends/anland/anland_output.h b/src/backends/anland/anland_output.h
+--- a/src/backends/anland/anland_output.h
++++ b/src/backends/anland/anland_output.h
+@@ -17,6 +17,7 @@
+ 
+ #include <QObject>
+ #include <memory>
++#include <optional>
+ 
+ namespace KWin
+ {
+@@ -58,6 +59,22 @@
+      *  for the new size — currentModeChanged() alone does not trigger a relayout. */
+     void resize(const QSize &newSize);
+ 
++    /** Apply a buffer size and an output transform in one state change, so the
++     *  Workspace lays windows out once for the new logical size. */
++    void reconfigure(const QSize &newSize, OutputTransform transform);
++
++    /** The consumer chose the rotation KWin renders with
++     *  (INPUT_TYPE_DISPLAY_TRANSFORM). From then on the consumer owns the
++     *  output transform: its buffers only show upright with that rotation, so
++     *  a stored or requested output configuration must not replace it. */
++    void setConsumerTransform(OutputTransform transform);
++    std::optional<OutputTransform> consumerTransform() const
++    {
++        return m_consumerTransform;
++    }
++
++    void applyChanges(const OutputConfiguration &config) override;
++
+     /** Consumer went away (fallback): fail any in-flight frame and inhibit() the
+      *  RenderLoop so the compositor stops trying to render into dmabufs that no
+      *  longer exist. */
+@@ -86,6 +103,7 @@
+     // Tracks our RenderLoop::inhibit() so inhibit/uninhibit stay balanced
+     // (uninhibit() asserts the count is > 0). See onConsumerLost()/resumeRendering().
+     bool m_renderingInhibited = false;
++    std::optional<OutputTransform> m_consumerTransform;
+ };
+ 
+ } // namespace KWin
+diff --git a/src/backends/anland/protocol.h b/src/backends/anland/protocol.h
+--- a/src/backends/anland/protocol.h
++++ b/src/backends/anland/protocol.h
+@@ -92,6 +92,17 @@
+  * sampled the input event that follows in the same write. The producer stamps
+  * that event with it instead of the time it happened to read it. */
+ #define INPUT_TYPE_EVENT_TIME 18
++/* Not input: the consumer says how it presents the buffers it just sent. A
++ * consumer whose display is rotated against its panel allocates the buffers in
++ * the panel's orientation, which its display controller can scan out without a
++ * rotating copy, and asks the producer to render rotated into them. The
++ * consumer writes this right after a buffer set. */
++#define INPUT_TYPE_DISPLAY_TRANSFORM 19
++
++#define DISPLAY_TRANSFORM_NORMAL 0
++#define DISPLAY_TRANSFORM_90     1
++#define DISPLAY_TRANSFORM_180    2
++#define DISPLAY_TRANSFORM_270    3
+ 
+ #define PINCH_BEGIN  0
+ #define PINCH_UPDATE 1
+@@ -164,6 +175,9 @@
+             uint32_t refresh_mhz; // current display refresh rate, milli-Hz
+         } display;
+         struct {
++            uint32_t transform; /* DISPLAY_TRANSFORM_* */
++        } display_transform;
++        struct {
+             uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
+         } clipboard;
+         struct {

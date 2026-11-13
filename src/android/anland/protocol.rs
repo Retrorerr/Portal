@@ -67,11 +67,76 @@ pub const INPUT_TYPE_TABLET_TOOL: u32 = 16;
 /// Touchpad pinch: phase (`PINCH_*`) and the scale since its start, which KWin
 /// gives clients as a pointer-gestures pinch.
 pub const INPUT_TYPE_POINTER_PINCH: u32 = 17;
+/// The `CLOCK_MONOTONIC` time, in ns as `{lo, hi}`, at which Android sampled
+/// the input event written right after it. KWin stamps that event with it
+/// instead of the time it got round to reading it.
+pub const INPUT_TYPE_EVENT_TIME: u32 = 18;
+/// Not input: how the consumer presents the buffer set it just sent. The
+/// payload is a `DISPLAY_TRANSFORM_*` rotation the producer renders with.
+pub const INPUT_TYPE_DISPLAY_TRANSFORM: u32 = 19;
+
+pub const DISPLAY_TRANSFORM_NORMAL: u32 = 0;
+pub const DISPLAY_TRANSFORM_90: u32 = 1;
+pub const DISPLAY_TRANSFORM_180: u32 = 2;
+pub const DISPLAY_TRANSFORM_270: u32 = 3;
+
+/// Android buffer transforms (`NATIVE_WINDOW_TRANSFORM_*`).
+pub const BUFFER_TRANSFORM_NONE: u32 = 0;
+pub const BUFFER_TRANSFORM_ROT_180: u32 = 3;
+pub const BUFFER_TRANSFORM_ROT_90: u32 = 4;
+pub const BUFFER_TRANSFORM_ROT_270: u32 = 7;
+
+/// Buffer transform that lets the display controller scan the surface out
+/// directly, given the window's transform hint (the rotation SurfaceFlinger
+/// applies for the display).
+///
+/// A panel mounted a quarter turn from the display orientation (a tablet held
+/// in portrait) makes SurfaceFlinger rotate every frame on the GPU, because
+/// display controllers do not rotate RGBA layers. Buffers allocated in the
+/// panel's orientation and tagged with the inverse rotation need no rotation
+/// at all. Half turns and flips are left alone: controllers do those
+/// themselves.
+pub fn pre_rotation(transform_hint: u32) -> u32 {
+    match transform_hint {
+        BUFFER_TRANSFORM_ROT_90 => BUFFER_TRANSFORM_ROT_270,
+        BUFFER_TRANSFORM_ROT_270 => BUFFER_TRANSFORM_ROT_90,
+        _ => BUFFER_TRANSFORM_NONE,
+    }
+}
+
+/// Size of the buffers behind a `width`x`height` window that are presented
+/// with `buffer_transform`.
+pub fn pre_rotated_size(width: u32, height: u32, buffer_transform: u32) -> (u32, u32) {
+    match buffer_transform {
+        BUFFER_TRANSFORM_ROT_90 | BUFFER_TRANSFORM_ROT_270 => (height, width),
+        _ => (width, height),
+    }
+}
+
+/// Rotation the producer renders with so that a buffer shown with
+/// `buffer_transform` appears upright. Android rotates the buffer clockwise;
+/// the producer maps an upright point (x, y) to (y, width - x) for
+/// `DISPLAY_TRANSFORM_90`, which is the image turned a quarter counter-clockwise.
+pub fn display_transform(buffer_transform: u32) -> u32 {
+    match buffer_transform {
+        BUFFER_TRANSFORM_ROT_90 => DISPLAY_TRANSFORM_90,
+        BUFFER_TRANSFORM_ROT_180 => DISPLAY_TRANSFORM_180,
+        BUFFER_TRANSFORM_ROT_270 => DISPLAY_TRANSFORM_270,
+        _ => DISPLAY_TRANSFORM_NORMAL,
+    }
+}
 
 pub const PINCH_BEGIN: u32 = 0;
 pub const PINCH_UPDATE: u32 = 1;
 pub const PINCH_END: u32 = 2;
 pub const PINCH_CANCEL: u32 = 3;
+
+/// Render-done byte on the fence channel: KWin rendered into the selected
+/// buffer (fence optional). Older producers always send this.
+pub const REFRESH_DONE_RENDERED: u8 = 0;
+/// Render-done byte: KWin rendered nothing, so the selected buffer is stale
+/// and must not be presented; the last presented buffer is still current.
+pub const REFRESH_DONE_SKIPPED: u8 = 1;
 
 pub const INPUT_ACTION_DOWN: i32 = 0;
 pub const INPUT_ACTION_UP: i32 = 1;
@@ -190,6 +255,33 @@ impl InputEvent {
             ev_type: INPUT_TYPE_TOUCH,
             payload,
         }
+    }
+
+    /// Android's sample time for the event written after this one.
+    pub fn event_time(time_ns: u64) -> Self {
+        let mut payload = [0u8; 16];
+        put_u32(&mut payload, 0, time_ns as u32);
+        put_u32(&mut payload, 4, (time_ns >> 32) as u32);
+        Self {
+            ev_type: INPUT_TYPE_EVENT_TIME,
+            payload,
+        }
+    }
+
+    /// Events KWin timestamps, which an `INPUT_TYPE_EVENT_TIME` may precede.
+    pub fn is_timed(&self) -> bool {
+        matches!(
+            self.ev_type,
+            INPUT_TYPE_TOUCH
+                | INPUT_TYPE_KEY
+                | INPUT_TYPE_POINTER_MOTION
+                | INPUT_TYPE_POINTER_BUTTON
+                | INPUT_TYPE_POINTER_AXIS
+                | INPUT_TYPE_POINTER_AXIS_FINGER
+                | INPUT_TYPE_POINTER_AXIS_STOP
+                | INPUT_TYPE_TABLET_TOOL
+                | INPUT_TYPE_POINTER_PINCH
+        )
     }
 
     pub fn touch_frame() -> Self {
@@ -354,6 +446,41 @@ mod tests {
         assert_eq!(size_of::<BufInfo>(), 28);
         assert_eq!(size_of::<InputEvent>(), 20);
         assert_eq!(size_of::<OutputEvent>(), 20);
+    }
+
+    #[test]
+    fn pre_rotation_cancels_quarter_turns_only() {
+        assert_eq!(
+            pre_rotation(BUFFER_TRANSFORM_ROT_270),
+            BUFFER_TRANSFORM_ROT_90
+        );
+        assert_eq!(
+            pre_rotation(BUFFER_TRANSFORM_ROT_90),
+            BUFFER_TRANSFORM_ROT_270
+        );
+        assert_eq!(
+            pre_rotation(BUFFER_TRANSFORM_ROT_180),
+            BUFFER_TRANSFORM_NONE
+        );
+        assert_eq!(pre_rotation(0), BUFFER_TRANSFORM_NONE);
+        // Flips and invalid hints never pre-rotate.
+        assert_eq!(pre_rotation(1), BUFFER_TRANSFORM_NONE);
+        assert_eq!(pre_rotation(0x80), BUFFER_TRANSFORM_NONE);
+    }
+
+    #[test]
+    fn pre_rotated_buffers_keep_the_panel_orientation() {
+        let t = pre_rotation(BUFFER_TRANSFORM_ROT_270);
+        assert_eq!(pre_rotated_size(2400, 3392, t), (3392, 2400));
+        assert_eq!(display_transform(t), DISPLAY_TRANSFORM_90);
+        assert_eq!(
+            pre_rotated_size(3392, 2400, BUFFER_TRANSFORM_NONE),
+            (3392, 2400)
+        );
+        assert_eq!(
+            display_transform(BUFFER_TRANSFORM_NONE),
+            DISPLAY_TRANSFORM_NORMAL
+        );
     }
 
     #[test]

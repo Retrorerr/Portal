@@ -1,5 +1,5 @@
 From 81f26957b1e4c7bf0f65c75abb79fc6fa1de3af7 Mon Sep 17 00:00:00 2001
-From: Portal <masobazee@gmail.com>
+From: Portal <116828772+Retrorerr@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 16:08:18 +0100
 Subject: [PATCH] backends/anland: Ask for Android pointer capture during
  pointer locks

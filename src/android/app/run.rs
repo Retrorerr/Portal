@@ -265,8 +265,8 @@ fn resume_wayland(
     crate::android::backend::video_decode::spawn_after_ready();
     launch();
     // Spawn guest/audio workers first so they retain normal priority. Only
-    // the NativeActivity event/render thread receives Android display
-    // priority; no affinity, root capability or guest-wide nice change.
+    // the NativeActivity event/render thread receives Android's foreground
+    // frame priority; no affinity, root capability or guest-wide nice change.
     crate::android::utils::frame_pacing::prioritize_current_render_thread();
     true
 }
@@ -462,6 +462,9 @@ fn forward_anland_input(
     let Some(session) = backend.anland.as_ref() else {
         return;
     };
+    // KWin delivers each event with the time Android sampled it, so clients
+    // see the real motion cadence instead of the arrival jitter.
+    let _stamp = session.stamp_input(winit::platform::android::input_event_time_ns());
     match event {
         WindowEvent::Touch(touch) => {
             let action = match touch.phase {
@@ -476,13 +479,14 @@ fn forward_anland_input(
                 touch.location.y,
                 format_args!("touch action={action} id={}", touch.id),
             );
-            session.send_input(&AnlandInput::touch(
+            // The points of one Android batch share a touch frame (sent by
+            // flush_input), so a two-finger gesture moves both fingers at once.
+            session.send_touch(
                 action,
                 touch.location.x as f32,
                 touch.location.y as f32,
                 touch.id as i32,
-            ));
-            session.send_input(&AnlandInput::touch_frame());
+            );
         }
         WindowEvent::CursorMoved { position, .. } => {
             note_motion_logged(position.x, position.y, format_args!("cursor"));
@@ -1546,6 +1550,10 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
+            // winit dispatched this wake's whole Android input batch.
+            if let Some(session) = backend.anland.as_ref() {
+                session.flush_input();
+            }
             // Rotation convergence retry: if a resize left an un-emitted
             // desire (winit and native disagreed mid-rotation), the native
             // surface may have caught up silently without a new event.

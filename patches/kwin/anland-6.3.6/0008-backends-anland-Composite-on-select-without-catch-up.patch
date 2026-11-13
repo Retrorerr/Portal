@@ -1,0 +1,603 @@
+From fe51e8730fe1e75f5987adb6f72633982a36cf1b Mon Sep 17 00:00:00 2001
+From: Portal <116828772+Retrorerr@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 14:57:40 +0000
+Subject: [PATCH] backends/anland: Composite on select, without catch-up
+ repaints
+
+The consumer selects a buffer at the display's vsync and presents what
+KWin renders into it, so it already paces the output. The RenderLoop's
+own vblank prediction started each composite about a vblank after the
+select, minus its expected render time, and two vblanks after it when two
+selects came close together: a frame of latency on every frame, and a
+dropped frame each time. A presentation safety margin of at least two
+vblanks, the cap on the expected compositing time, makes it composite at
+once.
+
+A buffer that missed damage asked for a full-output repaint until it was
+selected again. That repaint was new damage for the other buffers, so
+once anything changed every later frame repainted the whole output. Each
+buffer already accumulates the damage it missed, and doBeginFrame
+repaints it the next time the buffer is selected, so the catch-up repaint
+is dropped. A frame with nothing to repaint is not rendered, and the
+render-done message now tells the consumer so (REFRESH_DONE_SKIPPED): the
+selected buffer is stale, and the consumer keeps presenting the last one.
+A frame whose buffer was never selected drops its fence instead of
+sending it with the next frame. Without a native fence, glFinish makes
+the frame complete before it is presented.
+
+Input events carry the CLOCK_MONOTONIC time Android sampled them
+(INPUT_TYPE_EVENT_TIME, written together with its event). Stamping events
+when KWin read them made their spacing jitter by as much as a composite
+takes, which clients read as changes in finger speed. Implausible stamps
+fall back to the read time, and event times never go backwards.
+
+The X11 touchpad fling steps once per output frame, so each frame scrolls
+by exactly the time since the last one. Its free-running 8 ms timer beat
+against the vsync, giving some frames two steps and others none; the
+timer now steps only when no frames come.
+---
+ src/backends/anland/anland_backend.cpp     | 10 +++
+ src/backends/anland/anland_egl_backend.cpp | 25 +++---
+ src/backends/anland/anland_egl_backend.h   |  2 -
+ src/backends/anland/anland_input.cpp       | 94 +++++++++++++++++-----
+ src/backends/anland/anland_input.h         | 10 ++-
+ src/backends/anland/anland_output.cpp      |  8 ++
+ src/backends/anland/display_producer.c     | 19 ++++-
+ src/backends/anland/display_producer.h     |  7 +-
+ src/backends/anland/protocol.h             | 16 ++++
+ 9 files changed, 150 insertions(+), 41 deletions(-)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index a1ba9e0..ffffe35 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -13,6 +13,7 @@
+ #include "anland_output.h"
+ 
+ #include "core/drmdevice.h"
++#include "core/renderloop.h"
+ #include "effect/globals.h"
+ #include "inputmethod.h"
+ #include "main.h"
+@@ -155,6 +156,7 @@ bool AnlandBackend::initialize()
+ 
+     auto *output = new AnlandOutput(this, QStringLiteral("anland-1"));
+     output->init(QSize(w, h), static_cast<int>(refresh), 1.0);
++    connect(output->renderLoop(), &RenderLoop::frameRequested, m_inputDevice.get(), &AnlandInputDevice::outputFrame);
+     m_outputs.append(output);
+     Q_EMIT outputAdded(output);
+     output->updateEnabled(true);
+@@ -244,6 +246,9 @@ bool AnlandBackend::notifyFramePresented()
+         m_consumerReady = false;
+         return true;
+     }
++    // No buffer was selected for this frame, so nothing about it may reach the
++    // consumer: drop its fence rather than send it with a later frame.
++    discard_render_fence(m_display);
+     return false;
+ }
+ 
+@@ -291,6 +296,8 @@ void AnlandBackend::onInputReadable()
+         processInputEvent(ev);
+         if (m_inFallback) break; // poll_input_event may have triggered fallback
+     }
++    // An event time belongs to the event written with it.
++    setAnlandEventTime(std::nullopt);
+ }
+ 
+ /*
+@@ -441,6 +448,9 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
+     case INPUT_TYPE_TOUCH_FRAME:
+         m_inputDevice->touchFrame();
+         break;
++    case INPUT_TYPE_EVENT_TIME:
++        setAnlandEventTime(std::chrono::nanoseconds(int64_t(uint64_t(ev.event_time.lo) | (uint64_t(ev.event_time.hi) << 32))));
++        break;
+     case INPUT_TYPE_DISPLAY_REFRESH:
+         // Not an input event: the consumer reports its live display refresh rate
+         // (mHz) so we can repace the RenderLoop. m_outputs[0] is valid here (used
+diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
+index 9ecab43..dc0917f 100644
+--- a/src/backends/anland/anland_egl_backend.cpp
++++ b/src/backends/anland/anland_egl_backend.cpp
+@@ -80,8 +80,6 @@ void AnlandEglLayer::releaseBuffers()
+         m_renderTargets[i].reset();
+         m_accumDamage[i] = QRegion();
+     }
+-    m_damageFlags = 0;
+-    m_damageMask = 0;
+     m_bufCount = 0;
+     m_traceNextFrame = false;
+ }
+@@ -175,8 +173,6 @@ bool AnlandEglLayer::importBuffers(int count)
+     }
+ 
+     m_bufCount = count;
+-    m_damageMask = (uint8_t)((1 << m_bufCount) - 1);
+-    m_damageFlags = m_damageMask;
+     m_traceNextFrame = true;
+     return true;
+ }
+@@ -191,7 +187,6 @@ void AnlandEglLayer::onOutputTransformChanged()
+         m_renderTargets[i].emplace(m_fbos[i].get());
+         m_accumDamage[i] = infiniteRegion();
+     }
+-    m_damageFlags = m_damageMask;
+     addRepaint(infiniteRegion());
+ }
+ 
+@@ -221,24 +216,28 @@ std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
+ bool AnlandEglLayer::doEndFrame(const QRegion &renderedDeviceRegion, const QRegion &damagedDeviceRegion, OutputFrame *frame)
+ {
+     glFlush(); // flush pending rendering commands into the dmabuf.
++    // Every other buffer now owes this frame's damage, which doBeginFrame()
++    // repaints the next time the consumer selects that buffer. No buffer needs
++    // a catch-up frame of its own: a frame with nothing to paint is not rendered
++    // and the consumer keeps showing the buffer it presented last (see
++    // trigger_refresh()). The full-output catch-up repaint this used to request
++    // while any buffer owed damage was new damage itself, so once anything
++    // changed, every later frame repainted the whole output.
+     for (int i = 0; i < m_bufCount; i++)
+         m_accumDamage[i] = m_accumDamage[i] + damagedDeviceRegion;
+-
+-    if (!damagedDeviceRegion.isEmpty())
+-        m_damageFlags = m_damageMask;
+-
+     m_accumDamage[m_currentIndex] = QRegion();
+ 
+-    m_damageFlags &= ~(uint8_t)(1 << m_currentIndex);
+-    if (m_damageFlags != 0)
+-        addRepaint(infiniteRegion());
+-
+     // Instead of CPU-blocking on glFinish, create a fence for the just-submitted
+     // GPU work and hand it to the consumer (via the transport). The consumer passes
+     // it to ANativeWindow_queueBuffer, so SurfaceFlinger waits on it GPU-side before
+     // scanout -- letting us submit the buffer before its render completes.
+     EGLNativeFence fence{m_backend->openglContext()->displayObject()};
+     const bool fenceValid = fence.isValid();
++    if (!fenceValid) {
++        // Nothing for the consumer to wait on: the frame must be complete
++        // before it is presented.
++        glFinish();
++    }
+     const int fenceFd = fence.takeFileDescriptor().take();
+     set_render_fence(m_display, fenceFd);
+     if (m_traceNextFrame) {
+diff --git a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anland_egl_backend.h
+index 1252a76..f3ccf14 100644
+--- a/src/backends/anland/anland_egl_backend.h
++++ b/src/backends/anland/anland_egl_backend.h
+@@ -59,8 +59,6 @@ private:
+ 
+     int m_bufCount = 0;
+     int m_currentIndex = 0;
+-    uint8_t m_damageFlags = 0;
+-    uint8_t m_damageMask = 0;
+     bool m_traceNextFrame = false;
+     std::array<std::shared_ptr<GLTexture>, MAX_BUFS> m_textures;
+     std::array<std::unique_ptr<GLFramebuffer>, MAX_BUFS> m_fbos;
+diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
+index 98464d3..3291d2a 100644
+--- a/src/backends/anland/anland_input.cpp
++++ b/src/backends/anland/anland_input.cpp
+@@ -30,6 +30,39 @@ static std::chrono::microseconds now()
+         std::chrono::steady_clock::now().time_since_epoch());
+ }
+ 
++// The consumer stamps the input it forwards with the time Android sampled it.
++// Stamping events when KWin reads them instead made their spacing jitter by as
++// much as a composite takes, which clients (and the X11 fling below) read as
++// changes in finger speed. Android uses the same CLOCK_MONOTONIC as
++// steady_clock; anything implausible falls back to the read time.
++static std::optional<std::chrono::microseconds> s_eventTime;
++static std::chrono::microseconds s_lastEventTime{0};
++static constexpr std::chrono::microseconds MaxEventAge = std::chrono::milliseconds(100);
++
++void setAnlandEventTime(std::optional<std::chrono::nanoseconds> time)
++{
++    if (time) {
++        s_eventTime = std::chrono::duration_cast<std::chrono::microseconds>(*time);
++    } else {
++        s_eventTime.reset();
++    }
++}
++
++// The time of the event being processed. Each stamp applies to one event, and
++// times never go backwards, whichever way an event was stamped.
++static std::chrono::microseconds eventTime()
++{
++    const auto current = now();
++    auto time = s_eventTime.value_or(current);
++    s_eventTime.reset();
++    if (time > current || current - time > MaxEventAge) {
++        time = current;
++    }
++    time = std::max(time, s_lastEventTime);
++    s_lastEventTime = time;
++    return time;
++}
++
+ // Qt (angleDelta is 12 times the value) and Xwayland (a wheel click per 10)
+ // read finger-scroll values as wheel steps, so a logical px of finger travel
+ // scrolled far more than a px. Calibrated by feel on the OnePlus Pad, so the
+@@ -44,7 +77,11 @@ using namespace std::chrono_literals;
+ static constexpr std::chrono::microseconds FlingSampleWindow = 100ms;
+ // Fingers resting before the lift mean no momentum, as on any touchpad.
+ static constexpr std::chrono::microseconds FlingMaxIdle = 50ms;
+-static constexpr std::chrono::milliseconds FlingInterval = 8ms;
++// The fling steps once per output frame, so each frame scrolls by exactly the
++// time since the last one; a free-running 8 ms timer beat against the vsync and
++// gave some frames two steps and others none. The timer only steps while no
++// frames come.
++static constexpr std::chrono::milliseconds FlingIdleInterval = 25ms;
+ static constexpr qreal FlingTimeConstant = 0.325;
+ static constexpr qreal FlingMinSpeed = 150;
+ static constexpr qreal FlingStopSpeed = 20;
+@@ -71,7 +108,8 @@ AnlandInputDevice::AnlandInputDevice(QObject *parent)
+     m_scrollFactor = m_config.readEntry("ScrollFactor", 1.0);
+ 
+     m_flingTimer.setTimerType(Qt::PreciseTimer);
+-    m_flingTimer.setInterval(FlingInterval);
++    m_flingTimer.setSingleShot(true);
++    m_flingTimer.setInterval(FlingIdleInterval);
+     connect(&m_flingTimer, &QTimer::timeout, this, &AnlandInputDevice::flingStep);
+ 
+     const bool registered = QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/kde/KWin/InputDevice/") + sysName(),
+@@ -163,13 +201,14 @@ bool AnlandInputDevice::isLidSwitch() const
+ // compositor-side, independent of client delivery.
+ void AnlandInputDevice::pointerMotionAbsolute(const QPointF &position)
+ {
+-    Q_EMIT InputDevice::pointerMotionAbsolute(position, now(), this);
++    Q_EMIT InputDevice::pointerMotionAbsolute(position, eventTime(), this);
+     Q_EMIT InputDevice::pointerFrame(this);
+ }
+ 
+ void AnlandInputDevice::pointerMotion(const QPointF &pos, const QPointF &delta, const QPointF &deltaUnaccel)
+ {
+-    if (m_flingTimer.isActive()) {
++    const auto time = eventTime();
++    if (m_flinging) {
+         m_flingMotion += std::hypot(delta.x(), delta.y());
+         if (m_flingMotion > FlingCancelMotion) {
+             cancelFling();
+@@ -179,8 +218,8 @@ void AnlandInputDevice::pointerMotion(const QPointF &pos, const QPointF &delta,
+     // goes first for wl_pointer.relative_motion, then the absolute one puts
+     // the cursor exactly where the host's is; the other way round left the
+     // cursor a step ahead of the host's.
+-    Q_EMIT InputDevice::pointerMotion(delta, deltaUnaccel, now(), this);
+-    Q_EMIT InputDevice::pointerMotionAbsolute(pos, now(), this);
++    Q_EMIT InputDevice::pointerMotion(delta, deltaUnaccel, time, this);
++    Q_EMIT InputDevice::pointerMotionAbsolute(pos, time, this);
+     Q_EMIT InputDevice::pointerFrame(this);
+ }
+ 
+@@ -189,7 +228,7 @@ void AnlandInputDevice::pointerButton(quint32 button, bool pressed)
+     cancelFling();
+     Q_EMIT pointerButtonChanged(button,
+                                 pressed ? PointerButtonState::Pressed : PointerButtonState::Released,
+-                                now(), this);
++                                eventTime(), this);
+     Q_EMIT InputDevice::pointerFrame(this);
+ }
+ 
+@@ -200,7 +239,7 @@ void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV
+         deltaV120 != 0 ? PointerAxisSource::Wheel : PointerAxisSource::Continuous;
+     // 6.x pointerAxisChanged carries an explicit "inverted" (natural scroll) flag;
+     // the daemon already delivers deltas in KWin's direction, so it is never set.
+-    Q_EMIT pointerAxisChanged(axis, delta, deltaV120, source, false, now(), this);
++    Q_EMIT pointerAxisChanged(axis, delta, deltaV120, source, false, eventTime(), this);
+     Q_EMIT InputDevice::pointerFrame(this);
+ }
+ 
+@@ -221,7 +260,7 @@ void AnlandInputDevice::pointerAxisFinger(PointerAxis axis, qreal delta)
+     }
+     cancelFling();
+     // Momentum works in finger travel (logical px), the gain applies on emit.
+-    const auto time = now();
++    const auto time = eventTime();
+     while (!m_scrollSamples.empty() && time - m_scrollSamples.front().time > FlingSampleWindow * 2) {
+         m_scrollSamples.pop_front();
+     }
+@@ -241,7 +280,8 @@ void AnlandInputDevice::pointerAxisFinger(PointerAxis axis, qreal delta)
+ 
+ void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
+ {
+-    Q_EMIT pointerAxisChanged(axis, 0, 0, PointerAxisSource::Finger, false, now(), this);
++    const auto time = eventTime();
++    Q_EMIT pointerAxisChanged(axis, 0, 0, PointerAxisSource::Finger, false, time, this);
+     Q_EMIT InputDevice::pointerFrame(this);
+     m_fingerScrolling = false;
+     m_scrollCarry = QPointF();
+@@ -249,8 +289,8 @@ void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
+         return sample.axis == axis;
+     });
+     if (scrolled) {
+-        startFling(axis);
+-    } else if (now() - m_flingStart > FlingMaxIdle) {
++        startFling(axis, time);
++    } else if (time - m_flingStart > FlingMaxIdle) {
+         // Fingers landing on the pad during momentum end a scroll that never
+         // moved, which stops it. The host ends a real scroll on both axes at
+         // once, so a younger fling was just started by the other axis.
+@@ -262,9 +302,8 @@ void AnlandInputDevice::pointerAxisStop(PointerAxis axis)
+ // tells them when), but X11 has no such event, so X11 windows (Firefox among
+ // them) stop dead. For those, keep scrolling here at the fingers' speed and
+ // let it decay, until anything touches the pad again.
+-void AnlandInputDevice::startFling(PointerAxis axis)
++void AnlandInputDevice::startFling(PointerAxis axis, std::chrono::microseconds time)
+ {
+-    const auto time = now();
+     qreal speed = 0;
+     const auto latest = std::find_if(m_scrollSamples.rbegin(), m_scrollSamples.rend(), [axis](const ScrollSample &sample) {
+         return sample.axis == axis;
+@@ -300,14 +339,22 @@ void AnlandInputDevice::startFling(PointerAxis axis)
+     } else {
+         m_flingVelocity.setX(speed);
+     }
+-    if (!m_flingTimer.isActive()) {
++    if (!m_flinging) {
++        m_flinging = true;
+         m_flingStart = time;
+-        m_flingLastStep = time;
++        m_flingLastStep = now();
+         m_flingMotion = 0;
+         m_flingTimer.start();
+     }
+ }
+ 
++void AnlandInputDevice::outputFrame()
++{
++    if (m_flinging) {
++        flingStep();
++    }
++}
++
+ void AnlandInputDevice::flingStep()
+ {
+     if (!pointerOverXwayland()) {
+@@ -329,11 +376,14 @@ void AnlandInputDevice::flingStep()
+     Q_EMIT InputDevice::pointerFrame(this);
+     if (std::hypot(m_flingVelocity.x(), m_flingVelocity.y()) < FlingStopSpeed) {
+         cancelFling();
++    } else {
++        m_flingTimer.start();
+     }
+ }
+ 
+ void AnlandInputDevice::cancelFling()
+ {
++    m_flinging = false;
+     m_flingTimer.stop();
+     m_flingVelocity = QPointF();
+ }
+@@ -341,7 +391,7 @@ void AnlandInputDevice::cancelFling()
+ void AnlandInputDevice::pointerPinch(quint32 phase, qreal scale)
+ {
+     cancelFling();
+-    const auto time = now();
++    const auto time = eventTime();
+     switch (phase) {
+     case PINCH_BEGIN:
+         if (m_pinching) {
+@@ -374,23 +424,23 @@ void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
+     cancelFling();
+     Q_EMIT keyChanged(keycode,
+                       pressed ? KeyboardKeyState::Pressed : KeyboardKeyState::Released,
+-                      now(), this);
++                      eventTime(), this);
+ }
+ 
+ void AnlandInputDevice::touchDown(qint32 id, const QPointF &position)
+ {
+     cancelFling();
+-    Q_EMIT InputDevice::touchDown(id, position, now(), this);
++    Q_EMIT InputDevice::touchDown(id, position, eventTime(), this);
+ }
+ 
+ void AnlandInputDevice::touchMotion(qint32 id, const QPointF &position)
+ {
+-    Q_EMIT InputDevice::touchMotion(id, position, now(), this);
++    Q_EMIT InputDevice::touchMotion(id, position, eventTime(), this);
+ }
+ 
+ void AnlandInputDevice::touchUp(qint32 id)
+ {
+-    Q_EMIT InputDevice::touchUp(id, now(), this);
++    Q_EMIT InputDevice::touchUp(id, eventTime(), this);
+ }
+ 
+ void AnlandInputDevice::touchFrame()
+@@ -574,7 +624,7 @@ AnlandTabletTool *AnlandTabletDevice::activeTool()
+ 
+ void AnlandTabletDevice::toolState(const QPointF &position, qreal pressure, quint32 flags)
+ {
+-    const auto time = now();
++    const auto time = eventTime();
+     const bool down = flags & TABLET_TOOL_TIP_DOWN;
+     const bool near = down || (flags & TABLET_TOOL_IN_PROXIMITY);
+     const bool eraser = flags & TABLET_TOOL_ERASER;
+diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
+index 72b6970..7d2cfca 100644
+--- a/src/backends/anland/anland_input.h
++++ b/src/backends/anland/anland_input.h
+@@ -28,12 +28,17 @@
+ 
+ #include <chrono>
+ #include <deque>
++#include <optional>
+ 
+ namespace KWin
+ {
+ 
+ class AnlandBackend;
+ 
++// Time stamp for the next input event: the CLOCK_MONOTONIC time Android
++// sampled it (INPUT_TYPE_EVENT_TIME), or nullopt to clear it.
++void setAnlandEventTime(std::optional<std::chrono::nanoseconds> time);
++
+ class AnlandInputDevice : public InputDevice
+ {
+     Q_OBJECT
+@@ -149,13 +154,15 @@ public:
+     void touchUp(qint32 id);
+     void touchFrame();
+     void touchCancel();
++    // The output starts a frame: advances an X11 fling by one step.
++    void outputFrame();
+ 
+ Q_SIGNALS:
+     void naturalScrollChanged();
+     void scrollFactorChanged();
+ 
+ private:
+-    void startFling(PointerAxis axis);
++    void startFling(PointerAxis axis, std::chrono::microseconds time);
+     void flingStep();
+     void cancelFling();
+ 
+@@ -177,6 +184,7 @@ private:
+     bool m_pinching = false;
+     std::deque<ScrollSample> m_scrollSamples;
+     QTimer m_flingTimer;
++    bool m_flinging = false;
+     QPointF m_flingVelocity;
+     std::chrono::microseconds m_flingStart{0};
+     std::chrono::microseconds m_flingLastStep{0};
+diff --git a/src/backends/anland/anland_output.cpp b/src/backends/anland/anland_output.cpp
+index d73b2f5..7ce557d 100644
+--- a/src/backends/anland/anland_output.cpp
++++ b/src/backends/anland/anland_output.cpp
+@@ -27,6 +27,14 @@ AnlandOutput::AnlandOutput(AnlandBackend *parent, const QString &name)
+         .model = QStringLiteral("anland"),
+         .internal = true,
+     });
++    // The consumer paces frames: it selects a buffer at the display's vsync and
++    // presents what KWin renders as soon as the render fence allows. The
++    // RenderLoop's own vblank prediction instead started each composite about a
++    // vblank after the select, minus the expected render time, and two vblanks
++    // after it when two selects came close together: latency on every frame and
++    // a dropped frame each time. With a margin of at least two vblanks (the
++    // RenderLoop's cap on the expected compositing time) it composites at once.
++    m_renderLoop->setPresentationSafetyMargin(std::chrono::milliseconds(100));
+ }
+ 
+ AnlandOutput::~AnlandOutput()
+diff --git a/src/backends/anland/display_producer.c b/src/backends/anland/display_producer.c
+index 8d0e896..7105105 100644
+--- a/src/backends/anland/display_producer.c
++++ b/src/backends/anland/display_producer.c
+@@ -23,6 +23,7 @@ struct display_ctx {
+     int      shm_fd;
+     int      audio_fd;        /* local end of the bidirectional audio socketpair (hello slot 4) */
+     int      pending_render_fence; /* render-done fence for the in-flight frame */
++    bool     frame_rendered;       /* the in-flight frame was rendered (set_render_fence) */
+     volatile uint32_t *shm_ptr;
+     uint32_t screen_w, screen_h;
+     uint32_t pixel_format;
+@@ -184,6 +185,7 @@ int connect_to_deamon(display_ctx **out, const char *socket_path)
+     ctx->shm_fd = -1;
+     ctx->audio_fd = -1;
+     ctx->pending_render_fence = -1;
++    ctx->frame_rendered = false;
+     ctx->shm_ptr = NULL;
+     ctx->fallback = true; // stay in fallback until try_exit_fallback() succeeds
+     for (int i = 0; i < MAX_BUFS; i++)
+@@ -252,10 +254,22 @@ void set_render_fence(display_ctx *ctx, int fence_fd)
+     if (ctx->pending_render_fence >= 0)
+         close(ctx->pending_render_fence);
+     ctx->pending_render_fence = fence_fd;
++    ctx->frame_rendered = true;
++}
++
++void discard_render_fence(display_ctx *ctx)
++{
++    if (ctx->pending_render_fence >= 0) {
++        close(ctx->pending_render_fence);
++        ctx->pending_render_fence = -1;
++    }
++    ctx->frame_rendered = false;
+ }
+ 
+ int trigger_refresh(display_ctx *ctx)
+ {
++    const bool rendered = ctx->frame_rendered;
++    ctx->frame_rendered = false;
+     if (ctx->fallback) {
+         if (ctx->pending_render_fence >= 0) {
+             close(ctx->pending_render_fence);
+@@ -274,8 +288,9 @@ int trigger_refresh(display_ctx *ctx)
+      * on our socket. In lockstep the consumer always drains, so the one-message
+      * buffer never fills; a momentary miss self-heals via the consumer's 5s
+      * poll->fallback rather than freezing the compositor. data_fd's reverse direction
+-     * is intentionally left unused (reserved for future extension). */
+-    char b = 0;
++     * is intentionally left unused (reserved for future extension). The byte says
++     * whether KWin rendered anything into the selected buffer (REFRESH_DONE_*). */
++    char b = rendered ? REFRESH_DONE_RENDERED : REFRESH_DONE_SKIPPED;
+     struct iovec iov = { .iov_base = &b, .iov_len = 1 };
+     union {
+         char buf[CMSG_SPACE(sizeof(int))];
+diff --git a/src/backends/anland/display_producer.h b/src/backends/anland/display_producer.h
+index 53a5cdd..4d2fef8 100644
+--- a/src/backends/anland/display_producer.h
++++ b/src/backends/anland/display_producer.h
+@@ -31,9 +31,14 @@ int  get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32
+ /* Stash the render-done fence (created in doEndFrame) for the current frame. The
+  * next trigger_refresh hands it to the consumer on the dedicated fence channel, so
+  * SurfaceFlinger waits on it GPU-side instead of the producer CPU-blocking.
+- * Takes ownership of fence_fd (-1 = none). */
++ * Takes ownership of fence_fd (-1 = none). Also marks the frame rendered: a frame
++ * that never reaches it is reported to the consumer as REFRESH_DONE_SKIPPED. */
+ void set_render_fence(display_ctx *ctx, int fence_fd);
+ 
++/* Drop the stashed fence of a frame that no consumer buffer was selected for, so
++ * it cannot be sent with (or mark as rendered) a later frame. */
++void discard_render_fence(display_ctx *ctx);
++
+ /* Signal the consumer that the current frame is done by sending one message (with
+  * the render fence, if any) on the dedicated fence channel. No-op in fallback. */
+ int  trigger_refresh(display_ctx *ctx);
+diff --git a/src/backends/anland/protocol.h b/src/backends/anland/protocol.h
+index 212f7c5..bf6e368 100644
+--- a/src/backends/anland/protocol.h
++++ b/src/backends/anland/protocol.h
+@@ -88,6 +88,11 @@ struct buf_info {
+ /* Touchpad pinch: a PINCH_* phase and the scale since the pinch began. */
+ #define INPUT_TYPE_POINTER_PINCH 17
+ 
++/* Portal: the CLOCK_MONOTONIC time, in ns as { lo, hi }, at which Android
++ * sampled the input event that follows in the same write. The producer stamps
++ * that event with it instead of the time it happened to read it. */
++#define INPUT_TYPE_EVENT_TIME 18
++
+ #define PINCH_BEGIN  0
+ #define PINCH_UPDATE 1
+ #define PINCH_END    2
+@@ -96,6 +101,13 @@ struct buf_info {
+ /* Service identifiers used by OUTPUT_TYPE_RESOURCES_REQUEST / INPUT_TYPE_RESOURCE. */
+ #define SERVICE_TYPE_CAMERA 1
+ 
++/* The byte of each render-done message on the fence channel. A frame KWin did
++ * not render leaves the selected buffer stale: the consumer must not present it
++ * and keeps showing the buffer it presented last. Older producers always send
++ * REFRESH_DONE_RENDERED. */
++#define REFRESH_DONE_RENDERED 0
++#define REFRESH_DONE_SKIPPED  1
++
+ #define INPUT_ACTION_DOWN    0
+ #define INPUT_ACTION_UP      1
+ #define INPUT_ACTION_MOVE    2
+@@ -144,6 +156,10 @@ struct InputEvent {
+             uint32_t phase; /* PINCH_* */
+             float    scale; /* relative to the start of the pinch */
+         } pointer_pinch;
++        struct {
++            uint32_t lo;
++            uint32_t hi;
++        } event_time;
+         struct {
+             uint32_t refresh_mhz; // current display refresh rate, milli-Hz
+         } display;
+-- 
+2.56.0
+

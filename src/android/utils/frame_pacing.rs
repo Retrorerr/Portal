@@ -278,12 +278,16 @@ extern "C" fn choreographer_vsync_callback(data: *const FrameCallbackData, state
     });
 }
 
-/// Give the NativeActivity thread Android's standard display priority after
-/// guest/audio workers have been spawned, so they retain normal scheduling.
-/// Failure is harmless and leaves the platform default unchanged.
+/// Give a frame-producing thread the priority Android gives a foreground
+/// app's UI thread and RenderThread, after guest/audio workers have been
+/// spawned so they keep normal scheduling. THREAD_PRIORITY_DISPLAY (-4) put
+/// the vsync and select threads below Portal's own idle helpers (-10), and a
+/// busy guest (nice 0) then delayed selects by milliseconds. These threads
+/// use little CPU, so they cannot starve the system. Failure is harmless and
+/// leaves the platform default unchanged.
 pub fn prioritize_current_render_thread() {
-    const THREAD_PRIORITY_DISPLAY: libc::c_int = -4;
-    let result = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, THREAD_PRIORITY_DISPLAY) };
+    const TOP_APP_FRAME_PRIORITY: libc::c_int = -10;
+    let result = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, TOP_APP_FRAME_PRIORITY) };
     if result != 0 {
         log::warn!(
             "Could not apply Android display-thread priority: {}",

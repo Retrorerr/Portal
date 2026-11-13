@@ -9,7 +9,8 @@ from scripts.build_qt_animation import build
 CORE = '_ZN16QCoreApplication4execEv'
 GUI = '_ZN15QGuiApplication4execEv'
 WIDGETS = '_ZN12QApplication4execEv'
-VERSION = '_Z8qVersionv'
+# Real Qt 5 mangles qVersion(); Qt 6 exports it as extern "C".
+VERSIONS = {5: '_Z8qVersionv', 6: 'qVersion'}
 INSTANCE = '_ZN13QUnifiedTimer8instanceEb'
 INTERVAL = '_ZN13QUnifiedTimer17setTimingIntervalEi'
 PRIMARY = '_ZN15QGuiApplication13primaryScreenEv'
@@ -33,6 +34,7 @@ class QtAnimationLoaderTests(unittest.TestCase):
                             '-Wl,--no-as-needed', *['-l:' + d for d in dependencies]], check=True)
         for major, minor in [(5, 15), (6, 8)]:
             tag = f'Qt_{major}'
+            VERSION = VERSIONS[major]
             core, gui, widgets = [f'libQt{major}{name}.so.{major}' for name in ('Core', 'Gui', 'Widgets')]
             shared(core, f'''static int interval = 16;
 const char *{VERSION}(void) {{ const char *v = __builtin_getenv("PORTAL_FAKE_QT_VERSION"); return v && {major} == 6 ? v : "{major}.{minor}.2"; }}

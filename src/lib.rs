@@ -83,10 +83,10 @@ pub mod android {
         pub mod capture_permissions;
         pub mod child_fds;
         pub mod compose_overlay;
+        pub mod desktop_frames;
         pub mod display_mode_request;
         pub mod frame_pacing;
         pub mod frame_rate;
-        pub mod fullscreen_immersive;
         pub mod ndk;
         pub mod pointer_capture;
         pub mod recovery_screen;

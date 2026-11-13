@@ -17,15 +17,6 @@
  * (forwarding it would turn every presented frame into a request for the
  * next one). The original functions always run, unchanged.
  *
- * The Anland layer's buffer catch-up is excluded too: after every frame its
- * doEndFrame() calls OutputLayer::addRepaint(infiniteRegion()) while another
- * window buffer still owes damage, and that full repaint makes every other
- * buffer owe damage again, so forwarding it would present forever. Effects
- * and scene repaints reach addRepaint() with real device rects, so only the
- * infinite region (KWin's infiniteRegion(), origin INT_MIN / 2) is muted.
- * The muted repaint is still recorded by KWin; it renders on the next
- * select, so skipping the hint never skips owed damage.
- *
  * A hint is one byte on a non-blocking datagram socket (ANLAND_DAMAGE_SOCKET,
  * default /tmp/anland/damage.sock). Every repaint request sends one: the host
  * presents one frame per hint, so a hint dropped after the host took the last
@@ -59,21 +50,10 @@ extern int close(int fd);
 
 #define SCHEDULE_REPAINT_SYMBOL \
     "_ZN4KWin10RenderLoop15scheduleRepaintEPNS_4ItemEPNS_11RenderLayerEPNS_11OutputLayerE"
-#define ADD_REPAINT_SYMBOL "_ZN4KWin11OutputLayer10addRepaintERK7QRegion"
 
 typedef void (*schedule_repaint_fn)(void *self, void *item, void *layer, void *output_layer);
-typedef void (*add_repaint_fn)(void *self, const void *region);
-
-/* QRect is four ints, returned in registers like this struct (AAPCS64). */
-struct qrect {
-    int x1, y1, x2, y2;
-};
-extern struct qrect _ZNK7QRegion12boundingRectEv(const void *region);
 
 static schedule_repaint_fn real_schedule_repaint;
-static add_repaint_fn real_add_repaint;
-/* KWin's compositing is single-threaded; set only around the muted call. */
-static int muting_catch_up;
 static int hint_fd = -1;
 static long long last_connect_ns = -1000000000LL;
 
@@ -136,7 +116,7 @@ __attribute__((visibility("default"))) void
 _ZN4KWin10RenderLoop15scheduleRepaintEPNS_4ItemEPNS_11RenderLayerEPNS_11OutputLayerE(
     void *self, void *item, void *layer, void *output_layer)
 {
-    if (!muting_catch_up && (item || layer || output_layer)) {
+    if (item || layer || output_layer) {
         damage_hint();
     }
     if (!real_schedule_repaint) {
@@ -146,19 +126,4 @@ _ZN4KWin10RenderLoop15scheduleRepaintEPNS_4ItemEPNS_11RenderLayerEPNS_11OutputLa
         }
     }
     real_schedule_repaint(self, item, layer, output_layer);
-}
-
-__attribute__((visibility("default"))) void
-_ZN4KWin11OutputLayer10addRepaintERK7QRegion(void *self, const void *region)
-{
-    if (!real_add_repaint) {
-        real_add_repaint = (add_repaint_fn)dlsym(RTLD_NEXT, ADD_REPAINT_SYMBOL);
-        if (!real_add_repaint) {
-            return;
-        }
-    }
-    const int infinite = _ZNK7QRegion12boundingRectEv(region).x1 <= -1000000000;
-    muting_catch_up += infinite;
-    real_add_repaint(self, region);
-    muting_catch_up -= infinite;
 }

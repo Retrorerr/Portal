@@ -11,7 +11,7 @@ directory inside Debian 13 (trixie) on a native ARM64 runner.
 | --- | --- |
 | Debian KWin 6.3.6 | `kwin_6.3.6.orig.tar.xz`, SHA-256 `27f2205f06d58f1d1f480d2a94ae24022c2f95b9c1fdc5a549f8e143713fce12` |
 | lfdevs Debian packaging with the Anland backend | [lfdevs/kwin](https://github.com/lfdevs/kwin) tag `anland-5.13-debian-4_6.3.6-95`, commit `beea4c3d22f08100b1b3acda1bd502e87bb1a347` |
-| Portal patches | `0001-*.patch` to `0007-*.patch` here, appended to the lfdevs quilt series |
+| Portal patches | `0001-*.patch` to `0012-*.patch` here, appended to the lfdevs quilt series |
 
 The lfdevs tag is the source of the `kwin` 4:6.3.6-95 packages installed in
 Portal's guest (lfdevs/anland-termux release 5.13.3, pinned in
@@ -45,6 +45,35 @@ Portal's guest (lfdevs/anland-termux release 5.13.3, pinned in
   While an override-redirect menu is mapped and an X client holds a pointer
   grab, KWin delivers such a press to Xwayland as a click at the same
   position and swallows it, as an X server grab would.
+* `0008` composites as soon as the consumer selects a buffer, instead of
+  about a vblank later by the RenderLoop's own prediction (two when selects
+  came close together, dropping a frame). It drops the full-output catch-up
+  repaint that, once anything changed, made every later frame repaint the
+  whole output: a frame with nothing to repaint is reported to the consumer
+  as skipped (`REFRESH_DONE_SKIPPED`), which keeps presenting its last
+  buffer. Input events carry the time Android sampled them
+  (`INPUT_TYPE_EVENT_TIME` 18) instead of the time KWin read them, and the
+  X11 touchpad fling steps once per output frame instead of on an 8 ms timer.
+* `0009` reads all input the consumer has written before handling a select.
+  The input socket and the buffer-ready eventfd are separate notifiers, so a
+  select dispatched first sent the frame's frame callbacks ahead of that
+  vsync's touch events: clients that sample input at their frame callback
+  (Qt Quick, Gecko) showed no motion for one frame and double the next.
+* `0010` stops KWin from repainting the output when nothing changed. The
+  scene layer's repaint request was cleared only together with a repaint
+  region it never has, so after the first repaint every frame request
+  rendered: each touch made the consumer present about 180 identical frames.
+  A frame that only serves a frame callback is now reported as skipped.
+* `0011` flushes input to clients as soon as it is applied, so it does not
+  leave in the same write as the frame callbacks of the composite that
+  follows. Qt dispatches frame callbacks on a separate thread and often drew
+  a frame before handling the touch that came with it.
+* `0012` lets the consumer choose the output transform. With the display a
+  quarter turn from the panel (a tablet in portrait), Portal allocates the
+  buffers in the panel's orientation and KWin renders rotated into them, so
+  Android's display controller scans them out instead of SurfaceFlinger
+  rotating every frame on the GPU. The transform arrives right after a
+  buffer set and is applied with the buffer size as one output change.
 
 The library is linked without `-Bsymbolic`, as Debian builds it, which
 `assets/guest-arm64/anland-damage.c` relies on to interpose KWin's repaint

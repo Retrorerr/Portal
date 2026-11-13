@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Portal <116828772+Retrorerr@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 18:20:00 +0000
+Subject: [PATCH] backends/anland: Send input before the frame callbacks
+
+Input applied for a select was queued to clients and only flushed when
+the event loop next blocked, after the composite the select starts. The
+input and that frame's callbacks then reached a client in one write. Qt
+dispatches frame callbacks on their own thread, so a Qt Quick client
+often handled the callback before the touch: about 8% of its frames
+during a drag showed no motion and the next showed twice as much.
+Flush client connections as soon as input has been applied.
+---
+ src/backends/anland/anland_backend.cpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -292,12 +292,23 @@
+     if (m_inFallback) return;
+ 
+     InputEvent ev;
++    bool applied = false;
+     while (poll_input_event(m_display, &ev, 0) > 0) {
+         processInputEvent(ev);
++        applied = true;
+         if (m_inFallback) break; // poll_input_event may have triggered fallback
+     }
+     // An event time belongs to the event written with it.
+     setAnlandEventTime(std::nullopt);
++
++    // Send the input now instead of when the event loop next blocks. A select
++    // composites right after this, and that frame's callbacks would otherwise
++    // leave in the same write as the input. Qt dispatches frame callbacks on
++    // their own thread, so a Qt Quick client then often handled the callback
++    // before the touch and drew the frame without it.
++    if (applied && !m_inFallback) {
++        waylandServer()->display()->flush();
++    }
+ }
+ 
+ /*
+-- 
+2.56.0
+

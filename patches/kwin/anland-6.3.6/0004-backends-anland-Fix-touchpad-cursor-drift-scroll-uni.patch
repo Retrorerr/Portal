@@ -1,5 +1,5 @@
 From 4983ff13a9bfd199cb86ac2b742ef5057b40aa5b Mon Sep 17 00:00:00 2001
-From: Portal <masobazee@gmail.com>
+From: Portal <116828772+Retrorerr@users.noreply.github.com>
 Date: Sun, 27 Sep 2026 12:29:50 +0100
 Subject: [PATCH] backends/anland: Fix touchpad cursor drift, scroll units and
  X11 momentum

@@ -12,6 +12,7 @@ use std::ffi::c_void;
 use std::os::raw::c_int;
 
 pub const QUERY_MIN_UNDEQUEUED_BUFFERS: c_int = 3;
+const QUERY_TRANSFORM_HINT: c_int = 8;
 pub const FORMAT_RGBA_8888: c_int = 1; // == AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM
 
 const ANW_API_CONNECT: c_int = 13;
@@ -167,6 +168,9 @@ pub struct AnwApi {
         'static,
         unsafe extern "C" fn(*mut c_void, *mut ANativeWindowBuffer, c_int) -> c_int,
     >,
+    /// `ANativeWindow_setBuffersTransform` (API 26); optional.
+    set_buffers_transform:
+        Option<libloading::Symbol<'static, unsafe extern "C" fn(*mut c_void, i32) -> i32>>,
     /// Platform `ANativeWindow_setSwapInterval` (API 30+); optional.
     set_swap_interval:
         Option<libloading::Symbol<'static, unsafe extern "C" fn(*mut c_void, c_int) -> c_int>>,
@@ -209,6 +213,7 @@ impl AnwApi {
                 dequeue_buffer: sym!(b"ANativeWindow_dequeueBuffer"),
                 queue_buffer: sym!(b"ANativeWindow_queueBuffer"),
                 cancel_buffer: sym!(b"ANativeWindow_cancelBuffer"),
+                set_buffers_transform: leaked.get(b"ANativeWindow_setBuffersTransform").ok(),
                 set_swap_interval: leaked.get(b"ANativeWindow_setSwapInterval").ok(),
             })
         }
@@ -348,6 +353,34 @@ impl AnwApi {
         }
     }
 
+    /// Rotation SurfaceFlinger applies to this window's buffers for the
+    /// display (`NATIVE_WINDOW_TRANSFORM_*`). `None` when the query fails or
+    /// buffer transforms cannot be set on this platform.
+    ///
+    /// # Safety
+    ///
+    /// `window` must be a live `ANativeWindow*` that this session owns.
+    pub unsafe fn transform_hint(&self, window: *mut c_void) -> Option<u32> {
+        self.set_buffers_transform.as_ref()?;
+        unsafe {
+            let mut value: c_int = 0;
+            let r = (self.query)(window as *const c_void, QUERY_TRANSFORM_HINT, &mut value);
+            (r == 0 && value >= 0).then_some(value as u32)
+        }
+    }
+
+    /// Tag the buffers queued from now on with a `NATIVE_WINDOW_TRANSFORM_*`.
+    ///
+    /// # Safety
+    ///
+    /// `window` must be a live `ANativeWindow*` that this session owns.
+    pub unsafe fn set_buffers_transform(&self, window: *mut c_void, transform: u32) -> c_int {
+        match self.set_buffers_transform.as_ref() {
+            Some(f) => unsafe { f(window, transform as i32) },
+            None => -1,
+        }
+    }
+
     /// Blocking dequeue. Returns (buffer, acquire fence or -1).
     /// The acquire fence must be waited on (or closed) by the caller.
     ///
@@ -382,7 +415,11 @@ impl AnwApi {
         buf: *mut ANativeWindowBuffer,
         fence: c_int,
     ) -> c_int {
-        unsafe { (self.queue_buffer)(window, buf, fence) }
+        let r = unsafe { (self.queue_buffer)(window, buf, fence) };
+        if r == 0 {
+            crate::android::utils::desktop_frames::presented();
+        }
+        r
     }
 
     /// # Safety

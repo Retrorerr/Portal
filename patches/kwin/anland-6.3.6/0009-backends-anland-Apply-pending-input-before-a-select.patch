@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Portal <116828772+Retrorerr@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 17:40:00 +0000
+Subject: [PATCH] backends/anland: Apply pending input before a select
+
+The consumer writes a vsync's input to the data socket before it selects
+the buffer for that vsync, but KWin watches the socket and the
+buffer-ready eventfd with separate notifiers. When both are ready, Qt can
+dispatch buffer-ready first, so the frame callbacks of the frame it
+schedules reach clients ahead of that vsync's input. A client that
+samples input at its frame callback (Qt Quick, Gecko) then shows no
+motion for one frame and twice the motion in the next: about one frame
+in twelve during a touch drag. Read all input already written before
+handling a select.
+---
+ src/backends/anland/anland_backend.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index ffffe35..552281d 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -518,6 +518,18 @@ void AnlandBackend::onBufferReady()
+         return;
+     }
+ 
++    // The consumer writes a vsync's input before it selects the buffer for
++    // that vsync, but the input socket and this eventfd are separate
++    // notifiers: when both are ready, Qt may dispatch this one first, and the
++    // frame callbacks of the frame it schedules then reach clients before the
++    // input does. A client that samples input at its frame callback (Qt Quick,
++    // Gecko) shows no motion for that frame and twice the motion in the next.
++    // Applying everything already written first makes the order explicit.
++    onInputReadable();
++    if (m_inFallback) {
++        return;
++    }
++
+     // The dmabuf set is already in hand (try_exit_fallback() received it when we
+     // left fallback), so buffer-ready is purely a frame-completion signal: drain
+     // the eventfd and pace the render cycle.
+-- 
+2.56.0

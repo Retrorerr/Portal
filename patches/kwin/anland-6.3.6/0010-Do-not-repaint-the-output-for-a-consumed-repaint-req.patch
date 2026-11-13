@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Portal <116828772+Retrorerr@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 17:55:00 +0000
+Subject: [PATCH] Do not repaint the output for a consumed repaint request
+
+RenderLayer::scheduleRepaint(Item *) marks the layer as needing a
+repaint, but Compositor::prePaintPass() cleared that mark only when the
+layer also had a repaint region of its own. The scene layer collects
+item repaints through its delegate and has no region, so once any item
+repainted, the mark stayed set and every later frame request rendered
+the whole scene. Anland requests a frame for every buffer the consumer
+selects, so each touch made KWin render and the consumer present about
+180 identical frames. Clear the mark once a frame has served it.
+
+A frame can still have nothing new when a client only asked for a frame
+callback. The Anland layer now reports such a frame as skipped, so the
+consumer keeps showing the identical frame it already presents.
+---
+ src/backends/anland/anland_egl_backend.cpp | 9 +++++++++
+ src/compositor.cpp                         | 7 ++++++-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
+index dc0917f..5b063d7 100644
+--- a/src/backends/anland/anland_egl_backend.cpp
++++ b/src/backends/anland/anland_egl_backend.cpp
+@@ -227,6 +227,15 @@ bool AnlandEglLayer::doEndFrame(const QRegion &renderedDeviceRegion, const QRegi
+         m_accumDamage[i] = m_accumDamage[i] + damagedDeviceRegion;
+     m_accumDamage[m_currentIndex] = QRegion();
+ 
++    if (damagedDeviceRegion.isEmpty()) {
++        // Nothing changed since the last rendered frame (a client asked only
++        // for a frame callback), and that frame is the one the consumer
++        // shows: report this one as skipped rather than present a copy. The
++        // repaint owed by this buffer is done either way.
++        discard_render_fence(m_display);
++        return true;
++    }
++
+     // Instead of CPU-blocking on glFinish, create a fence for the just-submitted
+     // GPU work and hand it to the consumer (via the transport). The consumer passes
+     // it to ANativeWindow_queueBuffer, so SurfaceFlinger waits on it GPU-side before
+diff --git a/src/compositor.cpp b/src/compositor.cpp
+index a94ed81..08e7619 100644
+--- a/src/compositor.cpp
++++ b/src/compositor.cpp
+@@ -145,8 +145,13 @@ void Compositor::prePaintPass(RenderLayer *layer, QRegion *damage)
+ {
+     if (const QRegion repaints = layer->repaints(); !repaints.isEmpty()) {
+         *damage += layer->mapToGlobal(repaints);
+-        layer->resetRepaints();
+     }
++    // This frame serves the layer's repaint request even when the layer has
++    // no region of its own: item repaints and frame requests are collected by
++    // its delegate below. Clearing the request only together with a region
++    // left it set on the scene layer forever, so every later frame request
++    // repainted the output with nothing new.
++    layer->resetRepaints();
+ 
+     const QRegion repaints = layer->delegate()->prePaint();
+     if (!repaints.isEmpty()) {
+-- 
+2.56.0
