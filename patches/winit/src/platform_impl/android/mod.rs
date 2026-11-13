@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use android_activity::input::{
-    self, Button, InputEvent, KeyAction, Keycode, MotionAction, ToolType,
+    self, Button, InputEvent, KeyAction, Keycode, MotionAction, Source, ToolType,
 };
 use android_activity::{
     AndroidApp, AndroidAppWaker, ConfigurationRef, InputStatus, MainEvent, Rect,
@@ -20,7 +20,6 @@ use crate::error;
 use crate::error::EventLoopError;
 use crate::event::{self, Event, Force, InnerSizeWriter, MouseButton, StartCause, WindowEvent};
 use crate::event_loop::{self, ActiveEventLoop as RootAEL, ControlFlow, DeviceEvents};
-use crate::platform::android::PointerShape;
 use crate::platform::pump_events::PumpStatus;
 use crate::platform_impl::Fullscreen;
 use crate::window::{
@@ -29,9 +28,6 @@ use crate::window::{
 };
 
 mod keycodes;
-mod pointer_class;
-
-use pointer_class::PointerClass;
 
 
 pub(crate) use crate::cursor::{
@@ -50,32 +46,6 @@ pub fn set_stylus_events(enabled: bool) {
 
 pub fn input_event_time_ns() -> i64 {
     INPUT_EVENT_TIME_NS.load(Ordering::Relaxed)
-}
-
-static POINTER_SHAPE_OBSERVER: std::sync::OnceLock<fn(&PointerShape)> = std::sync::OnceLock::new();
-/// The shapes already reported, most recent last.
-static SEEN_POINTER_SHAPES: Mutex<Vec<(i32, u32, u32, u32)>> = Mutex::new(Vec::new());
-/// Enough for every action of a handful of devices; later shapes go unreported.
-const MAX_POINTER_SHAPES: usize = 96;
-
-pub fn set_pointer_shape_observer(observer: fn(&PointerShape)) {
-    let _ = POINTER_SHAPE_OBSERVER.set(observer);
-}
-
-/// Report each distinct (device, source, tool, action) once.
-fn note_pointer_shape(shape: PointerShape) {
-    let Some(observer) = POINTER_SHAPE_OBSERVER.get() else {
-        return;
-    };
-    let key = (shape.device_id, shape.source, shape.tool_type, shape.action);
-    {
-        let mut seen = SEEN_POINTER_SHAPES.lock().unwrap_or_else(|e| e.into_inner());
-        if seen.last() == Some(&key) || seen.len() >= MAX_POINTER_SHAPES || seen.contains(&key) {
-            return;
-        }
-        seen.push(key);
-    }
-    observer(&shape);
 }
 
 /// Motion axes a stylus sample carries beyond X/Y.
@@ -892,23 +862,19 @@ impl<T: 'static> EventLoop<T> {
                     self.dispatch_stylus(motion_event, &pointer, action, tool_type, callback);
                     return;
                 }
-                let raw_source: u32 = source.into();
-                let class = pointer_class::classify(raw_source, tool_type.into());
-                note_pointer_shape(PointerShape {
-                    device_id: motion_event.device_id(),
-                    source: raw_source,
-                    tool_type: tool_type.into(),
-                    action: action.into(),
-                    button_state: motion_event.button_state().0,
-                    class: class.name(),
-                });
+                // On Samsung Dex, `tool_type()` still reports `Finger` when using built-in trackpad
+                // So we also check for `source()`, as it correctly reports `Mouse` (although other devices such as Desktop AVDs report `Unknown``)
 
-                if class != PointerClass::Touch {
+                if tool_type != ToolType::Finger
+                    || source == Source::Mouse
+                    || source == Source::Touchpad
+                {
                     let window_id = window::WindowId(WindowId);
                     let device_id = event::DeviceId(DeviceId(motion_event.device_id()));
 
-                    let is_touchpad = class == PointerClass::Touchpad;
-                    let is_mouse = class == PointerClass::Mouse;
+                    let is_touchpad = source == Source::Touchpad
+                        || (source == Source::Mouse && tool_type == ToolType::Finger);
+                    let is_mouse = source == Source::Mouse && tool_type != ToolType::Finger;
                     if is_touchpad {
                         self.last_touchpad_device_id = Some(device_id);
                     }
@@ -1025,7 +991,7 @@ impl<T: 'static> EventLoop<T> {
                                 event: WindowEvent::AndroidPointerMoved {
                                     device_id,
                                     android_device_id: motion_event.device_id(),
-                                    source: raw_source,
+                                    source: source.into(),
                                     tool_type: tool_type.into(),
                                     position: location,
                                 },
@@ -1171,12 +1137,35 @@ impl<T: 'static> EventLoop<T> {
                                     );
                                 }
                             },
-                            // Releases normally come before the Up, so this
-                            // covers a click that arrived as a bare Down/Up.
-                            MotionAction::Up | MotionAction::Cancel => {
+                            MotionAction::Up => {
                                 let released: Vec<MouseButton> =
                                     self.pressed_mouse_buttons.drain().collect();
-                                for btn in released {
+                                if released.is_empty() {
+                                    send_mouse_button(
+                                        callback,
+                                        self.window_target(),
+                                        window_id,
+                                        device_id,
+                                        event::ElementState::Released,
+                                        mapped_button,
+                                    );
+                                } else {
+                                    for btn in released {
+                                        send_mouse_button(
+                                            callback,
+                                            self.window_target(),
+                                            window_id,
+                                            device_id,
+                                            event::ElementState::Released,
+                                            btn,
+                                        );
+                                    }
+                                }
+                            },
+                            MotionAction::Cancel => {
+                                let cancelled: Vec<MouseButton> =
+                                    self.pressed_mouse_buttons.drain().collect();
+                                for btn in cancelled {
                                     send_mouse_button(
                                         callback,
                                         self.window_target(),
