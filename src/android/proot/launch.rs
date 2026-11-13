@@ -296,8 +296,7 @@ pub fn launch() {
         let started = Instant::now();
         let broker_environment = crate::android::clipboard::ClipboardBridge::broker_environment();
         // Project Anland: the GPU session needs its broker-socket dir, the
-        // Mesa freedreno overlay and the KWin Anland environment. QPainter
-        // sessions pass nothing extra (empty env + binds).
+        // Mesa freedreno overlay and the KWin Anland environment.
         let anland = crate::android::anland::is_anland_requested();
         let mut extra_env: Vec<(String, String)> = Vec::new();
         let mut extra_binds: Vec<crate::core::runtime::BindMount> = Vec::new();
@@ -328,6 +327,11 @@ pub fn launch() {
             );
         }
         extra_binds.extend(library_overlay_binds);
+        // Abstract AF_UNIX listener owned by ScreenInhibition in PortalActivity.
+        extra_env.push((
+            "PORTAL_SCREEN_INHIBIT_SOCKET".into(),
+            format!("portal-screen-inhibit.{}", std::process::id()),
+        ));
         let broker_environment = broker_environment.into_iter().chain(extra_env);
         let output = ArchProcess {
             // Graphical login is a fixed, validated unprivileged boundary;

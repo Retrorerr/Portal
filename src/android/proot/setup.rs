@@ -1487,6 +1487,7 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         }
     }
     write_executable(&fs_root.join("usr/local/bin/kwin_wayland"), KWIN_WRAPPER);
+    sync_screen_inhibition(fs_root);
     sync_bwrap_shim(fs_root);
     write_executable(
         &fs_root.join("usr/local/lib/portal/portal-flatpak-bwrap"),
@@ -2332,6 +2333,31 @@ fn install_camera_bridge(fs_root: &Path) {
 
 fn write_guest_binary(path: &Path, contents: &[u8]) {
     write_guest_binary_result(path, contents).expect("Failed to install guest binary");
+}
+
+fn sync_screen_inhibition(fs_root: &Path) {
+    let path = fs_root.join("usr/local/lib/portal/kwin-idle-inhibit.so");
+    let binary = include_bytes!("../../../assets/guest-arm64/kwin-idle-inhibit.so");
+    if !fs::read(&path).is_ok_and(|current| current == binary.as_slice()) {
+        if let Err(error) = write_guest_binary_result(&path, binary.as_slice()) {
+            log::warn!("KWin display inhibition bridge not installed: {error:#}");
+        }
+    }
+    write_executable(
+        &fs_root.join("usr/local/bin/portal-screen-inhibit"),
+        include_str!("../../../assets/portal-screen-inhibit.py"),
+    );
+    let services = fs_root.join("usr/local/share/dbus-1/services");
+    for name in [
+        "org.freedesktop.ScreenSaver",
+        "org.kde.Solid.PowerManagement",
+        "org.kde.Solid.PowerManagement.PolicyAgent",
+    ] {
+        write_default_file(
+            &services.join(format!("{name}.service")),
+            &format!("[D-BUS Service]\nName={name}\nExec=/usr/local/bin/portal-screen-inhibit\n"),
+        );
+    }
 }
 
 /// Qt animation timer at the display rate for every Qt Widgets app (Qt's

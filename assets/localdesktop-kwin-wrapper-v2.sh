@@ -215,6 +215,10 @@ else
         export LD_PRELOAD="/usr/local/lib/portal/anland-damage.so${LD_PRELOAD:+:$LD_PRELOAD}"
     fi
 fi
+# Both renderers use KWin's visibility rules for Wayland idle inhibitors.
+if [ -n "${PORTAL_SCREEN_INHIBIT_SOCKET:-}" ] && [ -r /usr/local/lib/portal/kwin-idle-inhibit.so ]; then
+    export LD_PRELOAD="/usr/local/lib/portal/kwin-idle-inhibit.so${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 export QT_FORCE_STDERR_LOGGING=1
 export QT_LOGGING_RULES="kwin_core.warning=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
 

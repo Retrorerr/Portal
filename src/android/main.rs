@@ -3,12 +3,7 @@ use crate::{
         accessibility::{register_event_loop_proxy, AppUserEvent},
         app::build::PolarBearApp,
         diagnostics, ime,
-        utils::{
-            application_context::ApplicationContext,
-            fullscreen_immersive::keep_screen_on,
-            ndk::run_in_jvm,
-            webview_handoff,
-        },
+        utils::{application_context::ApplicationContext, webview_handoff},
     },
     core::config,
 };
@@ -58,8 +53,6 @@ fn android_main(android_app: AndroidApp) {
     } else {
         android_logger::init_once(android_logger::Config::default().with_max_level(log_level));
     }
-
-    run_in_jvm(keep_screen_on, android_app.clone());
 
     // Resolve the bundled bridge once from the NativeActivity-attached thread.  Calling `hide`
     // is deliberately nonintrusive, but it exercises the same Activity class-loader path used
