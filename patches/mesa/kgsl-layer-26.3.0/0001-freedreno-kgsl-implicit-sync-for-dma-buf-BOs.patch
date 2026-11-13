@@ -1,5 +1,5 @@
 From 2133159b53ce9f46348c98e63dc339a0cb9211f6 Mon Sep 17 00:00:00 2001
-From: Retrorerr <masobazee@gmail.com>
+From: Retrorerr <116828772+Retrorerr@users.noreply.github.com>
 Date: Mon, 12 Oct 2026 20:17:21 +0100
 Subject: [PATCH] freedreno/kgsl: implicit sync for dma-buf BOs
 

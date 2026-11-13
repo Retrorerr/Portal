@@ -96,6 +96,31 @@ pub fn input_event_time_ns() -> i64 {
     time
 }
 
+/// The raw identity of an Android pointer event and how it was classified.
+#[derive(Clone, Copy, Debug)]
+pub struct PointerShape {
+    pub device_id: i32,
+    /// `MotionEvent.getSource()`.
+    pub source: u32,
+    /// `MotionEvent.getToolType()` of the acting pointer.
+    pub tool_type: u32,
+    /// `MotionEvent.getActionMasked()`.
+    pub action: u32,
+    /// `MotionEvent.getButtonState()`.
+    pub button_state: u32,
+    /// `mouse`, `touchpad`, `hover` or `touch`.
+    pub class: &'static str,
+}
+
+/// Call `observer` once for each distinct device, source, tool type and
+/// action a pointer event arrives with. Only the first observer is kept.
+pub fn set_pointer_shape_observer(observer: fn(&PointerShape)) {
+    #[cfg(android_platform)]
+    crate::platform_impl::set_pointer_shape_observer(observer);
+    #[cfg(not(android_platform))]
+    let _ = observer;
+}
+
 /// Additional methods on [`EventLoop`] that are specific to Android.
 pub trait EventLoopExtAndroid {
     /// Get the [`AndroidApp`] which was used to create this event loop.

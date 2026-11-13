@@ -1,5 +1,5 @@
 From 239e3c746b66eeaceebd04043f9af0000dfbfdf9 Mon Sep 17 00:00:00 2001
-From: Retrorerr <masobazee@gmail.com>
+From: Retrorerr <116828772+Retrorerr@users.noreply.github.com>
 Date: Tue, 13 Oct 2026 17:17:11 +0100
 Subject: [PATCH] freedreno/kgsl: keep merged submits' bos alive until the
  submit

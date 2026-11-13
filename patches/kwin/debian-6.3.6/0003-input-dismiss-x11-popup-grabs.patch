@@ -1,5 +1,5 @@
 From 6b86d11764b129f09dd18d9a8de940f64a5f1a4d Mon Sep 17 00:00:00 2001
-From: Portal <masobazee@gmail.com>
+From: Portal <116828772+Retrorerr@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 08:40:07 +0100
 Subject: [PATCH] input: Dismiss X11 popup grabs on presses outside Xwayland
 
