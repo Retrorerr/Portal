@@ -254,9 +254,9 @@ fn spawn_reader(device_id: i32, master: Arc<File>, stop: Arc<AtomicBool>) {
                     Ok(count) => count,
                 };
                 pending.extend_from_slice(&buffer[..count]);
-                let whole = pending.len() / INPUT_EVENT_SIZE * INPUT_EVENT_SIZE;
-                for record in pending[..whole].chunks_exact(INPUT_EVENT_SIZE) {
-                    let record: &[u8; INPUT_EVENT_SIZE] = record.try_into().unwrap();
+                let (records, _) = pending.as_chunks::<INPUT_EVENT_SIZE>();
+                let whole = records.len() * INPUT_EVENT_SIZE;
+                for record in records {
                     if let Some(rumble) = gamepad::parse_request(record).and_then(|request| effects.apply(request)) {
                         vibrate(device_id, rumble);
                     }
