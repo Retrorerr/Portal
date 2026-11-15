@@ -615,7 +615,7 @@ pub fn create_window(
         .map_err(|e| format!("Anland window handle failed: {e}"))?;
     match handle {
         RawWindowHandle::AndroidNdk(h) => {
-            // Lifecycle evidence (spike/game-activity-host): the GameActivity
+            // Lifecycle evidence: the GameActivity
             // SurfaceView ANativeWindow backing this Winit window. Anland
             // acquires and owns it for this surface generation; suspend
             // joins surface workers and releases it before Android destroys

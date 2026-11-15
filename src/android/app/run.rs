@@ -1080,7 +1080,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         if self.handle_initial_preferences_failure() {
             return;
         }
-        // SPIKE compose-setup: on the first process resume, show the Compose veil,
+        // On the first process resume, show the Compose veil,
         // then immediately continue the normal native resume path underneath it.
         // The Activity is never recreated; later resumes use the same paths below.
         // Presentation is acknowledged asynchronously: a reported show failure
@@ -1093,7 +1093,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 ),
                 PolarBearBackend::WebView(_) => (false, true),
             };
-            if compose_overlay::spike_should_show(renderer_active, is_webview) {
+            if compose_overlay::should_show(renderer_active, is_webview) {
                 let app = self.frontend.android_app.clone();
                 // Launch routing on the existing durable setup marker: a
                 // WebView backend means provisioning is still pending, so the
@@ -1122,10 +1122,10 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                     "wayland"
                 };
                 log::info!(
-                    "compose-spike: eager native startup requested exactly once target={target}; overlay retained"
+                    "compose-overlay: eager native startup requested exactly once target={target}; overlay retained"
                 );
                 crate::android::diagnostics::host_event(
-                    "compose-spike",
+                    "compose-overlay",
                     &format!("eager-native-start target={target}"),
                 );
             }
@@ -1157,7 +1157,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             if self.handle_setup_complete(event_loop) {
                 return;
             }
-            // SPIKE: the overlay owns the screen while up; keep the HTML fallback hidden.
+            // The overlay owns the screen while up; show the status screen only once it is gone.
             if compose_overlay::is_hidden() {
                 self.show_webview();
             }

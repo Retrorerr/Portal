@@ -1,6 +1,6 @@
 package app.polarbear.setup.components
 
-// SPIKE-ONLY: sliding segmented control with ONE inset selection surface
+// Sliding segmented control with ONE inset selection surface
 // that glides between options. The pill moves like a drop of liquid: its
 // leading edge springs ahead and the trailing edge follows, so it stretches
 // toward the new option and settles back to size. Both edges are critically

@@ -1,6 +1,6 @@
 package app.polarbear
 
-// SPIKE-ONLY (branch spike/game-activity-host): native Android launch host.
+// Native Android launch host.
 //
 // A com.google.androidgamesdk.GameActivity (4.4.0) subclass. It preserves
 // Portal's Android-native shell behaviour while giving the app a normal

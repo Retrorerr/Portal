@@ -1,6 +1,6 @@
 package app.polarbear.setup
 
-// SPIKE-ONLY (branch compose-setup-spike): Portal CONFIGURE screen tokens.
+// Portal CONFIGURE screen tokens.
 // Official palette: charcoal #191B1C, ivory #F1EBDD, orange #F07949.
 // Dark is the primary target; light stays coherent. Appearance follows the
 // Android system theme unless the user picks Dark/Light for preview.

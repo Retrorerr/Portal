@@ -1,6 +1,6 @@
 package app.polarbear.setup.components
 
-// SPIKE-ONLY: smooth color transitions. (Compose 1.7 hides the legacy
+// Smooth color transitions. (Compose 1.7 hides the legacy
 // single-value animateColorAsState entry point, so this uses the supported
 // generic animateValueAsState with an explicit Color converter.)
 

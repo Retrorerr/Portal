@@ -1,6 +1,6 @@
 package app.polarbear.setup
 
-// SPIKE-ONLY (branch compose-setup-spike): Portal first-run CONFIGURE
+// Portal first-run CONFIGURE
 // screen. Compose owns only the presentation and local selections. The
 // process-lifetime Rust coordinator owns installation and publishes the
 // durable provisioning snapshot consumed below.

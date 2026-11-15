@@ -1,6 +1,6 @@
 package app.polarbear.setup.components
 
-// SPIKE-ONLY: thin Portal wrapper driving the vendored upstream
+// Thin Portal wrapper driving the vendored upstream
 // PulsingBorder shader (../vendor/papershaders). Uniform application mirrors
 // upstream PulsingBorderShader.apply() and the shared setGlobalUniforms
 // behaviour exactly (same uniform names, same color-array packing, same

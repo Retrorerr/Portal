@@ -1,6 +1,6 @@
 package app.polarbear.setup.components
 
-// SPIKE-ONLY: static Portal bloom — a faint constant full-silhouette glow
+// Static Portal bloom — a faint constant full-silhouette glow
 // rendered with Android framework Paint + BlurMaskFilter (OUTER halo +
 // NORMAL broad falloff), the same technique family as the Apache-2.0
 // StarkDroid/compose-ShadowGlow project. The animated atmospheric layer

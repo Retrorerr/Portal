@@ -1,5 +1,4 @@
-//! SPIKE-ONLY (branch `spike/game-activity-host`): Rust side of the Kotlin +
-//! Jetpack Compose fullscreen setup overlay.
+//! Rust side of the Kotlin + Jetpack Compose fullscreen setup overlay.
 //!
 //! The overlay is a `ComposeView` in a fullscreen sibling `FrameLayout` added
 //! to GameActivity's own root (directly above the native
@@ -40,12 +39,7 @@ use std::sync::{
 };
 use winit::platform::android::activity::AndroidApp;
 
-/// Use the Compose overlay for setup/recovery screens on this spike branch.
-/// The HTML WebView code paths are retained as fallback but are not shown
-/// while this is true.
-pub const SPIKE_USE_COMPOSE: bool = true;
-
-/// Overlay state strings shown in the spike UI (must match the Kotlin side).
+/// Overlay state strings shown in the overlay UI (must match the Kotlin side).
 pub const STATE_IDLE: &str = "Idle";
 pub const STATE_STARTING: &str = "Starting";
 pub const STATE_READY: &str = "Desktop ready";
@@ -423,8 +417,8 @@ pub fn publish_current_anland_repair_state(android_app: &AndroidApp) {
 /// the backend still needs setup (WebView) or the Wayland renderer has not
 /// been bound. Later resumes (rotation, suspend/resume, retry) always use the
 /// normal paths so surface lifecycle, input, IME, and recovery keep working.
-pub fn spike_should_show(renderer_active: bool, is_webview: bool) -> bool {
-    if !SPIKE_USE_COMPOSE || SHOW_REQUESTED.load(Ordering::Acquire) {
+pub fn should_show(renderer_active: bool, is_webview: bool) -> bool {
+    if SHOW_REQUESTED.load(Ordering::Acquire) {
         return false;
     }
     is_webview || !renderer_active
@@ -511,7 +505,7 @@ fn show_compose_overlay_with(android_app: &AndroidApp, method: &str) {
         },
         android_app.clone(),
     );
-    crate::android::diagnostics::host_event("compose-spike", "overlay-show-requested");
+    crate::android::diagnostics::host_event("compose-overlay", "overlay-show-requested");
     // Preserve a readiness signal that raced ahead of Kotlin presentation.
     // Kotlin stores it even when the ComposeView does not exist yet.
     if DESKTOP_READY.load(Ordering::Acquire) {
@@ -758,8 +752,8 @@ pub fn notify_desktop_ready(android_app: &AndroidApp) {
     if DESKTOP_READY.swap(true, Ordering::AcqRel) {
         return;
     }
-    log::info!("compose-spike: native desktop ready latched; overlay remains fully visible");
-    crate::android::diagnostics::host_event("compose-spike", "desktop-ready overlay-retained");
+    log::info!("compose-overlay: native desktop ready latched; overlay remains fully visible");
+    crate::android::diagnostics::host_event("compose-overlay", "desktop-ready overlay-retained");
     publish_desktop_ready(android_app, true);
     if crate::android::anland::is_anland_requested() {
         crate::android::proot::mesa_layer::trial_after_desktop_ready();
@@ -774,8 +768,8 @@ pub fn notify_desktop_suspended(android_app: &AndroidApp) {
     if !DESKTOP_READY.swap(false, Ordering::AcqRel) {
         return;
     }
-    log::info!("compose-spike: native desktop readiness cleared for surface suspend");
-    crate::android::diagnostics::host_event("compose-spike", "desktop-ready-cleared suspend");
+    log::info!("compose-overlay: native desktop readiness cleared for surface suspend");
+    crate::android::diagnostics::host_event("compose-overlay", "desktop-ready-cleared suspend");
     publish_desktop_ready(android_app, false);
 }
 
@@ -800,8 +794,8 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnRevealCommitted
     }
     if matches!(state(), OverlayState::Showing | OverlayState::Visible) {
         set_state(OverlayState::Dismissing);
-        log::info!("compose-spike: final reveal committed; awaiting offscreen removal");
-        crate::android::diagnostics::host_event("compose-spike", "reveal-committed");
+        log::info!("compose-overlay: final reveal committed; awaiting offscreen removal");
+        crate::android::diagnostics::host_event("compose-overlay", "reveal-committed");
     }
 }
 
@@ -814,8 +808,8 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayShown(
 ) {
     if state() == OverlayState::Showing {
         set_state(OverlayState::Visible);
-        log::info!("compose-spike: overlay presentation confirmed");
-        crate::android::diagnostics::host_event("compose-spike", "overlay-visible");
+        log::info!("compose-overlay: overlay presentation confirmed");
+        crate::android::diagnostics::host_event("compose-overlay", "overlay-visible");
     }
     if DESKTOP_READY.load(Ordering::Acquire) {
         // A native frame can arrive between the show request and this
@@ -1036,9 +1030,9 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRequestAnlandRepa
 }
 
 fn on_overlay_show_failed(reason: &str) {
-    log::error!("compose-spike: overlay show failed: {reason}");
+    log::error!("compose-overlay: overlay show failed: {reason}");
     crate::android::diagnostics::host_event(
-        "compose-spike",
+        "compose-overlay",
         &format!("overlay-show-failed reason={reason}"),
     );
     if state() == OverlayState::Showing {
@@ -1058,7 +1052,7 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayRemoved(
 ) {
     set_state(OverlayState::Hidden);
     REVEAL_COMMITTED.store(false, Ordering::Release);
-    log::info!("compose-spike: overlay hierarchy removed; native surface undisturbed");
-    crate::android::diagnostics::host_event("compose-spike", "overlay-removed");
+    log::info!("compose-overlay: overlay hierarchy removed; native surface undisturbed");
+    crate::android::diagnostics::host_event("compose-overlay", "overlay-removed");
     super::webview_handoff::wake_event_loop();
 }

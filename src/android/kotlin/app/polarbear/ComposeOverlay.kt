@@ -1,6 +1,6 @@
 package app.polarbear
 
-// SPIKE-ONLY (branch spike/game-activity-host): minimal Jetpack Compose
+// Minimal Jetpack Compose
 // fullscreen setup UI hosted as a normal sibling View in the GameActivity
 // window.
 //
@@ -44,7 +44,7 @@ import app.polarbear.setup.PortalLaunchTransition
 import java.util.concurrent.atomic.AtomicBoolean
 
 object ComposeOverlay {
-    private const val TAG = "PortalComposeSpike"
+    private const val TAG = "PortalComposeOverlay"
     const val STATE_IDLE = "Idle"
     const val STATE_STARTING = "Starting"
     const val STATE_READY = "Desktop ready"
