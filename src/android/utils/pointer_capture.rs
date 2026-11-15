@@ -21,13 +21,13 @@ use winit::platform::android::activity::AndroidApp;
 use crate::android::anland::AnlandPointerSink;
 
 fn app_slot() -> &'static Mutex<Option<AndroidApp>> {
-    static APP: OnceLock<Mutex<Option<AndroidApp>>> = OnceLock::new();
-    APP.get_or_init(|| Mutex::new(None))
+    static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
+    &APP
 }
 
 fn sink_slot() -> &'static Mutex<Option<AnlandPointerSink>> {
-    static SINK: OnceLock<Mutex<Option<AnlandPointerSink>>> = OnceLock::new();
-    SINK.get_or_init(|| Mutex::new(None))
+    static SINK: Mutex<Option<AnlandPointerSink>> = Mutex::new(None);
+    &SINK
 }
 
 /// Logical px per raw mouse count: KWin divides host deltas by its output

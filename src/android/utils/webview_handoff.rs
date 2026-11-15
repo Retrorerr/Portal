@@ -7,11 +7,11 @@
 use crate::android::accessibility::AppUserEvent;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex, OnceLock,
+    Mutex,
 };
 use winit::{event_loop::EventLoopProxy, platform::android::activity::AndroidApp};
 
-static EVENT_LOOP_PROXY: OnceLock<Mutex<Option<EventLoopProxy<AppUserEvent>>>> = OnceLock::new();
+static EVENT_LOOP_PROXY: Mutex<Option<EventLoopProxy<AppUserEvent>>> = Mutex::new(None);
 /// Transient event-loop wake only. The durable runtime marker is the sole
 /// installation truth; this bit is never consulted as proof that setup
 /// succeeded.
@@ -23,7 +23,7 @@ static SETUP_HANDOFF_PENDING: AtomicBool = AtomicBool::new(false);
 static INITIAL_PREFERENCES_HANDOFF_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn event_loop_proxy() -> &'static Mutex<Option<EventLoopProxy<AppUserEvent>>> {
-    EVENT_LOOP_PROXY.get_or_init(|| Mutex::new(None))
+    &EVENT_LOOP_PROXY
 }
 
 pub fn register_event_loop_proxy(proxy: EventLoopProxy<AppUserEvent>) {

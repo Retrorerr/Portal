@@ -26,7 +26,7 @@ use crate::core::ime_policy::{CommitQueue, TapDetector};
 
 static COMMITS: OnceLock<Mutex<CommitQueue>> = OnceLock::new();
 static TAPS: Mutex<TapDetector> = Mutex::new(TapDetector::new());
-static EVENT_LOOP_PROXY: OnceLock<Mutex<Option<EventLoopProxy<AppUserEvent>>>> = OnceLock::new();
+static EVENT_LOOP_PROXY: Mutex<Option<EventLoopProxy<AppUserEvent>>> = Mutex::new(None);
 static HARDWARE_KEYBOARD_PRESENT: AtomicBool = AtomicBool::new(false);
 static DESKTOP_INPUT_PRESENT: AtomicBool = AtomicBool::new(true);
 // -1 hide, 0 unchanged, 1 show, 2 read current focus and keyboard state.
@@ -46,7 +46,7 @@ fn commits() -> &'static Mutex<CommitQueue> {
 }
 
 fn event_loop_proxy() -> &'static Mutex<Option<EventLoopProxy<AppUserEvent>>> {
-    EVENT_LOOP_PROXY.get_or_init(|| Mutex::new(None))
+    &EVENT_LOOP_PROXY
 }
 
 /// Register the winit proxy used to wake a waiting event loop after Android commits text.

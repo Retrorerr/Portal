@@ -59,8 +59,8 @@ pub fn target_millihz() -> Option<u32> {
 }
 
 fn app_slot() -> &'static Mutex<Option<AndroidApp>> {
-    static APP: OnceLock<Mutex<Option<AndroidApp>>> = OnceLock::new();
-    APP.get_or_init(|| Mutex::new(None))
+    static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
+    &APP
 }
 
 fn worker() -> Option<&'static Mutex<mpsc::Sender<bool>>> {

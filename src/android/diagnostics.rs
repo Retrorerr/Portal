@@ -51,10 +51,10 @@ static PATHS: OnceLock<Paths> = OnceLock::new();
 /// Open append handles with their current length, so a log line costs one
 /// write instead of mkdir + stat + open + close on every call (this runs for
 /// every host log record and every guest stdout line).
-static FILE_LOCK: OnceLock<Mutex<Vec<(PathBuf, File, u64)>>> = OnceLock::new();
+static FILE_LOCK: Mutex<Vec<(PathBuf, File, u64)>> = Mutex::new(Vec::new());
 
 fn lock() -> &'static Mutex<Vec<(PathBuf, File, u64)>> {
-    FILE_LOCK.get_or_init(|| Mutex::new(Vec::new()))
+    &FILE_LOCK
 }
 
 fn now_ms() -> u128 {

@@ -20,8 +20,8 @@ use winit::platform::android::activity::AndroidApp;
 use crate::android::backend::pipewire_standalone_aaudio::{self, CaptureKind};
 
 fn app_slot() -> &'static Mutex<Option<AndroidApp>> {
-    static APP: OnceLock<Mutex<Option<AndroidApp>>> = OnceLock::new();
-    APP.get_or_init(|| Mutex::new(None))
+    static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
+    &APP
 }
 
 fn worker() -> Option<&'static Mutex<mpsc::Sender<CaptureKind>>> {

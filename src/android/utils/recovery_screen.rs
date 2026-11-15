@@ -11,7 +11,7 @@ use jni::{
     sys::_jobject,
     JNIEnv,
 };
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use winit::platform::android::activity::AndroidApp;
 
 const RECOVERY_DOTTED_CLASS: &str = "app.polarbear.RecoveryScreen";
@@ -26,10 +26,10 @@ pub enum RecoveryKind {
 }
 
 /// Activity used by the diagnostics export, which runs off the event loop.
-static APP: OnceLock<Mutex<Option<AndroidApp>>> = OnceLock::new();
+static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 
 fn app_slot() -> &'static Mutex<Option<AndroidApp>> {
-    APP.get_or_init(|| Mutex::new(None))
+    &APP
 }
 
 fn activity_object(android_app: &AndroidApp) -> JObject<'static> {

@@ -15,7 +15,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc::{self, Sender},
-    Arc, Mutex, OnceLock,
+    Arc, Mutex,
 };
 use std::thread;
 
@@ -39,10 +39,10 @@ pub struct BrokerHandle {
     subscribers: Subscribers,
 }
 
-static ACTIVE_ENVIRONMENT: OnceLock<Mutex<Option<BrokerEnvironment>>> = OnceLock::new();
+static ACTIVE_ENVIRONMENT: Mutex<Option<BrokerEnvironment>> = Mutex::new(None);
 
 fn active_environment() -> &'static Mutex<Option<BrokerEnvironment>> {
-    ACTIVE_ENVIRONMENT.get_or_init(|| Mutex::new(None))
+    &ACTIVE_ENVIRONMENT
 }
 
 /// Return the broker variables to inject into the PRoot Plasma process.

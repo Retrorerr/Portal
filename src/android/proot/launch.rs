@@ -25,10 +25,10 @@ fn launch_state() -> &'static Mutex<LaunchState> {
     LAUNCH_STATE.get_or_init(|| Mutex::new(LaunchState::default()))
 }
 
-static LAUNCH_FAILURE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static LAUNCH_FAILURE: Mutex<Option<String>> = Mutex::new(None);
 
 fn launch_failure() -> &'static Mutex<Option<String>> {
-    LAUNCH_FAILURE.get_or_init(|| Mutex::new(None))
+    &LAUNCH_FAILURE
 }
 
 fn report_failure(reason: impl Into<String>) {

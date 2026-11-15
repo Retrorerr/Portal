@@ -36,7 +36,7 @@ use jni::{
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex, OnceLock,
+    Mutex,
 };
 use winit::platform::android::activity::AndroidApp;
 
@@ -71,8 +71,8 @@ pub enum OverlayState {
 }
 
 fn overlay_state() -> &'static Mutex<OverlayState> {
-    static STATE: OnceLock<Mutex<OverlayState>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(OverlayState::Hidden))
+    static STATE: Mutex<OverlayState> = Mutex::new(OverlayState::Hidden);
+    &STATE
 }
 
 fn state() -> OverlayState {
@@ -217,10 +217,10 @@ fn activity_object(android_app: &AndroidApp) -> JObject<'static> {
 /// Cached activity handle from the last overlay show, so readiness paths that
 /// run off the event loop (e.g. the Anland consumer thread) can dismiss the
 /// overlay without owning an `AndroidApp`.
-static CACHED_APP: OnceLock<Mutex<Option<AndroidApp>>> = OnceLock::new();
+static CACHED_APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 
 fn cached_app() -> &'static Mutex<Option<AndroidApp>> {
-    CACHED_APP.get_or_init(|| Mutex::new(None))
+    &CACHED_APP
 }
 
 /// Resolve the overlay class through the Activity's class loader.
