@@ -7,7 +7,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.AtomicFile
@@ -78,6 +77,8 @@ object FileTransfers {
     private var initializing = false
     private var listingGeneration = 0
     private var home = ""
+    private var interruptedImports = emptySet<String>()
+    private var cleaningImports = false
     private var pendingSave = emptyList<GuestFile>()
     private var pick: (() -> Unit)? = null
     private var save: ((Intent) -> Unit)? = null
@@ -129,6 +130,7 @@ object FileTransfers {
     }
 
     fun open() {
+        cleanInterruptedImports()
         if (home.isNotEmpty()) {
             if (!folder.loading && folder.id.isNotEmpty()) browse(folder.id, keepSelection = true)
             return
@@ -419,11 +421,13 @@ object FileTransfers {
 
     private fun persist(): java.util.concurrent.Future<*> {
         val state = JSONArray()
-        val retained = items.filter { it.phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling) }.map { it.id }.toSet() + items.takeLast(200).map { it.id }
+        val retained = items.filter { it.phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling) }
+            .map { it.id }.toSet() + interruptedImports + items.takeLast(200).map { it.id }
         items.filter { it.id in retained }.forEach { item -> state.put(JSONObject().put("id", item.id).put("name", item.name)
             .put("kind", item.kind.name).put("phase", item.phase.name).put("source", item.source)
             .put("destination", item.destination).put("total", item.total)
-            .put("output", item.output).put("permission", item.permission)) }
+            .put("output", item.output).put("permission", item.permission)
+            .put("importCleanupPending", item.id in interruptedImports)) }
         val bytes = state.toString().toByteArray()
         return journal.submit {
             val atomic = AtomicFile(File(app.filesDir, "file-transfers.json"))
@@ -436,20 +440,27 @@ object FileTransfers {
     private fun restore() {
         runCatching {
             val state = JSONArray(String(AtomicFile(File(app.filesDir, "file-transfers.json")).readFully()))
+            val pendingImports = mutableSetOf<String>()
             items = (0 until state.length()).mapNotNull { index ->
                 val value = state.getJSONObject(index)
                 if (value.getString("kind") == "Prepare") return@mapNotNull null
+                val id = value.getString("id")
+                val kind = TransferKind.valueOf(value.getString("kind"))
                 var phase = TransferPhase.valueOf(value.getString("phase"))
-                if (phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling)) phase = TransferPhase.Interrupted
-                TransferItem(value.getString("id"), value.getString("name"), TransferKind.valueOf(value.getString("kind")),
+                val wasActive = phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling)
+                if (kind == TransferKind.Import &&
+                    (wasActive || phase == TransferPhase.Interrupted && value.optBoolean("importCleanupPending", true))) {
+                    pendingImports.add(id)
+                }
+                if (wasActive) phase = TransferPhase.Interrupted
+                TransferItem(id, value.getString("name"), kind,
                     phase, total = value.optLong("total", -1), source = value.getString("source"),
                     destination = value.getString("destination"),
                     output = value.optString("output").takeUnless { it.isEmpty() || it == "null" },
                     permission = value.optString("permission").takeUnless { it.isEmpty() || it == "null" })
             }
-            items.filter { it.phase == TransferPhase.Interrupted && it.kind == TransferKind.Import }.forEach { item ->
-                work.execute { runCatching { run(JSONObject().put("action", "cleanup").put("directory", item.destination).put("job", item.id)) } }
-            }
+            interruptedImports = pendingImports
+            cleanInterruptedImports()
             val interruptedSaves = items.filter { it.phase == TransferPhase.Interrupted && it.kind == TransferKind.Save }
             val permissions = items.mapNotNull { it.permission }.toSet()
             work.execute {
@@ -460,6 +471,27 @@ object FileTransfers {
                 main.post { permissions.forEach(::releaseSavePermission) }
             }
 
+        }
+    }
+
+    /** The Activity can restore the journal before native startup or guest assets are ready. */
+    internal fun cleanInterruptedImports() {
+        if (!ComposeOverlay.desktopIsReady() || cleaningImports || interruptedImports.isEmpty()) return
+        val pending = items.filter { it.id in interruptedImports }
+        cleaningImports = true
+        work.execute {
+            val cleaned = pending.filter { item ->
+                runCatching {
+                    run(JSONObject().put("action", "cleanup").put("directory", item.destination).put("job", item.id))
+                }.isSuccess
+            }
+            main.post {
+                cleaningImports = false
+                if (cleaned.isNotEmpty()) {
+                    interruptedImports = interruptedImports - cleaned.map { it.id }.toSet()
+                    persist()
+                }
+            }
         }
     }
 

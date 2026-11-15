@@ -1,9 +1,19 @@
 #[path = "../src/core/provisioning.rs"]
 #[allow(dead_code)]
-mod provisioning;
+pub(crate) mod provisioning;
 #[path = "../src/core/runtime.rs"]
 #[allow(dead_code)]
 mod runtime;
+
+mod core {
+    pub(crate) use super::provisioning;
+    pub(crate) use localdesktop::core::{config, update_sources};
+}
+
+#[path = "../src/android/update_net.rs"]
+#[allow(dead_code)]
+mod update_net;
+
 use provisioning::{
     begin_installation, InstallOperationState, InstallStart, ProvisioningPhase,
     ProvisioningSnapshot, RuntimeArtifact, IMAGE_MARKER, IMAGE_READY_MARKER, PARTIAL_ARCHIVE,
@@ -16,7 +26,7 @@ use std::{fs, io::Write, path::Path};
 /// hard failure is retried, so a server that only answers once would leave the
 /// retry on a closed port, which provisioning waits out as being offline.
 fn serve(
-    respond: impl Fn(&mut std::net::TcpStream) + Send + 'static,
+    respond: impl Fn(&mut std::net::TcpStream, &str) + Send + 'static,
 ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     use std::io::Read;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -29,21 +39,150 @@ fn serve(
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
             let mut request = Vec::new();
             let mut byte = [0];
-            while !request.ends_with(b"
-
-") {
+            while !request.ends_with(b"\r\n\r\n") {
                 if stream.read_exact(&mut byte).is_err() {
                     break;
                 }
                 request.push(byte[0]);
             }
-            seen.lock()
-                .unwrap()
-                .push(String::from_utf8_lossy(&request).to_lowercase());
-            respond(&mut stream);
+            let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            seen.lock().unwrap().push(request.clone());
+            respond(&mut stream, &request);
         }
     });
     (url, requests)
+}
+
+#[test]
+fn app_update_reads_small_json_and_rejects_oversized_json() {
+    let (url, _) = serve(|stream, _| {
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}");
+    });
+    assert_eq!(
+        update_net::get_json::<serde_json::Value>(&url).unwrap()["ok"],
+        true
+    );
+
+    for chunked in [false, true] {
+        let (url, _) = serve(move |stream, _| {
+            let limit = 4 * 1024 * 1024;
+            if chunked {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+                    limit + 1
+                );
+                let _ = stream.write_all(&vec![b' '; limit + 1]);
+                let _ = stream.write_all(b"\r\n0\r\n\r\n");
+            } else {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                    limit + 1
+                );
+            }
+        });
+        let error = update_net::get_json::<serde_json::Value>(&url).unwrap_err();
+        assert!(
+            error.to_string().contains("larger than expected"),
+            "{error:#}"
+        );
+    }
+}
+
+#[test]
+fn app_update_only_appends_a_verified_partial_response() {
+    use core::update_sources::Download;
+    use std::time::Duration;
+
+    let payload = b"Portal fixture";
+    let offset = 6;
+    for valid in [true, false] {
+        let (url, requests) = serve(move |stream, _| {
+            let start = if valid { offset } else { offset + 1 };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{}/{}\r\nConnection: close\r\n\r\n",
+                payload.len() - start,
+                payload.len() - 1,
+                payload.len(),
+            );
+            let _ = stream.write_all(&payload[start..]);
+        });
+        let download = Download {
+            url,
+            size: payload.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(payload)),
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let part = temp.path().join("Portal.apk.part");
+        let dest = temp.path().join("Portal.apk");
+        fs::write(&part, &payload[..offset]).unwrap();
+        let result = update_net::download_verified(&download, &dest, Duration::ZERO, |_, _| {});
+        let requests = requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .all(|r| r.contains(&format!("range: bytes={offset}-"))));
+        if valid {
+            result.unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(fs::read(&dest).unwrap(), payload);
+            assert!(!part.exists());
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains("invalid download range"),
+                "{error:#}"
+            );
+            assert_eq!(requests.len(), 3);
+            assert!(!dest.exists());
+            assert_eq!(fs::read(&part).unwrap(), &payload[..offset]);
+        }
+    }
+}
+
+#[test]
+fn dropped_response_resumes_even_before_the_first_periodic_checkpoint() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (mut artifact, archive) = fixture(temp.path(), "test-v1");
+    let bytes = fs::read(archive).unwrap();
+    let offset = bytes.len() / 2;
+    let attempts = AtomicUsize::new(0);
+    let (url, requests) = serve(move |stream, request| {
+        let expected_range = format!("range: bytes={offset}-");
+        let (headers, body) = match attempts.fetch_add(1, Ordering::Relaxed) {
+            0 => (
+                format!("200 OK\r\nContent-Length: {}\r\n", bytes.len()),
+                &bytes[..offset],
+            ),
+            _ if request.contains(&expected_range) => (
+                format!(
+                    "206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {offset}-{}/{}\r\n",
+                    bytes.len() - offset,
+                    bytes.len() - 1,
+                    bytes.len()
+                ),
+                &bytes[offset..],
+            ),
+            _ => (
+                format!("200 OK\r\nContent-Length: {}\r\n", bytes.len()),
+                bytes.as_slice(),
+            ),
+        };
+        let _ = write!(stream, "HTTP/1.1 {headers}Connection: close\r\n\r\n");
+        let _ = stream.write_all(body);
+    });
+    artifact.url = url;
+
+    artifact.provision(temp.path(), |_| {}).unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].contains("range:"));
+    assert!(requests[1].contains(&format!("range: bytes={offset}-")));
+    assert!(artifact.is_image_ready(&temp.path().join("runtime-B")));
 }
 
 #[test]
@@ -249,20 +388,17 @@ fn invalid_resume_range_is_rejected_without_mutating_the_partial_prefix() {
     fs::write(&partial, &prefix).unwrap();
     fs::write(
         temp.path().join("portal-runtime.tar.xz.part.offset"),
-        format!("{offset}
-"),
+        format!(
+            "{offset}
+"
+        ),
     )
     .unwrap();
 
-    let (url, requests) = serve(move |stream| {
+    let (url, requests) = serve(move |stream, _| {
         let _ = write!(
             stream,
-            "HTTP/1.1 206 Partial Content
-Content-Length: {}
-Content-Range: bytes {}-{}/{}
-Connection: close
-
-",
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
             bytes.len() - offset,
             offset + 1,
             bytes.len() - 1,
@@ -288,14 +424,10 @@ fn incorrect_response_size_is_rejected_before_any_archive_is_committed() {
     let temp = tempfile::tempdir().unwrap();
     let (mut artifact, archive) = fixture(temp.path(), "test-v1");
     let bytes = fs::read(&archive).unwrap();
-    let (url, _) = serve(move |stream| {
+    let (url, _) = serve(move |stream, _| {
         let _ = write!(
             stream,
-            "HTTP/1.1 200 OK
-Content-Length: {}
-Connection: close
-
-",
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             bytes.len() + 1
         );
         let _ = stream.write_all(&bytes);

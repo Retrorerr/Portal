@@ -65,12 +65,17 @@ def desktop_visibility(raw):
                 surface_bounds=surface, entry_bounds=entry)
 
 
+def desktop_ui(session):
+    # Some Android builds do not send a /dev/tty dump over ADB.
+    path = '/data/local/tmp/portal-compat-ui-' + uuid.uuid4().hex + '.xml'
+    command = (f'trap "rm -f {path}" EXIT; '
+               f'uiautomator dump {path} >/dev/null && cat {path}')
+    result = session.adb('shell', '-T', command, capture_output=True, text=True, timeout=20)
+    return result.stdout
+
+
 def visible_desktop(session, dismiss_veil=False):
-    def inspect():
-        result = session.adb('exec-out', 'uiautomator', 'dump', '/dev/tty',
-                             capture_output=True, text=True, timeout=20)
-        return desktop_visibility(result.stdout)
-    state = inspect()
+    state = desktop_visibility(desktop_ui(session))
     if dismiss_veil and state['veil'] and state['entry_bounds'] and state['surface_bounds']:
         x0, y0, x1, y1 = state['entry_bounds']
         sx0, sy0, sx1, sy1 = state['surface_bounds']
@@ -80,7 +85,7 @@ def visible_desktop(session, dismiss_veil=False):
         target = sy0 + (sy1 - sy0) * 2 // 5
         session.adb('shell', f'input swipe {x} {y} {x} {target} 450', check=True)
         for _ in range(3):
-            state = inspect()
+            state = desktop_visibility(desktop_ui(session))
             if state['visible']:
                 state['veil_swiped'] = True
                 return state

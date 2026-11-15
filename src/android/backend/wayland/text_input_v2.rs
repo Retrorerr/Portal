@@ -128,9 +128,9 @@ impl Dispatch<ZwpTextInputV2, TextInputData> for State {
                     crate::android::ime::set_wayland_text_input_active(false);
                 }
             }
-            other => {
-                log::info!("Portal text-input-v2: other request: {:?}", other);
-            }
+            // Clients can include private text in context requests such as
+            // SetSurroundingText. Portal does not use that context.
+            _ => {}
         }
     }
 

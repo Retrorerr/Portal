@@ -313,7 +313,10 @@ object ComposeOverlay {
         if (ready && changed) {
             Log.i(TAG, "native desktop READY latched; Compose overlay remains attached")
         }
-        android.os.Handler(android.os.Looper.getMainLooper()).post { SessionControls.desktopReadyChanged(ready) }
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            if (ready && desktopReadyLatched.get()) FileTransfers.cleanInterruptedImports()
+            SessionControls.desktopReadyChanged(ready)
+        }
         composeView?.post {
             desktopReadyState.value = desktopReadyLatched.get()
             SessionControls.overlayChanged()

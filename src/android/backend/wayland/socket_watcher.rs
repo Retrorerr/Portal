@@ -165,14 +165,17 @@ impl Drop for WaylandSocketWatcher {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
 
-        // Wake eventfd if blocked in poll
-        let val: u64 = 1;
-        unsafe {
-            libc::write(
-                self.stop_eventfd,
-                &val as *const _ as *const libc::c_void,
-                std::mem::size_of::<u64>(),
-            );
+        // A signal can interrupt even an eventfd write. Retry so the worker
+        // cannot stay parked in poll while this thread joins it.
+        let value = 1_u64.to_ne_bytes();
+        loop {
+            let result =
+                unsafe { libc::write(self.stop_eventfd, value.as_ptr().cast(), value.len()) };
+            if result >= 0
+                || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                break;
+            }
         }
 
         // Wake condvar if waiting for main thread

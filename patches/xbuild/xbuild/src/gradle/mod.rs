@@ -400,9 +400,11 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
         Command::new("gradle")
     };
     cmd.current_dir(&gradle);
-    cmd.arg(match format {
-        Format::Aab => "bundle",
-        Format::Apk => "assemble",
+    cmd.arg(match (format, opt) {
+        (Format::Aab, Opt::Debug) => "bundleDebug",
+        (Format::Aab, Opt::Release) => "bundleRelease",
+        (Format::Apk, Opt::Debug) => "assembleDebug",
+        (Format::Apk, Opt::Release) => "assembleRelease",
         _ => unreachable!(),
     });
     println!("cmd: {:?}", cmd);

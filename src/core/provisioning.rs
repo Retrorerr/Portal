@@ -692,7 +692,6 @@ impl RuntimeArtifact {
         let mut streaming: Option<StreamingExtract> = None;
         loop {
             let result = (|| -> anyhow::Result<()> {
-                let mut streamed = false;
                 if self.verify(&archive).is_err() {
                     if streaming.is_none() {
                         streaming = Some(StreamingExtract::start(
@@ -706,18 +705,20 @@ impl RuntimeArtifact {
                     // exact size and SHA-256 check, so no second pass here.
                     self.download_archive(&client, &archive, &partial, &checkpoint, &report)
                         .map_err(tag_network_error)?;
-                    if let Some(stream) = streaming.take() {
-                        streamed = stream.finish(&self.sha256, &|count| {
-                            self.emit(
-                                &report,
-                                ProvisioningPhase::Extracting,
-                                55,
-                                format!("Extracting Debian runtime: {count} entries"),
-                            );
-                        });
-                    }
                 }
 
+                // The archive can already be present on a retry if the
+                // rename succeeded before checkpoint cleanup failed.
+                let streamed = streaming.take().is_some_and(|stream| {
+                    stream.finish(&self.sha256, &|count| {
+                        self.emit(
+                            &report,
+                            ProvisioningPhase::Extracting,
+                            55,
+                            format!("Extracting Debian runtime: {count} entries"),
+                        );
+                    })
+                });
                 if streamed {
                     self.seal_staging(&staging)?;
                 } else {
@@ -1189,6 +1190,9 @@ impl RuntimeArtifact {
             file.sync_all()?;
         }
         let offset = checkpoint_length;
+        if offset == self.compressed_bytes {
+            return self.commit_download(archive, partial, checkpoint, report);
+        }
         if offset == 0 {
             remove_path_synced(checkpoint)?;
         }
@@ -1199,57 +1203,17 @@ impl RuntimeArtifact {
         let response = request.send()?;
         let status = response.status();
         anyhow::ensure!(status.is_success(), "Runtime download HTTP {status}");
-        if offset == 0 {
-            anyhow::ensure!(
-                status == reqwest::StatusCode::OK,
-                "Server returned an unexpected partial response for a fresh download"
-            );
-        }
-
-        let mut ranged_end = None;
-        let resume = if offset == 0 {
-            false
-        } else if status == reqwest::StatusCode::PARTIAL_CONTENT {
-            let (start, end, total) = response
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(parse_content_range)
-                .ok_or_else(|| anyhow::anyhow!("Server returned no valid Content-Range"))?;
-            anyhow::ensure!(
-                start == offset && total == self.compressed_bytes && end >= start,
-                "Server returned an invalid download range"
-            );
-            anyhow::ensure!(
-                end < self.compressed_bytes,
-                "Server returned bytes beyond the pinned runtime size"
-            );
-            ranged_end = Some(end + 1);
-            if let Some(length) = response.content_length() {
-                anyhow::ensure!(
-                    length == end - start + 1,
-                    "Server Content-Length disagrees with Content-Range"
-                );
-            }
-            true
-        } else if status == reqwest::StatusCode::OK {
-            // A server that ignores Range is safe only when the old prefix is
-            // discarded and the response starts the archive from byte zero.
-            false
-        } else {
-            anyhow::bail!("Server returned unsupported response status {status}");
-        };
-
-        if let Some(length) = response.content_length() {
-            anyhow::ensure!(
-                length <= self.compressed_bytes.saturating_sub(if resume { offset } else { 0 }),
-                "Runtime response exceeds the pinned expected size"
-            );
+        let ranged_end = download_response_end(&response, offset, self.compressed_bytes)?;
+        let resume = ranged_end.is_some();
+        if !resume && offset > 0 {
+            // A full response replaces the old prefix. Its checkpoint must
+            // disappear before truncation, even if the process dies mid-write.
+            remove_path_synced(checkpoint)?;
         }
         if let Some(parent) = partial.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut file = fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .create(true)
             .write(true)
             .append(resume)
@@ -1260,23 +1224,36 @@ impl RuntimeArtifact {
         let mut checkpointed = if resume { offset } else { 0 };
         let mut last = Instant::now();
         let mut response = response;
+        let end = ranged_end.unwrap_or(self.compressed_bytes);
+        let mut out = &file;
+        let save_checkpoint = |length: u64| -> anyhow::Result<()> {
+            file.sync_all()?;
+            write_atomic(checkpoint, length.to_string().as_bytes())
+        };
         loop {
-            let count = response.read(&mut buffer)?;
+            let count = match response.read(&mut buffer) {
+                Ok(count) => count,
+                Err(error) => {
+                    if downloaded > checkpointed {
+                        save_checkpoint(downloaded)?;
+                    }
+                    return Err(error.into());
+                }
+            };
             if count == 0 {
                 break;
             }
             downloaded = downloaded.saturating_add(count as u64);
             anyhow::ensure!(
-                downloaded <= self.compressed_bytes,
-                "Runtime download exceeds expected size"
+                downloaded <= end,
+                "Runtime response exceeds the expected byte range"
             );
-            file.write_all(&buffer[..count])?;
+            out.write_all(&buffer[..count])?;
             // Checkpoint only after the data file is synced. A process death
             // before the next checkpoint merely loses the current interval;
             // it can never cause a later Range request to skip unknown bytes.
             if downloaded.saturating_sub(checkpointed) >= 4 * 1024 * 1024 {
-                file.sync_all()?;
-                write_atomic(checkpoint, downloaded.to_string().as_bytes())?;
+                save_checkpoint(downloaded)?;
                 checkpointed = downloaded;
             }
             if last.elapsed() >= Duration::from_secs(1) {
@@ -1296,43 +1273,9 @@ impl RuntimeArtifact {
                 last = Instant::now();
             }
         }
-        file.sync_all()?;
-        write_atomic(checkpoint, downloaded.to_string().as_bytes())?;
-        if let Some(expected_end) = ranged_end {
-            if downloaded > expected_end {
-                let _ = remove_path_synced(partial);
-                let _ = remove_path_synced(checkpoint);
-                anyhow::bail!("Server returned more bytes than its Content-Range proved");
-            }
-            anyhow::ensure!(
-                downloaded == expected_end,
-                "Server ended before its Content-Range was complete"
-            );
-        }
-        anyhow::ensure!(
-            regular_file_length(partial).unwrap_or(0) <= self.compressed_bytes,
-            "Runtime partial download exceeds expected size"
-        );
-        if regular_file_length(partial).unwrap_or(0) == self.compressed_bytes {
-            self.emit(
-                report,
-                ProvisioningPhase::Downloading,
-                45,
-                "Debian runtime download complete; checking it…",
-            );
-            // A full-size prefix is still not a final archive until this verify
-            // succeeds. Move it atomically only after the exact check.
-            if let Err(error) = self.verify(partial) {
-                let _ = remove_path_synced(partial);
-                let _ = remove_path_synced(checkpoint);
-                return Err(error);
-            }
-            if path_exists(archive) {
-                remove_path_synced(archive)?;
-            }
-            rename_synced(partial, archive)?;
-            remove_path_synced(checkpoint)?;
-            return Ok(());
+        save_checkpoint(downloaded)?;
+        if downloaded == self.compressed_bytes {
+            return self.commit_download(archive, partial, checkpoint, report);
         }
         // A body that ended cleanly but short (a proxy's Content-Length, a
         // close-delimited cut) must resume like a dropped connection: the
@@ -1343,6 +1286,71 @@ impl RuntimeArtifact {
         )
         .into())
     }
+
+    fn commit_download(
+        &self,
+        archive: &Path,
+        partial: &Path,
+        checkpoint: &Path,
+        report: &impl Fn(ProvisioningSnapshot),
+    ) -> anyhow::Result<()> {
+        self.emit(
+            report,
+            ProvisioningPhase::Downloading,
+            45,
+            "Debian runtime download complete; checking it…",
+        );
+        if let Err(error) = self.verify(partial) {
+            let _ = remove_path_synced(partial);
+            let _ = remove_path_synced(checkpoint);
+            return Err(error);
+        }
+        if path_exists(archive) {
+            remove_path_synced(archive)?;
+        }
+        rename_synced(partial, archive)?;
+        remove_path_synced(checkpoint)
+    }
+}
+
+/// Validate a download's framing before writing to a partial file. A ranged
+/// response returns its exclusive end. A full response always starts at zero.
+pub(crate) fn download_response_end(
+    response: &reqwest::blocking::Response,
+    offset: u64,
+    expected_size: u64,
+) -> anyhow::Result<Option<u64>> {
+    let status = response.status();
+    if status == reqwest::StatusCode::OK {
+        anyhow::ensure!(
+            response
+                .content_length()
+                .is_none_or(|length| length <= expected_size),
+            "Download response exceeds the expected size"
+        );
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        offset > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT,
+        "Unexpected download response status {status}"
+    );
+    let (start, end, total) = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_content_range)
+        .ok_or_else(|| anyhow::anyhow!("Server returned no valid Content-Range"))?;
+    anyhow::ensure!(
+        start == offset && total == expected_size && end >= start && end < total,
+        "Server returned an invalid download range"
+    );
+    anyhow::ensure!(
+        response
+            .content_length()
+            .is_none_or(|length| length == end - start + 1),
+        "Server Content-Length disagrees with Content-Range"
+    );
+    Ok(Some(end + 1))
 }
 
 fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
@@ -1508,7 +1516,7 @@ struct FollowReader {
 
 impl Read for FollowReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.position >= self.length {
+        if buf.is_empty() || self.position >= self.length {
             return Ok(0);
         }
         let want = buf.len().min((self.length - self.position) as usize);

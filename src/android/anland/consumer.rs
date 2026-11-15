@@ -1023,7 +1023,7 @@ impl AnlandSession {
         }
     }
 
-    /// Mouse wheel motion in clicks (axis 0 = vertical, 1 = horizontal).
+    /// Mouse wheel motion in clicks, positive down or right.
     pub fn send_wheel(&self, axis: u32, value: f32) {
         send_wheel_inner(&self.inner, axis, value);
     }
@@ -1081,10 +1081,13 @@ impl AnlandKeySink {
     }
 }
 
-/// Wheel motion in clicks (axis 0 = vertical, 1 = horizontal), as Android
-/// reports it. KWin takes whole clicks, so fractions add up until they make
+/// Wheel motion in clicks (axis 0 = vertical, 1 = horizontal).
+/// KWin takes whole clicks, so fractions add up until they make
 /// one; a direction change drops the leftover.
 fn send_wheel_inner(inner: &Arc<Inner>, axis: u32, value: f32) {
+    if !value.is_finite() {
+        return;
+    }
     let Some(clicks) = inner.wheel_carry.lock().ok().and_then(|mut carry| {
         let slot = carry.get_mut(axis as usize)?;
         if *slot * value < 0.0 {

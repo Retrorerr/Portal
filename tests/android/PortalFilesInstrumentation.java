@@ -46,7 +46,13 @@ public final class PortalFilesInstrumentation extends Instrumentation {
     private Object invoke(Class<?> type, String name) throws Exception {
         return type.getMethod(name).invoke(type.getField("INSTANCE").get(null));
     }
-    private void onMain(Runnable action) { runOnMainSync(action); }
+    private void onMain(Runnable action) {
+        java.util.concurrent.atomic.AtomicReference<Throwable> failure = new java.util.concurrent.atomic.AtomicReference<>();
+        runOnMainSync(() -> {
+            try { action.run(); } catch (Throwable error) { failure.set(error); }
+        });
+        if (failure.get() != null) throw new AssertionError("Main-thread test action failed", failure.get());
+    }
     private void status(String text) {
         if (prefix != null) try (FileOutputStream file = new FileOutputStream(new File(getTargetContext().getCacheDir(),prefix+"-checks.log"),true)) {
             file.write((text+"\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -215,7 +221,7 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             semanticBounds("Keyboard suggested");
             onMain(() -> { try { setState(session,"getTextInputFocused",false); setState(controls,"getSteamRunning",false); setState(controls,"getGameRunning",false); }
                 catch (Exception e) { throw new RuntimeException(e); } });
-            semanticBounds("Portal veil suggested","Files suggested");
+            semanticBounds("No suggestion","Files suggested");
         } finally {
             onMain(() -> { try { setState(session,"getTextInputFocused",focus); setState(controls,"getSteamRunning",steam); setState(controls,"getGameRunning",game); }
                 catch (Exception e) { throw new RuntimeException(e); } });
@@ -241,8 +247,9 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             check((Boolean) session.getMethod("isUtilityVisible").invoke(null),"Stale close completion released menu input");
             java.lang.reflect.Field token = view.getClass().getDeclaredField("inputOwner"); token.setAccessible(true);
             Object owner = token.get(view), previous = new Object(), instance = session.getField("INSTANCE").get(null);
-            check((Boolean) session.getMethod("acquireUtility",Object.class).invoke(instance,previous),"Could not acquire test menu owner");
-            check((Boolean) session.getMethod("acquireUtility",Object.class).invoke(instance,owner),"Could not restore current menu owner");
+            Method acquire = session.getMethod("acquireUtility", Object.class, boolean.class);
+            check((Boolean) acquire.invoke(instance, previous, false),"Could not acquire test menu owner");
+            check((Boolean) acquire.invoke(instance, owner, false),"Could not restore current menu owner");
             check(!(Boolean) session.getMethod("releaseUtility",Object.class).invoke(instance,previous),"A retired owner released current menu input");
             check((Boolean) session.getMethod("isUtilityVisible").invoke(null),"Owner replacement lost menu input");
         } catch (Exception e) { throw new RuntimeException(e); } });
@@ -258,7 +265,7 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         waitUtility("Menu");
         tap(utilityBounds("keyboard")); waitUtility("Keyboard");
         check((Boolean) session.getMethod("isUtilityVisible").invoke(null),"Keyboard lost menu input");
-        escapeUtility(); waitUtility("Menu"); escapeUtility(); waitUtility("Dock");
+        sendKeyDownUpSync(KeyEvent.KEYCODE_BACK); waitUtility("Menu"); escapeUtility(); waitUtility("Dock");
         check(!(Boolean) session.getMethod("isUtilityVisible").invoke(null),"Docked menu kept desktop input blocked");
         openMenu();
         onMain(() -> {
@@ -270,7 +277,7 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         waitUtility("Dock");
         check(!(Boolean) session.getMethod("isUtilityVisible").invoke(null),"Reattached control retained a hidden menu's input");
         openMenu(); tap(utilityBounds("keyboard")); waitUtility("Keyboard");
-        escapeUtility(); waitUtility("Menu"); escapeUtility(); waitUtility("Dock");
+        sendKeyDownUpSync(KeyEvent.KEYCODE_BACK); waitUtility("Menu"); escapeUtility(); waitUtility("Dock");
         status("Stale completion, retired-owner release, rapid reopen and actual keyboard taps preserved input ownership");
         status("Detached and reattached controls reset presentation and remained responsive");
     }
@@ -397,26 +404,22 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         } finally { bitmap.recycle(); }
     }
     private void openMenu() throws Exception { tap(capsuleBounds()); waitUtility("Menu"); }
-    private void openCapsule() throws Exception { openMenu(); tap(utilityBounds("veil")); }
+    private void openCapsule() throws Exception { openMenu(); tap(utilityBounds("files")); }
     private void testRoundtable() throws Exception {
         openMenu();
-        for (String action : new String[] { "veil","files","apps","keyboard" }) {
+        for (String action : new String[] { "report","files","apps","keyboard","settings" }) {
             android.graphics.Rect bounds = utilityBounds(action);
             check(bounds.left>=0 && bounds.top>=0 && bounds.right<=activity.getWindow().getDecorView().getWidth(), "Bubble left the viewport");
         }
         capture("-roundtable");
         tap(utilityBounds("keyboard")); waitUtility("Keyboard"); capture("-keyboard");
         check(!showing(), "Keyboard preview restarted or covered the guest with the veil");
-        long now=SystemClock.uptimeMillis();
-        sendKeySync(new KeyEvent(now,now,KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_ESCAPE,0));
-        sendKeySync(new KeyEvent(now,now+1,KeyEvent.ACTION_UP,KeyEvent.KEYCODE_ESCAPE,0));
+        sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
         waitUtility("Menu");
-        now=SystemClock.uptimeMillis();
-        sendKeySync(new KeyEvent(now,now,KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_ESCAPE,0));
-        sendKeySync(new KeyEvent(now,now+1,KeyEvent.ACTION_UP,KeyEvent.KEYCODE_ESCAPE,0));
+        escapeUtility();
         waitUtility("Dock");
         check(!showing(), "Dismissing the utility opened the veil");
-        status("Labelled utility roundtable, keyboard preview, nested Escape and guest preservation passed");
+        status("Labelled utility roundtable, keyboard preview, Back and Escape handling, and guest preservation passed");
     }
     private String shellText(String command) throws Exception {
         try (ParcelFileDescriptor descriptor = getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES).executeShellCommand(command);
@@ -462,7 +465,7 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         openMenu(); Object originalArea=utilityArea();
         try {
             setUtilityArea(compactArea(360)); SystemClock.sleep(1400); capture("-compact");
-            for (String action:new String[]{"veil","files","apps","keyboard"}) check(!utilityBounds(action).isEmpty(),"Compact action missing");
+            for (String action:new String[]{"report","files","apps","keyboard","settings"}) check(!utilityBounds(action).isEmpty(),"Compact action missing");
             shellText("settings put system font_scale 1.6"); SystemClock.sleep(1300);
             setUtilityArea(compactArea(700)); SystemClock.sleep(1400); capture("-large-text");
             shellText("cmd uimode night no"); SystemClock.sleep(1300);
@@ -480,7 +483,7 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         for (int pass=0;pass<(motionOnly ? 12 : 4);pass++) {
             if (pass==1) shellText("dumpsys gfxinfo app.polarbear reset");
             openMenu(); tap(utilityBounds("keyboard")); waitUtility("Keyboard");
-            escapeUtility(); waitUtility("Menu"); escapeUtility(); waitUtility("Dock");
+            sendKeyDownUpSync(KeyEvent.KEYCODE_BACK); waitUtility("Menu"); escapeUtility(); waitUtility("Dock");
         }
         try (FileOutputStream output=new FileOutputStream(new File(getTargetContext().getCacheDir(),prefix+"-utility-gfxinfo.txt"))) {
             output.write(shellText("dumpsys gfxinfo app.polarbear").getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -876,8 +879,9 @@ public final class PortalFilesInstrumentation extends Instrumentation {
                 return;
             }
             openCapsule(); waitShowing(true);
-            check((Boolean) invoke(overlay, "getSessionMode"), "Capsule did not open session controls");
-            status("Utility roundtable recalled the session controls");
+            check((Boolean) invoke(overlay, "getSessionMode"), "Files did not open session controls");
+            check("files".equals(invoke(overlay, "getActivePanel")), "Files did not open from the utility roundtable");
+            status("Utility roundtable opened Files in the session controls");
             onMain(() -> { try { invoke(overlay, "requestReturnToDesktop"); } catch (Exception e) { throw new RuntimeException(e); } });
             waitShowing(false);
             testCapsuleDrag();

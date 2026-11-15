@@ -874,7 +874,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		case SIGSYS: {
 			siginfo_t siginfo = {};
 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
-			if (siginfo.si_code == SYS_SECCOMP) {
+			if (siginfo.si_code == PROOT_SYS_SECCOMP) {
 				/* A filter that raises SIGSYS cancels the syscall
 				 * (SECCOMP_RET_TRAP skips it), so the sysenter stop
 				 * that otherwise follows a PTRACE_EVENT_SECCOMP stop

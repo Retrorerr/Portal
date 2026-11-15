@@ -23,6 +23,9 @@ const KEPT_DIRECTORIES: [&str; 2] = [".X11-unix", ".ICE-unix"];
 /// top-level entries were removed. Failures are skipped: a leftover is
 /// harmless, a half-cleared tree is retried at the next boot.
 pub fn clear_stale(tmp: &Path, boot: SystemTime) -> usize {
+    if !fs::symlink_metadata(tmp).is_ok_and(|metadata| metadata.is_dir()) {
+        return 0;
+    }
     let Ok(entries) = fs::read_dir(tmp) else {
         return 0;
     };
@@ -30,7 +33,9 @@ pub fn clear_stale(tmp: &Path, boot: SystemTime) -> usize {
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name();
-        if KEPT_DIRECTORIES.iter().any(|kept| name == *kept) {
+        if KEPT_DIRECTORIES.iter().any(|kept| name == *kept)
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
             removed += clear_stale(&path, boot);
             continue;
         }
@@ -119,5 +124,26 @@ mod tests {
             clear_stale(&root.path().join("absent"), SystemTime::now()),
             0
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kept_socket_directory_does_not_follow_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let tmp = root.path().join("tmp");
+        let elsewhere = root.path().join("elsewhere");
+        fs::create_dir(&tmp).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+        let document = elsewhere.join("document");
+        fs::write(&document, b"keep").unwrap();
+        let boot = SystemTime::now() - Duration::from_secs(1);
+        age(&document, boot - Duration::from_secs(3600));
+        symlink(&elsewhere, tmp.join(".X11-unix")).unwrap();
+
+        clear_stale(&tmp, boot);
+
+        assert_eq!(fs::read(&document).unwrap(), b"keep");
     }
 }

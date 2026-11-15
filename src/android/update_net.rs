@@ -9,7 +9,10 @@
 
 use crate::core::{
     config::VERSION,
-    provisioning::{offline_backoff, tag_network_error, WaitingForNetwork, DOWNLOAD_STALL_TIMEOUT},
+    provisioning::{
+        download_response_end, offline_backoff, tag_network_error, WaitingForNetwork,
+        DOWNLOAD_STALL_TIMEOUT,
+    },
     update_sources::Download,
 };
 use serde::de::DeserializeOwned;
@@ -23,6 +26,7 @@ use std::{
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const HARD_ATTEMPTS: u32 = 3;
+const MAX_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 fn user_agent() -> String {
     format!("Portal/{VERSION} (+https://github.com/Retrorerr/Portal)")
@@ -68,10 +72,9 @@ pub fn get_json<T: DeserializeOwned>(url: &str) -> anyhow::Result<T> {
         .send()
         .map_err(|error| anyhow::Error::new(error).context(format!("could not reach {url}")))?;
     let response = check_status(response, url)?;
-    let text = response
-        .text()
-        .map_err(|error| anyhow::Error::new(error).context(format!("could not read {url}")))?;
-    serde_json::from_str(&text).map_err(|error| anyhow::anyhow!("{url} sent unreadable JSON: {error}"))
+    let text = read_text(response, url, MAX_JSON_BYTES)?;
+    serde_json::from_str(&text)
+        .map_err(|error| anyhow::anyhow!("{url} sent unreadable JSON: {error}"))
 }
 
 /// GET a small text document, refusing anything over `limit` bytes.
@@ -80,19 +83,26 @@ pub fn get_text(url: &str, limit: usize) -> anyhow::Result<String> {
         .get(url)
         .send()
         .map_err(|error| anyhow::Error::new(error).context(format!("could not reach {url}")))?;
-    let mut response = check_status(response, url)?;
+    read_text(check_status(response, url)?, url, limit)
+}
+
+fn read_text(
+    response: reqwest::blocking::Response,
+    url: &str,
+    limit: usize,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        response
+            .content_length()
+            .is_none_or(|length| length <= limit as u64),
+        "{url} is larger than expected"
+    );
+    let mut response = response.take((limit as u64).saturating_add(1));
     let mut body = Vec::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let read = response
-            .read(&mut buffer)
-            .map_err(|error| anyhow::Error::new(error).context(format!("could not read {url}")))?;
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&buffer[..read]);
-        anyhow::ensure!(body.len() <= limit, "{url} is larger than expected");
-    }
+    response
+        .read_to_end(&mut body)
+        .map_err(|error| anyhow::Error::new(error).context(format!("could not read {url}")))?;
+    anyhow::ensure!(body.len() <= limit, "{url} is larger than expected");
     String::from_utf8(body).map_err(|_| anyhow::anyhow!("{url} is not text"))
 }
 
@@ -169,27 +179,28 @@ fn download_once(
         }
     }
 
-    let mut request = client()?.get(&download.url);
-    if have > 0 && have < download.size {
-        request = request.header("Range", format!("bytes={have}-"));
-    }
-    let mut response = if have == download.size {
-        None
-    } else {
+    if have < download.size {
+        let mut request = client()?.get(&download.url);
+        if have > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
+        }
         let response = request
             .send()
             .map_err(|error| anyhow::Error::new(error).context("download failed"))?;
-        if have > 0 && response.status() == reqwest::StatusCode::OK {
+        let mut response = check_status(response, &download.url)?;
+        let ranged_end = download_response_end(&response, have, download.size)?;
+        if have > 0 && ranged_end.is_none() {
             // The server ignored the range: start over.
             have = 0;
             hasher = Sha256::new();
-            fs::remove_file(&part)?;
         }
-        Some(check_status(response, &download.url)?)
-    };
-
-    if let Some(response) = response.as_mut() {
-        let mut out = OpenOptions::new().create(true).append(true).open(&part)?;
+        let end = ranged_end.unwrap_or(download.size);
+        let mut out = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(ranged_end.is_some())
+            .truncate(ranged_end.is_none())
+            .open(&part)?;
         let mut buffer = vec![0u8; 256 * 1024];
         let mut last_report = Instant::now()
             .checked_sub(Duration::from_secs(1))
@@ -203,9 +214,8 @@ fn download_once(
             }
             have += read as u64;
             anyhow::ensure!(
-                have <= download.size,
-                "the download is larger than the release says ({have} > {} bytes)",
-                download.size
+                have <= end,
+                "the download exceeds the expected byte range ({have} > {end})"
             );
             hasher.update(&buffer[..read]);
             out.write_all(&buffer[..read])?;
@@ -215,7 +225,7 @@ fn download_once(
             }
         }
         out.flush()?;
-        let _ = out.sync_all();
+        out.sync_all()?;
     }
     progress(have, download.size);
 

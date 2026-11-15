@@ -28,15 +28,14 @@ fun main() {
     check(OPTIONAL_APPS.all { it.available && it.categoryLabel.isNotEmpty() })
     check(groupedOptionalApps().map { it.first } == listOf("AI", "Productivity", "Internet", "Creative", "Media", "Gaming"))
     check(projectedInstallBytes(setOf("steam")) - projectedInstallBytes(emptySet()) == 4_200_000_000L)
-    val unavailable = parseOptionalAppCatalog("steam	Steam	Games	gaming	Gaming	4200	Needs GPU graphics mode
-broken line")
+    val unavailable = parseOptionalAppCatalog("steam	Steam	Games	gaming	Gaming	4200	Needs GPU graphics mode\nbroken line")
     check(unavailable.size == 1 && unavailable[0].unavailableReason == "Needs GPU graphics mode" && !unavailable[0].available)
     check(projectedInstallBytes(setOf("chatgpt")) - projectedInstallBytes(emptySet()) == 1_940_000_000L)
     check(projectedInstallBytes(setOf("claude")) - projectedInstallBytes(emptySet()) == 600_000_000L)
     check("okular" !in OPTIONAL_APP_IDS && "kate" !in OPTIONAL_APP_IDS)
     check(projectedInstallBytes(setOf("okular", "kate")) == projectedInstallBytes(emptySet()))
     check(selectedAppsSummary(emptySet()) == "Optional desktop applications")
-    check(selectedAppsSummary(setOf("libreoffice", "vlc", "gimp", "krita")) == "LibreOffice, VLC +2")
+    check(selectedAppsSummary(setOf("libreoffice", "vlc", "gimp", "krita")) == "LibreOffice, GIMP +2")
     check(projectedInstallBytes(setOf("unknown")) == projectedInstallBytes(emptySet()))
 
     // These deliberately span small/large and low/high-density Android
@@ -108,5 +107,5 @@ broken line")
     )
     check(runCatching { StorageCapacity(0L, 0L) }.isFailure)
     check(runCatching { StorageCapacity(10L, 11L) }.isFailure)
-    println("PASS: 128 optional-app selections across 4 capacities and 5 display baselines")
+    println("PASS: ${1 shl OPTIONAL_APPS.size} optional-app selections across ${capacities.size} capacities and ${displays.size} display baselines")
 }

@@ -92,6 +92,27 @@ flatpak_sandbox_env() {
 		MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER >/dev/null 2>&1
 }
 
+# Whether the override listing $2 already decides environment variable $1,
+# as a value under [Environment] or as an explicit unset. Plain shell: a new
+# image has no awk until a later setup stage restores its alternative.
+flatpak_override_names_env() {
+	compat_section=
+	while IFS= read -r compat_line; do
+		case "$compat_line" in
+		"["*) compat_section=$compat_line ;;
+		"$1="*) [ "$compat_section" = "[Environment]" ] && return 0 ;;
+		unset-environment=*)
+			case ";${compat_line#*=};" in
+			*";$1;"*) return 0 ;;
+			esac
+			;;
+		esac
+	done <<COMPAT_OVERRIDES
+$2
+COMPAT_OVERRIDES
+	return 1
+}
+
 # Launchers can omit the desktop's GPU variables. System-installed Flatpaks
 # still need the Portal GL extension's KGSL defaults inside the sandbox.
 # Add missing defaults once; explicit values, explicit
@@ -108,15 +129,7 @@ flatpak_env_defaults() {
 	set --
 	for compat_default in $compat_defaults; do
 		compat_name=${compat_default%%=*}
-		if printf '%s\n' "$compat_overrides" | awk -v key="$compat_name" '
-			/^\[/ { environment = ($0 == "[Environment]") }
-			environment && index($0, key "=") == 1 { found = 1 }
-			/^unset-environment=/ {
-				count = split(substr($0, index($0, "=") + 1), names, ";")
-				for (i = 1; i <= count; i++) if (names[i] == key) found = 1
-			}
-			END { exit !found }
-		'; then
+		if flatpak_override_names_env "$compat_name" "$compat_overrides"; then
 			continue
 		fi
 		case "$compat_default" in
@@ -173,7 +186,9 @@ flatpak_gl_portal() {
 			continue
 		{
 			bundle=$(mktemp) || continue
-			if curl -fsSL --retry 3 -o "$bundle" 				"$flatpak_gl_url/org.freedesktop.Platform.GL.portal-$branch-aarch64.flatpak" &&
+			if curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 20 \
+				--retry 2 -o "$bundle" \
+				"$flatpak_gl_url/org.freedesktop.Platform.GL.portal-$branch-aarch64.flatpak" &&
 				echo "$sha  $bundle" | sha256sum -c - &&
 				flatpak install --system -y --noninteractive --reinstall 					--bundle "$bundle"; then
 				mkdir -p "$state" && echo "$sha" >"$state/$branch"

@@ -4977,7 +4977,13 @@ fn run_all_stages(
     options: &SetupOptions,
     registration: &SetupRegistration,
 ) -> Result<(), SetupFailure> {
+    let mut dns_follower = None;
     for (index, (name, stage)) in stages.into_iter().enumerate() {
+        // The first stage creates the root filesystem; nothing may write
+        // into it before that stage has committed it.
+        if index == 1 {
+            dns_follower = Some(GuestDnsFollower::start());
+        }
         let (start, end) = stage_span(name, options);
         publish_snapshot(
             registration,
@@ -5001,7 +5007,50 @@ fn run_all_stages(
             ),
         );
     }
+    drop(dns_follower);
     Ok(())
+}
+
+/// Keeps the guest's DNS servers on Android's active network while the setup
+/// stages run. Each download stage used to take one snapshot when it began,
+/// so a network that changed under it (mobile data giving way to Wi-Fi or a
+/// VPN after a restart) left the guest asking servers it could no longer
+/// reach, and the stage sat in resolver timeouts. A desktop session follows
+/// the network the same way from its watch thread.
+struct GuestDnsFollower {
+    stop: Option<Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl GuestDnsFollower {
+    const INTERVAL: Duration = Duration::from_secs(3);
+
+    fn start() -> Self {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let thread = thread::Builder::new()
+            .name("setup-dns".to_owned())
+            .spawn(move || {
+                let root = Path::new(PRODUCTION_FS_ROOT);
+                sync_guest_network_config(root);
+                while stopped.recv_timeout(Self::INTERVAL) == Err(mpsc::RecvTimeoutError::Timeout) {
+                    sync_guest_network_config(root);
+                }
+            })
+            .ok();
+        Self {
+            stop: Some(stop),
+            thread,
+        }
+    }
+}
+
+impl Drop for GuestDnsFollower {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 fn finalise_installation(registration: &SetupRegistration) -> Result<(), SetupFailure> {

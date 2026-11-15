@@ -32,16 +32,6 @@ fn normalize(value: Option<String>) -> Option<String> {
     }
 }
 
-/// Short single-line preview for diagnostic logging: first 24 chars with
-/// newlines escaped, plus byte length available at the call site. Keeps
-/// logcat/host.log bounded while still identifying test strings.
-pub fn clip_preview(text: &str) -> String {
-    text.chars()
-        .take(24)
-        .collect::<String>()
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-}
 /// Guest writes whose echo may still be observed. Writes are serialized, so a
 /// handful covers a burst of copies landing between two Android reads.
 const MAX_PENDING_ECHOES: usize = 8;

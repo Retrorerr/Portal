@@ -27,11 +27,11 @@ use crate::core::ime_policy::{CommitQueue, TapDetector};
 static COMMITS: OnceLock<Mutex<CommitQueue>> = OnceLock::new();
 static TAPS: Mutex<TapDetector> = Mutex::new(TapDetector::new());
 static EVENT_LOOP_PROXY: OnceLock<Mutex<Option<EventLoopProxy<AppUserEvent>>>> = OnceLock::new();
-static WAYLAND_TEXT_INPUT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static HARDWARE_KEYBOARD_PRESENT: AtomicBool = AtomicBool::new(false);
 static DESKTOP_INPUT_PRESENT: AtomicBool = AtomicBool::new(true);
-// -1 hide, 0 unchanged, 1 show. The event-loop owns all JNI visibility calls.
+// -1 hide, 0 unchanged, 1 show, 2 read current focus and keyboard state.
 static VISIBILITY_REQUEST: AtomicI8 = AtomicI8::new(0);
+const REFRESH_VISIBILITY: i8 = 2;
 
 pub fn is_hardware_keyboard_present() -> bool {
     HARDWARE_KEYBOARD_PRESENT.load(Ordering::Acquire)
@@ -80,13 +80,10 @@ fn set_source_active(source: u8, active: bool) {
     } else {
         ACTIVE_SOURCES.fetch_and(!source, Ordering::AcqRel) & !source
     };
-    let hw = HARDWARE_KEYBOARD_PRESENT.load(Ordering::Acquire);
     log::info!(
-        "Portal ime: source {source:#x} active={active}, sources={sources:#x}, hw_present={hw}"
+        "Portal ime: source {source:#x} active={active}, sources={sources:#x}"
     );
-    IME_CONTEXT_ACTIVE.store(sources & GUEST_IM_SOURCES != 0, Ordering::Release);
-    WAYLAND_TEXT_INPUT_ACTIVE.store(sources != 0, Ordering::Release);
-    request_visibility(sources != 0 && !hw);
+    refresh_visibility();
 }
 
 /// Portal's text-input-v2 global (Smithay compositor path) enabled or disabled text entry.
@@ -96,7 +93,11 @@ pub fn set_wayland_text_input_active(active: bool) {
 
 pub fn request_visibility(show: bool) {
     log::info!("Portal ime: request_visibility({show})");
-    VISIBILITY_REQUEST.store(if show { 1 } else { -1 }, Ordering::Release);
+    queue_visibility(if show { 1 } else { -1 });
+}
+
+fn queue_visibility(request: i8) {
+    VISIBILITY_REQUEST.store(request, Ordering::Release);
     wake_event_loop();
 }
 
@@ -104,37 +105,24 @@ pub fn take_visibility_request() -> Option<bool> {
     match VISIBILITY_REQUEST.swap(0, Ordering::AcqRel) {
         1 => Some(true),
         -1 => Some(false),
+        REFRESH_VISIBILITY => Some(is_wayland_text_input_active() && !is_hardware_keyboard_present()),
         _ => None,
     }
 }
 
 pub fn refresh_visibility() {
-    request_visibility(
-        WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire)
-            && !HARDWARE_KEYBOARD_PRESENT.load(Ordering::Acquire),
-    );
+    queue_visibility(REFRESH_VISIBILITY);
 }
 
 pub fn is_wayland_text_input_active() -> bool {
-    WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire)
+    ACTIVE_SOURCES.load(Ordering::Acquire) != 0
 }
 
-static IME_CONTEXT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static IME_CMD_FIFO: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static ENGINE_CMD_FIFO: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
 pub fn is_ime_context_active() -> bool {
-    IME_CONTEXT_ACTIVE.load(Ordering::Acquire)
-}
-
-pub fn set_ime_context_active_for_test(active: bool) {
-    IME_CONTEXT_ACTIVE.store(active, Ordering::Release);
-}
-
-pub fn set_ime_cmd_file_for_test(file: Option<std::fs::File>) {
-    if let Ok(mut guard) = IME_CMD_FIFO.lock() {
-        *guard = file;
-    }
+    ACTIVE_SOURCES.load(Ordering::Acquire) & GUEST_IM_SOURCES != 0
 }
 
 /// Write to a command FIFO without ever stalling the caller (often the
@@ -721,9 +709,7 @@ pub extern "system" fn Java_app_polarbear_SoftKeyboardBridge_nativeOnInputDevice
 
     let prev_keyboard = HARDWARE_KEYBOARD_PRESENT.swap(has_physical_keyboard, Ordering::AcqRel);
     if prev_keyboard != has_physical_keyboard {
-        request_visibility(
-            !has_physical_keyboard && WAYLAND_TEXT_INPUT_ACTIVE.load(Ordering::Acquire),
-        );
+        refresh_visibility();
     }
 
     let prev_desktop = DESKTOP_INPUT_PRESENT.swap(has_desktop_input, Ordering::AcqRel);

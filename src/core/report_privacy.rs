@@ -4,25 +4,18 @@
 //! system paths, versions, errors and Portal's own download hosts.
 
 use regex::{Captures, Regex};
+use reqwest::Url;
+use std::net::Ipv6Addr;
 use std::sync::OnceLock;
-
-/// Hosts Portal or the guest's package tools fetch from. Which of them failed
-/// is often the bug, and nothing in those URLs is about the user.
-const KEPT_HOSTS: &[&str] = &[
-    "github.com",
-    "githubusercontent.com",
-    "debian.org",
-    "flathub.org",
-    "localhost",
-    "127.0.0.1",
-];
 
 struct Patterns {
     url: Regex,
+    text_input_context: Regex,
     email: Regex,
     mac: Regex,
     ipv4: Regex,
     ipv6: Regex,
+    quoted_paths: [Regex; 2],
     shared_storage: Regex,
     home: Regex,
 }
@@ -30,12 +23,19 @@ struct Patterns {
 fn patterns() -> &'static Patterns {
     static PATTERNS: OnceLock<Patterns> = OnceLock::new();
     PATTERNS.get_or_init(|| Patterns {
-        url: Regex::new(r#"(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>\\)\]]*"#).unwrap(),
+        url: Regex::new(r#"(?i)\b[a-z][a-z0-9+.-]*://[^\s"<>\\]+"#).unwrap(),
+        text_input_context: Regex::new(r"(?m)(Portal text-input-v2: other request: SetSurroundingText\b)[^\r\n]*")
+            .unwrap(),
         email: Regex::new(r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}").unwrap(),
         mac: Regex::new(r"(?i)\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b").unwrap(),
         ipv4: Regex::new(r"\b\d{1,3}(?:\.\d{1,3}){3}\b").unwrap(),
         // Global unicast only (2000::/3); link-local and ULA say nothing.
-        ipv6: Regex::new(r"(?i)\b[23][0-9a-f]{3}(?::[0-9a-f]{0,4}){2,7}\b").unwrap(),
+        ipv6: Regex::new(r"(?i)\b[23][0-9a-f]{3}:[0-9a-f:.]+").unwrap(),
+        quoted_paths: ['"', '\''].map(|quote| {
+            let base = r#"(?:file://)?(?:/storage/(?:emulated/\d+|[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4})|/sdcard|/home/[^/\s"']+|/root)"#;
+            Regex::new(&format!(r#"{quote}({base})/([^{quote}./\r\n][^{quote}\r\n]*){quote}"#))
+                .unwrap()
+        }),
         shared_storage: Regex::new(
             r#"(/storage/(?:emulated/\d+|[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4})|/sdcard)/[^\s"':]+"#,
         )
@@ -45,25 +45,47 @@ fn patterns() -> &'static Patterns {
     })
 }
 
-fn kept_host(host: &str) -> bool {
-    let host = host.to_ascii_lowercase();
-    KEPT_HOSTS
-        .iter()
-        .any(|kept| host == *kept || host.ends_with(&format!(".{kept}")))
+fn kept_path(host: &str, path: &str) -> bool {
+    let portal_repo = |prefix: &str| {
+        path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    match host {
+        "github.com" | "raw.githubusercontent.com" => portal_repo("/Retrorerr/Portal"),
+        "api.github.com" => portal_repo("/repos/Retrorerr/Portal"),
+        host => ["debian.org", "flathub.org"].into_iter().any(|domain| {
+            host == domain
+                || host
+                    .strip_suffix(domain)
+                    .is_some_and(|rest| rest.ends_with('.'))
+        }),
+    }
 }
 
-fn scrub_url(url: &str) -> Option<String> {
-    let (scheme, rest) = url.split_once("://")?;
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    // file:///path has no host; the path rules below judge it.
-    if host.is_empty() {
-        return None;
+fn scrub_url(raw: &str) -> String {
+    let url = raw.trim_end_matches(['\'', ')', ',', ';']);
+    let punctuation = &raw[url.len()..];
+    let (scheme, rest) = url.split_once("://").expect("matched a URL");
+    if scheme.eq_ignore_ascii_case("file") && rest.starts_with('/') {
+        // The path rules below handle local file URLs.
+        return raw.to_owned();
     }
-    // Userinfo can hide a token, and fools a naive host check.
-    if !host.contains('@') && kept_host(host.split(':').next().unwrap_or_default()) {
-        return None;
+    if let Ok(mut parsed) = Url::parse(url) {
+        if matches!(parsed.scheme(), "http" | "https")
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed
+                .host_str()
+                .is_some_and(|host| kept_path(host, parsed.path()))
+        {
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            return format!("{parsed}{punctuation}");
+        }
     }
-    Some(format!("{scheme}://<url>"))
+    format!("{scheme}://<url>{punctuation}")
 }
 
 /// A dotted quad that is an address, not a version: `libfoo.so.1.2.3.4` and
@@ -97,11 +119,26 @@ fn is_address(text: &str, start: usize, end: usize) -> bool {
 /// look the logs over.
 pub fn scrub(text: &str) -> String {
     let patterns = patterns();
-    let text = patterns.url.replace_all(text, |caps: &Captures| {
-        let url = &caps[0];
-        scrub_url(url).unwrap_or_else(|| url.to_owned())
-    });
+    // Older Portal builds logged full text-input requests at info level.
+    let text = patterns.text_input_context.replace_all(text, "$1 <text>");
+    let text = patterns
+        .url
+        .replace_all(&text, |caps: &Captures| scrub_url(&caps[0]));
     let text = patterns.email.replace_all(&text, "<email>");
+    let text = patterns.ipv6.replace_all(&text, |caps: &Captures| {
+        let candidate = &caps[0];
+        let address = candidate.trim_end_matches('.');
+        if address.parse::<Ipv6Addr>().is_ok() {
+            format!("<ip>{}", &candidate[address.len()..])
+        } else if let Some(address) = address
+            .strip_suffix(':')
+            .filter(|s| s.parse::<Ipv6Addr>().is_ok())
+        {
+            format!("<ip>{}", &candidate[address.len()..])
+        } else {
+            candidate.to_owned()
+        }
+    });
     let text = patterns.mac.replace_all(&text, "<mac>");
     let quads = text.clone();
     let text = patterns.ipv4.replace_all(&text, |caps: &Captures| {
@@ -112,12 +149,13 @@ pub fn scrub(text: &str) -> String {
             found.as_str().to_owned()
         }
     });
-    let text = patterns.ipv6.replace_all(&text, "<ip>");
+    let text = patterns.quoted_paths[0].replace_all(&text, r#""$1/<path>""#);
+    let text = patterns.quoted_paths[1].replace_all(&text, "'$1/<path>'");
     let text = patterns.shared_storage.replace_all(&text, "$1/<path>");
     patterns.home.replace_all(&text, "$1/<path>").into_owned()
 }
 
 /// Binary files can't be scrubbed or read in an issue, so they stay home.
 pub fn looks_binary(bytes: &[u8]) -> bool {
-    bytes.iter().take(8 * 1024).any(|byte| *byte == 0)
+    bytes.contains(&0)
 }

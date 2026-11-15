@@ -21,7 +21,7 @@ use jni::{
 use log::Record;
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -418,25 +418,49 @@ fn add_file(
     archive_name: &str,
     total: &mut u64,
 ) -> io::Result<()> {
-    let meta = match fs::metadata(source) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Logs rotate during export. Open once and read from that same file, with
+    // a hard limit even if it grows after the metadata check.
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(source)
+    {
+        Ok(file) => file,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(())
+        }
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(()),
         Err(error) => return Err(error),
     };
-    if !meta.is_file() || meta.len() > MAX_FILE_BYTES || *total + meta.len() > MAX_ARCHIVE_BYTES {
+    let limit = MAX_FILE_BYTES.min(MAX_ARCHIVE_BYTES.saturating_sub(*total));
+    if limit == 0 {
+        return Ok(());
+    }
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.len() > limit {
         return Ok(());
     }
     // Reports get posted publicly: text is scrubbed, and a binary file could
     // hold anything, so it isn't exported at all.
-    let bytes = fs::read(source)?;
-    if report_privacy::looks_binary(&bytes) {
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit || report_privacy::looks_binary(&bytes) {
         return Ok(());
     }
+    let scrubbed = report_privacy::scrub(&String::from_utf8_lossy(&bytes));
+    let end = scrubbed.floor_char_boundary(scrubbed.len().min(limit as usize));
     writer
         .start_file(archive_name, FileOptions::default())
         .map_err(|error| io::Error::other(error.to_string()))?;
-    writer.write_all(report_privacy::scrub(&String::from_utf8_lossy(&bytes)).as_bytes())?;
-    *total += meta.len();
+    writer.write_all(&scrubbed.as_bytes()[..end])?;
+    *total += end as u64;
     Ok(())
 }
 
@@ -454,12 +478,12 @@ fn add_tree(
     prefix: &str,
     total: &mut u64,
 ) -> io::Result<()> {
-    if !root.exists() || !current.exists() {
-        return Ok(());
-    }
-    let canonical_root = fs::canonicalize(root)?;
-    let canonical_current = fs::canonicalize(current)?;
-    if !canonical_current.starts_with(&canonical_root) {
+    let canonical_current = match fs::canonicalize(current) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if canonical_current != current || !canonical_current.starts_with(root) {
         return Ok(());
     }
     let Ok(entries) = fs::read_dir(&canonical_current) else {
@@ -473,15 +497,31 @@ fn add_tree(
         if metadata.file_type().is_symlink() {
             continue;
         }
-        let relative = path.strip_prefix(&canonical_root).unwrap_or(&path);
-        let name = format!("{prefix}/{}", relative.to_string_lossy().replace('\\', "/"));
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let Some(relative) = relative.to_str() else {
+            continue;
+        };
+        if relative.contains('\\') {
+            continue;
+        }
         if metadata.is_dir() {
-            add_tree(writer, &canonical_root, &path, prefix, total)?;
+            add_tree(writer, root, &path, prefix, total)?;
         } else if metadata.is_file() {
+            let name = format!("{prefix}/{relative}");
             add_file(writer, &path, &name, total)?;
         }
     }
     Ok(())
+}
+
+/// The Debian guest can change its own symlinks. Only collect guest files
+/// from the canonical runtime directory, including the expected home log.
+fn guest_diagnostic_path(runtime: &Path, relative: &Path) -> Option<PathBuf> {
+    let runtime = fs::canonicalize(runtime).ok()?;
+    let path = runtime.join(relative);
+    (fs::canonicalize(&path).ok()? == path).then_some(path)
 }
 
 fn system_property(name: &str) -> String {
@@ -711,31 +751,35 @@ pub fn export_archive(codecs: &str) -> Result<PathBuf, String> {
     )
     .map_err(|error| error.to_string())?;
 
-    let guest_state = Path::new(PRODUCTION_FS_ROOT).join("var/lib/localdesktop");
-    let guest_state_status = if guest_state.is_dir() {
-        "present"
-    } else {
-        "absent"
-    };
-    add_tree(
-        &mut writer,
-        &guest_state,
-        &guest_state,
-        "guest/localdesktop",
-        &mut total,
-    )
-    .map_err(|error| error.to_string())?;
+    use crate::core::runtime::LinuxRuntime;
+    let runtime = crate::android::runtime::proot::PRootRuntime::active();
+    let root = runtime.rootfs_path();
+    let mut guest_state_status = "absent";
+    if let Some(guest_state) =
+        guest_diagnostic_path(root, Path::new("var/lib/localdesktop")).filter(|path| path.is_dir())
+    {
+        guest_state_status = "present";
+        add_tree(
+            &mut writer,
+            &guest_state,
+            &guest_state,
+            "guest/localdesktop",
+            &mut total,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     // The first-run helper that applies appearance, scale and panel
     // launchers at 99% logs into the desktop user's home.
     let username = get_application_context().local_config.user.username;
     let home = if username == "root" {
-        Path::new(PRODUCTION_FS_ROOT).join("root")
+        PathBuf::from("root")
     } else {
-        Path::new(PRODUCTION_FS_ROOT).join(format!("home/{username}"))
+        Path::new("home").join(username)
     };
-    let helper_log = home.join(".local/state/localdesktop/initial-appearance.log");
-    // Like the state tree, never follow a guest symlink out of it.
-    if fs::symlink_metadata(&helper_log).is_ok_and(|metadata| metadata.is_file()) {
+    if let Some(helper_log) = guest_diagnostic_path(
+        root,
+        &home.join(".local/state/localdesktop/initial-appearance.log"),
+    ) {
         add_file(
             &mut writer,
             &helper_log,
@@ -755,7 +799,7 @@ pub fn export_archive(codecs: &str) -> Result<PathBuf, String> {
         "Portal diagnostics\nversion={VERSION}\ntimestamp_ms={}\narch={}\nrootfs={}\nguest_state={guest_state_status}\nbytes={}\n",
         now_ms(),
         std::env::consts::ARCH,
-        PRODUCTION_FS_ROOT,
+        root.display(),
         total
     );
     writer

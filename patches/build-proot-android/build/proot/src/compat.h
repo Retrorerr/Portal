@@ -261,9 +261,10 @@
 #    ifndef NT_ARM_SYSTEM_CALL
 #        define NT_ARM_SYSTEM_CALL		0x404
 #    endif
-#    ifndef SYS_SECCOMP
-#        define SYS_SECCOMP 1
-#    endif
+
+/* Linux SIGSYS si_code for a seccomp trap. Use a private name because
+ * some libc headers declare SYS_SECCOMP as an enum member. */
+#define PROOT_SYS_SECCOMP 1
 
 /* openat2(2) "how" argument.  Mirrors struct open_how from
  * <linux/openat2.h>, but uses a private name so we don't depend on (or
