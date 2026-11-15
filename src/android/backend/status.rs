@@ -8,7 +8,7 @@ use winit::platform::android::activity::AndroidApp;
 
 /// Actions which the event loop consumes on behalf of the recovery screen.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WebviewAction {
+pub enum RecoveryAction {
     /// Clear the Plasma failure and restart the session.
     RetryPlasma,
 }
@@ -18,9 +18,9 @@ pub enum WebviewAction {
 static RETRY_PLASMA_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Record a recovery action and wake the event loop to act on it.
-pub fn request_action(action: WebviewAction) {
+pub fn request_action(action: RecoveryAction) {
     match action {
-        WebviewAction::RetryPlasma => RETRY_PLASMA_REQUESTED.store(true, Ordering::Release),
+        RecoveryAction::RetryPlasma => RETRY_PLASMA_REQUESTED.store(true, Ordering::Release),
     }
     crate::android::utils::webview_handoff::wake_event_loop();
 }
@@ -36,11 +36,11 @@ pub enum ErrorVariant {
     Runtime(String),
 }
 
-pub struct WebviewBackend {
+pub struct StatusBackend {
     pub error: ErrorVariant,
 }
 
-impl WebviewBackend {
+impl StatusBackend {
     /// A backend for setup in progress. Setup reports to Compose through the provisioning
     /// snapshot.
     pub fn build() -> Self {
@@ -72,9 +72,9 @@ impl WebviewBackend {
     }
 
     /// Take a pending recovery action of the requested kind.
-    pub fn take_action(&self, action: WebviewAction) -> bool {
+    pub fn take_action(&self, action: RecoveryAction) -> bool {
         match action {
-            WebviewAction::RetryPlasma => RETRY_PLASMA_REQUESTED.swap(false, Ordering::AcqRel),
+            RecoveryAction::RetryPlasma => RETRY_PLASMA_REQUESTED.swap(false, Ordering::AcqRel),
         }
     }
 }

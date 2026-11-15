@@ -100,7 +100,7 @@ pub struct State {
     pub kwin_client_id: Option<ClientId>,
     pub kwin_generation: Option<u64>,
     /// Android clipboard bridge. It is initialized only after provisioning has produced the
-    /// Wayland backend, so setup/webview stages never touch Android clipboard state.
+    /// Wayland backend, so setup/status stages never touch Android clipboard state.
     pub clipboard_bridge: Option<ClipboardBridge>,
     pub ahb_importer: Option<crate::android::backend::wayland::gl_import::AhbTextureImporter>,
     /// Single authoritative display state for physical dimensions, configure size, and presentation.

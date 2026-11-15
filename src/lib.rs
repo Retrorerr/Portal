@@ -62,9 +62,9 @@ pub mod android {
     pub mod backend {
         pub mod aaudio_player;
         pub mod pipewire_standalone_aaudio;
+        pub mod status;
         pub mod video_decode;
         pub mod wayland;
-        pub mod webview;
     }
     pub mod proot {
         pub mod launch;

@@ -4,8 +4,8 @@ use crate::{
     android::{
         app::build::PolarBearBackend,
         backend::{
+            status::{ErrorVariant, StatusBackend},
             wayland::{Compositor, TouchMode, WaylandBackend},
-            webview::{ErrorVariant, WebviewBackend},
         },
         diagnostics,
         utils::application_context::get_application_context,
@@ -61,10 +61,10 @@ pub struct SetupOptions {
     pub install_optional_apps: bool,
 }
 
-/// Completion hook used by the lifecycle owner to dismiss the provisioning
-/// WebView and send an event through its event-loop proxy. Keeping this hook
-/// outside `WebviewBackend` avoids recreating the NativeActivity just to swap
-/// to the Wayland backend.
+/// Completion hook used by the lifecycle owner to leave the setup status backend
+/// and send an event through its event-loop proxy. Keeping this hook outside
+/// `StatusBackend` avoids recreating the NativeActivity just to swap to the
+/// Wayland backend.
 pub type SetupCompletionCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 const KWIN_WRAPPER: &str = include_str!("../../../assets/localdesktop-kwin-wrapper-v2.sh");
@@ -4528,7 +4528,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// Publish one native provisioning state to both the process coordinator and
-/// the two UI surfaces (Compose first, WebView fallback). The native
+/// the Compose installer. The native
 /// coordinator owns this state; a screen disappearing cannot stop the worker.
 fn publish_snapshot(registration: &SetupRegistration, snapshot: ProvisioningSnapshot) {
     if let Some(progress) = registration.progress() {
@@ -5533,7 +5533,7 @@ fn finish_installation(
             diagnostics::host_event("setup-complete", "all guest provisioning stages completed");
             // A first-run plan already closed the fallback popup and is now
             // running through the provisional Wayland backend. Calling the
-            // ordinary marker-backed WebView callback here would publish a
+            // ordinary marker-backed completion callback here would publish a
             // second, semantically different handoff edge.
             let initial_plan = setup_coordinator()
                 .lock()
@@ -6087,9 +6087,9 @@ fn setup_failure_backend(
     }
     crate::android::utils::webview_handoff::cancel_initial_preferences_handoff();
     publish_snapshot(registration, snapshot);
-    let mut backend = WebviewBackend::build();
+    let mut backend = StatusBackend::build();
     backend.error = ErrorVariant::Setup(message.to_string());
-    PolarBearBackend::WebView(backend)
+    PolarBearBackend::Status(backend)
 }
 
 fn is_truly_fresh_runtime(root: &Path) -> bool {
@@ -6160,7 +6160,7 @@ pub fn setup_with_completion(
             files_dir.display()
         );
         diagnostics::host_event("setup-unsupported", "not the primary Android profile");
-        return PolarBearBackend::WebView(WebviewBackend::unsupported(
+        return PolarBearBackend::Status(StatusBackend::unsupported(
             android_app,
             "Portal only runs in your device's main profile. Open it there instead of a work \
              profile, Private Space or another user.",
@@ -6169,7 +6169,7 @@ pub fn setup_with_completion(
     if !ArchProcess::is_supported(&android_app) {
         log::info!("Guest engine support check failed, showing Device Unsupported page");
         diagnostics::host_event("setup-unsupported", "guest engine support probe failed");
-        return PolarBearBackend::WebView(WebviewBackend::unsupported(
+        return PolarBearBackend::Status(StatusBackend::unsupported(
             android_app,
             "This device can't run Portal's Linux environment.",
         ));
@@ -6180,7 +6180,7 @@ pub fn setup_with_completion(
     // Activity/Compose recreation must attach to it before the completed
     // runtime branch below has a chance to replay the broad setup pipeline.
     if attach_to_anland_repair(&registration, &progress).is_some() {
-        return PolarBearBackend::WebView(WebviewBackend::build());
+        return PolarBearBackend::Status(StatusBackend::build());
     }
 
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
@@ -6206,7 +6206,7 @@ pub fn setup_with_completion(
                 "Reconnecting to Portal installation…",
             ),
         );
-        return PolarBearBackend::WebView(WebviewBackend::build());
+        return PolarBearBackend::Status(StatusBackend::build());
     }
     // A failed operation is also process-lifetime state. Rebinding after an
     // Activity recreation must keep the Retry screen visible; otherwise a
@@ -6214,7 +6214,7 @@ pub fn setup_with_completion(
     // fallback could start an uncontrolled retry loop.
     if let Some((InstallOperationState::Failed, snapshot)) = existing_operation {
         set_registration(registration, InstallOperationState::Failed, snapshot);
-        let mut backend = WebviewBackend::build();
+        let mut backend = StatusBackend::build();
         backend.error = ErrorVariant::Setup(
             setup_coordinator()
                 .lock()
@@ -6222,7 +6222,7 @@ pub fn setup_with_completion(
                 .and_then(|coordinator| coordinator.snapshot.error.clone())
                 .unwrap_or_else(|| "Portal setup paused. Tap Try again.".to_string()),
         );
-        return PolarBearBackend::WebView(backend);
+        return PolarBearBackend::Status(backend);
     }
 
     // The plan is the source of truth for a first-run transaction. A new
@@ -6291,17 +6291,17 @@ pub fn setup_with_completion(
                         let failure =
                             SetupFailure::from_detail(12, "wayland-backend", format!("{error:#}"));
                         publish_failure(&registration, &failure);
-                        let mut backend = WebviewBackend::build();
+                        let mut backend = StatusBackend::build();
                         backend.error = ErrorVariant::Setup(failure.user_message);
-                        return PolarBearBackend::WebView(backend);
+                        return PolarBearBackend::Status(backend);
                     }
                 }
             }
             Err(failure) => {
                 publish_failure(&registration, &failure);
-                let mut backend = WebviewBackend::build();
+                let mut backend = StatusBackend::build();
                 backend.error = ErrorVariant::Setup(failure.user_message);
-                return PolarBearBackend::WebView(backend);
+                return PolarBearBackend::Status(backend);
             }
         }
     }
@@ -6355,7 +6355,7 @@ pub fn setup_with_completion(
                         "Portal could not restart its accepted setup worker. The guest and choices were preserved; tap Try again or export diagnostics.",
                     );
                 }
-                return PolarBearBackend::WebView(WebviewBackend::build());
+                return PolarBearBackend::Status(StatusBackend::build());
             }
         }
     }
@@ -6373,7 +6373,7 @@ pub fn setup_with_completion(
         "Portal setup is ready to begin.",
     );
     set_registration(registration, InstallOperationState::Idle, initial);
-    PolarBearBackend::WebView(WebviewBackend::build())
+    PolarBearBackend::Status(StatusBackend::build())
 }
 
 #[cfg(test)]

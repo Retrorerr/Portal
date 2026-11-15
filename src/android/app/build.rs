@@ -1,7 +1,7 @@
 use winit::platform::android::activity::AndroidApp;
 
 use crate::android::{
-    backend::{wayland::WaylandBackend, webview::WebviewBackend},
+    backend::{status::StatusBackend, wayland::WaylandBackend},
     proot::setup::{setup_with_completion, SetupCompletionCallback},
     utils::webview_handoff,
 };
@@ -28,7 +28,7 @@ pub struct PolarBearFrontend {
 pub enum PolarBearBackend {
     /// No desktop is running: setup, a setup failure, an unsupported device or
     /// a runtime failure. Compose screens report these to the user.
-    WebView(WebviewBackend),
+    Status(StatusBackend),
 
     /// Use a wayland compositor to render Linux GUI applications back to the Android Native Activity
     Wayland(WaylandBackend),

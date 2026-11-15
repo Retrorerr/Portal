@@ -5,7 +5,7 @@
 //! the setup overlay is, and independent of that overlay's veil state machine. Its buttons call
 //! the JNI entry points below directly; there is no WebView, localhost socket or token.
 
-use crate::android::backend::webview::{request_action, WebviewAction};
+use crate::android::backend::status::{request_action, RecoveryAction};
 use jni::{
     objects::{JClass, JObject, JValue},
     sys::_jobject,
@@ -136,7 +136,7 @@ pub extern "system" fn Java_app_polarbear_RecoveryScreen_nativeRetryPlasma(
     _class: JObject,
 ) {
     log::info!("Recovery screen: Retry Plasma requested");
-    request_action(WebviewAction::RetryPlasma);
+    request_action(RecoveryAction::RetryPlasma);
 }
 
 /// JNI: the user tapped Export diagnostics. Builds the archive on a worker thread, opens the

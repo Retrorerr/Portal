@@ -3,11 +3,11 @@ use crate::android::{
     accessibility::{self, AppUserEvent},
     backend::{
         pipewire_standalone_aaudio,
+        status::{ErrorVariant, RecoveryAction, StatusBackend},
         wayland::{
             bind, centralize, centralize_injected_keyboard, handle, write_guest_output_state,
             CentralizedEvent, State,
         },
-        webview::{ErrorVariant, WebviewAction, WebviewBackend},
     },
     ime,
     proot::launch::{is_running, launch, stop, take_failure, take_session_ended},
@@ -650,8 +650,8 @@ impl PolarBearApp {
     /// Keeping this in one helper matters for runtime failures: replacing the Wayland backend
     /// must immediately surface the actionable screen instead of waiting for Android to emit a
     /// second `resumed` callback. Both screens update in place when already showing.
-    fn show_webview(&mut self) {
-        let PolarBearBackend::WebView(backend) = &self.backend else {
+    fn show_status(&mut self) {
+        let PolarBearBackend::Status(backend) = &self.backend else {
             return;
         };
         accessibility::set_runtime_active(false);
@@ -682,7 +682,7 @@ impl PolarBearApp {
             return false;
         }
         self.pending_runtime_error_page = false;
-        self.show_webview();
+        self.show_status();
         true
     }
 
@@ -732,19 +732,19 @@ impl PolarBearApp {
         // The next session must present a fresh frame before the Return veil offers the desktop.
         compose_overlay::notify_desktop_suspended(&android_app);
         log::error!("Switching to graphical runtime error screen: {reason}");
-        self.backend = PolarBearBackend::WebView(if initial_preferences_setup {
-            WebviewBackend::setup_error(android_app, reason)
+        self.backend = PolarBearBackend::Status(if initial_preferences_setup {
+            StatusBackend::setup_error(android_app, reason)
         } else {
-            WebviewBackend::runtime_error(android_app, reason)
+            StatusBackend::runtime_error(android_app, reason)
         });
         self.pending_runtime_error_page = false;
         if initial_preferences_setup {
             // Still setup: the installer shows the failure with Retry Setup.
-            self.show_webview();
+            self.show_status();
             return;
         }
         if compose_overlay::is_hidden() {
-            self.show_webview();
+            self.show_status();
             return;
         }
         // Dismiss the setup veil first. nativeOnOverlayRemoved wakes the event loop, which then
@@ -757,11 +757,11 @@ impl PolarBearApp {
     }
 
     /// Handle a Retry Plasma request from the recovery screen without blocking the winit loop.
-    fn handle_webview_actions(&mut self, event_loop: &ActiveEventLoop) {
+    fn handle_recovery_actions(&mut self, event_loop: &ActiveEventLoop) {
         let retry_runtime = match &self.backend {
-            PolarBearBackend::WebView(backend) => {
+            PolarBearBackend::Status(backend) => {
                 matches!(backend.error, ErrorVariant::Runtime(_))
-                    && backend.take_action(WebviewAction::RetryPlasma)
+                    && backend.take_action(RecoveryAction::RetryPlasma)
             }
             PolarBearBackend::Wayland(_) => false,
         };
@@ -789,11 +789,11 @@ impl PolarBearApp {
         log::info!("Retry Plasma action accepted; rebuilding the Wayland backend");
         let backend = crate::android::proot::setup::setup(android_app.clone());
         self.backend = backend;
-        if matches!(&self.backend, PolarBearBackend::WebView(_)) {
+        if matches!(&self.backend, PolarBearBackend::Status(_)) {
             log::error!(
                 "Plasma retry could not rebuild the guest backend; keeping the error screen"
             );
-            self.show_webview();
+            self.show_status();
             return;
         }
         // Hand the screen to the Return veil, as on a normal launch: it restores the desktop
@@ -901,7 +901,7 @@ impl PolarBearApp {
         }
         let old_backend = std::mem::replace(
             &mut self.backend,
-            PolarBearBackend::WebView(WebviewBackend::runtime_error(
+            PolarBearBackend::Status(StatusBackend::runtime_error(
                 android_app.clone(),
                 placeholder,
             )),
@@ -960,7 +960,7 @@ impl PolarBearApp {
         let android_app = self.frontend.android_app.clone();
         let old_backend = std::mem::replace(
             &mut self.backend,
-            PolarBearBackend::WebView(WebviewBackend::runtime_error(
+            PolarBearBackend::Status(StatusBackend::runtime_error(
                 android_app.clone(),
                 "Portal is applying your initial Plasma preferences…",
             )),
@@ -1006,7 +1006,7 @@ impl PolarBearApp {
         true
     }
 
-    /// Transition from completed provisioning WebView to Wayland backend in-process.
+    /// Transition from the completed setup status backend to the Wayland backend in-process.
     /// Returns true if a transition occurred.
     fn handle_setup_complete(&mut self, event_loop: &ActiveEventLoop) -> bool {
         // As for the preferences handoff: wait for the surface, not onStart.
@@ -1086,29 +1086,29 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         // Presentation is acknowledged asynchronously: a reported show failure
         // returns the host to Hidden so the fallback paths run instead.
         {
-            let (renderer_active, is_webview) = match &self.backend {
+            let (renderer_active, is_status) = match &self.backend {
                 PolarBearBackend::Wayland(backend) => (
                     backend.graphic_renderer.is_some() || backend.anland.is_some(),
                     false,
                 ),
-                PolarBearBackend::WebView(_) => (false, true),
+                PolarBearBackend::Status(_) => (false, true),
             };
-            if compose_overlay::should_show(renderer_active, is_webview) {
+            if compose_overlay::should_show(renderer_active, is_status) {
                 let app = self.frontend.android_app.clone();
                 // Launch routing on the existing durable setup marker: a
-                // WebView backend means provisioning is still pending, so the
+                // status backend means provisioning is still pending, so the
                 // polished first-install intro shows unchanged; a Wayland
                 // backend means Portal is already installed, so the minimal
                 // Return to Plasma screen shows through the same overlay,
                 // transition and veil. Nothing is written here; merely
                 // launching never completes setup.
-                if is_webview {
+                if is_status {
                     compose_overlay::show_compose_overlay(&app);
                 } else {
                     compose_overlay::show_compose_return(&app);
                 }
                 let initial = match &self.backend {
-                    PolarBearBackend::WebView(backend)
+                    PolarBearBackend::Status(backend)
                         if !matches!(backend.error, ErrorVariant::None) =>
                     {
                         compose_overlay::STATE_ERROR
@@ -1116,7 +1116,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                     _ => compose_overlay::STATE_IDLE,
                 };
                 compose_overlay::set_compose_state(&app, initial);
-                let target = if is_webview {
+                let target = if is_status {
                     "setup-pending"
                 } else {
                     "wayland"
@@ -1150,7 +1150,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             }
             return;
         }
-        if matches!(&self.backend, PolarBearBackend::WebView(_)) {
+        if matches!(&self.backend, PolarBearBackend::Status(_)) {
             if self.handle_initial_preferences_handoff(event_loop) {
                 return;
             }
@@ -1159,7 +1159,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             }
             // The overlay owns the screen while up; show the status screen only once it is gone.
             if compose_overlay::is_hidden() {
-                self.show_webview();
+                self.show_status();
             }
             return;
         }
@@ -1233,7 +1233,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             }
             return;
         }
-        if matches!(&self.backend, PolarBearBackend::WebView(_)) {
+        if matches!(&self.backend, PolarBearBackend::Status(_)) {
             accessibility::drain_pending_events();
             // Setup owns RetrySetup while provisioning is active. Runtime error pages are
             // handled below for RetryPlasma; draining IME commits here prevents a stale editor
@@ -1243,13 +1243,13 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 self.finish_runtime_retry(event_loop);
                 return;
             }
-            self.handle_webview_actions(event_loop);
+            self.handle_recovery_actions(event_loop);
             if self.pending_runtime_retry {
                 return;
             }
             // Retry Plasma may have replaced the error page with a live Wayland backend. Do not
             // run setup-completion handling against that newly installed backend.
-            if !matches!(&self.backend, PolarBearBackend::WebView(_)) {
+            if !matches!(&self.backend, PolarBearBackend::Status(_)) {
                 return;
             }
             if self.handle_initial_preferences_handoff(event_loop) {

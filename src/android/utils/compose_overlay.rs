@@ -414,14 +414,14 @@ pub fn publish_current_anland_repair_state(android_app: &AndroidApp) {
 /// defer native startup.
 ///
 /// Returns true only once per process, when nothing is rendering yet: either
-/// the backend still needs setup (WebView) or the Wayland renderer has not
+/// the backend still needs setup (status backend) or the Wayland renderer has not
 /// been bound. Later resumes (rotation, suspend/resume, retry) always use the
 /// normal paths so surface lifecycle, input, IME, and recovery keep working.
-pub fn should_show(renderer_active: bool, is_webview: bool) -> bool {
+pub fn should_show(renderer_active: bool, is_status: bool) -> bool {
     if SHOW_REQUESTED.load(Ordering::Acquire) {
         return false;
     }
-    is_webview || !renderer_active
+    is_status || !renderer_active
 }
 
 /// Show the fullscreen Compose overlay (UI-thread posted).
@@ -1037,7 +1037,7 @@ fn on_overlay_show_failed(reason: &str) {
     );
     if state() == OverlayState::Showing {
         // The show request stays consumed; native startup has already taken
-        // the normal WebView/Wayland path and never waits on the overlay.
+        // the normal status/Wayland path and never waits on the overlay.
         set_state(OverlayState::Hidden);
     }
     super::webview_handoff::wake_event_loop();
