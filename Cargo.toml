@@ -9,7 +9,7 @@ default-run = "build_apk"
 [lib]
 crate-type = ["lib", "cdylib"]
 
-# The standalone PipeWire client that owns the Android AAudio output stream. Off
+# The standalone PipeWire client that feeds the Android AAudio output stream. Off
 # by default: it links libpipewire-0.3, so it needs an Android PipeWire sysroot
 # that the normal APK build does not. See scripts/build-pipewire-aaudio-sink.sh.
 [[bin]]

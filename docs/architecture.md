@@ -72,6 +72,8 @@ The optional accessibility service exists because Android can consume hardware s
 
 The guest exposes normal PipeWire/Pulse interfaces to Linux applications. Portal's native sink bridges the resulting stream to AAudio on Android.
 
+The sink is a separate PipeWire client process and the graph's driver. The AAudio stream itself is opened by a thread in the app's own process (`backend/aaudio_player.rs`), because Android attributes a stream to the process that opened it: only then do per-app volume panels list Portal. The two are joined by a socket pair, the sink's standard input (`core/audio_link.rs`). One sink thread requests a graph cycle, waits for it, sends the result, and waits for the app's reply, which comes once AAudio's blocking write has taken it, so Android's playback rate paces the graph. Cycles are kept most of a quantum apart so clients can refill between them. The AAudio stream is an ordinary media stream (deep-buffer mixer, where device effects run, and an audio session announced to effect apps) unless `<APP_FILES>/audio-output` says `low-latency`. It is started only while the graph delivers audible samples and stopped after three seconds of silence; in between, a timer paces the graph so guest clocks keep running. The player reopens the stream itself when Android changes the route.
+
 The Debian filesystem remains in app-private storage. Shared Android storage is mounted separately and only when the corresponding Android permission is granted.
 
 ## Failure and recovery

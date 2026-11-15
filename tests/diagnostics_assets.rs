@@ -21,6 +21,7 @@ const ANDROID_MAIN: &str = include_str!("../src/android/main.rs");
 const DRMSHIM_SOURCE: &str = include_str!("../assets/guest-arm64/drmshim.c");
 const DRMSHIM_BINARY: &[u8] = include_bytes!("../assets/guest-arm64/drmshim.so");
 const AUDIO_SUPERVISOR: &str = include_str!("../src/android/backend/pipewire_standalone_aaudio.rs");
+const AUDIO_PLAYER: &str = include_str!("../src/android/backend/aaudio_player.rs");
 const LOGIN_HELPER: &str = include_str!("../assets/localdesktop-prepare-login.py");
 const ROOTFS_BUILDER: &str = include_str!("../scripts/build_debian_rootfs.py");
 
@@ -46,8 +47,15 @@ fn graphical_login_is_nonroot_and_keeps_privileged_install_plan_separate() {
 
 #[test]
 fn audio_supervisor_recovers_dead_or_disconnected_backend_without_changing_guest_sockets() {
-    assert!(AUDIO_SUPERVISOR.contains("AAUDIO_SINK_ERROR_PID"));
-    assert!(AUDIO_SUPERVISOR.contains("AAudio stream disconnected in sink"));
+    // A dead sink is restarted by the supervisor; a disconnected Android
+    // stream (route change) is reopened by the player itself.
+    assert!(AUDIO_SUPERVISOR.contains("; restarting the AAudio sink"));
+    assert!(AUDIO_PLAYER.contains(
+        "if DISCONNECTED.swap(false, Ordering::AcqRel) {\n            player.reopen()?;"
+    ));
+    // The stream belongs to the app's process, not the sink's, so Android
+    // lists Portal as what is playing.
+    assert!(AUDIO_SUPERVISOR.contains("aaudio_player::serve("));
     assert!(AUDIO_SUPERVISOR.contains("SocketCleanupOnError"));
     assert!(AUDIO_SUPERVISOR.contains("schedule_start(android_app)"));
     assert!(AUDIO_SUPERVISOR.contains("AAUDIO_OPERATION.lock()"));

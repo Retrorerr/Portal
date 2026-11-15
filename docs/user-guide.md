@@ -73,6 +73,14 @@ connected. If you minimise it, it returns as the small button for later fields
 until you tap that or close it. Android's keyboard is not shown while this is
 on.
 
+Linux sound plays as ordinary Android media, so the tablet's own sound effects
+and tuning (Dolby and the like) and equalizer apps apply to it, and Portal
+appears in per-app volume controls on tablets that have them. While nothing
+audible is playing, Portal keeps no Android audio stream running; a Bluetooth
+headset shared with a phone is free to switch. **Low-latency audio** (off by
+default) trades those effects for a shorter delay, which some games and music
+tools want.
+
 Swipe up or activate the bottom veil affordance to return to the desktop.
 Tap outside an expanded Apps or Files card to collapse it. The veil's idle
 motion pauses while either card is open.

@@ -1,6 +1,7 @@
 pub mod core {
     pub mod android_input;
     pub mod android_integration;
+    pub mod audio_link;
     pub mod clipboard_broker;
     pub mod clipboard_policy;
     pub mod clipboard_sync;
@@ -60,6 +61,7 @@ pub mod android {
         pub mod run;
     }
     pub mod backend {
+        pub mod aaudio_player;
         pub mod pipewire_standalone_aaudio;
         pub mod video_decode;
         pub mod wayland;

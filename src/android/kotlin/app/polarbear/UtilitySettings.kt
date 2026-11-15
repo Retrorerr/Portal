@@ -77,6 +77,14 @@ internal fun PortalSettingsContent(
                 palette = palette,
                 onChange = host::setPortalKeyboardEnabled,
             )
+            SettingsDivider(palette)
+            SettingsToggle(
+                title = "Low-latency audio",
+                subtitle = "Skips Android's sound effects",
+                checked = host.lowLatencyAudio,
+                palette = palette,
+                onChange = host::setLowLatencyAudioEnabled,
+            )
         }
     }
 }

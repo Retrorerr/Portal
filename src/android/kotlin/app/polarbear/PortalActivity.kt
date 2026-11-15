@@ -41,6 +41,7 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
 import android.graphics.PixelFormat
+import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -63,6 +64,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.google.androidgamesdk.GameActivity
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
@@ -136,6 +138,7 @@ open class PortalActivity : GameActivity() {
         useAndroidScreenTimeout = preferences.getBoolean(PREF_USE_ANDROID_SCREEN_TIMEOUT, true)
         usePortalKeyboard = preferences.getBoolean(PREF_USE_PORTAL_KEYBOARD, false)
         SessionControls.replaceAndroidKeyboard = usePortalKeyboard
+        lowLatencyAudio = runCatching { audioOutputFile().readText().trim() == "low-latency" }.getOrDefault(false)
         screenInhibition.start()
         applyScreenTimeout()
         applyDesktopPointerIcon()
@@ -359,6 +362,47 @@ open class PortalActivity : GameActivity() {
         usePortalKeyboard = enabled
         getPreferences(MODE_PRIVATE).edit().putBoolean(PREF_USE_PORTAL_KEYBOARD, enabled).apply()
         SessionControls.replaceAndroidKeyboard = enabled
+    }
+
+    // The native audio supervisor reads this file when it starts the output.
+    private fun audioOutputFile() = File(filesDir, "audio-output")
+
+    internal var lowLatencyAudio by mutableStateOf(false)
+        private set
+
+    internal fun setLowLatencyAudioEnabled(enabled: Boolean) {
+        lowLatencyAudio = enabled
+        runCatching {
+            if (enabled) audioOutputFile().writeText("low-latency\n") else audioOutputFile().delete()
+        }
+        nativeAudioOutputChanged()
+    }
+
+    private var audioEffectSession = 0
+
+    /**
+     * The audio session Portal plays on, or 0 when it has none. Announced the way media
+     * players do, so equalizer and sound-effect apps can attach to Portal's sound.
+     */
+    @Suppress("unused") // called from native code
+    fun setAudioEffectSession(session: Int) = runOnUiThread {
+        if (session == audioEffectSession) return@runOnUiThread
+        if (audioEffectSession > 0) {
+            announceAudioEffectSession(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION, audioEffectSession)
+        }
+        audioEffectSession = session
+        if (session > 0) {
+            announceAudioEffectSession(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION, session)
+        }
+    }
+
+    private fun announceAudioEffectSession(action: String, session: Int) {
+        sendBroadcast(
+            Intent(action)
+                .putExtra(AudioEffect.EXTRA_AUDIO_SESSION, session)
+                .putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
+                .putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC),
+        )
     }
 
     private fun applyScreenTimeout() {
@@ -678,6 +722,7 @@ open class PortalActivity : GameActivity() {
         private const val IDLE_REFRESH_HZ = 60f
         private val processHostsActivity = AtomicBoolean(false)
 
+        @JvmStatic private external fun nativeAudioOutputChanged()
         @JvmStatic private external fun nativeCapturedMotion(dx: Float, dy: Float)
         // Also carries mouse side buttons, captured or not.
         @JvmStatic private external fun nativeCapturedButton(code: Int, pressed: Boolean)

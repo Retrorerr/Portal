@@ -2,7 +2,9 @@
 //!
 //! This proof of concept runs a PipeWire daemon in the Android app context,
 //! exposes its native socket to the proot guest, and bridges playback through a
-//! separate normal PipeWire client that registers an AAudio-backed `Audio/Sink`.
+//! separate normal PipeWire client that registers an `Audio/Sink`. That client
+//! sends what the graph plays back to this process, which owns the AAudio
+//! stream (`aaudio_player`), so Android counts the sound as the app's.
 //!
 //! The important distinction is that this is not a PipeWire/SPA plugin or
 //! module. It is a standalone client process, so the POC can avoid PipeWire's
@@ -19,13 +21,14 @@ use std::os::unix::fs as unix_fs;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use winit::platform::android::activity::AndroidApp;
 
+use crate::android::backend::aaudio_player::{self, Output};
 use crate::android::utils::application_context::get_application_context;
 use crate::core::config;
 
@@ -71,10 +74,11 @@ static AAUDIO_CHILDREN: Mutex<Option<PipewireAaudioChildren>> = Mutex::new(None)
 // and that startup can publish children after shutdown has already returned.
 static AAUDIO_OPERATION: Mutex<()> = Mutex::new(());
 static AAUDIO_WANTED: AtomicBool = AtomicBool::new(false);
-// The sink process reports AAudio stream disconnection on stderr but may keep
-// its PipeWire node alive. Treat that exact process as failed so the shared
-// backend can recover instead of leaving a selectable silent output.
-static AAUDIO_SINK_ERROR_PID: AtomicU32 = AtomicU32::new(0);
+/// The activity that announces the player's audio session to Android.
+static ACTIVITY: Mutex<Option<AndroidApp>> = Mutex::new(None);
+/// Counts sinks started. Each has its own player thread, and only the latest
+/// one's audio session is Portal's.
+static PLAYER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// The tablet's microphone and cameras, each published to the guest by its
 /// own capture helper process (`localdesktop_pipewire_capture`).
@@ -195,6 +199,9 @@ pub fn spawn_after_ready(android_app: AndroidApp) {
 }
 
 fn schedule_start(android_app: AndroidApp) {
+    if let Ok(mut activity) = ACTIVITY.lock() {
+        *activity = Some(android_app.clone());
+    }
     pw_info!(
         "server",
         "scheduling standalone-client PipeWire/AAudio backend"
@@ -220,7 +227,10 @@ fn schedule_start(android_app: AndroidApp) {
                     if ready {
                         pw_info!("server", "standalone-client PipeWire/AAudio ready");
                     } else {
-                        pw_warn!("server", "standalone-client PipeWire/AAudio unavailable on this device/build");
+                        pw_warn!(
+                            "server",
+                            "standalone-client PipeWire/AAudio unavailable on this device/build"
+                        );
                     }
                     return;
                 }
@@ -281,6 +291,55 @@ pub fn suspend_output() {
             }
         }
     });
+}
+
+/// Replace the running sink and with it the Android stream, which follows
+/// `<files>/audio-output` when it opens. The monitor starts the new one
+/// within a second.
+fn restart_output() {
+    thread::spawn(|| {
+        let _operation = AAUDIO_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+        if let Ok(mut slot) = AAUDIO_CHILDREN.lock() {
+            if let Some(mut sink) = slot.as_mut().and_then(|children| children.sink.take()) {
+                kill_child("aaudio-sink", &mut sink);
+            }
+        }
+    });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_PortalActivity_nativeAudioOutputChanged(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    restart_output();
+}
+
+/// Tell Android which audio session Portal plays on (0: none), as media
+/// players do, so equalizer and sound-effect apps can attach to it.
+fn announce_effect_session(session: i32) {
+    let Some(app) = ACTIVITY.lock().ok().and_then(|activity| activity.clone()) else {
+        return;
+    };
+    crate::android::utils::ndk::run_in_jvm(
+        |env, app| {
+            let activity = unsafe {
+                jni::objects::JObject::from_raw(app.activity_as_ptr() as *mut jni::sys::_jobject)
+            };
+            if let Err(error) = env.call_method(
+                activity,
+                "setAudioEffectSession",
+                "(I)V",
+                &[jni::objects::JValue::Int(session)],
+            ) {
+                pw_warn!(
+                    "server",
+                    "failed to announce audio session {session}: {error}"
+                );
+            }
+        },
+        app,
+    );
 }
 
 /// Start the AAudio sink and make sure it survives its first moments.
@@ -483,7 +542,10 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
             })
             .collect(),
         None => {
-            pw_info!("capture", "{CAPTURE_LIB} missing; no guest microphone or camera");
+            pw_info!(
+                "capture",
+                "{CAPTURE_LIB} missing; no guest microphone or camera"
+            );
             Vec::new()
         }
     };
@@ -547,9 +609,9 @@ fn spawn_child_monitor(runtime_dir: PathBuf, android_app: AndroidApp) {
                         slot.take()
                     }
                     Ok(None) => {
-                        // A dead sink or a disconnected AAudio stream (route
-                        // change, Bluetooth, headphones) needs only a new
-                        // sink; the guest's connections stay up.
+                        // A dead sink needs only a new sink; the guest's
+                        // connections stay up. (The player follows Android
+                        // route changes by itself.)
                         match poll_sink_exit(children) {
                             Ok(Some(reason)) => {
                                 pw_warn!("monitor", "{reason}; restarting the AAudio sink");
@@ -560,7 +622,11 @@ fn spawn_child_monitor(runtime_dir: PathBuf, android_app: AndroidApp) {
                             Ok(None) => {}
                             Err(e) => pw_error!("monitor", "failed to poll sink state: {e}"),
                         }
-                        supervise_capture(children, &mut capture_failures, &mut next_capture_attempt);
+                        supervise_capture(
+                            children,
+                            &mut capture_failures,
+                            &mut next_capture_attempt,
+                        );
                         if children.sink.is_some() {
                             sink_failures = 0;
                         } else if AAUDIO_WANTED.load(Ordering::SeqCst)
@@ -648,13 +714,6 @@ fn poll_sink_exit(children: &mut PipewireAaudioChildren) -> Result<Option<String
     let Some(sink) = children.sink.as_mut() else {
         return Ok(None);
     };
-    if AAUDIO_SINK_ERROR_PID.load(Ordering::SeqCst) == sink.id() {
-        AAUDIO_SINK_ERROR_PID.store(0, Ordering::SeqCst);
-        return Ok(Some(format!(
-            "AAudio stream disconnected in sink pid={}",
-            sink.id()
-        )));
-    }
     if let Some(status) = sink
         .try_wait()
         .map_err(|e| format!("aaudio-sink try_wait: {e}"))?
@@ -869,7 +928,7 @@ context.objects = [
         }}
     }}
     # Silent stand-in for Portal Audio Output, which stops while Portal is in
-    # the background and restarts after an Android route change. Without
+    # the background. Without
     # another sink, WirePlumber failed every open stream ("no target node
     # available"); with it, streams wait here and follow the default back
     # to Portal Audio Output, which outranks it (no priority = 0).
@@ -1033,32 +1092,67 @@ fn spawn_pipewire_pulse(
     spawn_logged(command, "pipewire-pulse")
 }
 
-/// Portal's tone chain (bass, loudness and a limiter in the sink) is on
-/// unless `<files>/audio-tone` says `off`.
-fn audio_tone_enabled() -> bool {
-    let flag = Path::new(crate::core::config::APP_FILES_ROOT).join("audio-tone");
-    fs::read_to_string(flag).map_or(true, |value| value.trim() != "off")
+/// Which Android output the stream asks for. Media, the default, is what any
+/// music app gets: Android's deep-buffer mixer with the device's sound
+/// effects. `<files>/audio-output` may say `low-latency` for the shortest
+/// path, which skips them.
+fn audio_output() -> Output {
+    let flag = Path::new(crate::core::config::APP_FILES_ROOT).join("audio-output");
+    match fs::read_to_string(flag) {
+        Ok(value) if value.trim() == "low-latency" => Output::LowLatency,
+        _ => Output::Media,
+    }
+}
+
+const SINK_RATE: u32 = 48000;
+const SINK_CHANNELS: u32 = 2;
+
+/// Play what the sink at the other end of `link` sends, until it is gone.
+fn spawn_player(link: UnixStream) {
+    let generation = PLAYER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let output = audio_output();
+    let announce = move |session| {
+        if PLAYER_GENERATION.load(Ordering::SeqCst) == generation {
+            announce_effect_session(session);
+        }
+    };
+    let spawned = thread::Builder::new()
+        .name("aaudio-player".into())
+        .spawn(move || {
+            // An error closes the link: the sink exits and the monitor
+            // starts a new one, with a new stream.
+            match aaudio_player::serve(link, output, SINK_RATE, SINK_CHANNELS, announce) {
+                Ok(()) => pw_info!("player", "the sink closed the audio link"),
+                Err(error) => pw_error!("player", "{error}"),
+            }
+            announce(0);
+        });
+    if let Err(error) = spawned {
+        pw_error!("player", "failed to start the player thread: {error}");
+    }
 }
 
 fn spawn_aaudio_sink(binary: &Path, env: &PipewireAaudioEnv) -> Result<Child, String> {
     pw_info!("spawn", "exec {}", binary.display());
+    // The sink's standard input is its end of the audio link.
+    let (ours, theirs) = UnixStream::pair().map_err(|e| format!("audio link socketpair: {e}"))?;
     let mut command = Command::new(binary);
     apply_pipewire_env(&mut command, env);
     command
         .arg("--node-name")
         .arg("portal-audio-output")
         .arg("--rate")
-        .arg("48000")
+        .arg(SINK_RATE.to_string())
         .arg("--channels")
-        .arg("2")
-        .arg("--buffer-ms")
-        .arg("120")
-        .arg("--tone")
-        .arg(if audio_tone_enabled() { "on" } else { "off" })
-        .stdin(Stdio::null())
+        .arg(SINK_CHANNELS.to_string())
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(theirs)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    spawn_logged(command, "aaudio-sink")
+    // `spawn_logged` drops the command and with it this process's copy of
+    // the sink's end, so the player sees the link close when the sink dies.
+    let sink = spawn_logged(command, "aaudio-sink")?;
+    spawn_player(ours);
+    Ok(sink)
 }
 
 /// The app's package name (its process name), which AAudio attributes the
@@ -1082,7 +1176,11 @@ fn mic_preset() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn spawn_capture(binary: &Path, env: &PipewireAaudioEnv, kind: CaptureKind) -> Result<Child, String> {
+fn spawn_capture(
+    binary: &Path,
+    env: &PipewireAaudioEnv,
+    kind: CaptureKind,
+) -> Result<Child, String> {
     pw_info!("spawn", "exec {} ({kind:?})", binary.display());
     let mut command = Command::new(binary);
     apply_pipewire_env(&mut command, env);
@@ -1138,34 +1236,40 @@ fn supervise_capture(
     let Some(bin) = children.capture_bin.clone() else {
         return;
     };
-    children.capture.retain_mut(|helper| match helper.child.try_wait() {
-        Ok(None) => true,
-        result => {
-            pw_warn!(
-                "monitor",
-                "{} pid={} exited ({result:?})",
-                helper.kind.log_name(),
-                helper.child.id()
-            );
-            if let Ok(mut inputs) = CAPTURE_INPUT.lock() {
-                inputs[helper.kind as usize] = None;
+    children
+        .capture
+        .retain_mut(|helper| match helper.child.try_wait() {
+            Ok(None) => true,
+            result => {
+                pw_warn!(
+                    "monitor",
+                    "{} pid={} exited ({result:?})",
+                    helper.kind.log_name(),
+                    helper.child.id()
+                );
+                if let Ok(mut inputs) = CAPTURE_INPUT.lock() {
+                    inputs[helper.kind as usize] = None;
+                }
+                let index = helper.kind as usize;
+                failures[index] = failures[index].saturating_add(1);
+                next_attempt[index] =
+                    Instant::now() + Duration::from_secs(1 << failures[index].min(6));
+                false
             }
-            let index = helper.kind as usize;
-            failures[index] = failures[index].saturating_add(1);
-            next_attempt[index] = Instant::now() + Duration::from_secs(1 << failures[index].min(6));
-            false
-        }
-    });
+        });
     for kind in CaptureKind::ALL {
         let index = kind as usize;
-        if children.capture.iter().any(|helper| helper.kind == kind) || Instant::now() < next_attempt[index] {
+        if children.capture.iter().any(|helper| helper.kind == kind)
+            || Instant::now() < next_attempt[index]
+        {
             continue;
         }
         match spawn_capture(&bin, &children.env, kind) {
             Ok(child) => children.capture.push(CaptureChild { kind, child }),
             Err(e) => {
                 failures[index] = failures[index].saturating_add(1);
-                next_attempt[index] = Instant::now() + Duration::from_secs(1 << failures[index].min(6));
+                next_attempt[index] =
+                    Instant::now() + Duration::from_secs(1 << failures[index].min(6));
                 pw_error!("monitor", "{kind:?} helper restart failed: {e}");
             }
         }
@@ -1179,10 +1283,10 @@ fn spawn_logged(mut command: Command, name: &'static str) -> Result<Child, Strin
     pw_info!("spawn", "{name} child pid={pid}");
 
     if let Some(stderr) = child.stderr.take() {
-        thread::spawn(move || stream_child_lines(name, pid, "stderr", stderr));
+        thread::spawn(move || stream_child_lines(name, "stderr", stderr));
     }
     if let Some(stdout) = child.stdout.take() {
-        thread::spawn(move || stream_child_lines(name, pid, "stdout", stdout));
+        thread::spawn(move || stream_child_lines(name, "stdout", stdout));
     }
 
     Ok(child)
@@ -1203,13 +1307,12 @@ fn verify_child_still_running(
     Ok(())
 }
 
-fn stream_child_lines(name: &'static str, pid: u32, stream: &'static str, pipe: impl std::io::Read) {
+fn stream_child_lines(name: &'static str, stream: &'static str, pipe: impl std::io::Read) {
     for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-        if name == "aaudio-sink" && line.contains("[pipewire-aaudio-sink] AAudio error:") {
-            AAUDIO_SINK_ERROR_PID.store(pid, Ordering::SeqCst);
-        }
         if line == "[portal-capture] demand" {
-            let kind = CaptureKind::ALL.into_iter().find(|kind| kind.log_name() == name);
+            let kind = CaptureKind::ALL
+                .into_iter()
+                .find(|kind| kind.log_name() == name);
             if let Some(kind) = kind {
                 crate::android::utils::capture_permissions::request(kind);
             }
