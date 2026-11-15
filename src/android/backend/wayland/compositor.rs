@@ -293,12 +293,6 @@ impl State {
         }
     }
 
-    /// Compatibility helper for callers that only have submit/feedback
-    /// evidence and no Android timestamp sample.
-    pub fn mark_kwin_frame_presented(&mut self) -> Option<u64> {
-        self.mark_kwin_frame_presented_with_evidence("egl-swap-and-wayland-feedback", None)
-    }
-
     fn observe_kwin_surface_id(&mut self, surface: &WlSurface) {
         let toplevel = self
             .xdg_shell_state
@@ -792,11 +786,6 @@ impl Compositor {
             output: None,
             output_global: None,
         })
-    }
-
-    /// Legacy constructor defaulting to 1920x1080 for backwards compatibility.
-    pub fn build() -> Result<Compositor, Box<dyn Error>> {
-        Self::new((1920, 1080), 1.0)
     }
 
     /// Start clipboard polling after the Android NativeActivity and the nested compositor exist.

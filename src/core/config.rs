@@ -39,15 +39,9 @@ pub fn runs_in_primary_profile(files_dir: &std::path::Path, app_files_root: &std
     }
 }
 
-/// Project homepage, also the online documentation entry point.
-pub const DOCS_HOME_URL: &str = "https://github.com/Retrorerr/Portal#readme";
-
 pub const WAYLAND_SOCKET_NAME: &str = "wayland-0";
 pub const DESKTOP_USER: &str = "desktop";
-pub const DESKTOP_UID: u32 = 1000;
 pub const DESKTOP_RUNTIME_DIR: &str = "/run/user/1000";
-
-pub const MAX_PANEL_LOG_ENTRIES: usize = 100;
 
 /// PipeWire runtime path as seen from inside the proot guest.
 pub const PIPEWIRE_GUEST_RUNTIME_DIR: &str = "/tmp";

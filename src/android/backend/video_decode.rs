@@ -78,11 +78,6 @@ pub fn layer_installed() -> bool {
         && layer_dir().join(DRIVER_FILE).is_file()
 }
 
-/// Whether sessions get the VA driver and the daemon runs.
-pub fn enabled() -> bool {
-    wanted() && layer_installed()
-}
-
 /// Guest environment selecting the termux-va VA driver. Set whenever
 /// decoding is wanted, so a driver installed during the session works in
 /// apps started after it lands; until then libva fails to load the driver

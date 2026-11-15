@@ -35,9 +35,6 @@ use winit::platform::android::activity::AndroidApp;
 /// `Display.getSupportedModes()`; this stays as the sane default.
 pub const DESIRED_FRAME_RATE_HZ: f32 = 144.0;
 
-/// Fallback interactive desktop hint in millihertz (see [`DESIRED_FRAME_RATE_HZ`]).
-pub const DESIRED_FRAME_RATE_MILLIHZ: i32 = 144_000;
-
 /// Resolve the preferred frame-rate hint in Hz from the display modes Android
 /// reports (144.0 on the OnePlus Pad 3, otherwise the device maximum).
 /// Always finite and positive; falls back to [`DESIRED_FRAME_RATE_HZ`].
@@ -61,25 +58,16 @@ const COMPATIBILITY_AT_LEAST: i8 = 2;
 /// non-seamless (visually interrupting) mode switch.
 const CHANGE_ONLY_IF_SEAMLESS: i8 = 0;
 
-/// Request the preferred rate for Portal's current `ANativeWindow` via the
+/// Request an explicit rate (Hz) for Portal's current `ANativeWindow` via the
 /// supported NDK path. Idempotency is owned by the caller (invoke on
 /// resume/window creation, not per-frame): the hint is sticky per window until
-/// cleared or destroyed.
+/// cleared or destroyed. Invalid/non-positive rates fall back to
+/// [`DESIRED_FRAME_RATE_HZ`].
 ///
 /// Logs the numeric `status` return (0 = success, `-EINVAL` = invalid window /
 /// rate / compatibility) plus which entry point was used, so OxygenOS policy
 /// decisions can be correlated with `dumpsys display` / SurfaceFlinger
 /// evidence. Never panics, never modifies global state.
-pub fn ensure_high_refresh_rate(android_app: &AndroidApp) {
-    ensure_high_refresh_rate_hz(android_app, preferred_frame_rate_hz(android_app));
-}
-
-/// Request an explicit rate (Hz) for Portal's current `ANativeWindow`.
-///
-/// Prefer [`ensure_high_refresh_rate`] (which resolves the preferred rate
-/// from the supported modes) unless the caller already holds the nominal
-/// target and needs the hint to match it exactly. Invalid/non-positive rates
-/// fall back to [`DESIRED_FRAME_RATE_HZ`].
 pub fn ensure_high_refresh_rate_hz(android_app: &AndroidApp, rate_hz: f32) {
     let rate_hz = if rate_hz.is_finite() && rate_hz > 0.0 {
         rate_hz

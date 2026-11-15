@@ -38,12 +38,6 @@ pub const ABS_RZ: u16 = 0x05;
 pub const ABS_HAT0X: u16 = 0x10;
 pub const ABS_HAT0Y: u16 = 0x11;
 
-pub const FF_RUMBLE: u16 = 0x50;
-
-pub const BUS_USB: u16 = 0x03;
-pub const XBOX360_VENDOR: u16 = 0x045e;
-pub const XBOX360_PRODUCT: u16 = 0x028e;
-pub const XBOX360_VERSION: u16 = 0x0114;
 pub const PAD_NAME: &str = "Microsoft X-Box 360 pad";
 
 /// Buttons in the order xpad registers them.

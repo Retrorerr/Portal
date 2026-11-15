@@ -597,11 +597,6 @@ where
         (w, h).into()
     }
 
-    /// Scale factor of the underlying window.
-    pub fn scale_factor(&self) -> f64 {
-        self.window.scale_factor()
-    }
-
     /// Reference to the underlying window
     pub fn window(&self) -> &WinitWindow {
         &self.window
@@ -618,11 +613,6 @@ where
                 _ => None,
             })
             .unwrap_or(std::ptr::null_mut())
-    }
-
-    /// Access the underlying renderer
-    pub fn renderer(&mut self) -> &mut R {
-        &mut self.renderer
     }
 
     /// Bind the window and query the age of the back buffer acquired by this bind.
@@ -674,14 +664,6 @@ where
             }
         }
         Ok((&mut self.renderer, fb, age.max(0) as usize))
-    }
-
-    /// Retrieve the underlying `EGLSurface` for advanced operations
-    ///
-    /// **Note:** Don't carelessly use this to manually bind the renderer to the surface,
-    /// `WinitGraphicsBackend::bind` transparently handles window resizes for you.
-    pub fn egl_surface(&self) -> &EGLSurface {
-        &self.egl_surface
     }
 
     /// Return whether the Android physical display-present timestamp probe is

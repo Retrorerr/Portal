@@ -178,14 +178,6 @@ fn wanted(archive_path: &str) -> bool {
             .any(|w| stripped == *w || stripped.starts_with(&format!("{w}/")))
 }
 
-/// Legacy entry point (no progress). Prefer `provision_with_progress` from
-/// the spawned setup stage so the UI stays live during the ~11 MB fetch.
-pub fn provision() {
-    if let Err(error) = provision_with_progress(|_| {}) {
-        log::error!("mesa KGSL layer provisioning failed: {error:#}");
-    }
-}
-
 /// Download (fail closed), verify, and transactionally promote the layer.
 ///
 /// Cheap when already provisioned. Reports `checking / downloading /

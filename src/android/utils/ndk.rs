@@ -49,17 +49,6 @@ where
     res
 }
 
-/// Recreate the NativeActivity after first-run provisioning so the same launch continues into
-/// the Wayland backend without asking the user to close or restart the app.
-pub fn recreate_activity(env: &mut JNIEnv, android_app: &AndroidApp) {
-    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _jobject) };
-    if let Err(error) = env.call_method(activity, "recreate", "()V", &[]) {
-        log::error!("Failed to recreate activity after setup: {error}");
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
-}
-
 /// The user ended the Plasma session: PortalActivity leaves the task and ends the process.
 pub fn close_after_logout(android_app: &AndroidApp) {
     run_in_jvm(

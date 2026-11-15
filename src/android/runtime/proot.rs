@@ -17,7 +17,7 @@ use crate::android::diagnostics;
 use crate::android::utils::application_context::get_application_context;
 use crate::android::utils::thread::spawn_named;
 use crate::core::config;
-use crate::core::runtime::{LinuxRuntime, LogCallback, ProcessSpec, RuntimeHealth};
+use crate::core::runtime::{LinuxRuntime, LogCallback, ProcessSpec};
 use winit::platform::android::activity::AndroidApp;
 
 const MAX_CAPTURED_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -55,14 +55,6 @@ impl PRootRuntime {
         Self {
             rootfs: rootfs.into(),
         }
-    }
-
-    pub fn production() -> Self {
-        Self::new(config::PRODUCTION_FS_ROOT)
-    }
-
-    pub fn debian_slot(path: impl Into<PathBuf>) -> Self {
-        Self::new(path)
     }
 
     pub fn active() -> Self {
@@ -395,44 +387,20 @@ fn signal_process_group(process_group: Option<libc::pid_t>, signal: libc::c_int)
 }
 
 /// A `--bind` for PRoot or a `-b` for tawcroot; `dst` defaults to `src`.
-fn bind_arg(tawcroot: bool, src: &str, dst: Option<&str>, readonly: bool) -> Vec<String> {
-    let ro = if readonly { ":ro" } else { "" };
+fn bind_arg(tawcroot: bool, src: &str, dst: Option<&str>) -> Vec<String> {
     if tawcroot {
-        vec![
-            "-b".to_string(),
-            format!("{src}:{}{ro}", dst.unwrap_or(src)),
-        ]
+        vec!["-b".to_string(), format!("{src}:{}", dst.unwrap_or(src))]
     } else {
         match dst {
-            Some(dst) => vec![format!("--bind={src}:{dst}{ro}")],
-            None => vec![format!("--bind={src}{ro}")],
+            Some(dst) => vec![format!("--bind={src}:{dst}")],
+            None => vec![format!("--bind={src}")],
         }
     }
 }
 
 impl LinuxRuntime for PRootRuntime {
-    fn engine_name(&self) -> &'static str {
-        if super::tawcroot::selected() {
-            "tawcroot"
-        } else {
-            "proot"
-        }
-    }
-
     fn rootfs_path(&self) -> &Path {
         &self.rootfs
-    }
-
-    fn check_health(&self) -> RuntimeHealth {
-        if !self.rootfs.exists() {
-            return RuntimeHealth::MissingRootfs(self.rootfs.clone());
-        }
-        let sh_bin = self.rootfs.join("bin/sh");
-        let usr_sh_bin = self.rootfs.join("usr/bin/sh");
-        if !sh_bin.exists() && !usr_sh_bin.exists() {
-            return RuntimeHealth::Degraded("Rootfs missing /bin/sh shell".to_string());
-        }
-        RuntimeHealth::Healthy
     }
 
     fn execute(
@@ -442,10 +410,6 @@ impl LinuxRuntime for PRootRuntime {
         cancel: Option<Arc<AtomicBool>>,
     ) -> Output {
         self.execute_with_streams(spec, None, None, log, None, cancel)
-    }
-
-    fn terminate(&self) {
-        log::info!("Terminating PRoot runtime at {}", self.rootfs.display());
     }
 }
 
@@ -515,9 +479,9 @@ impl PRootRuntime {
         } else {
             PathBuf::from("/home").join(&user)
         };
-        let working_dir = spec.working_dir.clone().unwrap_or(guest_home);
+        let working_dir = guest_home;
         let tawcroot = super::tawcroot::selected();
-        let bind = |src: &str, dst: Option<&str>| bind_arg(tawcroot, src, dst, false);
+        let bind = |src: &str, dst: Option<&str>| bind_arg(tawcroot, src, dst);
 
         // Game pads: `/dev/input` is Portal's pty-backed pads, and the
         // engine answers their evdev ioctls (see `android::gamepad`).
@@ -548,7 +512,6 @@ impl PRootRuntime {
                     true,
                     &instance.bind_source().to_string_lossy(),
                     Some(super::tawcroot::INSTANCE_GUEST_PATH),
-                    false,
                 ));
             }
             super::tawcroot::ensure_dev_links(&self.rootfs);
@@ -679,7 +642,6 @@ impl PRootRuntime {
                 tawcroot,
                 &extra.host_path.display().to_string(),
                 Some(&extra.guest_path.display().to_string()),
-                extra.readonly,
             ));
         }
 

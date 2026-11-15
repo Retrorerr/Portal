@@ -28,7 +28,6 @@ pub mod core {
     pub mod renderer_policy;
     pub mod report_privacy;
     pub mod runtime;
-    pub mod shm_damage;
     pub mod startup;
     pub mod steam_processes;
     pub mod stylus;

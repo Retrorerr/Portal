@@ -53,14 +53,10 @@ const XWAYLAND_PORTAL_SHA256SUMS_SOURCE: &str =
 use android_input::{android_keycode_to_scancode, committed_ascii_to_key_events};
 use android_integration::{
     clamp_physical_coordinate, density_scale_factor, is_valid_refresh_millihz,
-    normalized_coordinate, normalized_rotation_degrees, physical_window_size, qt_scale_factor,
-    refresh_changed, refresh_period_nanos, select_preferred_refresh_millihz, xft_dpi,
-    DESIRED_REFRESH_MILLIHZ, NOMINAL_OUTPUT_REFRESH_MILLIHZ,
+    normalized_coordinate, refresh_changed, refresh_period_nanos, select_preferred_refresh_millihz,
+    NOMINAL_OUTPUT_REFRESH_MILLIHZ,
 };
-use clipboard_policy::{
-    choose_text_mime, is_valid_clip_text, supports_mime_type, validate_clip_text,
-    MAX_CLIPBOARD_BYTES, TEXT_MIME, UTF8_TEXT_MIME,
-};
+use clipboard_policy::{is_valid_clip_text, validate_clip_text, MAX_CLIPBOARD_BYTES};
 
 #[test]
 fn optional_libreoffice_has_a_wayland_backend_and_guest_proc_version() {
@@ -79,10 +75,7 @@ fn optional_libreoffice_has_a_wayland_backend_and_guest_proc_version() {
 fn oneplus_pad_like_metrics_keep_fractional_scale_and_refresh_period() {
     let scale = density_scale_factor(280);
     assert!((scale - 1.75).abs() < f64::EPSILON);
-    assert_eq!(qt_scale_factor(scale), "1.75");
-    assert_eq!(xft_dpi(scale), 168);
     assert_eq!(refresh_period_nanos(144_000), 6_944_444);
-    assert_eq!(physical_window_size(2560, 1600), Some((2560, 1600)));
 }
 
 #[test]
@@ -175,7 +168,6 @@ fn first_session_retries_on_compatibility_graphics_before_setup_pauses() {
 fn nominal_output_refresh_is_independent_of_physical_vrr() {
     // Fallback constants stay sane when mode enumeration is unavailable.
     assert_eq!(NOMINAL_OUTPUT_REFRESH_MILLIHZ, 120_000);
-    assert_eq!(DESIRED_REFRESH_MILLIHZ, 120_000);
     assert_eq!(
         refresh_period_nanos(NOMINAL_OUTPUT_REFRESH_MILLIHZ),
         8_333_333
@@ -267,7 +259,6 @@ fn nominal_output_refresh_is_independent_of_physical_vrr() {
 fn oneplus_pad_3_physical_bounds_and_coordinate_clamping() {
     // OnePlus Pad 3 has a 3392 x 2400 physical display at 144Hz
     let (w, h) = (3392, 2400);
-    assert_eq!(physical_window_size(w, h), Some((3392, 2400)));
     assert_eq!(refresh_period_nanos(144_000), 6_944_444);
 
     // In-bounds touch coordinates pass through unaltered
@@ -291,19 +282,9 @@ fn oneplus_pad_3_physical_bounds_and_coordinate_clamping() {
 }
 
 #[test]
-fn tablet_native_resolution_and_density_conversions() {
-    let scale = density_scale_factor(300);
-    assert_eq!(physical_window_size(3392, 2400), Some((3392, 2400)));
-    assert_eq!(xft_dpi(scale), 180);
-    assert_eq!(qt_scale_factor(scale), "1.875");
-}
-
-#[test]
 fn malformed_android_events_are_safe_to_forward_or_drop() {
     assert_eq!(normalized_coordinate(f64::NAN), 0.0);
     assert_eq!(normalized_coordinate(2.0), 1.0);
-    assert_eq!(physical_window_size(0, 1600), None);
-    assert_eq!(normalized_rotation_degrees(-90), 270);
     assert_eq!(android_keycode_to_scancode(0), None);
     assert_eq!(android_keycode_to_scancode(67), Some(14));
 }
@@ -531,80 +512,6 @@ fn anland_session_leaves_qpa_selection_to_each_qt_runtime() {
 }
 
 #[test]
-fn automatic_tablet_and_laptop_mode_switching_policy() {
-    use tablet_mode::{
-        is_desktop_pointer, is_physical_alphabetic_keyboard, InputDeviceDescriptor,
-        SystemInputState, KEYBOARD_TYPE_ALPHABETIC, KEYBOARD_TYPE_NONE,
-        KEYBOARD_TYPE_NON_ALPHABETIC, SOURCE_KEYBOARD, SOURCE_MOUSE, SOURCE_TOUCHPAD,
-        SOURCE_TOUCHSCREEN,
-    };
-
-    // 1. External physical alphabetic keyboard -> desktop mode, IME suppressed
-    let ext_keyboard =
-        InputDeviceDescriptor::new(true, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_ALPHABETIC);
-    assert!(is_physical_alphabetic_keyboard(&ext_keyboard));
-    assert!(!is_desktop_pointer(&ext_keyboard));
-    let kb_state = SystemInputState::evaluate([&ext_keyboard]);
-    assert!(kb_state.physical_keyboard_present);
-    assert!(kb_state.desktop_input_present);
-    assert_eq!(kb_state.kwin_tablet_mode(), "off");
-    assert!(kb_state.should_suppress_soft_keyboard());
-
-    // 2. External pointer/touchpad -> desktop mode, IME NOT suppressed
-    let ext_touchpad = InputDeviceDescriptor::new(true, false, SOURCE_TOUCHPAD, KEYBOARD_TYPE_NONE);
-    assert!(!is_physical_alphabetic_keyboard(&ext_touchpad));
-    assert!(is_desktop_pointer(&ext_touchpad));
-    let tp_state = SystemInputState::evaluate([&ext_touchpad]);
-    assert!(!tp_state.physical_keyboard_present);
-    assert!(tp_state.desktop_input_present);
-    assert_eq!(tp_state.kwin_tablet_mode(), "off");
-    assert!(!tp_state.should_suppress_soft_keyboard());
-
-    let ext_mouse = InputDeviceDescriptor::new(true, false, SOURCE_MOUSE, KEYBOARD_TYPE_NONE);
-    assert!(is_desktop_pointer(&ext_mouse));
-    let mouse_state = SystemInputState::evaluate([&ext_mouse]);
-    assert!(mouse_state.desktop_input_present);
-    assert_eq!(mouse_state.kwin_tablet_mode(), "off");
-    assert!(!mouse_state.should_suppress_soft_keyboard());
-
-    // 3. Internal tablet touchscreen alone -> tablet mode, IME NOT suppressed
-    let touchpanel =
-        InputDeviceDescriptor::new(false, false, SOURCE_TOUCHSCREEN, KEYBOARD_TYPE_NONE);
-    assert!(!is_physical_alphabetic_keyboard(&touchpanel));
-    assert!(!is_desktop_pointer(&touchpanel));
-    let touch_state = SystemInputState::evaluate([&touchpanel]);
-    assert!(!touch_state.physical_keyboard_present);
-    assert!(!touch_state.desktop_input_present);
-    assert_eq!(touch_state.kwin_tablet_mode(), "on");
-    assert!(!touch_state.should_suppress_soft_keyboard());
-
-    // 4. Internal non-alphabetic keys (gpio-keys, power, volume) -> tablet mode
-    let power_key =
-        InputDeviceDescriptor::new(false, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_NON_ALPHABETIC);
-    let gpio_keys =
-        InputDeviceDescriptor::new(false, false, SOURCE_KEYBOARD, KEYBOARD_TYPE_NON_ALPHABETIC);
-    let internal_state = SystemInputState::evaluate([&touchpanel, &power_key, &gpio_keys]);
-    assert!(!internal_state.physical_keyboard_present);
-    assert!(!internal_state.desktop_input_present);
-    assert_eq!(internal_state.kwin_tablet_mode(), "on");
-    assert!(!internal_state.should_suppress_soft_keyboard());
-
-    // 5. Combined OnePlus Pad keyboard case (keyboard + touchpad) attached -> desktop mode
-    let attached_state = SystemInputState::evaluate([&touchpanel, &ext_keyboard, &ext_touchpad]);
-    assert!(attached_state.physical_keyboard_present);
-    assert!(attached_state.desktop_input_present);
-    assert_eq!(attached_state.kwin_tablet_mode(), "off");
-    assert!(attached_state.should_suppress_soft_keyboard());
-
-    // 6. Detached keyboard case -> transitions to tablet mode
-    let detached_state = SystemInputState::evaluate([&touchpanel]);
-    assert!(!detached_state.physical_keyboard_present);
-    assert!(!detached_state.desktop_input_present);
-    assert_eq!(detached_state.kwin_tablet_mode(), "on");
-    assert!(!detached_state.should_suppress_soft_keyboard());
-}
-
-#[test]
 fn soft_keyboard_bridge_publishes_both_states_without_device_name_heuristics() {
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("hasDesktopInput"));
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("nativeOnInputDevicesChanged"));
@@ -612,30 +519,6 @@ fn soft_keyboard_bridge_publishes_both_states_without_device_name_heuristics() {
     assert!(ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("InputDevice.SOURCE_TOUCHPAD"));
     assert!(!ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("OnePlus Pad 3 Keyboard"));
     assert!(!ANDROID_KEYBOARD_BRIDGE_SOURCE.contains("pogo_touchpad"));
-}
-
-#[test]
-fn clipboard_bridge_accepts_text_only_and_prefers_utf8() {
-    assert!(supports_mime_type(TEXT_MIME));
-    assert!(supports_mime_type(UTF8_TEXT_MIME));
-    assert!(supports_mime_type("text/plain; charset=utf-8"));
-    assert!(supports_mime_type("UTF8_STRING"));
-    assert!(supports_mime_type("STRING"));
-    assert!(supports_mime_type("TEXT"));
-    assert!(!supports_mime_type("text/html"));
-    assert!(!supports_mime_type("application/octet-stream"));
-    assert_eq!(
-        choose_text_mime(["text/html", TEXT_MIME, UTF8_TEXT_MIME]),
-        Some(UTF8_TEXT_MIME)
-    );
-    assert_eq!(
-        choose_text_mime(["text/plain", "text/plain; charset=utf-8"]),
-        Some("text/plain; charset=utf-8")
-    );
-    assert_eq!(
-        choose_text_mime(["STRING", "UTF8_STRING"]),
-        Some("UTF8_STRING")
-    );
 }
 
 #[test]

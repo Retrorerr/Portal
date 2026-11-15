@@ -182,10 +182,6 @@ impl BrokerHandle {
         }
         Ok(true)
     }
-
-    pub fn environment(&self) -> &BrokerEnvironment {
-        &self.environment
-    }
 }
 
 impl Drop for BrokerHandle {

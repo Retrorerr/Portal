@@ -14,7 +14,7 @@ mod text_input_v2;
 mod winit_backend;
 pub mod wlegl;
 
-pub use output_state::{read_kwin_output_scale, sync_kwin_output_scale, write_guest_output_state};
+pub use output_state::write_guest_output_state;
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
