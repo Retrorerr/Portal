@@ -41,8 +41,6 @@ fn graphical_login_is_nonroot_and_keeps_privileged_install_plan_separate() {
     assert!(!PLASMA_LAUNCHER.contains("state_dir=/var/lib/localdesktop\n"));
     assert!(ROOTFS_BUILDER.contains("desktop:x:1000:1000"));
     assert!(SETUP.contains(".with_user(DESKTOP_USER)"));
-    assert!(SETUP
-        .contains("fs_root.join(\"root/.config/autostart/localdesktop-session-init.desktop\")"));
 }
 
 #[test]
@@ -173,7 +171,6 @@ fn electron_helper_remains_available_without_automatic_desktop_rewrites() {
     assert!(!SETUP.contains("--no-stdio-init"));
     assert!(!SETUP.contains("--ozone-platform=wayland"));
     assert!(SETUP.contains("retire_electron_launch_options"));
-    assert!(SETUP.contains("retire_legacy_desktop_mutators"));
     assert!(!PLASMA_LAUNCHER.contains("localdesktop-no-sandbox-entries"));
     let package_setup = SETUP
         .split("fn sync_debian_package_management(")

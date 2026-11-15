@@ -240,7 +240,6 @@ def main():
         ).encode("utf-8")
         add_bytes("etc/apt/sources.list", sources_list)
         add_bytes("etc/apt/apt.conf.d/01no-sandbox", b'APT::Sandbox::User "root";\n')
-        add_bytes("etc/apt/apt.conf.d/01portal-clean", b'DPkg::Options { "--force-confdef"; "--force-confold"; };\n')
 
         # 6. Policy-rc.d
         add_bytes("usr/sbin/policy-rc.d", b"#!/bin/sh\nexit 101\n", mode=0o755)

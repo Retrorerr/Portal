@@ -2639,18 +2639,6 @@ fn repair_base_files_runtime_links(fs_root: &Path) -> bool {
 }
 
 const DPKG_INFO_MIGRATION_MARKER: &str = "var/lib/localdesktop/dpkg-info-multiarch-v1";
-const LEGACY_PORTAL_CLEAN_APT: &str =
-    "DPkg::Options { \"--force-confdef\"; \"--force-confold\"; };\n";
-
-fn remove_legacy_portal_clean_apt(fs_root: &Path) {
-    let path = fs_root.join("etc/apt/apt.conf.d/01portal-clean");
-    if fs::read_to_string(&path).ok().as_deref() == Some(LEGACY_PORTAL_CLEAN_APT)
-        && fs::remove_file(&path).is_err()
-    {
-        panic!("Cannot remove the obsolete Portal apt override");
-    }
-}
-
 fn dpkg_multiarch_same_packages(status: &str) -> Vec<(String, String)> {
     let mut packages = Vec::new();
     for stanza in status.split("\n\n") {
@@ -2878,7 +2866,6 @@ fn sync_pam_defaults(fs_root: &Path) -> bool {
 
 /// Ensure guest package-management files are durable across slot switches and clean installs.
 fn sync_debian_package_management(fs_root: &Path) {
-    remove_legacy_portal_clean_apt(fs_root);
     if !repair_base_files_runtime_links(fs_root) {
         panic!("Debian /var/run and /var/lock integration is unsafe; refusing package operations");
     }
@@ -2934,42 +2921,6 @@ fn sync_debian_package_management(fs_root: &Path) {
     }
     super::system_updates::sync_apt_policy(fs_root)
         .expect("Failed to pin Portal's platform packages away from Debian");
-}
-
-fn retire_legacy_desktop_mutators(fs_root: &Path) -> anyhow::Result<()> {
-    let marker = fs_root.join("var/lib/localdesktop/desktop-ownership-v1");
-    if marker.is_file() {
-        return Ok(());
-    }
-    let username = get_application_context().local_config.user.username;
-    let home_dir = chroot_home_dir(fs_root, &username);
-    let legacy_autostart = "[Desktop Entry]\nType=Application\nName=Portal Session Integration\nExec=/usr/local/bin/localdesktop-no-sandbox-entries\nOnlyShowIn=KDE;\nX-KDE-autostart-after=panel\n";
-    for (path, contents) in [
-        (home_dir.join(".config/autostart/localdesktop-session-init.desktop"), legacy_autostart),
-        // Completed root-era profiles are imported after this cleanup. Never
-        // carry their old cold-start desktop rewriter into the new login.
-        (fs_root.join("root/.config/autostart/localdesktop-session-init.desktop"), legacy_autostart),
-        (
-            fs_root.join("etc/apt/apt.conf.d/99portal-desktop-integration"),
-            "DPkg::Post-Invoke { \"if [ -x /usr/local/bin/localdesktop-no-sandbox-entries ]; then HOME=/root XDG_DATA_HOME=/root/.local/share /usr/local/bin/localdesktop-no-sandbox-entries >>/var/lib/localdesktop/desktop-integration.log 2>&1 || printf '%s\\n' 'Portal desktop integration refresh failed' >>/var/lib/localdesktop/desktop-integration.log; fi\"; };\n",
-        ),
-    ] {
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() => {
-                if fs::read(&path)? == contents.as_bytes() {
-                    fs::remove_file(&path)?;
-                }
-            }
-            Ok(_) => {} // A user replacement is not Portal's to remove.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    if let Some(parent) = marker.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(marker, b"legacy auto-rewriters retired\n")?;
-    Ok(())
 }
 
 fn sync_initial_desktop_defaults(fs_root: &Path) {
@@ -3157,10 +3108,7 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     sync_guest_session_directories(fs_root).expect("Failed to create guest session directories");
     // A committed desktop is user-owned. Only the still-uncommitted first-run
     // image may receive defaults, panel migration, or home/config repairs.
-    if crate::core::provisioning::RuntimeArtifact::production().is_bootable(fs_root) {
-        retire_legacy_desktop_mutators(fs_root)
-            .expect("Failed to retire Portal's legacy desktop auto-rewriters");
-    } else {
+    if !crate::core::provisioning::RuntimeArtifact::production().is_bootable(fs_root) {
         sync_initial_desktop_defaults(fs_root);
     }
     sync_portal_runtime_assets(fs_root, ui_scale);
