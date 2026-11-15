@@ -15,6 +15,12 @@ use winit::{
 #[no_mangle]
 fn android_main(android_app: AndroidApp) {
     crate::android::proot::launch::note_process_start();
+    // Every path into the guest goes through the workspace chosen here, so it
+    // comes before anything that reads the rootfs.
+    let workspace = crate::core::workspaces::activate(
+        std::path::Path::new(config::APP_FILES_ROOT),
+        crate::core::workspaces::now_unix(),
+    );
     std::env::set_var(
         "RUST_BACKTRACE",
         if cfg!(debug_assertions) { "1" } else { "0" },
@@ -24,18 +30,16 @@ fn android_main(android_app: AndroidApp) {
     // runtime before any keyboard context (or background worker) is created.
     std::env::set_var(
         "XKB_CONFIG_ROOT",
-        format!("{}/usr/share/X11/xkb", config::PRODUCTION_FS_ROOT),
+        config::rootfs().join("usr/share/X11/xkb"),
     );
-    std::env::set_var(
-        "XLOCALEDIR",
-        format!("{}/usr/share/X11/locale", config::PRODUCTION_FS_ROOT),
-    );
+    std::env::set_var("XLOCALEDIR", config::rootfs().join("usr/share/X11/locale"));
 
     // Build the context before touching the persistent diagnostic paths.  The
     // context owns the app-private directory used by diagnostics, and this
     // call must happen before any setup/PRoot worker can emit guest events.
     ApplicationContext::build(&android_app);
     diagnostics::initialize();
+    diagnostics::host_event("workspace", &format!("id={}", workspace.id));
 
     // Keep Android logcat and the user-exported host log bounded in debug builds too. The
     // per-frame Smithay/EGL records are DEBUG-level; they remain available only when a future

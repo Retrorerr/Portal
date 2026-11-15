@@ -14,7 +14,7 @@ use crate::{
         utils::{application_context::get_application_context, compose_overlay},
     },
     core::{
-        config::PRODUCTION_FS_ROOT,
+        config::rootfs,
         install_plan::{optional_app_catalog, OptionalApp},
         optional_apps::{
             install_command, installed_packages, is_installed, parse_bootstrap_progress,
@@ -148,8 +148,8 @@ fn coordinator() -> &'static Mutex<Coordinator> {
     })
 }
 
-fn root() -> &'static Path {
-    Path::new(PRODUCTION_FS_ROOT)
+fn root() -> std::path::PathBuf {
+    rootfs()
 }
 
 /// Whether an install or removal owns apt right now (or is queued to).
@@ -203,7 +203,7 @@ fn idle_entry(installed: bool) -> Entry {
 /// Refresh idle entries from the guest; busy and failed ones keep their
 /// state until the worker or the user changes it.
 fn refresh(coordinator: &mut Coordinator) {
-    let installed = installed_now(root());
+    let installed = installed_now(&root());
     for app in OptionalApp::ALL {
         let entry = coordinator
             .entries
@@ -269,7 +269,7 @@ pub fn request(app_id: &str, install: bool) -> bool {
         log::warn!("optional-apps: ignoring unknown app {app_id:?}");
         return false;
     };
-    if !crate::core::provisioning::RuntimeArtifact::production().is_bootable(root()) {
+    if !crate::core::provisioning::RuntimeArtifact::production().is_bootable(&root()) {
         log::warn!("optional-apps: the runtime is not a completed Portal install");
         return false;
     }
@@ -351,7 +351,7 @@ fn run_queue() {
                     "optional-app",
                     &format!("{} {:?} complete", app.id(), action),
                 );
-                let installed = installed_now(root()).contains(&app);
+                let installed = installed_now(&root()).contains(&app);
                 set_entry(app, |entry| *entry = idle_entry(installed));
             }
             Err(error) => {
@@ -421,7 +421,7 @@ fn run_apt_lines(
     command: &str,
     on_line: impl Fn(&str) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
-    crate::android::proot::system_updates::sync_apt_policy(root())?;
+    crate::android::proot::system_updates::sync_apt_policy(&root())?;
     let last_error = Arc::new(Mutex::new(None::<String>));
     let callback_error = last_error.clone();
     let shell = format!(
@@ -466,7 +466,7 @@ fn desktop_user() -> String {
 
 /// Install one app: its Debian side, then Portal's per-app follow-up.
 fn install(app: OptionalApp, progress: Progress) -> anyhow::Result<()> {
-    let fs_root = root();
+    let fs_root = &root();
     crate::android::proot::setup::validate_optional_app_apt_setup(fs_root)?;
     let steam = app == OptionalApp::Steam;
     let apt_end = if steam { 40 } else { 96 };
@@ -528,7 +528,7 @@ fn prepare_electron_launcher(app: OptionalApp) -> anyhow::Result<()> {
 /// Mark Steam installed, sync Portal's files, then seed Valve's ARM64 client
 /// so the first start goes straight to the client's own updater.
 fn install_steam(progress: Progress) -> anyhow::Result<()> {
-    let fs_root = root();
+    let fs_root = &root();
     write_file(&fs_root.join(STEAM_MARKER_REL), b"1\n", 0o644)?;
     sync_steam_files(fs_root)?;
     progress(42, "Downloading Steam for ARM64…".to_owned());
@@ -577,7 +577,7 @@ fn install_steam(progress: Progress) -> anyhow::Result<()> {
 /// Remove one app. Debian apps go through apt; Steam's client and Portal's
 /// files are deleted, but its game library (`steamapps`) is always kept.
 fn remove(app: OptionalApp) -> anyhow::Result<()> {
-    let fs_root = root();
+    let fs_root = &root();
     if let Some(command) = remove_command(app) {
         crate::android::proot::setup::validate_optional_app_apt_setup(fs_root)?;
         run_apt(&command, 5, 96, entry_progress(app))?;

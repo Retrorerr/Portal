@@ -14,7 +14,7 @@ use crate::{
         },
     },
     core::{
-        config::{APP_FILES_ROOT, DESKTOP_USER, PRODUCTION_FS_ROOT},
+        config::{rootfs, APP_FILES_ROOT, DESKTOP_USER},
         guest_browser as browser, guest_sudo,
         install_plan::{
             validate_initial_setup_proof, AppearanceChoice, AppliedAppearance, InstallPlan,
@@ -581,7 +581,7 @@ fn setup_coordinator() -> &'static Mutex<SetupCoordinator> {
 /// replace an incomplete image but must never lose a choice already accepted
 /// by the user.
 pub fn persisted_install_plan_path() -> PathBuf {
-    get_application_context().data_dir.join(INSTALL_PLAN_FILE)
+    crate::core::config::workspace_dir().join(INSTALL_PLAN_FILE)
 }
 
 pub fn load_persisted_install_plan() -> anyhow::Result<Option<PersistedInstallPlan>> {
@@ -713,7 +713,7 @@ fn persist_plan_before_start(
             let plan = proposed.context(
                 "No first-run plan is persisted; Portal cannot infer setup choices from UI defaults",
             )?;
-            let root = Path::new(PRODUCTION_FS_ROOT);
+            let root = &rootfs();
             anyhow::ensure!(
                 is_truly_fresh_runtime(root),
                 "A first-run plan cannot replace or resume an existing or partial runtime without its accepted plan; export diagnostics or recover the accepted plan"
@@ -728,7 +728,7 @@ fn persist_plan_before_start(
 
 fn mark_active_plan_failed() {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
-    if artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)) {
+    if artifact.is_bootable(&rootfs()) {
         // The installation marker is the authoritative commit point. A late
         // bookkeeping/setup error must not downgrade a committed runtime or
         // move its immutable plan back to retryable Failed state.
@@ -856,7 +856,7 @@ pub fn anland_repair_ui_snapshot() -> (AnlandRepairAvailability, ProvisioningSna
         AnlandRepairState::Complete => AnlandRepairAvailability::Complete,
         AnlandRepairState::Idle => {
             let artifact = crate::core::provisioning::RuntimeArtifact::production();
-            let root = Path::new(PRODUCTION_FS_ROOT);
+            let root = &rootfs();
             let eligible = crate::android::anland::kgsl_available()
                 && artifact.classify_runtime(root).is_trusted_recovery()
                 && matches!(
@@ -909,11 +909,11 @@ pub fn anland_repair_handoff_active() -> bool {
 
 fn setup_debian_runtime(options: &SetupOptions) -> StageOutput {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
-    if artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)) {
+    if artifact.is_bootable(&rootfs()) {
         return None;
     }
     let report = options.progress.clone();
-    let base = get_application_context().data_dir.clone();
+    let base = crate::core::config::workspace_dir();
     Some(thread::spawn(move || {
         artifact.provision_with_progress(&base, |snapshot| {
             diagnostics::host_event("runtime-provisioning", &snapshot.message);
@@ -988,10 +988,10 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
     let plan = options.install_plan.as_ref()?;
     let selected_apps = plan.selected_apps();
     if selected_apps.is_empty() {
-        provision_ibus_packages(Path::new(PRODUCTION_FS_ROOT));
+        provision_ibus_packages(&rootfs());
         return None;
     }
-    let fs_root = Path::new(PRODUCTION_FS_ROOT);
+    let fs_root = &rootfs();
     if let Err(error) = validate_optional_app_apt_setup(fs_root) {
         let detail = format!("{error:#}");
         return Some(thread::spawn(move || Err(anyhow::anyhow!(detail))));
@@ -1072,7 +1072,7 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
                 defer_optional_apps(&missing)?;
             }
         }
-        provision_ibus_packages(Path::new(PRODUCTION_FS_ROOT));
+        provision_ibus_packages(&rootfs());
         Ok(())
     }))
 }
@@ -1086,17 +1086,17 @@ fn defer_optional_apps(apps: &[OptionalApp]) -> anyhow::Result<()> {
         .map(|app| app.id())
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(Path::new(APP_FILES_ROOT).join(DEFERRED_OPTIONAL_APPS), ids)
+    fs::write(crate::core::config::workspace_dir().join(DEFERRED_OPTIONAL_APPS), ids)
         .context("could not record the optional apps left for later")
 }
 
 fn clear_deferred_optional_apps() {
-    let _ = fs::remove_file(Path::new(APP_FILES_ROOT).join(DEFERRED_OPTIONAL_APPS));
+    let _ = fs::remove_file(crate::core::config::workspace_dir().join(DEFERRED_OPTIONAL_APPS));
 }
 
 /// IDs the latest optional-apps run left for the app manager.
 fn deferred_optional_app_ids() -> Vec<String> {
-    fs::read_to_string(Path::new(APP_FILES_ROOT).join(DEFERRED_OPTIONAL_APPS))
+    fs::read_to_string(crate::core::config::workspace_dir().join(DEFERRED_OPTIONAL_APPS))
         .map(|ids| {
             ids.lines()
                 .map(str::trim)
@@ -1110,7 +1110,7 @@ fn deferred_optional_app_ids() -> Vec<String> {
 /// Hand apps setup deferred to the app manager. Runs once the runtime is
 /// bootable, after first setup or on the next start if the process died.
 fn queue_deferred_optional_apps() {
-    let path = Path::new(APP_FILES_ROOT).join(DEFERRED_OPTIONAL_APPS);
+    let path = crate::core::config::workspace_dir().join(DEFERRED_OPTIONAL_APPS);
     let Ok(ids) = fs::read_to_string(&path) else {
         return;
     };
@@ -1140,7 +1140,7 @@ fn setup_renderer_mode(_options: &SetupOptions) -> StageOutput {
 }
 
 fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(PRODUCTION_FS_ROOT);
+    let fs_root = rootfs();
     let report = options.progress.clone();
     let (at, _) = stage_span("linux-sysdata", options);
 
@@ -1186,7 +1186,7 @@ fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
 }
 
 fn setup_machine_id(_: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(PRODUCTION_FS_ROOT);
+    let fs_root = &rootfs();
     let machine_id = fs_root.join("etc/machine-id");
 
     let existing = fs::read_to_string(&machine_id).unwrap_or_default();
@@ -2014,7 +2014,7 @@ fn upsert_kv_file(path: &Path, delimiter: char, updates: &[(&str, String)]) {
 }
 
 fn setup_fake_bwrap(_: &SetupOptions) -> StageOutput {
-    sync_bwrap_shim(Path::new(PRODUCTION_FS_ROOT));
+    sync_bwrap_shim(&rootfs());
     None
 }
 
@@ -2093,7 +2093,7 @@ User=root\n";
 /// helper), run by the desktop session's PRoot before the user's session
 /// (see `ProcessSpec::system_services`).
 fn setup_system_services(_: &SetupOptions) -> StageOutput {
-    sync_system_services(Path::new(PRODUCTION_FS_ROOT));
+    sync_system_services(&rootfs());
     None
 }
 
@@ -2127,7 +2127,7 @@ fn sync_system_services(fs_root: &Path) {
 }
 
 fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(PRODUCTION_FS_ROOT);
+    let fs_root = &rootfs();
 
     // Chromium's sandbox needs user and PID namespaces, which the kernel lacks;
     // both guest engines emulate them, so it only runs without one where
@@ -2155,7 +2155,7 @@ exec /usr/bin/chromium "$@"
 }
 
 fn setup_onboard_signal_fix(_: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(PRODUCTION_FS_ROOT);
+    let fs_root = &rootfs();
     let wrapper_path = fs_root.join("usr/local/bin/onboard");
 
     // proot intercepts fstat() on socket fds and follows /proc/self/fd/N which points
@@ -3107,9 +3107,9 @@ pub fn try_sync_session_runtime_files(fs_root: &Path, ui_scale: i32) -> anyhow::
 /// account validation, one-time non-destructive root-profile import, and
 /// private runtime/session directories; Plasma itself is never run as root.
 pub fn prepare_desktop_login(migrate_legacy: bool) -> anyhow::Result<()> {
-    ensure_apt_lock_wait(Path::new(PRODUCTION_FS_ROOT));
-    ensure_desktop_services(Path::new(PRODUCTION_FS_ROOT))?;
-    sync_firefox_esr_diversion(Path::new(PRODUCTION_FS_ROOT));
+    ensure_apt_lock_wait(&rootfs());
+    ensure_desktop_services(&rootfs())?;
+    sync_firefox_esr_diversion(&rootfs());
     // Mozilla's Firefox and the everyday extras are downloads the desktop
     // does not need to start: see `spawn_background_installs`.
     let caches = PRootRuntime::active().execute(
@@ -3477,7 +3477,7 @@ pub fn spawn_background_installs() {
     thread::spawn(|| {
         // Let Plasma have the CPU while it starts.
         thread::sleep(Duration::from_secs(20));
-        let root = Path::new(PRODUCTION_FS_ROOT);
+        let root = &rootfs();
         repair_package_dependencies(root);
         keep_account_databases_readable();
         ensure_app_compatibility(root);
@@ -3497,7 +3497,7 @@ pub fn spawn_background_installs() {
 /// `spawn_background_installs` retries on a later launch.
 fn setup_mozilla_firefox(_: &SetupOptions) -> StageOutput {
     Some(thread::spawn(|| {
-        let root = Path::new(PRODUCTION_FS_ROOT);
+        let root = &rootfs();
         // The image's apt state has unmet dependencies until this repair.
         repair_package_dependencies(root);
         if sync_firefox_esr_diversion(root) {
@@ -4328,7 +4328,7 @@ fn setup_flatpak_gl(_: &SetupOptions) -> StageOutput {
     Some(thread::spawn(|| {
         // First setup reaches here before the session files (DNS among
         // them) are synced.
-        sync_guest_network_config(Path::new(PRODUCTION_FS_ROOT));
+        sync_guest_network_config(&rootfs());
         let output = PRootRuntime::active().execute(
             ProcessSpec::new("/usr/local/sbin/portal-system-services flatpak-gl"),
             None,
@@ -4354,7 +4354,7 @@ fn setup_va_layer(_: &SetupOptions) -> StageOutput {
 }
 
 fn setup_plasma_wayland(options: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(PRODUCTION_FS_ROOT);
+    let fs_root = &rootfs();
     let username = get_application_context().local_config.user.username;
     let home_dir = chroot_home_dir(fs_root, &username);
     // The host Wayland compositor already establishes a logical viewport scaled by
@@ -4470,7 +4470,7 @@ fn seed_desktop_stuff(android_app: &AndroidApp, stuff: &Path) -> anyhow::Result<
     Ok(())
 }
 fn fix_xkb_symlink(_options: &SetupOptions) -> StageOutput {
-    let fs_root = Path::new(PRODUCTION_FS_ROOT);
+    let fs_root = &rootfs();
     let xkb_path = fs_root.join("usr/share/X11/xkb");
 
     if let Ok(meta) = fs::symlink_metadata(&xkb_path) {
@@ -4651,7 +4651,7 @@ fn publish_repair_success(registration: &SetupRegistration) {
 
 fn run_anland_repair_inner(registration: &SetupRegistration) -> anyhow::Result<()> {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
-    let root = Path::new(PRODUCTION_FS_ROOT);
+    let root = &rootfs();
     let initial_classification = artifact.classify_runtime(root);
     anyhow::ensure!(
         initial_classification.is_trusted_recovery(),
@@ -4925,7 +4925,7 @@ impl GuestDnsFollower {
         let thread = thread::Builder::new()
             .name("setup-dns".to_owned())
             .spawn(move || {
-                let root = Path::new(PRODUCTION_FS_ROOT);
+                let root = &rootfs();
                 sync_guest_network_config(root);
                 while stopped.recv_timeout(Self::INTERVAL) == Err(mpsc::RecvTimeoutError::Timeout) {
                     sync_guest_network_config(root);
@@ -4970,11 +4970,11 @@ fn finalise_installation(registration: &SetupRegistration) -> Result<(), SetupFa
     }
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
     artifact
-        .mark_installation_complete(Path::new(PRODUCTION_FS_ROOT))
+        .mark_installation_complete(&rootfs())
         .map_err(|error| {
             SetupFailure::from_detail(11, "installation-marker", format!("{error:#}"))
         })?;
-    if !artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)) {
+    if !artifact.is_bootable(&rootfs()) {
         return Err(SetupFailure::from_detail(
             11,
             "installation-marker",
@@ -5210,7 +5210,7 @@ fn apply_initial_preferences_before_commit(
     let failure = |error: anyhow::Error| {
         SetupFailure::from_detail(12, "initial-preferences", format!("{error:#}"))
     };
-    let root = Path::new(PRODUCTION_FS_ROOT);
+    let root = &rootfs();
     stage_initial_appearance_helper(root).map_err(failure)?;
     if let Err(error) = run_provisional_handoff(
         registration,
@@ -5259,7 +5259,7 @@ fn run_provisional_handoff(
     plan: &InstallPlan,
     message: &str,
 ) -> anyhow::Result<()> {
-    let root = Path::new(PRODUCTION_FS_ROOT);
+    let root = &rootfs();
     let (appearance, attempt_id, launcher_apps) =
         prepare_initial_preferences_handoff(root, android_app, plan)?;
     {
@@ -5402,7 +5402,7 @@ fn can_rerun_in_place(failure: &SetupFailure) -> bool {
     });
     idle && matches!(
         crate::core::provisioning::RuntimeArtifact::production()
-            .classify_runtime(Path::new(PRODUCTION_FS_ROOT)),
+            .classify_runtime(&rootfs()),
         crate::core::provisioning::RuntimeClassification::Absent
             | crate::core::provisioning::RuntimeClassification::ValidatedImageOnly
     )
@@ -5721,7 +5721,7 @@ pub fn retry_install() -> bool {
         log::error!("Retry rejected because the accepted plan is not in the Failed state");
         return false;
     }
-    let root = Path::new(PRODUCTION_FS_ROOT);
+    let root = &rootfs();
     let classification =
         crate::core::provisioning::RuntimeArtifact::production().classify_runtime(root);
     if !matches!(
@@ -5763,7 +5763,7 @@ pub fn repair_enable_anland() -> bool {
             return false;
         };
         let artifact = crate::core::provisioning::RuntimeArtifact::production();
-        let classification = artifact.classify_runtime(Path::new(PRODUCTION_FS_ROOT));
+        let classification = artifact.classify_runtime(&rootfs());
         if !classification.is_trusted_recovery() {
             log::warn!(
                 "Ignoring Anland repair because the runtime is not a completed Portal install: {classification:?}"
@@ -5896,7 +5896,7 @@ pub fn can_launch_pending_initial_preferences(root: &Path) -> bool {
 /// appearance/scale provisioning. The runtime marker remains absent until the
 /// setup worker validates the helper's readback proof.
 pub fn build_pending_wayland_backend(android_app: AndroidApp) -> anyhow::Result<PolarBearBackend> {
-    let root = Path::new(PRODUCTION_FS_ROOT);
+    let root = &rootfs();
     anyhow::ensure!(
         can_launch_pending_initial_preferences(root),
         "No validated first-run preferences handoff is pending"
@@ -5921,7 +5921,7 @@ pub fn build_pending_wayland_backend(android_app: AndroidApp) -> anyhow::Result<
 /// it can stop the temporary guest and return to setup under the same plan.
 pub fn fail_initial_preferences_handoff(reason: &str) -> bool {
     if crate::core::provisioning::RuntimeArtifact::production()
-        .is_bootable(Path::new(PRODUCTION_FS_ROOT))
+        .is_bootable(&rootfs())
     {
         return false;
     }
@@ -6043,7 +6043,7 @@ pub fn build_committed_wayland_backend(
 ) -> anyhow::Result<PolarBearBackend> {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
     anyhow::ensure!(
-        artifact.is_bootable(Path::new(PRODUCTION_FS_ROOT)),
+        artifact.is_bootable(&rootfs()),
         "Committed Portal runtime is no longer bootable"
     );
     // The completion marker is not enough to choose a renderer: a process
@@ -6113,7 +6113,7 @@ fn is_truly_fresh_runtime(root: &Path) -> bool {
 /// Refresh only Portal-owned runtime support and perform the one-time login
 /// migration; the first-run provisioning stages must never be replayed here.
 fn prepare_committed_runtime(registration: &SetupRegistration) -> Result<(), SetupFailure> {
-    let root = Path::new(PRODUCTION_FS_ROOT);
+    let root = &rootfs();
     let renderer = crate::android::anland::ensure_renderer_mode()
         .map_err(|error| SetupFailure::from_detail(2, "renderer-mode", format!("{error:#}")))?;
     if matches!(renderer, crate::android::anland::RendererKind::Anland)
@@ -6184,7 +6184,7 @@ pub fn setup_with_completion(
     }
 
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
-    let root = Path::new(PRODUCTION_FS_ROOT);
+    let root = &rootfs();
     let existing_operation = setup_coordinator()
         .lock()
         .ok()

@@ -8,7 +8,7 @@ fn desktop_portal_is_provisioned_before_plasma_and_not_globally_disabled() {
         assert!(ROOTFS.contains(package));
         assert!(SETUP.contains(package));
     }
-    assert!(SETUP.contains("ensure_desktop_services(Path::new(PRODUCTION_FS_ROOT))?"));
+    assert!(SETUP.contains("ensure_desktop_services(&rootfs())?"));
     assert!(PLASMA_LAUNCHER.contains("dbus-run-session -- /usr/bin/startplasma-wayland"));
     for disabled in ["QT_NO_XDG_DESKTOP_PORTAL=1", "KDE_NO_PORTAL=1", "GTK_USE_PORTAL=0"] {
         assert!(!PLASMA_LAUNCHER.contains(disabled));

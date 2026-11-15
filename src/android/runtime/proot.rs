@@ -58,8 +58,7 @@ impl PRootRuntime {
     }
 
     pub fn active() -> Self {
-        let layout = crate::core::runtime::RuntimeLayout::new(config::APP_FILES_ROOT);
-        Self::new(layout.active_slot().rootfs_path)
+        Self::new(config::rootfs())
     }
 
     pub fn is_supported(android_app: &AndroidApp) -> bool {

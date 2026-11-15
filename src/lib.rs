@@ -35,6 +35,7 @@ pub mod core {
     pub mod system_updates;
     pub mod tablet_mode;
     pub mod update_sources;
+    pub mod workspaces;
     pub mod wayland_protocol;
 }
 

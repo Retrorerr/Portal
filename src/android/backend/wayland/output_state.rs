@@ -39,7 +39,7 @@ pub fn read_kwin_output_scale_with_mtime() -> Option<(f64, u64)> {
         runtime
             .rootfs_path()
             .join("root/.config/kwinoutputconfig.json"),
-        std::path::PathBuf::from(crate::core::config::PRODUCTION_FS_ROOT)
+        crate::core::config::rootfs()
             .join("root/.config/kwinoutputconfig.json"),
         std::path::PathBuf::from(crate::core::config::APP_FILES_ROOT)
             .join("arch/root/.config/kwinoutputconfig.json"),

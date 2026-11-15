@@ -16,12 +16,17 @@ pub const APP_FILES_ROOT: &str = "/data/data/app.polarbear.portal/files";
 #[cfg(test)]
 pub const APP_FILES_ROOT: &str = "/data/local/tmp";
 
-#[cfg(all(not(test), feature = "portal-debug"))]
-pub const PRODUCTION_FS_ROOT: &str = "/data/data/app.polarbear/files/runtime-B";
-#[cfg(all(not(test), not(feature = "portal-debug")))]
-pub const PRODUCTION_FS_ROOT: &str = "/data/data/app.polarbear.portal/files/runtime-B";
-#[cfg(test)]
-pub const PRODUCTION_FS_ROOT: &str = "/data/local/tmp/runtime-B";
+/// The directory of the workspace this process runs (`core::workspaces`):
+/// the app files directory itself for `main`, which every install had
+/// before workspaces existed.
+pub fn workspace_dir() -> std::path::PathBuf {
+    crate::core::workspaces::active_dir(std::path::Path::new(APP_FILES_ROOT))
+}
+
+/// The Debian rootfs of the workspace this process runs.
+pub fn rootfs() -> std::path::PathBuf {
+    workspace_dir().join(crate::core::workspaces::ROOTFS_DIR)
+}
 
 /// Whether Android gave Portal the app data directory its paths are built on.
 ///

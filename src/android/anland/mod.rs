@@ -83,9 +83,7 @@ pub fn mode_flag_path() -> std::path::PathBuf {
 /// marker is committed.
 pub fn active_renderer() -> RendererKind {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
-    let runtime = artifact.classify_runtime(std::path::Path::new(
-        crate::core::config::PRODUCTION_FS_ROOT,
-    ));
+    let runtime = artifact.classify_runtime(&crate::core::config::rootfs());
     let kind = match crate::core::renderer_policy::resolve_renderer_mode(&mode_flag_path(), runtime)
     {
         Ok(crate::core::renderer_policy::RendererSelection::Anland) => RendererKind::Anland,
@@ -114,9 +112,7 @@ pub fn active_renderer() -> RendererKind {
 /// initialized according to the runtime's Portal classification.
 pub fn ensure_renderer_mode() -> anyhow::Result<RendererKind> {
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
-    let runtime = artifact.classify_runtime(std::path::Path::new(
-        crate::core::config::PRODUCTION_FS_ROOT,
-    ));
+    let runtime = artifact.classify_runtime(&crate::core::config::rootfs());
     let selection = crate::core::renderer_policy::ensure_renderer_mode(&mode_flag_path(), runtime)?;
     Ok(without_kgsl(match selection {
         crate::core::renderer_policy::RendererSelection::Anland => RendererKind::Anland,
@@ -358,7 +354,7 @@ pub fn validate_launch_contract() -> anyhow::Result<()> {
 /// and watchdog policy match the actual renderer. Absent (or anything else)
 /// means hardware: genuine fenced evidence is required as usual.
 pub fn kwin_glmode_flag_path() -> std::path::PathBuf {
-    std::path::Path::new(crate::core::config::PRODUCTION_FS_ROOT)
+    crate::core::config::rootfs()
         .join("var/lib/localdesktop/kwin-glmode")
 }
 

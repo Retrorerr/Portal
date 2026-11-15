@@ -751,8 +751,10 @@ fn source_routes_only_release_image_and_preserves_session_handoff() {
         .contains("RuntimeArtifact::production().is_bootable"));
     let main = include_str!("../src/android/main.rs");
     assert!(main.contains("\"XKB_CONFIG_ROOT\""));
-    assert!(main.contains("config::PRODUCTION_FS_ROOT"));
+    assert!(main.contains("config::rootfs().join(\"usr/share/X11/xkb\")"));
     assert!(main.find("\"XKB_CONFIG_ROOT\"") < main.find("ApplicationContext::build"));
+    // The workspace is chosen before anything derives a path from it.
+    assert!(main.find("workspaces::activate(") < main.find("\"XKB_CONFIG_ROOT\""));
     let support = include_bytes!("../assets/guest-arm64/localdesktop-crash-handler.so");
     assert_eq!(&support[..4], b"\x7fELF");
     assert_eq!(u16::from_le_bytes([support[18], support[19]]), 183); // AArch64

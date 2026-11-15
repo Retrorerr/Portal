@@ -1,7 +1,7 @@
 use crate::core::runtime::LinuxRuntime;
 use crate::{
     android::utils::ndk::run_in_jvm,
-    core::config::{parse_config, LocalConfig, CONFIG_FILE, DESKTOP_USER, PRODUCTION_FS_ROOT},
+    core::config::{parse_config, LocalConfig, CONFIG_FILE, DESKTOP_USER},
 };
 use jni::{
     objects::{JObject, JString},
@@ -55,7 +55,7 @@ impl ApplicationContext {
         let full_config_path = if config_candidate.exists() {
             config_candidate.to_string_lossy().to_string()
         } else {
-            format!("{}{}", PRODUCTION_FS_ROOT, CONFIG_FILE)
+            format!("{}{}", crate::core::config::rootfs().display(), CONFIG_FILE)
         };
         let mut local_config = parse_config(full_config_path);
         if local_config.user.username != DESKTOP_USER {

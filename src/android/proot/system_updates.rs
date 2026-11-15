@@ -36,7 +36,7 @@ use crate::{
         utils::{application_context::get_application_context, compose_overlay, webview_handoff},
     },
     core::{
-        config::{APP_FILES_ROOT, PRODUCTION_FS_ROOT, VERSION},
+        config::{rootfs, APP_FILES_ROOT, VERSION},
         install_plan::OptionalApp,
         runtime::{LinuxRuntime, ProcessSpec},
         system_updates::{
@@ -290,8 +290,8 @@ pub fn apt_lock() -> MutexGuard<'static, ()> {
     APT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn root() -> &'static Path {
-    Path::new(PRODUCTION_FS_ROOT)
+fn root() -> std::path::PathBuf {
+    rootfs()
 }
 
 fn files() -> &'static Path {
@@ -417,7 +417,7 @@ fn ensure_loaded(coordinator: &mut Coordinator) {
         return;
     }
     coordinator.loaded = true;
-    let fs_root = root();
+    let fs_root = &root();
     let installed = read_installed(fs_root).ok();
     let mut updates = match (read_cache(fs_root), installed.as_ref()) {
         (Some(cache), Some(installed)) => still_pending(&cache.updates, installed),
@@ -527,7 +527,7 @@ fn apt_refresh_command() -> String {
 /// Refresh apt's lists and record what an upgrade would install.
 fn check_debian() -> anyhow::Result<usize> {
     let _apt = apt_lock();
-    sync_apt_policy(root())?;
+    sync_apt_policy(&root())?;
     guest(&format!("nice -n 10 sh -c '{}'", apt_refresh_command().replace('\'', "'\\''")))
         .context("apt-get update failed")?;
     let mut updates = simulate_upgrade()?;
@@ -559,7 +559,7 @@ fn check_chatgpt(installed: &HashMap<String, String>) -> anyhow::Result<bool> {
     if !installed.contains_key("chatgpt") {
         return Ok(false);
     }
-    let fs_root = root();
+    let fs_root = &root();
     let stamp = fs::read_to_string(fs_root.join(CHATGPT_STAMP_REL))
         .ok()
         .map(|text| DebStamp::parse(&text));
@@ -605,7 +605,7 @@ fn run_check(android_app: &AndroidApp, desktop_ready: Instant) -> anyhow::Result
     let runs = runs_started();
     let metered = crate::android::utils::ndk::is_active_network_metered(android_app);
     let policy = refresh_policy();
-    let fs_root = root();
+    let fs_root = &root();
     let mut errors = Vec::new();
     let mut cache = read_host_cache().unwrap_or_default();
 
@@ -739,7 +739,7 @@ pub fn schedule_background_check(android_app: &AndroidApp) {
         app_update::discard_installed();
         let mut failures = 0u32;
         loop {
-            let ready = crate::core::provisioning::RuntimeArtifact::production().is_bootable(root())
+            let ready = crate::core::provisioning::RuntimeArtifact::production().is_bootable(&root())
                 && !update_in_progress();
             if ready && (failures > 0 || check_is_due()) {
                 match run_check(&android_app, desktop_ready) {
@@ -769,7 +769,7 @@ pub fn schedule_background_check(android_app: &AndroidApp) {
 /// while one runs, further calls attach to it. `include_app` is false when
 /// the user would not let Portal install apps; everything else still runs.
 pub fn begin_update(include_app: bool) -> bool {
-    let fs_root = root();
+    let fs_root = &root();
     if !crate::core::provisioning::RuntimeArtifact::production().is_bootable(fs_root) {
         log::warn!("Ignoring update: the runtime is not a completed Portal install");
         return false;
@@ -1026,7 +1026,7 @@ fn unresolved_libraries() -> anyhow::Result<Vec<String>> {
 
 fn run_debian(step: &Arc<Step>) -> anyhow::Result<()> {
     let _apt = apt_lock();
-    let fs_root = root();
+    let fs_root = &root();
     if let Some(free) = free_bytes(fs_root) {
         anyhow::ensure!(
             free >= MIN_FREE_BYTES,
@@ -1160,7 +1160,7 @@ fn run_debian(step: &Arc<Step>) -> anyhow::Result<()> {
 /// Install OpenAI's current ChatGPT build over the installed one.
 fn run_chatgpt(step: &Arc<Step>) -> anyhow::Result<()> {
     let _apt = apt_lock();
-    sync_apt_policy(root())?;
+    sync_apt_policy(&root())?;
     step.report(0, "Downloading ChatGPT…".to_owned());
     let command = format!(
         "exec 3>&1 >>{LOG_GUEST_PATH} 2>&1; echo \"== Portal ChatGPT refresh $(date -Is) ==\"; {}",

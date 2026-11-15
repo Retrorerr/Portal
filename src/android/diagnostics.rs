@@ -9,7 +9,7 @@
 use crate::{
     android::utils::{application_context::get_application_context, ndk::run_in_jvm},
     core::{
-        config::{PRODUCTION_FS_ROOT, VERSION},
+        config::{rootfs, VERSION},
         report_privacy,
     },
 };
@@ -146,7 +146,7 @@ pub fn initialize() {
             "os={} arch={} rootfs={} wayland_socket=/tmp/wayland-0",
             std::env::consts::OS,
             std::env::consts::ARCH,
-            PRODUCTION_FS_ROOT
+            rootfs().display()
         ),
     );
 }
