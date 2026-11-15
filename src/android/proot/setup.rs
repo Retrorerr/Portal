@@ -49,15 +49,8 @@ use crate::{
 };
 use winit::platform::android::activity::AndroidApp;
 
-#[derive(Clone, Debug)]
-pub enum SetupMessage {
-    Progress(String),
-    Error(String),
-}
-
 pub struct SetupOptions {
     pub android_app: AndroidApp,
-    pub mpsc_sender: Sender<SetupMessage>,
     pub progress: Arc<dyn Fn(ProvisioningSnapshot) + Send + Sync>,
     /// Exact native-validated choices accepted before this worker started.
     /// Stages must never recover choices from Compose defaults or current
@@ -473,15 +466,14 @@ impl SetupFailure {
 
 struct SetupSink {
     android_app: AndroidApp,
-    senders: Vec<Sender<SetupMessage>>,
     progress: Arc<Mutex<u16>>,
     on_complete: Option<SetupCompletionCallback>,
 }
 
 #[derive(Clone)]
 struct SetupRegistration {
-    // The worker owns this shared sink rather than a particular Activity or
-    // WebView receiver. A recreation can bind a fresh UI to the same running
+    // The worker owns this shared sink rather than a particular Activity. A
+    // recreation can bind a fresh UI to the same running
     // operation without starting a second worker or sending JNI calls to a
     // stale Activity instance.
     sink: Arc<Mutex<SetupSink>>,
@@ -490,14 +482,12 @@ struct SetupRegistration {
 impl SetupRegistration {
     fn new(
         android_app: AndroidApp,
-        sender: Sender<SetupMessage>,
         progress: Arc<Mutex<u16>>,
         on_complete: Option<SetupCompletionCallback>,
     ) -> Self {
         Self {
             sink: Arc::new(Mutex::new(SetupSink {
                 android_app,
-                senders: vec![sender],
                 progress,
                 on_complete,
             })),
@@ -508,30 +498,17 @@ impl SetupRegistration {
         if Arc::ptr_eq(&self.sink, &other.sink) {
             return;
         }
-        let Some((android_app, sender, progress, on_complete)) = other
-            .sink
-            .lock()
-            .ok()
-            .map(|sink| {
-                (
-                    sink.android_app.clone(),
-                    sink.senders.last().cloned(),
-                    sink.progress.clone(),
-                    sink.on_complete.clone(),
-                )
-            })
-            .and_then(|(android_app, sender, progress, on_complete)| {
-                sender.map(|sender| (android_app, sender, progress, on_complete))
-            })
-        else {
+        let Some((android_app, progress, on_complete)) = other.sink.lock().ok().map(|sink| {
+            (
+                sink.android_app.clone(),
+                sink.progress.clone(),
+                sink.on_complete.clone(),
+            )
+        }) else {
             return;
         };
         if let Ok(mut sink) = self.sink.lock() {
             sink.android_app = android_app;
-            // Only the newest Activity owns a live progress receiver. Drop
-            // the old sender so its WebView forwarding thread can terminate
-            // instead of accumulating one thread per rotation.
-            sink.senders = vec![sender];
             sink.progress = progress;
             sink.on_complete = on_complete;
         }
@@ -539,13 +516,6 @@ impl SetupRegistration {
 
     fn android_app(&self) -> Option<AndroidApp> {
         self.sink.lock().ok().map(|sink| sink.android_app.clone())
-    }
-
-    fn sender(&self) -> Option<Sender<SetupMessage>> {
-        self.sink
-            .lock()
-            .ok()
-            .and_then(|sink| sink.senders.last().cloned())
     }
 
     fn progress(&self) -> Option<Arc<Mutex<u16>>> {
@@ -557,15 +527,6 @@ impl SetupRegistration {
             .lock()
             .ok()
             .and_then(|sink| sink.on_complete.clone())
-    }
-
-    fn publish(&self, message: SetupMessage) -> Option<AndroidApp> {
-        let Ok(mut sink) = self.sink.lock() else {
-            return None;
-        };
-        sink.senders
-            .retain(|sender| sender.send(message.clone()).is_ok());
-        Some(sink.android_app.clone())
     }
 }
 
@@ -4335,7 +4296,6 @@ fn setup_mesa_layer(options: &SetupOptions) -> StageOutput {
     // completes (success or clearly reported failure) before Plasma setup
     // runs, so KWin can never launch while provisioning is unfinished.
     let report = options.progress.clone();
-    let sender = options.mpsc_sender.clone();
     let (at, _) = stage_span("mesa-kgsl-layer", options);
     Some(thread::spawn(move || {
         super::mesa_layer::provision_with_progress(|message| {
@@ -4347,7 +4307,6 @@ fn setup_mesa_layer(options: &SetupOptions) -> StageOutput {
             } else {
                 message
             };
-            let _ = sender.send(SetupMessage::Progress(display_message.clone()));
             report(ProvisioningSnapshot::update(
                 ProvisioningPhase::Configuring,
                 at,
@@ -4580,12 +4539,7 @@ fn publish_snapshot(registration: &SetupRegistration, snapshot: ProvisioningSnap
     if let Ok(mut coordinator) = setup_coordinator().lock() {
         coordinator.snapshot = snapshot.clone();
     }
-    let message = if snapshot.error.is_some() {
-        SetupMessage::Error(snapshot.message.clone())
-    } else {
-        SetupMessage::Progress(snapshot.message.clone())
-    };
-    if let Some(android_app) = registration.publish(message) {
+    if let Some(android_app) = registration.android_app() {
         crate::android::utils::compose_overlay::publish_install_state(&android_app, &snapshot);
     }
 }
@@ -4631,9 +4585,7 @@ fn publish_failure(registration: &SetupRegistration, failure: &SetupFailure) {
             *current = progress;
         }
     }
-    if let Some(android_app) =
-        registration.publish(SetupMessage::Error(failure.user_message.clone()))
-    {
+    if let Some(android_app) = registration.android_app() {
         crate::android::utils::compose_overlay::publish_install_state(&android_app, &snapshot);
     }
 }
@@ -4642,12 +4594,7 @@ fn publish_repair_snapshot(registration: &SetupRegistration, snapshot: Provision
     if let Ok(mut coordinator) = anland_repair_coordinator().lock() {
         coordinator.snapshot = snapshot.clone();
     }
-    let message = if snapshot.error.is_some() {
-        SetupMessage::Error(snapshot.message.clone())
-    } else {
-        SetupMessage::Progress(snapshot.message.clone())
-    };
-    if let Some(android_app) = registration.publish(message) {
+    if let Some(android_app) = registration.android_app() {
         let (status, _) = anland_repair_ui_snapshot();
         crate::android::utils::compose_overlay::publish_anland_repair_state(
             &android_app,
@@ -5540,13 +5487,6 @@ fn run_installation_attempt(
                 "setup UI binding is unavailable",
             ));
         };
-        let Some(mpsc_sender) = registration.sender() else {
-            return Err(SetupFailure::from_detail(
-                0,
-                "setup-coordinator",
-                "setup progress channel is unavailable",
-            ));
-        };
         let install_plan = setup_coordinator()
             .lock()
             .ok()
@@ -5558,7 +5498,6 @@ fn run_installation_attempt(
         let preferences_app = android_app.clone();
         let options = SetupOptions {
             android_app,
-            mpsc_sender,
             progress,
             install_plan: Some(install_plan.clone()),
             install_optional_apps: true,
@@ -6125,8 +6064,6 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
 
 fn setup_failure_backend(
     registration: &SetupRegistration,
-    receiver: mpsc::Receiver<SetupMessage>,
-    progress: Arc<Mutex<u16>>,
     plan: Option<InstallPlan>,
     message: &str,
 ) -> PolarBearBackend {
@@ -6150,7 +6087,7 @@ fn setup_failure_backend(
     }
     crate::android::utils::webview_handoff::cancel_initial_preferences_handoff();
     publish_snapshot(registration, snapshot);
-    let mut backend = WebviewBackend::build(receiver, progress);
+    let mut backend = WebviewBackend::build();
     backend.error = ErrorVariant::Setup(message.to_string());
     PolarBearBackend::WebView(backend)
 }
@@ -6213,7 +6150,6 @@ pub fn setup_with_completion(
     android_app: AndroidApp,
     on_complete: Option<SetupCompletionCallback>,
 ) -> PolarBearBackend {
-    let (sender, receiver) = mpsc::channel();
     let progress = Arc::new(Mutex::new(0));
 
     // Before the engine probe, which would fail here too and blame the device.
@@ -6238,22 +6174,13 @@ pub fn setup_with_completion(
             "This device can't run Portal's Linux environment.",
         ));
     }
-    let _ = sender.send(SetupMessage::Progress(
-        "✅ Your device is supported!".to_string(),
-    ));
-
-    let registration = SetupRegistration::new(
-        android_app.clone(),
-        sender.clone(),
-        progress.clone(),
-        on_complete,
-    );
+    let registration = SetupRegistration::new(android_app.clone(), progress.clone(), on_complete);
 
     // An explicit Anland migration is a separate process-lifetime operation.
     // Activity/Compose recreation must attach to it before the completed
     // runtime branch below has a chance to replay the broad setup pipeline.
     if attach_to_anland_repair(&registration, &progress).is_some() {
-        return PolarBearBackend::WebView(WebviewBackend::build(receiver, progress));
+        return PolarBearBackend::WebView(WebviewBackend::build());
     }
 
     let artifact = crate::core::provisioning::RuntimeArtifact::production();
@@ -6279,7 +6206,7 @@ pub fn setup_with_completion(
                 "Reconnecting to Portal installation…",
             ),
         );
-        return PolarBearBackend::WebView(WebviewBackend::build(receiver, progress));
+        return PolarBearBackend::WebView(WebviewBackend::build());
     }
     // A failed operation is also process-lifetime state. Rebinding after an
     // Activity recreation must keep the Retry screen visible; otherwise a
@@ -6287,7 +6214,7 @@ pub fn setup_with_completion(
     // fallback could start an uncontrolled retry loop.
     if let Some((InstallOperationState::Failed, snapshot)) = existing_operation {
         set_registration(registration, InstallOperationState::Failed, snapshot);
-        let mut backend = WebviewBackend::build(receiver, progress);
+        let mut backend = WebviewBackend::build();
         backend.error = ErrorVariant::Setup(
             setup_coordinator()
                 .lock()
@@ -6313,7 +6240,7 @@ pub fn setup_with_completion(
             let message = format!(
                 "Portal found a damaged first-run plan and preserved the existing runtime. Export diagnostics or restore the accepted plan before retrying. ({error:#})"
             );
-            return setup_failure_backend(&registration, receiver, progress, None, &message);
+            return setup_failure_backend(&registration, None, &message);
         }
     };
 
@@ -6364,7 +6291,7 @@ pub fn setup_with_completion(
                         let failure =
                             SetupFailure::from_detail(12, "wayland-backend", format!("{error:#}"));
                         publish_failure(&registration, &failure);
-                        let mut backend = WebviewBackend::build(receiver, progress);
+                        let mut backend = WebviewBackend::build();
                         backend.error = ErrorVariant::Setup(failure.user_message);
                         return PolarBearBackend::WebView(backend);
                     }
@@ -6372,7 +6299,7 @@ pub fn setup_with_completion(
             }
             Err(failure) => {
                 publish_failure(&registration, &failure);
-                let mut backend = WebviewBackend::build(receiver, progress);
+                let mut backend = WebviewBackend::build();
                 backend.error = ErrorVariant::Setup(failure.user_message);
                 return PolarBearBackend::WebView(backend);
             }
@@ -6384,8 +6311,6 @@ pub fn setup_with_completion(
             InstallPlanState::Complete => {
                 return setup_failure_backend(
                     &registration,
-                    receiver,
-                    progress,
                     Some(record.plan().clone()),
                     "Portal has a completed setup plan but its runtime marker is missing. The existing guest was preserved; export diagnostics before recovery.",
                 );
@@ -6406,8 +6331,6 @@ pub fn setup_with_completion(
                     );
                     return setup_failure_backend(
                         &registration,
-                        receiver,
-                        progress,
                         Some(record.plan().clone()),
                         &message,
                     );
@@ -6420,8 +6343,6 @@ pub fn setup_with_completion(
                         );
                         return setup_failure_backend(
                             &registration,
-                            receiver,
-                            progress,
                             Some(record.plan().clone()),
                             &message,
                         );
@@ -6430,13 +6351,11 @@ pub fn setup_with_completion(
                 if !start_installation_worker(registration.clone(), plan) {
                     return setup_failure_backend(
                         &registration,
-                        receiver,
-                        progress,
                         Some(record.plan().clone()),
                         "Portal could not restart its accepted setup worker. The guest and choices were preserved; tap Try again or export diagnostics.",
                     );
                 }
-                return PolarBearBackend::WebView(WebviewBackend::build(receiver, progress));
+                return PolarBearBackend::WebView(WebviewBackend::build());
             }
         }
     }
@@ -6444,8 +6363,6 @@ pub fn setup_with_completion(
     if !is_truly_fresh_runtime(root) {
         return setup_failure_backend(
             &registration,
-            receiver,
-            progress,
             None,
             "Portal found an existing or partial runtime without its accepted setup plan. It was preserved; export diagnostics or restore the plan before retrying.",
         );
@@ -6456,7 +6373,7 @@ pub fn setup_with_completion(
         "Portal setup is ready to begin.",
     );
     set_registration(registration, InstallOperationState::Idle, initial);
-    PolarBearBackend::WebView(WebviewBackend::build(receiver, progress))
+    PolarBearBackend::WebView(WebviewBackend::build())
 }
 
 #[cfg(test)]

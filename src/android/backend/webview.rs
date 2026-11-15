@@ -3,14 +3,7 @@
 //! (`compose_overlay`), and runtime and unsupported-device failures by the Compose recovery
 //! screen (`recovery_screen`), whose buttons call native code directly over JNI.
 
-use crate::android::proot::setup::SetupMessage;
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    thread,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 use winit::platform::android::activity::AndroidApp;
 
 /// Actions which the event loop consumes on behalf of the recovery screen.
@@ -48,15 +41,9 @@ pub struct WebviewBackend {
 }
 
 impl WebviewBackend {
-    /// A backend for setup in progress.
-    ///
-    /// Setup reports to Compose through the provisioning snapshot. Its message channel stays
-    /// drained here so the worker's senders remain connected for the life of this backend.
-    pub fn build(
-        receiver: std::sync::mpsc::Receiver<SetupMessage>,
-        _progress: Arc<Mutex<u16>>,
-    ) -> Self {
-        thread::spawn(move || for _ in receiver {});
+    /// A backend for setup in progress. Setup reports to Compose through the provisioning
+    /// snapshot.
+    pub fn build() -> Self {
         Self {
             error: ErrorVariant::None,
         }

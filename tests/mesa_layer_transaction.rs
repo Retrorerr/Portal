@@ -504,7 +504,6 @@ fn setup_defers_mesa_to_spawned_stage_and_plasma_never_downloads_inline() {
     let mesa_body = &setup[mesa_fn..plasma_fn];
     assert!(mesa_body.contains("thread::spawn"));
     assert!(mesa_body.contains("provision_with_progress"));
-    assert!(mesa_body.contains("SetupMessage::Progress"));
     assert!(mesa_body.contains("is_anland_requested"));
     // Plasma setup must not download inline anymore.
     let plasma_body = &setup[plasma_fn..plasma_fn + 3000.min(setup.len() - plasma_fn)];
