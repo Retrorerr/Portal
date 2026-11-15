@@ -65,6 +65,22 @@ fn android_main(android_app: AndroidApp) {
         log::warn!("Physical keyboard monitor failed to start: {error}");
     }
 
+    // Each new kind of pointer event is recorded once, so a report shows how
+    // a device this app has never met presents its mouse or touchpad.
+    winit::platform::android::set_pointer_shape_observer(|shape| {
+        crate::android::diagnostics::host_event(
+            "pointer-shape",
+            &format!(
+                "device={} source={:#x} tool={} action={} buttons={:#x} class={}",
+                shape.device_id,
+                shape.source,
+                shape.tool_type,
+                shape.action,
+                shape.button_state,
+                shape.class
+            ),
+        );
+    });
     let event_loop = EventLoop::<AppUserEvent>::with_user_event()
         .with_android_app(android_app.clone())
         .build()

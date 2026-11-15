@@ -154,8 +154,7 @@ open class PortalActivity : GameActivity() {
         }
     }
 
-    // GameActivity forwards only touch input to native code; controller
-    // keys and sticks go to the guest's evdev pads before the view tree.
+    // Controller keys and sticks go to the guest's evdev pads before the view tree.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
         SessionControls.onShortcut(event) || SessionControls.onBackKey(event) || TouchControls.dispatchUtilityKey(event) || dispatchMouseSideButton(event) || TouchControls.onBackKey(event) || GamepadBridge.dispatchKey(event) ||
             super.dispatchKeyEvent(event)
@@ -178,7 +177,7 @@ open class PortalActivity : GameActivity() {
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean =
-        dispatchCaptured(event) || dispatchMouseWheel(event) || GamepadBridge.dispatchMotion(event) ||
+        dispatchCaptured(event) || GamepadBridge.dispatchMotion(event) ||
             super.dispatchGenericMotionEvent(event)
 
     // A captured mouse reports as SOURCE_MOUSE_RELATIVE, a trackball-class
@@ -430,22 +429,6 @@ open class PortalActivity : GameActivity() {
         Log.i(TAG, "pointer capture=$hasCapture (wanted=$pointerCaptureWanted)")
         padX = Float.NaN
         padY = Float.NaN
-    }
-
-    /**
-     * Mouse wheel, straight to the guest: GameActivity's native glue never
-     * sees ACTION_SCROLL here, so the wheel did nothing. Touchpad scrolling
-     * (finger tool) keeps its own path, and the setup screen keeps the wheel.
-     */
-    private fun dispatchMouseWheel(event: MotionEvent): Boolean {
-        if (event.actionMasked != MotionEvent.ACTION_SCROLL || ComposeOverlay.isShowing()) return false
-        if (!event.isFromSource(InputDevice.SOURCE_MOUSE)) return false
-        if (event.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER) return false
-        nativeCapturedWheel(
-            event.getAxisValue(MotionEvent.AXIS_HSCROLL),
-            event.getAxisValue(MotionEvent.AXIS_VSCROLL),
-        )
-        return true
     }
 
     /** Captured mouse/touchpad input goes straight to the Anland session. */

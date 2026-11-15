@@ -140,7 +140,8 @@ pub extern "system" fn Java_app_polarbear_PortalActivity_nativeCapturedWheel(
     vertical: jfloat,
 ) {
     with_sink(|sink| {
-        // Android counts wheel-up as positive; Wayland scrolls down on positive.
+        // Android's positive vertical delta means up, and its positive
+        // horizontal delta means right. Match the uncaptured wheel path.
         if vertical != 0.0 {
             sink.send_wheel(0, -vertical);
         }

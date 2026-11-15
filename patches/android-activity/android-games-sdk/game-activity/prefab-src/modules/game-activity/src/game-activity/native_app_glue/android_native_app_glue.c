@@ -250,13 +250,13 @@ static bool default_key_filter(const GameActivityKeyEvent* event) {
              event->keyCode == KEY_EVENT_KEYCODE_ZOOM_OUT);
 }
 
-// See
-// https://developer.android.com/reference/android/view/InputDevice#SOURCE_TOUCHSCREEN
-#define SOURCE_TOUCHSCREEN 0x00001002
-
 static bool default_motion_filter(const GameActivityMotionEvent* event) {
-    // Ignore any non-touch events.
-    return (event->source & SOURCE_TOUCHSCREEN) != 0;
+    // Portal needs absolute desktop pointers as well as touch. Controllers
+    // and captured relative motion have their own paths in the Activity.
+    const uint32_t source = event->source;
+    return (source & AINPUT_SOURCE_CLASS_POINTER) != 0 ||
+           (source & AINPUT_SOURCE_TOUCHPAD) == AINPUT_SOURCE_TOUCHPAD ||
+           source == AINPUT_SOURCE_UNKNOWN;
 }
 
 // --------------------------------------------------------------------

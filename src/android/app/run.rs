@@ -581,10 +581,10 @@ fn forward_anland_input(
                 MouseScrollDelta::LineDelta(x, y) => {
                     log::debug!("anland.input wheel lines x={x} y={y}");
                     if *y != 0.0 {
-                        session.send_wheel(0, *y);
+                        session.send_wheel(0, -*y);
                     }
                     if *x != 0.0 {
-                        session.send_wheel(1, *x);
+                        session.send_wheel(1, -*x);
                     }
                 }
                 MouseScrollDelta::PixelDelta(pos) => {
