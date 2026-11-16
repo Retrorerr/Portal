@@ -238,6 +238,7 @@ audio_connects() {
     python3 -c 'import socket, sys; s=socket.socket(socket.AF_UNIX); s.settimeout(0.2); s.connect(sys.argv[1]); s.close()' /tmp/pulse/native >/dev/null 2>&1
 }
 audio_ready=0
+audio_wait_start=$(date +%s%3N)
 for _ in $(seq 1 150); do
     if [ -S /tmp/pulse/native ] && audio_connects; then
         audio_ready=1
@@ -248,6 +249,9 @@ done
 if [ "$audio_ready" -ne 1 ]; then
     printf 'stage=audio-unavailable action=retry-portal\n' >> "$session_log"
 fi
+# Plasma waits on this, so its cost shows in every start and switch.
+printf 'stage=audio-wait ready=%s waited_ms=%s\n' "$audio_ready" \
+    "$(( $(date +%s%3N) - audio_wait_start ))" >> "$session_log"
 
 # A normal dbus-run-session owns the bus for the complete Plasma process tree;
 # no user systemd daemon is started in PRoot.
