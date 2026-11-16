@@ -79,7 +79,7 @@ internal class PortalCapsuleView(
                     "keyboard" -> changePage(UtilityPage.Keyboard)
                     "controller" -> onToggleController()
                     "game" -> changePage(UtilityPage.Gaming)
-                    "files", "apps", "report" -> handoff { onOpen(action) }
+                    "files", "apps", "workspaces", "report" -> handoff { onOpen(action) }
                     else -> handoff { onOpen(null) }
                 } },
                 onBack = { changePage(UtilityPage.Menu) }, onOutside = { dismiss() },

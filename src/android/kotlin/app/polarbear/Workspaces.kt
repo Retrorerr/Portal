@@ -29,16 +29,8 @@ object Workspaces {
     /** Previews are a third of the desktop's size: sharp on a card, small on disk. */
     private const val PREVIEW_DIVISOR = 3
     private const val PREVIEW_QUALITY = 85
-    // Waiting for the new desktop to be worth showing: a tiny copy every
-    // poll, until it is no longer the black splash and has stopped fading in.
-    private const val SETTLE_SAMPLE_W = 48
-    private const val SETTLE_SAMPLE_H = 30
-    private const val SETTLE_POLL_MS = 120L
-    private const val SETTLE_MIN_LUMA = 0.06f
-    private const val SETTLE_MAX_CHANGE = 0.012f
-    /** A wallpaper darker than the splash never "arrives"; lift anyway. */
-    private const val SETTLE_MAX_MS = 6_000L
-    private const val SETTLE_CLEAR_DELAY_MS = 700L
+    /** How long "Opening …" outlasts the lift, so it leaves with the veil. */
+    private const val OPENING_CLEAR_DELAY_MS = 700L
 
     data class Workspace(val id: String, val name: String, val lastUsedUnix: Long)
 
@@ -69,8 +61,10 @@ object Workspaces {
     private val main = Handler(Looper.getMainLooper())
     private var previewDir: File? = null
 
+    /** Main thread: also reads the list, so the Portal menu knows whether to offer Workspaces. */
     fun attach(context: Context) {
         if (previewDir == null) previewDir = File(context.filesDir, "workspaces/previews")
+        refresh()
     }
 
     private fun parse(json: String): State? = try {
@@ -139,60 +133,15 @@ object Workspaces {
     }
 
     /**
-     * The new desktop presented its first frame. That frame is Plasma's
-     * black startup splash; lift the veil once the wallpaper has come in and
-     * settled, so the first thing seen is the workspace itself. Main thread.
+     * The new desktop has settled past Plasma's splash: lift the veil onto
+     * it, so the first thing seen is the workspace itself. Main thread.
      */
-    fun onDesktopReady(root: android.view.View?, lift: () -> Unit) {
+    fun onDesktopSettled(lift: () -> Unit) {
         if (!returnAfterSwitch.getAndSet(false)) return
-        val surface = root?.let { app.polarbear.setup.components.findDesktopSurface(it) }
-        val started = android.os.SystemClock.uptimeMillis()
-        val sample = Bitmap.createBitmap(SETTLE_SAMPLE_W, SETTLE_SAMPLE_H, Bitmap.Config.ARGB_8888)
-        val pixels = IntArray(SETTLE_SAMPLE_W * SETTLE_SAMPLE_H)
-        var previous = -1f
-        fun finish() {
-            lift()
-            // The reveal animates over the new desktop; the "Opening" line
-            // goes with it rather than changing under the user's eyes.
-            main.postDelayed({ opening.value = null }, SETTLE_CLEAR_DELAY_MS)
-        }
-        fun poll() {
-            val elapsed = android.os.SystemClock.uptimeMillis() - started
-            if (surface == null || Build.VERSION.SDK_INT < 24 || elapsed >= SETTLE_MAX_MS ||
-                surface.holder.surface?.isValid != true
-            ) {
-                finish()
-                return
-            }
-            try {
-                PixelCopy.request(surface, sample, { code ->
-                    if (code == PixelCopy.SUCCESS) {
-                        sample.getPixels(pixels, 0, SETTLE_SAMPLE_W, 0, 0, SETTLE_SAMPLE_W, SETTLE_SAMPLE_H)
-                        val brightness = meanLuma(pixels)
-                        val settled = brightness > SETTLE_MIN_LUMA && previous >= 0f &&
-                            kotlin.math.abs(brightness - previous) < SETTLE_MAX_CHANGE
-                        previous = brightness
-                        if (settled) {
-                            Log.i(TAG, "new desktop settled after ${elapsed}ms (luma=$brightness)")
-                            finish()
-                            return@request
-                        }
-                    }
-                    main.postDelayed(::poll, SETTLE_POLL_MS)
-                }, main)
-            } catch (_: IllegalArgumentException) {
-                main.postDelayed(::poll, SETTLE_POLL_MS)
-            }
-        }
-        poll()
-    }
-
-    private fun meanLuma(pixels: IntArray): Float {
-        var sum = 0f
-        for (p in pixels) {
-            sum += 0.2126f * ((p shr 16) and 0xff) + 0.7152f * ((p shr 8) and 0xff) + 0.0722f * (p and 0xff)
-        }
-        return sum / (pixels.size * 255f)
+        lift()
+        // The reveal animates over the new desktop; the "Opening" line goes
+        // with it rather than changing under the user's eyes.
+        main.postDelayed({ opening.value = null }, OPENING_CLEAR_DELAY_MS)
     }
 
     /** Null when renamed, else the reason shown under the name. Main thread. */

@@ -71,6 +71,8 @@ internal fun UtilityRoundtable(
         add(UtilityAction("report", "Report", PortalGlyph.Report))
         add(UtilityAction("files", "Files", PortalGlyph.Files, if (active > 0) "$active copying" else if (failed) "Needs attention" else ""))
         add(UtilityAction("apps", "Apps", PortalGlyph.Apps))
+        add(UtilityAction("workspaces", "Workspaces", PortalGlyph.Workspaces,
+            available = Workspaces.state.value.workspaces.size > 1))
         add(UtilityAction("keyboard", "Keyboard", PortalGlyph.Keyboard))
         add(UtilityAction("game", "Game settings", PortalGlyph.Options))
         add(UtilityAction("settings", "Portal settings", PortalGlyph.Settings))

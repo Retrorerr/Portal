@@ -39,6 +39,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -69,6 +70,7 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -86,10 +88,13 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.coerceIn
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.ComposeOverlay
@@ -107,7 +112,14 @@ private const val WORKSPACES_ENTRANCE_DELAY_MS = 500L
 /** Long enough to see the chosen card answer the tap before the card folds. */
 private const val SWITCH_FOLD_DELAY_MS = 160L
 private val WorkspacesCardWidth = 560.dp
-private val TileWidth = 196.dp
+/** Tiles share the card's width, within these bounds; more than fit scroll. */
+private val TileMinWidth = 156.dp
+private val TileMaxWidth = 248.dp
+private val TileGap = 12.dp
+/** Name and status, or the rename field and its note: the same height, so renaming never moves the card. */
+private val TileFooterHeight = 46.dp
+/** Over the frozen old desktop, so the chosen one is what is seen. */
+private const val BACKDROP_ALPHA = 0.88f
 private val TileCorner = 14.dp
 
 @Composable
@@ -169,7 +181,7 @@ internal fun WorkspaceSwitchBackdrop() {
     val preview = target?.let { Workspaces.previews[it] }
     if (preview != null) shown = preview
     val alpha by animateFloatAsState(
-        targetValue = if (preview != null) 0.62f else 0f,
+        targetValue = if (preview != null) BACKDROP_ALPHA else 0f,
         animationSpec = tween(if (preview != null) 520 else 360, easing = PortalEmphasized),
         label = "workspace backdrop",
     )
@@ -184,7 +196,7 @@ internal fun WorkspaceSwitchBackdrop() {
                 .graphicsLayer {
                     this.alpha = alpha
                     // Settles from slightly enlarged, as if stepping back into it.
-                    val scale = 1.04f - 0.04f * (alpha / 0.62f)
+                    val scale = 1.04f - 0.04f * (alpha / BACKDROP_ALPHA)
                     scaleX = scale
                     scaleY = scale
                 }
@@ -193,7 +205,10 @@ internal fun WorkspaceSwitchBackdrop() {
     }
 }
 
-/** The capsule: two stacked panes and the running workspace's name. */
+/**
+ * The capsule: two stacked panes and the running workspace's name. While one
+ * opens, the veil's subtitle says so and the capsule names the one arriving.
+ */
 @Composable
 private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, onClick: () -> Unit) {
     val openingId by Workspaces.opening
@@ -201,8 +216,7 @@ private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, o
     val tap = remember { MutableInteractionSource() }
     val pressed by tap.collectIsPressedAsState()
     val pressScale by animateFloatAsState(if (pressed) 0.975f else 1f, tween(110), label = "workspaces capsule press")
-    val label = opening?.let { "Opening ${state.name(it) ?: "workspace"}…" }
-        ?: (state.name(state.active) ?: "Workspaces")
+    val label = opening?.let { state.name(it) } ?: state.name(state.active) ?: "Workspaces"
     Row(
         modifier = Modifier
             .graphicsLayer {
@@ -328,26 +342,35 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
             PanelButton(text = "Done", primary = false, palette = palette, onClick = onClose)
         }
         Spacer(Modifier.height(14.dp))
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
+        BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+            val count = state.workspaces.size.coerceAtLeast(1)
+            val tileWidth = ((maxWidth - TileGap * (count - 1)) / count).coerceIn(TileMinWidth, TileMaxWidth)
+            Row(
+                // At least the card's width, so a few tiles sit centred and
+                // more than fit scroll.
+                modifier = Modifier.horizontalScroll(rememberScrollState()).widthIn(min = maxWidth),
+                horizontalArrangement = Arrangement.spacedBy(TileGap, Alignment.CenterHorizontally),
+            ) {
             state.workspaces.forEach { workspace ->
                 WorkspaceTile(
                     workspace = workspace,
+                    width = tileWidth,
                     preview = Workspaces.previews[workspace.id],
                     running = workspace.id == state.active,
                     chosen = chosen == workspace.id,
                     renaming = renaming == workspace.id,
                     palette = palette,
                     onOpen = {
-                        if (chosen == null && renaming == null && workspace.id != state.active) {
-                            chosen = workspace.id
+                        when {
+                            // A tap away from the field ends the rename, unsaved.
+                            renaming != null -> renaming = null
+                            chosen == null && workspace.id != state.active -> chosen = workspace.id
                         }
                     },
                     onRename = { renaming = workspace.id },
                     onRenameDone = { renaming = null },
                 )
+            }
             }
         }
         AnimatedVisibility(
@@ -371,6 +394,7 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
 @Composable
 private fun WorkspaceTile(
     workspace: Workspaces.Workspace,
+    width: androidx.compose.ui.unit.Dp,
     preview: ImageBitmap?,
     running: Boolean,
     chosen: Boolean,
@@ -399,7 +423,7 @@ private fun WorkspaceTile(
     val shape = RoundedCornerShape(TileCorner)
     Column(
         Modifier
-            .width(TileWidth)
+            .width(width)
             .semantics {
                 contentDescription = if (running) "${workspace.name}, open now" else "Open ${workspace.name}"
                 selected = running
@@ -459,6 +483,7 @@ private fun WorkspaceTile(
             }
         }
         Spacer(Modifier.height(8.dp))
+        Column(Modifier.height(TileFooterHeight)) {
         if (renaming) {
             RenameField(workspace, palette, onRenameDone)
         } else {
@@ -490,36 +515,46 @@ private fun WorkspaceTile(
                 maxLines = 1,
             )
         }
+        }
     }
 }
 
 @Composable
 private fun RenameField(workspace: Workspaces.Workspace, palette: PortalPalette, onDone: () -> Unit) {
-    var text by remember { mutableStateOf(workspace.name) }
+    // The whole name selected, so typing replaces it.
+    var value by remember {
+        mutableStateOf(TextFieldValue(workspace.name, selection = TextRange(0, workspace.name.length)))
+    }
     var refusal by remember { mutableStateOf<String?>(null) }
+    var focused by remember { mutableStateOf(false) }
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
     val save = {
-        if (text.trim() == workspace.name) {
+        if (value.text.trim() == workspace.name) {
             onDone()
         } else {
-            refusal = Workspaces.rename(workspace.id, text)
+            refusal = Workspaces.rename(workspace.id, value.text)
             if (refusal == null) onDone()
         }
     }
     Column {
         BasicTextField(
-            value = text,
+            value = value,
             onValueChange = {
-                text = it
-                refusal = null
+                if (it.text != value.text) refusal = null
+                value = it
             },
             modifier = Modifier
                 .fillMaxWidth()
                 .focusRequester(focus)
+                .onFocusChanged {
+                    // Leaving the field cancels; only Enter saves.
+                    if (focused && !it.isFocused) onDone()
+                    focused = it.isFocused
+                }
                 .clip(RoundedCornerShape(8.dp))
                 .border(1.dp, palette.accent.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
-                .padding(horizontal = 8.dp, vertical = 5.dp),
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             singleLine = true,
             textStyle = TextStyle(color = palette.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold),
             cursorBrush = SolidColor(palette.accent),
@@ -527,11 +562,12 @@ private fun RenameField(workspace: Workspaces.Workspace, palette: PortalPalette,
             keyboardActions = KeyboardActions(onDone = { save() }),
         )
         Text(
-            text = refusal ?: "Press Enter to save",
+            text = refusal ?: "Enter saves",
             modifier = Modifier.padding(start = 2.dp, top = 3.dp),
             fontSize = 11.sp,
             color = if (refusal != null) palette.accent else palette.textMuted,
-            maxLines = 2,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

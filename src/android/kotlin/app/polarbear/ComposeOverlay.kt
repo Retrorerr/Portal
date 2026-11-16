@@ -113,6 +113,8 @@ object ComposeOverlay {
     // can latch this before the Compose hierarchy has finished presenting.
     private val desktopReadyLatched = AtomicBoolean(false)
     private val desktopReadyState = mutableStateOf(false)
+    /** Main thread: the ready desktop is past Plasma's splash (see DesktopSettle). */
+    private var desktopSettled = false
     data class InstallUiState(
         val phase: String,
         val progress: Int,
@@ -327,15 +329,25 @@ object ComposeOverlay {
             Log.i(TAG, "native desktop READY latched; Compose overlay remains attached")
         }
         android.os.Handler(android.os.Looper.getMainLooper()).post {
-            if (ready && desktopReadyLatched.get()) FileTransfers.cleanInterruptedImports()
-            // A switch ends with the new workspace on screen, not the veil.
             if (ready && desktopReadyLatched.get()) {
-                Workspaces.onDesktopReady(composeView?.rootView) { requestReturnToDesktop() }
+                FileTransfers.cleanInterruptedImports()
+                // The veil says the desktop is ready once it shows the
+                // desktop, not Plasma's splash; a switch then lifts onto it.
+                DesktopSettle.watch(composeView?.rootView) {
+                    if (!desktopReadyLatched.get()) return@watch
+                    desktopSettled = true
+                    desktopReadyState.value = true
+                    SessionControls.overlayChanged()
+                    Workspaces.onDesktopSettled { requestReturnToDesktop() }
+                }
+            } else if (!ready) {
+                DesktopSettle.cancel()
+                desktopSettled = false
             }
             SessionControls.desktopReadyChanged(ready)
         }
         composeView?.post {
-            desktopReadyState.value = desktopReadyLatched.get()
+            desktopReadyState.value = desktopReadyLatched.get() && desktopSettled
             SessionControls.overlayChanged()
             // Recover the intended Ready translucency after an underlying
             // runtime error temporarily restored the safety charcoal.
@@ -772,7 +784,7 @@ object ComposeOverlay {
             }
             // Catch readiness that arrived before or while the Compose
             // hierarchy was being attached, always from this UI thread.
-            desktopReadyState.value = desktopReadyLatched.get()
+            desktopReadyState.value = desktopReadyLatched.get() && desktopSettled
             installStateValue.value = installStateSnapshot
             anlandRepairStateValue.value = anlandRepairStateSnapshot
             systemUpdateStateValue.value = systemUpdateStateSnapshot
