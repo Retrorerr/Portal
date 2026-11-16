@@ -142,7 +142,9 @@ internal fun ReturnWorkspacesPanel(
                     WorkspacesCard(state, palette) { ComposeOverlay.activePanel = null }
                 } else {
                     WorkspacesCapsule(state, palette) {
-                        if (ComposeOverlay.activePanel == null && state.switching == null) {
+                        if (ComposeOverlay.activePanel == null && state.switching == null &&
+                            Workspaces.opening.value == null
+                        ) {
                             ComposeOverlay.activePanel = "workspaces"
                         }
                     }
@@ -160,7 +162,8 @@ internal fun ReturnWorkspacesPanel(
 @Composable
 internal fun WorkspaceSwitchBackdrop() {
     val state by Workspaces.state
-    val target = state.switching
+    val opening by Workspaces.opening
+    val target = opening ?: state.switching
     // Keep the last target drawn while it fades out.
     var shown by remember { mutableStateOf<ImageBitmap?>(null) }
     val preview = target?.let { Workspaces.previews[it] }
@@ -193,10 +196,12 @@ internal fun WorkspaceSwitchBackdrop() {
 /** The capsule: two stacked panes and the running workspace's name. */
 @Composable
 private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, onClick: () -> Unit) {
+    val openingId by Workspaces.opening
+    val opening = openingId ?: state.switching
     val tap = remember { MutableInteractionSource() }
     val pressed by tap.collectIsPressedAsState()
     val pressScale by animateFloatAsState(if (pressed) 0.975f else 1f, tween(110), label = "workspaces capsule press")
-    val label = state.switching?.let { "Opening ${state.name(it) ?: "workspace"}…" }
+    val label = opening?.let { "Opening ${state.name(it) ?: "workspace"}…" }
         ?: (state.name(state.active) ?: "Workspaces")
     Row(
         modifier = Modifier
@@ -214,7 +219,7 @@ private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, o
             .padding(start = 12.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        StackGlyph(palette, busy = state.switching != null)
+        StackGlyph(palette, busy = opening != null)
         Spacer(Modifier.width(9.dp))
         AnimatedContent(
             targetState = label,
@@ -235,7 +240,7 @@ private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, o
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (state.switching == null) {
+        if (opening == null) {
             Spacer(Modifier.width(8.dp))
             Text(text = "›", fontSize = 16.sp, fontWeight = FontWeight.Medium, color = palette.textMuted)
         }

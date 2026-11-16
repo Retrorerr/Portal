@@ -329,8 +329,8 @@ object ComposeOverlay {
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             if (ready && desktopReadyLatched.get()) FileTransfers.cleanInterruptedImports()
             // A switch ends with the new workspace on screen, not the veil.
-            if (ready && desktopReadyLatched.get() && Workspaces.takeReturnAfterSwitch()) {
-                requestReturnToDesktop()
+            if (ready && desktopReadyLatched.get()) {
+                Workspaces.onDesktopReady(composeView?.rootView) { requestReturnToDesktop() }
             }
             SessionControls.desktopReadyChanged(ready)
         }

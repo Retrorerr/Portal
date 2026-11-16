@@ -519,7 +519,8 @@ internal fun PortalReturnScreen(
                 // The line settles from "restoring" to "ready" the moment the
                 // veil may be lifted, dissolving through a soft blur.
                 val workspaces by app.polarbear.Workspaces.state
-                val opening = workspaces.switching?.let { workspaces.name(it) }
+                val openingId by app.polarbear.Workspaces.opening
+                val opening = (openingId ?: workspaces.switching)?.let { workspaces.name(it) }
                 AnimatedContent(
                     targetState = veil.eligible to opening,
                     transitionSpec = {
