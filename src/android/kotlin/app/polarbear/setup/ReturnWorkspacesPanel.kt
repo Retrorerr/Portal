@@ -334,6 +334,7 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
                     running = workspace.id == state.active,
                     chosen = chosen == workspace.id,
                     renaming = renaming == workspace.id,
+                    renamingAny = renaming != null,
                     palette = palette,
                     onOpen = {
                         when {
@@ -374,6 +375,8 @@ private fun WorkspaceTile(
     running: Boolean,
     chosen: Boolean,
     renaming: Boolean,
+    /** Any tile is being renamed: a tap on this one, even the running one, ends it. */
+    renamingAny: Boolean,
     palette: PortalPalette,
     onOpen: () -> Unit,
     onRename: () -> Unit,
@@ -419,7 +422,7 @@ private fun WorkspaceTile(
                     interactionSource = tap,
                     indication = null,
                     role = Role.Button,
-                    enabled = !running,
+                    enabled = !running || renamingAny,
                     onClickLabel = "Open ${workspace.name}",
                     onClick = onOpen,
                 ),
