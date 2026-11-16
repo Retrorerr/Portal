@@ -261,6 +261,7 @@ fn resume_wayland(
         log::error!("Initial Wayland frame failed; guest session will not be launched");
         return false;
     }
+    crate::android::proot::launch::set_display_paused(false);
     pipewire_standalone_aaudio::spawn_after_ready(android_app.clone());
     crate::android::backend::video_decode::spawn_after_ready();
     launch();
@@ -413,6 +414,7 @@ fn resume_anland(
         accessibility::set_anland_key_sink(session.key_sink());
         crate::android::utils::pointer_capture::attach(android_app, session.pointer_sink());
     }
+    crate::android::proot::launch::set_display_paused(false);
     pipewire_standalone_aaudio::spawn_after_ready(android_app.clone());
     crate::android::backend::video_decode::spawn_after_ready();
     if existing_session {
@@ -1519,6 +1521,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         compose_overlay::notify_desktop_suspended(&self.frontend.android_app);
 
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
+            crate::android::proot::launch::set_display_paused(true);
             if let Err(error) = ime::hide(&backend.android_app) {
                 log::debug!("Software keyboard bridge could not be hidden on suspend: {error}");
             }

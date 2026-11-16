@@ -72,6 +72,30 @@ fn clear_failure_markers() {
     }
 }
 
+/// Tell the guest's startup wait whether Android has given Portal a window
+/// to show the desktop in. While it has not, no frame can prove Plasma
+/// ready, so the wait stops counting instead of failing a healthy start.
+pub fn set_display_paused(paused: bool) {
+    let runtime = crate::android::runtime::proot::PRootRuntime::active();
+    let marker = runtime
+        .rootfs_path()
+        .join("var/lib/localdesktop/session/display-paused");
+    let result = if paused {
+        marker
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::write(&marker, b""))
+    } else {
+        match fs::remove_file(&marker) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    };
+    if let Err(error) = result {
+        log::warn!("Could not update {}: {error}", marker.display());
+    }
+}
+
 fn marker_reason(path: &Path, name: &str) -> String {
     let details = fs::read_to_string(path)
         .ok()

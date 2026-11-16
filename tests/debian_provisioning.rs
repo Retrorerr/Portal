@@ -842,3 +842,16 @@ fn runtime_builder_pins_lfdevs_anland_stack_and_publish_validates_it() {
         );
     }
 }
+
+#[test]
+fn plasma_startup_does_not_time_out_while_portal_has_no_window() {
+    let launcher = include_str!("../assets/localdesktop-startplasma.sh");
+    let host = include_str!("../src/android/proot/launch.rs");
+    assert!(launcher.contains("display_paused=\"$state_dir/display-paused\""));
+    assert!(launcher
+        .contains("if [ ! -e \"$display_paused\" ]; then\n        waited=$((waited + 1))"));
+    assert!(host.contains("var/lib/localdesktop/session/display-paused"));
+    let run = include_str!("../src/android/app/run.rs");
+    assert!(run.contains("set_display_paused(true)"));
+    assert_eq!(run.matches("set_display_paused(false)").count(), 2);
+}

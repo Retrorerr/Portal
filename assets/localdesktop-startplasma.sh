@@ -267,8 +267,13 @@ start_clipboard_bridge
 log_monitor_pid=$!
 trap 'kill "$log_monitor_pid" 2>/dev/null || true' EXIT
 
+# Portal keeps this file while Android gives it no window to draw the
+# desktop in (screen off, Portal in the background). No frame can be
+# presented then, so that time does not count against startup.
+display_paused="$state_dir/display-paused"
 ready=0
-for _ in $(seq 1 120); do
+waited=0
+while [ "$waited" -lt 120 ]; do
     if [ -s "$crash_marker" ] && grep -Fq "attempt=$attempt_id" "$crash_marker"; then
         break
     fi
@@ -284,6 +289,9 @@ for _ in $(seq 1 120); do
         break
     fi
     sleep 1
+    if [ ! -e "$display_paused" ]; then
+        waited=$((waited + 1))
+    fi
 done
 
 if [ "$ready" -ne 1 ]; then
