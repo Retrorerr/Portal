@@ -56,11 +56,9 @@ internal fun UtilityRoundtable(
     if (!ready) return
     val palette = resolvePalette(AppearanceMode.System)
     val density = LocalDensity.current
-    val active = FileTransfers.items.count { it.phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling) }
-    val failed = FileTransfers.items.asReversed().distinctBy { it.kind to it.source }
-        .any { it.phase in setOf(TransferPhase.Failed, TransferPhase.Interrupted) }
+    val active = FileTransfers.activeCount
     val suggestion = UtilitySuggestion.forContext(SessionControls.textInputFocused.value,
-        TouchControls.steamRunning.value || TouchControls.gameRunning.value, active > 0 || failed)
+        TouchControls.steamRunning.value || TouchControls.gameRunning.value, active > 0)
     val suggestedGlyph = when (suggestion) {
         UtilitySuggestion.Keyboard -> PortalGlyph.Keyboard
         UtilitySuggestion.Gaming -> PortalGlyph.Options
@@ -68,8 +66,10 @@ internal fun UtilityRoundtable(
         UtilitySuggestion.Veil -> PortalGlyph.Veil
     }
     val actions = buildList {
-        // One way into the veil; Apps, Files, Workspaces and Report are chosen there.
-        add(UtilityAction("veil", "Veil", PortalGlyph.Veil, if (active > 0) "$active copying" else if (failed) "Files need attention" else ""))
+        add(UtilityAction("report", "Report", PortalGlyph.Report))
+        // One way into the veil; Apps, Files and Workspaces are chosen there.
+        // A failed copy is shown on the Files pill, where it can be retried.
+        add(UtilityAction("veil", "Veil", PortalGlyph.Veil, if (active > 0) "Copying $active ${if (active == 1) "file" else "files"}" else ""))
         add(UtilityAction("keyboard", "Keyboard", PortalGlyph.Keyboard))
         add(UtilityAction("game", "Game settings", PortalGlyph.Options))
         add(UtilityAction("settings", "Portal settings", PortalGlyph.Settings))

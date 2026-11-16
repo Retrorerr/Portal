@@ -407,7 +407,7 @@ public final class PortalFilesInstrumentation extends Instrumentation {
     private void openCapsule() throws Exception { openMenu(); tap(utilityBounds("files")); }
     private void testRoundtable() throws Exception {
         openMenu();
-        for (String action : new String[] { "report","files","apps","keyboard","settings" }) {
+        for (String action : new String[] { "report","veil","keyboard","settings" }) {
             android.graphics.Rect bounds = utilityBounds(action);
             check(bounds.left>=0 && bounds.top>=0 && bounds.right<=activity.getWindow().getDecorView().getWidth(), "Bubble left the viewport");
         }
@@ -465,7 +465,7 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         openMenu(); Object originalArea=utilityArea();
         try {
             setUtilityArea(compactArea(360)); SystemClock.sleep(1400); capture("-compact");
-            for (String action:new String[]{"report","files","apps","keyboard","settings"}) check(!utilityBounds(action).isEmpty(),"Compact action missing");
+            for (String action:new String[]{"report","veil","keyboard","settings"}) check(!utilityBounds(action).isEmpty(),"Compact action missing");
             shellText("settings put system font_scale 1.6"); SystemClock.sleep(1300);
             setUtilityArea(compactArea(700)); SystemClock.sleep(1400); capture("-large-text");
             shellText("cmd uimode night no"); SystemClock.sleep(1300);

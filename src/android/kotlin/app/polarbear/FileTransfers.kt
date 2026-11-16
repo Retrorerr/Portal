@@ -48,6 +48,13 @@ object FileTransfers {
     @JvmStatic private external fun nativeForget(job: String)
 
     var items by mutableStateOf<List<TransferItem>>(emptyList()); private set
+    /** Copies queued or running now. */
+    val activeCount: Int
+        get() = items.count { it.phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling) }
+    /** Files whose latest attempt failed or was cut off; a retry that worked clears them. */
+    val failedCount: Int
+        get() = items.asReversed().filter { it.phase != TransferPhase.Canceled }.distinctBy { it.kind to it.source }
+            .count { it.phase in setOf(TransferPhase.Failed, TransferPhase.Interrupted) }
     var folder by mutableStateOf(GuestFolder()); private set
     var importDirectory by mutableStateOf(""); private set
     var importLabel by mutableStateOf("Downloads"); private set

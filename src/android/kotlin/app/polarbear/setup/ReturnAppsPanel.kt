@@ -67,13 +67,11 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -93,6 +91,7 @@ import app.polarbear.setup.components.dissolveBlur
 import app.polarbear.setup.components.formatInstalledSize
 import app.polarbear.setup.components.rememberAppIcons
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 /** After the update capsule, so the two never arrive in the same frame. */
 private const val APPS_ENTRANCE_DELAY_MS = 800L
@@ -140,6 +139,10 @@ internal fun ReturnAppsPanel(
             // The gap between pills closes while one of them is open as a card.
             val gap by animateDpAsState(if (panel == null) 10.dp else 0.dp,
                 spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness), label = "controls capsule spacing")
+            // The report card takes the capsules' place, and the stack's height
+            // has to travel with it or the logo snaps when either one settles.
+            val capsuleRow by animateFloatAsState(if (panel == "report") 0f else 1f,
+                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness), label = "controls capsule row")
             androidx.compose.ui.layout.Layout(content = {
                 SessionActionSlot(visible = (panel == null || panel == "apps") && !switching && catalog.isNotEmpty()) {
                     SessionActionSurface(panel == "apps", palette, "apps surface") { expanded ->
@@ -158,11 +161,10 @@ internal fun ReturnAppsPanel(
                 SessionActionSlot(visible = (panel == null || panel == "workspaces") && workspaces.workspaces.size > 1) {
                     WorkspacesSurface(palette)
                 }
-                // Last and quietest: only a glyph until it opens.
-                SessionActionSlot(visible = panel == null || panel == "report") {
-                    SessionActionSurface(panel == "report", palette, "report surface") { expanded ->
-                        if (expanded) ReturnReportPanel(palette) { ComposeOverlay.activePanel = null }
-                        else ReportCapsule(palette) { if (ComposeOverlay.activePanel == null) ComposeOverlay.activePanel = "report" }
+                // Opened only from the pill's menu, so it never competes with the pills.
+                SessionActionSlot(visible = panel == "report", fromEdge = false) {
+                    SessionActionSurface(true, palette, "report surface") { _ ->
+                        ReturnReportPanel(palette) { ComposeOverlay.activePanel = null }
                     }
                 }
             }) { children, constraints ->
@@ -170,17 +172,20 @@ internal fun ReturnAppsPanel(
                 // throughout a morph. Re-constraining against a retreating
                 // peer restarts its size spring every frame and feels sticky.
                 val relaxed = constraints.copy(minWidth = 0, minHeight = 0)
-                val row = children.map { it.measure(relaxed) }
+                val row = children.subList(0, 3).map { it.measure(relaxed) }
+                val report = children[3].measure(relaxed)
                 val shown = row.filter { it.width > 0 }
                 val spacing = gap.roundToPx()
                 val rowWidth = shown.sumOf { it.width } + spacing * (shown.size - 1).coerceAtLeast(0)
-                val width = constraints.constrainWidth(rowWidth)
-                layout(width, constraints.constrainHeight(row.maxOfOrNull { it.height } ?: 0)) {
+                val rowHeight = ((row.maxOfOrNull { it.height } ?: 0) * capsuleRow).roundToInt()
+                val width = constraints.constrainWidth(maxOf(rowWidth, report.width))
+                layout(width, constraints.constrainHeight(rowHeight + report.height)) {
                     var x = (width - rowWidth) / 2
                     for (pill in row) {
                         pill.placeRelative(x, 0)
                         if (pill.width > 0) x += pill.width + spacing
                     }
+                    report.placeRelative((width - report.width) / 2, rowHeight)
                 }
             }
         }
@@ -259,40 +264,6 @@ private fun AppsCapsule(palette: PortalPalette, onClick: () -> Unit) {
             color = palette.textPrimary,
         )
         Text(text = "›", fontSize = 16.sp, color = palette.textMuted)
-    }
-}
-
-/** Report a problem: a glyph-only pill, the same height as its neighbours. */
-@Composable
-private fun ReportCapsule(palette: PortalPalette, onClick: () -> Unit) {
-    val tap = remember { MutableInteractionSource() }
-    val pressed by tap.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(if (pressed) 0.975f else 1f, tween(110), label = "report capsule press")
-    Box(
-        modifier = Modifier
-            .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
-            }
-            .clickable(
-                interactionSource = tap,
-                indication = null,
-                role = Role.Button,
-                onClickLabel = "Report a problem",
-                onClick = onClick,
-            )
-            .semantics { contentDescription = "Report a problem" }
-            .padding(horizontal = 11.dp, vertical = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        // An invisible line of the chevron's size gives the pill the same
-        // height as the named pills beside it.
-        Text(text = " ", fontSize = 16.sp, color = Color.Transparent)
-        app.polarbear.setup.components.PortalIcon(
-            app.polarbear.setup.components.PortalGlyph.Report,
-            palette.textPrimary,
-            size = 16.dp,
-        )
     }
 }
 

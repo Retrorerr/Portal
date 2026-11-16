@@ -10,9 +10,11 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
@@ -66,6 +68,18 @@ internal fun FilesCapsule(palette: PortalPalette, onClick: () -> Unit) {
         FileGlyph(palette.textPrimary, folder = true)
         Text("Files", color = palette.textPrimary,
             fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        // What the panel would say first: a copy running, or one to retry.
+        val active = FileTransfers.activeCount
+        val failed = FileTransfers.failedCount
+        val note = when {
+            active > 0 -> "Copying"
+            failed > 0 -> "$failed failed"
+            else -> null
+        }
+        AnimatedVisibility(note != null, enter = fadeIn(tween(220)) + expandHorizontally(tween(260)),
+            exit = fadeOut(tween(140)) + shrinkHorizontally(tween(260))) {
+            Text(note.orEmpty(), color = palette.textMuted, fontSize = 12.sp, maxLines = 1)
+        }
         Text("›", color = palette.textMuted, fontSize = 16.sp)
     }
 }
