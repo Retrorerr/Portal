@@ -342,6 +342,13 @@ private fun AppsCard(
                     )
                 }
             }
+            Text(
+                text = OTHER_APPS_DESKTOP_NOTE,
+                modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 4.dp),
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                color = palette.textMuted,
+            )
         }
     }
 }

@@ -1164,6 +1164,13 @@ private fun OptionalAppsSection(
         icons = icons,
         enabled = enabled,
     )
+    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        text = OTHER_APPS_SETUP_NOTE,
+        fontSize = 11.sp,
+        lineHeight = 15.sp,
+        color = palette.textMuted,
+    )
 }
 
 @Composable

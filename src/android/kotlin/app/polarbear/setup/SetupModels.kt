@@ -206,6 +206,15 @@ object OptionalAppCatalog {
 val OPTIONAL_APPS: List<EssentialApp> get() = OptionalAppCatalog.apps
 val OPTIONAL_APP_IDS: Set<String> get() = OPTIONAL_APPS.mapTo(linkedSetOf()) { it.id }
 val DEFAULT_OPTIONAL_APP_IDS: Set<String> = emptySet()
+
+/** Under the setup picker: the catalog is a head start, not the limit of what runs. */
+const val OTHER_APPS_SETUP_NOTE =
+    "Just a few picks. Any app or game built for ARM64 Linux works too, and you can add your own later."
+
+/** The same note at the foot of the Apps card, where the desktop is already running. */
+const val OTHER_APPS_DESKTOP_NOTE =
+    "Just a few picks. Any app or game built for ARM64 Linux works too, from Discover or apt."
+
 const val MINIMAL_INSTALLED_MB = 5400L
 
 /** Apps grouped for display, keeping catalog order within and between groups. */
