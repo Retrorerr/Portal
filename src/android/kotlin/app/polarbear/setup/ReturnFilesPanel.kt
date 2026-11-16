@@ -311,7 +311,10 @@ private fun TransferStatus(palette: PortalPalette) {
                         }, Modifier.weight(1f), color = palette.textMuted, fontSize = 11.sp)
                         when (item.phase) {
                             TransferPhase.Queued, TransferPhase.Running -> PanelButton("Cancel", false, palette) { FileTransfers.cancel(item) }
-                            TransferPhase.Failed, TransferPhase.Interrupted -> PanelButton("Retry", false, palette) { FileTransfers.retry(item) }
+                            TransferPhase.Failed, TransferPhase.Interrupted -> {
+                                PanelButton("Dismiss", false, palette) { FileTransfers.dismiss(item) }
+                                PanelButton("Retry", false, palette) { FileTransfers.retry(item) }
+                            }
                             else -> Unit
                         }
                     }

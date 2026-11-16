@@ -356,6 +356,23 @@ object FileTransfers {
         }
     }
 
+    /**
+     * Forget a copy that failed or was cut off, with its earlier attempts, so
+     * one that can never succeed stops asking for attention. A cut-off import
+     * still waiting for its partial file to be cleaned up keeps its record,
+     * marked canceled, until that is done.
+     */
+    fun dismiss(item: TransferItem) {
+        val stale = setOf(TransferPhase.Failed, TransferPhase.Interrupted)
+        val same = { other: TransferItem -> other.kind == item.kind && other.source == item.source && other.phase in stale }
+        items = items.mapNotNull { when {
+            !same(it) -> it
+            it.id in interruptedImports -> it.copy(phase = TransferPhase.Canceled, error = null)
+            else -> null
+        } }
+        persist()
+    }
+
     fun cancel(item: TransferItem) {
         canceled.add(item.id)
         signals[item.id]?.cancel()
