@@ -466,6 +466,7 @@ internal fun PortalReturnScreen(
             cardBounds = { Rect.Zero },
             readyPrelude = returnReady && !repairBlocked && !updateBlocked,
         )
+        WorkspaceSwitchBackdrop()
         // The swipe hint keeps its own band at the bottom; nothing scrolls under it.
         BoxWithConstraints(
             modifier = Modifier
@@ -517,8 +518,10 @@ internal fun PortalReturnScreen(
                 Spacer(modifier = Modifier.height(if (shortScreen) 4.dp else 8.dp))
                 // The line settles from "restoring" to "ready" the moment the
                 // veil may be lifted, dissolving through a soft blur.
+                val workspaces by app.polarbear.Workspaces.state
+                val opening = workspaces.switching?.let { workspaces.name(it) }
                 AnimatedContent(
-                    targetState = veil.eligible,
+                    targetState = veil.eligible to opening,
                     transitionSpec = {
                         (fadeIn(tween(420, delayMillis = 90, easing = PortalEmphasizedDecelerate)) +
                             slideInVertically(tween(560, easing = PortalEmphasized)) { it / 2 })
@@ -530,9 +533,14 @@ internal fun PortalReturnScreen(
                     },
                     contentAlignment = Alignment.Center,
                     label = "return subtitle",
-                ) { desktopReady ->
+                ) { (desktopReady, openingName) ->
                     Text(
-                        text = if (sessionControls) "Your desktop is running" else if (desktopReady) "Your desktop is ready" else "Restoring your desktop",
+                        text = when {
+                            openingName != null -> "Opening $openingName…"
+                            sessionControls -> "Your desktop is running"
+                            desktopReady -> "Your desktop is ready"
+                            else -> "Restoring your desktop"
+                        },
                         modifier = Modifier.dissolveBlur(this, radius = 8.dp),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium,
@@ -563,11 +571,19 @@ internal fun PortalReturnScreen(
                     onBlockedChanged = { updateBlocked = it },
                     immediate = sessionControls,
                 )
-                // Optional apps can be added or removed after setup. Hidden
-                // while a repair or Debian upgrade owns the runtime.
-                ReturnAppsPanel(
+                // Every workspace, as it was left; one tap opens another.
+                ReturnWorkspacesPanel(
                     palette = palette,
                     suppressed = repairPhase != ReturnRepairPhase.Hidden || updateBlocked,
+                    immediate = sessionControls,
+                )
+                // Optional apps can be added or removed after setup. Hidden
+                // while a repair, Debian upgrade or workspace switch owns the
+                // runtime, and while the Workspaces card is open.
+                ReturnAppsPanel(
+                    palette = palette,
+                    suppressed = repairPhase != ReturnRepairPhase.Hidden || updateBlocked ||
+                        opening != null || ComposeOverlay.activePanel == "workspaces",
                     immediate = sessionControls,
                 )
             }

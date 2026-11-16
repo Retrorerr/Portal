@@ -82,6 +82,19 @@ object ComposeOverlay {
     @JvmStatic external fun nativeRequestOptionalApp(appId: String, install: Boolean): Boolean
     /** Build the diagnostics archive and open the share sheet; false while one is running. */
     @JvmStatic external fun nativeExportDiagnostics(): Boolean
+    /** The Workspaces card's state as JSON (see Workspaces). */
+    @JvmStatic external fun nativeWorkspaces(): String?
+    /** Open another workspace; false, with the reason in the state, when it can't. */
+    @JvmStatic external fun nativeSwitchWorkspace(id: String): Boolean
+    /** Rename a workspace; null on success, else why it was refused. */
+    @JvmStatic external fun nativeRenameWorkspace(id: String, name: String): String?
+    /** The workspace to open at launch; empty for the last one used. */
+    @JvmStatic external fun nativeSetOpenAtLaunch(id: String): Boolean
+
+    /** Native workspace switcher bridge; the state lives in Workspaces. */
+    @JvmStatic fun updateWorkspacesState(json: String) {
+        Workspaces.update(json)
+    }
 
     init {
         // The pickers read the catalog through SetupModels, which stays free
@@ -315,6 +328,10 @@ object ComposeOverlay {
         }
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             if (ready && desktopReadyLatched.get()) FileTransfers.cleanInterruptedImports()
+            // A switch ends with the new workspace on screen, not the veil.
+            if (ready && desktopReadyLatched.get() && Workspaces.takeReturnAfterSwitch()) {
+                requestReturnToDesktop()
+            }
             SessionControls.desktopReadyChanged(ready)
         }
         composeView?.post {
@@ -357,6 +374,7 @@ object ComposeOverlay {
 
     @JvmStatic fun attachContext(context: android.content.Context) {
         appContext = context.applicationContext
+        Workspaces.attach(context)
         // A setup resumed before the Activity existed starts its service now.
         SetupService.sync(context, installStateSnapshot)
     }

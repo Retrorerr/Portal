@@ -205,9 +205,9 @@ private fun SessionActionSlot(visible: Boolean, fromEdge: Boolean = true, conten
     }
 }
 
-/** The original Apps capsule-to-card transition, shared by Files. */
+/** The original Apps capsule-to-card transition, shared by Files and Workspaces. */
 @Composable
-private fun SessionActionSurface(expanded: Boolean, palette: PortalPalette, label: String,
+internal fun SessionActionSurface(expanded: Boolean, palette: PortalPalette, label: String,
     content: @Composable androidx.compose.animation.AnimatedContentScope.(Boolean) -> Unit) {
     val corner by animateDpAsState(if (expanded) AppsCardCorner else AppsCapsuleCorner,
         tween(420, easing = PortalEmphasized), label = "$label corner")
