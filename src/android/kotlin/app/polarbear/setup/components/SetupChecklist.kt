@@ -1,10 +1,9 @@
 package app.polarbear.setup.components
 
-// Android settings Portal cannot change itself, offered while the install
-// runs (the user is waiting anyway). Each step opens the right Settings
-// screen; the child-process step ticks itself off once Android reports the
-// restriction disabled, the Games step (OPPO-family brands) on the user's word.
-// A ticked-off step folds away after a beat, and the card with its last step.
+// The Android setting Portal cannot change itself, offered while the install
+// runs (the user is waiting anyway). The step opens the right Settings screen
+// and ticks itself off once Android reports the restriction disabled; the card
+// folds away a beat later.
 
 import android.content.ActivityNotFoundException
 import android.content.Context
@@ -62,13 +61,9 @@ import kotlinx.coroutines.delay
 
 private const val TAG = "PortalSetupChecklist"
 internal const val PREFS = "portal_setup_checklist"
-private const val PREF_GAMES_DONE = "games_added"
 
 /** The user said the setting is on, on a device that never reports it. */
 private const val PREF_PREPARE_CONFIRMED = "prepare_confirmed"
-
-/** The Games app behind game handling on OxygenOS, ColorOS and realme UI. */
-private const val OPLUS_GAMES_PACKAGE = "com.oplus.games"
 
 /**
  * Android 14 added "Disable child process restrictions" to Developer options.
@@ -93,9 +88,7 @@ fun setupChecklistApplies(context: Context): Boolean = setupChecklistPending(con
 
 /** Whether a step is still open, for surfaces shown on every launch. */
 fun setupChecklistPending(context: Context): Boolean =
-    (childProcessStepApplies() && !prepareSatisfied(context)) ||
-        (gamesStepApplies() &&
-            !context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(PREF_GAMES_DONE, false))
+    childProcessStepApplies() && !prepareSatisfied(context)
 
 /**
  * Whether the Android setting the desktop depends on is known to be on. Android
@@ -120,18 +113,6 @@ internal fun rememberPrepareConfirmed(context: Context) {
 
 internal fun childProcessStepApplies(): Boolean =
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
-
-/**
- * OPPO-family brands share one game stack (com.oplus.games) across OxygenOS,
- * ColorOS and realme UI. Nothing tells the ROMs apart reliably (they report
- * the same ro.build.version.oplusrom, and OnePlus ships ColorOS in China), so
- * the step names the brand, never the ROM.
- */
-private val OPLUS_BRANDS = mapOf("oneplus" to "OnePlus", "oppo" to "OPPO", "realme" to "realme")
-
-private fun oplusBrand(): String? = OPLUS_BRANDS[Build.MANUFACTURER.lowercase()]
-
-private fun gamesStepApplies(): Boolean = oplusBrand() != null
 
 /**
  * `true` once the restriction is off, `false` while it applies, `null` when
@@ -186,15 +167,6 @@ internal fun openAboutDevice(context: Context) {
     }
 }
 
-private fun openGames(context: Context) {
-    val games = Intent(Intent.ACTION_MAIN)
-        .addCategory(Intent.CATEGORY_LAUNCHER)
-        .setPackage(OPLUS_GAMES_PACKAGE)
-    if (!launch(context, games)) {
-        launch(context, Intent(Settings.ACTION_SETTINGS))
-    }
-}
-
 @Composable
 fun SetupChecklist(
     palette: PortalPalette,
@@ -202,7 +174,6 @@ fun SetupChecklist(
     title: String = "While Portal installs",
 ) {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
     // Re-read Android's state whenever Portal comes back from Settings.
     var resumes by remember { mutableIntStateOf(0) }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -215,21 +186,15 @@ fun SetupChecklist(
     }
     val restrictionsOff = remember(resumes) { childRestrictionsDisabled() }
     val developerOn = remember(resumes) { developerOptionsEnabled(context) }
-    var gamesDone by remember { mutableStateOf(prefs.getBoolean(PREF_GAMES_DONE, false)) }
-    // Decided once: only steps still open when the card appears are offered.
+    // Decided once: the card only appears while the step is still open.
     val childStep = remember { childProcessStepApplies() && !prepareSatisfied(context) }
-    val gamesStep = remember { gamesStepApplies() && !gamesDone }
     val childDone = restrictionsOff == true
-    // A ticked-off step shows its tick for a beat, then folds away; the card
-    // folds with the last one.
+    // Once ticked off, the step shows its tick for a beat, then the card folds.
     val childGone = rememberSettled(childDone)
-    val gamesGone = rememberSettled(gamesDone)
-    val childShown = childStep && !childGone
-    val gamesShown = gamesStep && !gamesGone
 
     val shape = RoundedCornerShape(24.dp)
     AnimatedVisibility(
-        visible = childShown || gamesShown,
+        visible = childStep && !childGone,
         enter = EnterTransition.None,
         exit = ChecklistCardExit,
         label = "checklist card",
@@ -249,50 +214,28 @@ fun SetupChecklist(
             )
             Spacer(Modifier.height(2.dp))
             Text(
-                text = "Android settings that keep the desktop running smoothly. Portal can’t change them for you.",
+                text = "An Android setting that keeps the desktop running smoothly. Portal can’t change it for you.",
                 fontSize = 12.sp,
                 lineHeight = 16.sp,
                 color = palette.textMuted,
             )
-            // While the card itself folds, its last step stays inside it
-            // rather than collapsing twice.
-            val cardLeaving = !childShown && !gamesShown
-            val lastStep = rememberLastStep(childShown, gamesShown)
-            CollapsingStep(visible = childShown || (cardLeaving && lastStep == 0)) {
-                ChecklistStep(
-                    number = 1,
-                    title = "Keep desktop apps running",
-                    body = if (developerOn || childDone) {
-                        "Android stops apps that start many processes. In Developer options, turn on " +
-                            "“Disable child process restrictions”."
-                    } else {
-                        "Android stops apps that start many processes. Turn on Developer options first " +
-                            "(About device › tap Build number 7 times), then turn on " +
-                            "“Disable child process restrictions”."
-                    },
-                    state = if (childDone) StepState.Done else StepState.Todo,
-                    actionLabel = if (developerOn) "Open Developer options" else "Open About device",
-                    onAction = { openChildProcessSetting(context) },
-                    palette = palette,
-                )
-            }
-            CollapsingStep(visible = gamesShown || (cardLeaving && lastStep == 1)) {
-                ChecklistStep(
-                    number = if (childShown) 2 else 1,
-                    title = "Add Portal to Games",
-                    body = "${oplusBrand()} devices lower the refresh rate for apps they don’t treat as games. " +
-                        "In the Games app, add Portal to your games.",
-                    state = if (gamesDone) StepState.Done else StepState.Todo,
-                    actionLabel = "Open Games",
-                    onAction = { openGames(context) },
-                    secondaryLabel = "I’ve added it",
-                    onSecondary = {
-                        gamesDone = true
-                        prefs.edit().putBoolean(PREF_GAMES_DONE, true).apply()
-                    },
-                    palette = palette,
-                )
-            }
+            Spacer(Modifier.height(16.dp))
+            ChecklistStep(
+                number = 1,
+                title = "Keep desktop apps running",
+                body = if (developerOn || childDone) {
+                    "Android stops apps that start many processes. In Developer options, turn on " +
+                        "“Disable child process restrictions”."
+                } else {
+                    "Android stops apps that start many processes. Turn on Developer options first " +
+                        "(About device › tap Build number 7 times), then turn on " +
+                        "“Disable child process restrictions”."
+                },
+                state = if (childDone) StepState.Done else StepState.Todo,
+                actionLabel = if (developerOn) "Open Developer options" else "Open About device",
+                onAction = { openChildProcessSetting(context) },
+                palette = palette,
+            )
         }
     }
 }

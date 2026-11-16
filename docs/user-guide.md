@@ -184,7 +184,7 @@ launching a game, and the controller toggle appears in the menu while a game run
 - **On-screen controller**: show it, set its opacity and size, and edit the layout. A layout can be shared by every game or kept for one game. The controller steps aside while a physical controller is connected unless you ask for it.
 - **Game settings**: the video memory Windows games are told the GPU has and a **Frame-rate cap** for steadier pacing and less heat. These can also be kept per game, and apply the next time the game starts.
 
-Games and browser pages that lock the mouse pointer get Android pointer capture, so mouse look works with a physical mouse. On OnePlus, OPPO and realme devices, add Portal to the **Games** app so the screen is not held at a lower refresh rate.
+Games and browser pages that lock the mouse pointer get Android pointer capture, so mouse look works with a physical mouse.
 
 ## Camera and microphone
 
