@@ -125,21 +125,23 @@ pub fn note_process_start() {
 }
 
 /// Empty each workspace's `/tmp` of earlier sessions' leftovers once per app
-/// process, as a tmpfs `/tmp` is at boot (see `core::guest_tmp`).
-fn clear_stale_guest_tmp(rootfs: &Path) {
+/// process, as a tmpfs `/tmp` is at boot (see `core::guest_tmp`). Host
+/// daemons that keep sockets there (PipeWire) call this before they start:
+/// the lock is held while clearing, so a socket made meanwhile is never swept
+/// away with the stale directory it lands in.
+pub fn clear_stale_guest_tmp(rootfs: &Path) {
     let Some(&boot) = PROCESS_STARTED.get() else {
         return;
     };
-    {
-        let mut cleared = GUEST_TMP_CLEARED
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if cleared.iter().any(|done| done == rootfs) {
-            return;
-        }
-        cleared.push(rootfs.to_path_buf());
+    let mut cleared = GUEST_TMP_CLEARED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cleared.iter().any(|done| done == rootfs) {
+        return;
     }
     let removed = crate::core::guest_tmp::clear_stale(&rootfs.join("tmp"), boot);
+    cleared.push(rootfs.to_path_buf());
+    drop(cleared);
     if removed > 0 {
         diagnostics::host_event("guest-tmp", &format!("removed={removed}"));
     }

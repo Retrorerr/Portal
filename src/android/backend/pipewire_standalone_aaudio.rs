@@ -445,6 +445,11 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
     }
 
     let env = build_pipewire_env(&ctx.data_dir, &lib_dir)?;
+    // The session's first start sweeps the guest's old /tmp; do it before
+    // the daemons put their sockets there, never while they do.
+    if let Some(rootfs) = env.runtime_dir.parent() {
+        crate::android::proot::launch::clear_stale_guest_tmp(rootfs);
+    }
     fs::create_dir_all(&env.runtime_dir)
         .map_err(|e| format!("mkdir {}: {e}", env.runtime_dir.display()))?;
     fs::create_dir_all(&env.config_dir)
