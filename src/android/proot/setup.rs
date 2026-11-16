@@ -1584,6 +1584,7 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     }
     let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
     repair_virtual_keyboard_toggle(fs_root);
+    skip_hidden_splash(fs_root);
     // Debian's chromium launcher sources /etc/chromium.d. Under Wayland Chromium
     // reports text fields to the input method only with --enable-wayland-ime,
     // so without it no field ever opens the Android keyboard. X11 ignores it.
@@ -1720,6 +1721,25 @@ fn repair_virtual_keyboard_toggle(fs_root: &Path) {
             try_upsert_kconfig_value(&kwinrc, "Wayland", "VirtualKeyboardEnabled", "true")
         {
             log::warn!("Could not re-enable KWin's virtual keyboard: {error}");
+        }
+    }
+}
+
+/// Plasma's startup splash plays behind Portal's veil, which stays up until
+/// the desktop itself shows, so nobody ever sees it. Its QML process only
+/// competes with plasmashell while the workspace starts. Applying a global
+/// theme (first-run appearance, or System Settings) turns it back on.
+fn skip_hidden_splash(fs_root: &Path) {
+    let username = get_application_context().local_config.user.username;
+    let ksplashrc = chroot_home_dir(fs_root, &username).join(".config/ksplashrc");
+    let text = fs::read_to_string(&ksplashrc).unwrap_or_default();
+    for (key, value) in [("Engine", "none"), ("Theme", "None")] {
+        if kconfig_value(&text, "KSplash", key) == Some(value) {
+            continue;
+        }
+        if let Err(error) = try_upsert_kconfig_value(&ksplashrc, "KSplash", key, value) {
+            log::warn!("Could not turn off Plasma's hidden splash: {error}");
+            return;
         }
     }
 }

@@ -278,9 +278,16 @@ pub fn launch() {
         // session support. A normal launch below now preserves the committed
         // user's home and Plasma configuration too.
         log::info!("launch: using validated Anland repair handoff assets");
-    } else if let Err(error) =
-        crate::android::proot::setup::try_sync_session_runtime_files(rootfs, 1)
-    {
+    } else if let Err(error) = {
+        let started = Instant::now();
+        let synced = crate::android::proot::setup::try_sync_session_runtime_files(rootfs, 1);
+        // Plasma can't start until this is done, so it counts in every switch.
+        diagnostics::host_event(
+            "launch",
+            &format!("session-files sync_ms={}", started.elapsed().as_millis()),
+        );
+        synced
+    } {
         log::error!("Portal session integration repair failed: {error:#}");
         report_failure(
             "Portal could not repair its desktop session files. Tap Retry Plasma to try again.",

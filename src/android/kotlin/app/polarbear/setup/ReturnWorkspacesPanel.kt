@@ -298,8 +298,10 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
     }
     LaunchedEffect(chosen) {
         val id = chosen ?: return@LaunchedEffect
-        delay(SWITCH_FOLD_DELAY_MS)
+        // The switch starts at once; only the card's fold waits for the
+        // chosen tile to answer the tap.
         Workspaces.switchTo(id, findDesktopSurface(view.rootView))
+        delay(SWITCH_FOLD_DELAY_MS)
         onClose()
     }
     Column(

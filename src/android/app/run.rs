@@ -947,9 +947,14 @@ impl PolarBearApp {
             )),
         );
         drop(old_backend);
-        let backend = match crate::android::proot::setup::build_committed_wayland_backend(
-            android_app.clone(),
-        ) {
+        let rebuild_started = std::time::Instant::now();
+        let built =
+            crate::android::proot::setup::build_committed_wayland_backend(android_app.clone());
+        crate::android::diagnostics::host_event(
+            "relaunch",
+            &format!("backend build_ms={}", rebuild_started.elapsed().as_millis()),
+        );
+        let backend = match built {
             Ok(backend) => backend,
             Err(error) => {
                 log::error!("Could not rebuild the Wayland backend for Plasma: {error:#}");
