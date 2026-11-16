@@ -54,6 +54,7 @@ pub mod android {
     pub mod steam_processes;
     pub mod tablet_mode_manager;
     pub mod update_net;
+    pub mod workspace_switch;
 
     pub mod main;
     pub mod app {

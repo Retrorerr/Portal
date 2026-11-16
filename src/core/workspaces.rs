@@ -69,6 +69,8 @@ pub enum WorkspaceError {
     Unknown(String),
     ActiveCannotBeRemoved,
     LastCannotBeRemoved,
+    AlreadyActive,
+    FilesMissing,
 }
 
 impl std::fmt::Display for WorkspaceError {
@@ -85,6 +87,8 @@ impl std::fmt::Display for WorkspaceError {
                 write!(f, "Switch to another workspace before deleting this one.")
             }
             Self::LastCannotBeRemoved => write!(f, "Portal needs at least one workspace."),
+            Self::AlreadyActive => write!(f, "That workspace is already open."),
+            Self::FilesMissing => write!(f, "That workspace's files are missing."),
         }
     }
 }
@@ -318,6 +322,45 @@ impl Registry {
         Ok(())
     }
 
+    /// The workspace a switch to `id` would open, if it can open.
+    pub fn switch_target(&self, app_files: &Path, id: &str) -> Result<Workspace, WorkspaceError> {
+        let target = self
+            .get(id)
+            .ok_or_else(|| WorkspaceError::Unknown(id.to_owned()))?;
+        if self.active == id {
+            return Err(WorkspaceError::AlreadyActive);
+        }
+        if !workspace_rootfs(app_files, id).is_dir() {
+            return Err(WorkspaceError::FilesMissing);
+        }
+        Ok(target.clone())
+    }
+
+    /// What the veil's Workspaces card shows, most recently used first after
+    /// the running one.
+    pub fn listing_json(&self) -> String {
+        let mut workspaces: Vec<&Workspace> = self.workspaces.iter().collect();
+        workspaces.sort_by_key(|workspace| {
+            (
+                workspace.id != self.active,
+                std::cmp::Reverse(workspace.last_used_unix),
+            )
+        });
+        serde_json::json!({
+            "active": self.active,
+            "openAtLaunch": self.open_at_launch,
+            "workspaces": workspaces
+                .iter()
+                .map(|workspace| serde_json::json!({
+                    "id": workspace.id,
+                    "name": workspace.name,
+                    "lastUsed": workspace.last_used_unix,
+                }))
+                .collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+
     pub fn set_open_at_launch(&mut self, id: Option<&str>) -> Result<(), WorkspaceError> {
         if let Some(id) = id {
             self.get_mut(id)?;
@@ -411,6 +454,37 @@ pub fn set_active_dir(dir: PathBuf) {
     *ACTIVE_DIR
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(dir);
+}
+
+/// Serialises registry edits within this process: the veil and the switch
+/// worker both read, change and save it.
+static EDIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Reads the registry, applies one change and saves it. A registry that
+/// cannot be read is never overwritten.
+pub fn edit<T>(
+    app_files: &Path,
+    change: impl FnOnce(&mut Registry) -> Result<T, WorkspaceError>,
+) -> anyhow::Result<(Registry, T)> {
+    let _guard = EDIT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut registry = Registry::read(app_files)?;
+    let value = change(&mut registry)?;
+    registry.save(app_files)?;
+    Ok((registry, value))
+}
+
+/// Records `id` as the running workspace and points this process at it.
+/// The guest must already be stopped.
+pub fn switch_to(app_files: &Path, id: &str, now_unix: u64) -> anyhow::Result<Workspace> {
+    let (_, target) = edit(app_files, |registry| {
+        let target = registry.switch_target(app_files, id)?;
+        registry.set_active(id, now_unix)?;
+        Ok(target)
+    })?;
+    set_active_dir(workspace_dir(app_files, id));
+    Ok(target)
 }
 
 /// Picks the workspace to open at launch and points this process at it.

@@ -173,7 +173,12 @@ struct PipewireAaudioChildren {
     capture: Vec<CaptureChild>,
     capture_bin: Option<PathBuf>,
     env: PipewireAaudioEnv,
+    /// Ties these children to the monitor started with them, so a monitor
+    /// whose daemons were replaced (another workspace, a crash) ends.
+    generation: u64,
 }
+
+static CHILDREN_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct PipewireAaudioEnv {
     home_dir: PathBuf,
@@ -374,7 +379,12 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
             .lock()
             .map_err(|e| format!("pipewire aaudio child lock: {e}"))?;
         if let Some(children) = slot.as_mut() {
-            if let Some(reason) = poll_daemon_exit(children)? {
+            // The daemons serve one workspace's /tmp; after a switch, start
+            // them again inside the new one.
+            if children.env.runtime_dir != pipewire_runtime_dir() {
+                pw_info!("server", "restarting PipeWire for another workspace");
+                slot.take()
+            } else if let Some(reason) = poll_daemon_exit(children)? {
                 pw_warn!(
                     "server",
                     "discarding stale PipeWire/AAudio children: {reason}"
@@ -401,8 +411,8 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
     };
 
     if let Some(children) = stale_children {
+        let runtime_dir = children.env.runtime_dir.clone();
         stop_children(children);
-        let runtime_dir = pipewire_runtime_dir();
         cleanup_socket(&runtime_dir);
     }
 
@@ -551,6 +561,7 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
     };
 
     let runtime_dir = env.runtime_dir.clone();
+    let generation = CHILDREN_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     *AAUDIO_CHILDREN
         .lock()
         .map_err(|e| format!("pipewire aaudio child lock: {e}"))? = Some(PipewireAaudioChildren {
@@ -562,9 +573,10 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
         capture,
         capture_bin,
         env,
+        generation,
     });
     cleanup_on_error.armed = false;
-    spawn_child_monitor(runtime_dir, android_app.clone());
+    spawn_child_monitor(runtime_dir, android_app.clone(), generation);
 
     pw_info!(
         "server",
@@ -576,7 +588,7 @@ fn ensure_running(android_app: &AndroidApp) -> Result<bool, String> {
     Ok(true)
 }
 
-fn spawn_child_monitor(runtime_dir: PathBuf, android_app: AndroidApp) {
+fn spawn_child_monitor(runtime_dir: PathBuf, android_app: AndroidApp, generation: u64) {
     thread::spawn(move || {
         let mut sink_failures: u32 = 0;
         let mut next_sink_attempt = Instant::now();
@@ -599,6 +611,9 @@ fn spawn_child_monitor(runtime_dir: PathBuf, android_app: AndroidApp) {
                 let Some(children) = slot.as_mut() else {
                     return;
                 };
+                if children.generation != generation {
+                    return;
+                }
 
                 match poll_daemon_exit(children) {
                     Ok(Some(reason)) => {

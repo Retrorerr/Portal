@@ -665,6 +665,42 @@ pub fn publish_optional_apps_state(android_app: &AndroidApp, text: &str) {
     );
 }
 
+/// Publish the Workspaces card's state (JSON from `workspace_switch`).
+pub fn publish_workspaces_state(text: &str) {
+    let Some(android_app) = cached_app().lock().ok().and_then(|app| app.clone()) else {
+        return;
+    };
+    let text = text.to_owned();
+    super::ndk::run_in_jvm(
+        move |env, app| {
+            let activity = activity_object(app);
+            let class = match overlay_class(env, &activity) {
+                Ok(class) => class,
+                Err(error) => {
+                    log::error!("Compose overlay class is unavailable: {error}");
+                    clear_exception(env, "find ComposeOverlay for workspace state");
+                    return;
+                }
+            };
+            let Ok(value) = env.new_string(text) else {
+                log::error!("Failed to allocate workspace state string");
+                clear_exception(env, "allocate workspace state");
+                return;
+            };
+            if let Err(error) = env.call_static_method(
+                class,
+                "updateWorkspacesState",
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&value)],
+            ) {
+                log::error!("Compose overlay updateWorkspacesState failed: {error}");
+                clear_exception(env, "updateWorkspacesState");
+            }
+        },
+        android_app,
+    );
+}
+
 /// Update the small overlay state text (`Idle` / `Starting` / `Desktop ready` / `Error`).
 pub fn set_compose_state(android_app: &AndroidApp, state: &str) {
     if state == STATE_ERROR {
@@ -884,6 +920,10 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeBeginSystemUpdate
     _class: JObject,
     include_app: jni::sys::jboolean,
 ) -> jni::sys::jboolean {
+    if crate::android::workspace_switch::in_progress() {
+        log::warn!("Ignoring a system update while a workspace switch runs");
+        return 0;
+    }
     u8::from(crate::android::proot::system_updates::begin_update(
         include_app != 0,
     ))

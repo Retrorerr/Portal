@@ -422,7 +422,10 @@ fn resume_anland(
         // process and KWin producer are still alive and reconnect through the
         // persistent broker. A missing worker is a runtime failure, not a
         // reason to create a second desktop session.
-        if !is_running() && !crate::android::proot::system_updates::update_in_progress() {
+        if !is_running()
+            && !crate::android::proot::system_updates::update_in_progress()
+            && !crate::android::workspace_switch::in_progress()
+        {
             log::error!("anland.surface resumed but the tracked guest session is not running");
             accessibility::set_runtime_active(false);
             event_loop.set_control_flow(ControlFlow::Wait);
@@ -879,6 +882,41 @@ impl PolarBearApp {
         true
     }
 
+    /// Start the workspace a switch opened, or the old one again if the
+    /// switch failed: either way its worker stopped the session. Waits for
+    /// a window, so a switch finishing while Portal is in the background
+    /// starts Plasma only once it can show it.
+    fn handle_workspace_switch_result(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if self.frontend.android_app.native_window().is_none() {
+            return false;
+        }
+        let Some(result) = crate::android::workspace_switch::take_result() else {
+            return false;
+        };
+        let name = match result {
+            crate::android::workspace_switch::SwitchResult::Switched(workspace) => {
+                crate::android::workspace_switch::point_host_libraries_at_rootfs();
+                workspace.name
+            }
+            crate::android::workspace_switch::SwitchResult::Failed(reason) => {
+                log::error!("Workspace switch did not complete: {reason}");
+                crate::core::workspaces::Registry::load(std::path::Path::new(
+                    crate::core::config::APP_FILES_ROOT,
+                ))
+                .active()
+                .name
+                .clone()
+            }
+        };
+        self.relaunch_committed_plasma(
+            event_loop,
+            &format!("Portal is opening {name}…"),
+            &format!("Portal is installed, but {name} could not start. Tap Retry Plasma."),
+        );
+        crate::android::workspace_switch::publish();
+        true
+    }
+
     /// Replace the committed Wayland backend and start a fresh Plasma
     /// session after a native worker stopped the previous one. The old
     /// compositor is dropped first so the new one can bind the guest
@@ -1079,6 +1117,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         if self.handle_system_update_result(event_loop) {
             return;
         }
+        if self.handle_workspace_switch_result(event_loop) {
+            return;
+        }
         if self.handle_initial_preferences_failure() {
             return;
         }
@@ -1206,6 +1247,9 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             return;
         }
         if self.handle_system_update_result(event_loop) {
+            return;
+        }
+        if self.handle_workspace_switch_result(event_loop) {
             return;
         }
         if self.handle_initial_preferences_failure() {

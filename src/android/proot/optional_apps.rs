@@ -277,6 +277,10 @@ pub fn request(app_id: &str, install: bool) -> bool {
         log::warn!("optional-apps: a system update is running");
         return false;
     }
+    if crate::android::workspace_switch::in_progress() {
+        log::warn!("optional-apps: a workspace switch is running");
+        return false;
+    }
     if install {
         if let Some(reason) = unavailable_reason(app, device_capabilities()) {
             log::warn!("optional-apps: {} is unavailable: {reason}", app.id());

@@ -22,7 +22,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -116,10 +117,31 @@ fn socket_dir() -> PathBuf {
 /// Install the pinned driver when it is missing, then start the decode
 /// daemon. Runs in the background; a failed download retries on the next
 /// launch.
+/// The running daemon and the socket directory it serves.
+static DAEMON_PID: AtomicI32 = AtomicI32::new(0);
+static SERVED_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// After a workspace switch the daemon's socket is in the old workspace's
+/// `/tmp`; ending it lets the supervisor start it in the new one.
+fn follow_workspace() {
+    let served = SERVED_DIR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let pid = DAEMON_PID.load(Ordering::Acquire);
+    if pid > 0 && served.is_some_and(|dir| dir != socket_dir()) {
+        log::info!("[VideoDecode] restarting the daemon for another workspace");
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+}
+
 pub fn spawn_after_ready() {
     if !wanted() {
         return;
     }
+    follow_workspace();
     if layer_installed() {
         spawn_daemon();
         return;
@@ -281,10 +303,16 @@ fn spawn_daemon() {
             crate::android::utils::child_fds::close_inherited_fds(&mut command);
             match command.spawn() {
                 Ok(mut child) => {
+                    *SERVED_DIR
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(dir.clone());
+                    DAEMON_PID.store(child.id() as i32, Ordering::Release);
                     if let Some(stderr) = child.stderr.take() {
                         thread::spawn(move || forward_daemon_log(stderr));
                     }
-                    match child.wait() {
+                    let waited = child.wait();
+                    DAEMON_PID.store(0, Ordering::Release);
+                    match waited {
                         Ok(status) => log::warn!("[VideoDecode] daemon exited: {status}"),
                         Err(error) => log::error!("[VideoDecode] wait {DAEMON_LIB}: {error}"),
                     }

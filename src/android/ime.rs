@@ -277,6 +277,9 @@ pub fn dispatch_committed_text(text: String) -> bool {
 
 #[cfg(target_os = "android")]
 static FIFO_LISTENER_STARTED: AtomicBool = AtomicBool::new(false);
+/// The events FIFO the listener should read: the running workspace's.
+#[cfg(target_os = "android")]
+static EVENTS_FIFO: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
 pub fn start_ime_fifo_listener(rootfs_path: &std::path::Path) {
     // A new guest session starts with no focused field. Bridges of the previous one that died
@@ -340,13 +343,26 @@ pub fn start_ime_fifo_listener(rootfs_path: &std::path::Path) {
             }
         }
 
+        let previous = EVENTS_FIFO
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replace(events_fifo_path.clone());
         if !FIFO_LISTENER_STARTED.swap(true, Ordering::SeqCst) {
             std::thread::Builder::new()
                 .name("portal-ime-fifo".to_string())
-                .spawn(move || {
-                    run_fifo_listener(&events_fifo_path);
-                })
+                .spawn(run_fifo_listener)
                 .expect("Failed to spawn IME FIFO listener thread");
+        } else if let Some(previous) = previous.filter(|previous| *previous != events_fifo_path) {
+            // Another workspace: an empty line wakes the listener blocked
+            // on the old FIFO so it moves to the new one.
+            if let Ok(mut old) = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&previous)
+            {
+                use std::io::Write;
+                let _ = old.write_all(b"\n");
+            }
         }
     }
     #[cfg(not(target_os = "android"))]
@@ -356,10 +372,23 @@ pub fn start_ime_fifo_listener(rootfs_path: &std::path::Path) {
 }
 
 #[cfg(target_os = "android")]
-fn run_fifo_listener(fifo_path: &std::path::Path) {
+fn current_events_fifo() -> Option<std::path::PathBuf> {
+    EVENTS_FIFO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+#[cfg(target_os = "android")]
+fn run_fifo_listener() {
     use std::io::BufRead;
 
     loop {
+        let Some(fifo_path) = current_events_fifo() else {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            continue;
+        };
+        let fifo_path = fifo_path.as_path();
         let file = match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -380,7 +409,12 @@ fn run_fifo_listener(fifo_path: &std::path::Path) {
             if n == 0 {
                 break;
             }
-            handle_fifo_line(&line);
+            if current_events_fifo().as_deref() != Some(fifo_path) {
+                break;
+            }
+            if !line.trim().is_empty() {
+                handle_fifo_line(&line);
+            }
             line.clear();
         }
 

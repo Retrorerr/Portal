@@ -2,8 +2,8 @@
 //! the veil's Workspaces card relies on.
 
 use localdesktop::core::workspaces::{
-    activate, active_dir, normalise_name, registry_path, workspace_dir, workspace_rootfs, Registry,
-    WorkspaceError, MAIN_ID, MAX_NAME_CHARS,
+    activate, active_dir, edit, normalise_name, registry_path, workspace_dir, workspace_rootfs,
+    Registry, WorkspaceError, MAIN_ID, MAX_NAME_CHARS,
 };
 use std::{fs, path::Path};
 
@@ -177,4 +177,69 @@ fn saving_refuses_a_registry_that_breaks_the_rules() {
     registry.active = "gone".into();
     assert!(registry.save(temp.path()).is_err());
     assert!(!registry_path(temp.path()).exists());
+}
+
+#[test]
+fn a_switch_needs_another_workspace_whose_system_is_there() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut registry = Registry::implicit();
+    let uni = registry.add("Uni", 1).unwrap();
+    assert_eq!(
+        registry.switch_target(temp.path(), MAIN_ID),
+        Err(WorkspaceError::AlreadyActive)
+    );
+    assert_eq!(
+        registry.switch_target(temp.path(), "nope"),
+        Err(WorkspaceError::Unknown("nope".into()))
+    );
+    // A workspace directory without its system is half made.
+    fs::create_dir_all(workspace_dir(temp.path(), &uni.id)).unwrap();
+    assert_eq!(
+        registry.switch_target(temp.path(), &uni.id),
+        Err(WorkspaceError::FilesMissing)
+    );
+    fs::create_dir_all(workspace_rootfs(temp.path(), &uni.id)).unwrap();
+    assert_eq!(
+        registry.switch_target(temp.path(), &uni.id).unwrap().name,
+        "Uni"
+    );
+}
+
+#[test]
+fn the_card_lists_the_running_workspace_first_then_the_most_recent() {
+    let mut registry = Registry::implicit();
+    let old = registry.add("Old", 1).unwrap();
+    let recent = registry.add("Recent", 2).unwrap();
+    registry.set_active(&old.id, 10).unwrap();
+    registry.set_active(&recent.id, 20).unwrap();
+    registry.set_active(MAIN_ID, 30).unwrap();
+    registry.set_open_at_launch(Some(&old.id)).unwrap();
+    let listing: serde_json::Value = serde_json::from_str(&registry.listing_json()).unwrap();
+    let names: Vec<&str> = listing["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Main", "Recent", "Old"]);
+    assert_eq!(listing["active"], MAIN_ID);
+    assert_eq!(listing["openAtLaunch"], "old");
+    assert_eq!(listing["workspaces"][1]["lastUsed"], 20);
+}
+
+#[test]
+fn edits_save_only_what_succeeded() {
+    let temp = tempfile::tempdir().unwrap();
+    let (registry, ()) = edit(temp.path(), |registry| registry.rename(MAIN_ID, "Home")).unwrap();
+    assert_eq!(Registry::read(temp.path()).unwrap(), registry);
+    assert!(edit(temp.path(), |registry| registry.rename(MAIN_ID, " ")).is_err());
+    assert_eq!(Registry::read(temp.path()).unwrap().active().name, "Home");
+
+    // An unreadable registry is never replaced by an edit.
+    fs::write(registry_path(temp.path()), "not json").unwrap();
+    assert!(edit(temp.path(), |registry| registry.rename(MAIN_ID, "Again")).is_err());
+    assert_eq!(
+        fs::read_to_string(registry_path(temp.path())).unwrap(),
+        "not json"
+    );
 }

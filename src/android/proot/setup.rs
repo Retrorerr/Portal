@@ -5749,7 +5749,21 @@ pub fn retry_install() -> bool {
 /// Debian provisioning/extraction, and leaves the installation coordinator
 /// and completion marker alone. A caller may invoke it again after a consumed
 /// failure/result; while the worker is active all callers attach to it.
+/// Whether the explicit Anland repair owns the guest right now.
+pub fn anland_repair_running() -> bool {
+    anland_repair_coordinator()
+        .lock()
+        .map(|coordinator| {
+            coordinator.state == AnlandRepairState::Running || coordinator.result.is_some()
+        })
+        .unwrap_or(true)
+}
+
 pub fn repair_enable_anland() -> bool {
+    if crate::android::workspace_switch::in_progress() {
+        log::warn!("Ignoring Anland repair while a workspace switch runs");
+        return false;
+    }
     let registration = {
         let Ok(coordinator) = setup_coordinator().lock() else {
             return false;

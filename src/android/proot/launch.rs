@@ -3,7 +3,7 @@ use crate::android::utils::thread::spawn_named;
 use crate::android::{diagnostics, utils::webview_handoff};
 use crate::core::runtime::LinuxRuntime;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -115,7 +115,8 @@ fn marker_reason(path: &Path, name: &str) -> String {
 
 /// When this app process started: Portal's "boot" for the guest.
 static PROCESS_STARTED: OnceLock<SystemTime> = OnceLock::new();
-static GUEST_TMP_CLEARED: AtomicBool = AtomicBool::new(false);
+/// The workspaces whose `/tmp` this process has already emptied.
+static GUEST_TMP_CLEARED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// Record the process start; called first thing in `android_main`, before
 /// any host component writes into the guest.
@@ -123,14 +124,20 @@ pub fn note_process_start() {
     PROCESS_STARTED.get_or_init(SystemTime::now);
 }
 
-/// Empty the guest's `/tmp` of earlier sessions' leftovers once per app
+/// Empty each workspace's `/tmp` of earlier sessions' leftovers once per app
 /// process, as a tmpfs `/tmp` is at boot (see `core::guest_tmp`).
 fn clear_stale_guest_tmp(rootfs: &Path) {
     let Some(&boot) = PROCESS_STARTED.get() else {
         return;
     };
-    if GUEST_TMP_CLEARED.swap(true, Ordering::AcqRel) {
-        return;
+    {
+        let mut cleared = GUEST_TMP_CLEARED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cleared.iter().any(|done| done == rootfs) {
+            return;
+        }
+        cleared.push(rootfs.to_path_buf());
     }
     let removed = crate::core::guest_tmp::clear_stale(&rootfs.join("tmp"), boot);
     if removed > 0 {
@@ -216,6 +223,10 @@ pub fn is_running() -> bool {
 pub fn launch() {
     if crate::android::proot::system_updates::update_in_progress() {
         log::info!("Skipping launch while a system update replaces guest packages");
+        return;
+    }
+    if crate::android::workspace_switch::in_progress() {
+        log::info!("Skipping launch while a workspace switch changes the guest");
         return;
     }
     if LAUNCH_RUNNING
