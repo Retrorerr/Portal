@@ -206,7 +206,7 @@ fn a_switch_needs_another_workspace_whose_system_is_there() {
 }
 
 #[test]
-fn the_card_lists_the_running_workspace_first_then_the_most_recent() {
+fn the_card_lists_workspaces_in_the_order_they_were_made() {
     let mut registry = Registry::implicit();
     let old = registry.add("Old", 1).unwrap();
     let recent = registry.add("Recent", 2).unwrap();
@@ -221,10 +221,11 @@ fn the_card_lists_the_running_workspace_first_then_the_most_recent() {
         .iter()
         .map(|workspace| workspace["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["Main", "Recent", "Old"]);
+    // The running one doesn't jump to the front: cards keep their places.
+    assert_eq!(names, ["Main", "Old", "Recent"]);
     assert_eq!(listing["active"], MAIN_ID);
     assert_eq!(listing["openAtLaunch"], "old");
-    assert_eq!(listing["workspaces"][1]["lastUsed"], 20);
+    assert_eq!(listing["workspaces"][2]["lastUsed"], 20);
 }
 
 #[test]

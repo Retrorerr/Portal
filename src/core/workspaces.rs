@@ -81,7 +81,7 @@ impl std::fmt::Display for WorkspaceError {
             Self::NameHasControlCharacters => {
                 write!(f, "The name can't contain control characters.")
             }
-            Self::NameTaken => write!(f, "Another workspace already has that name."),
+            Self::NameTaken => write!(f, "That name is taken."),
             Self::Unknown(id) => write!(f, "There is no workspace {id}."),
             Self::ActiveCannotBeRemoved => {
                 write!(f, "Switch to another workspace before deleting this one.")
@@ -336,16 +336,10 @@ impl Registry {
         Ok(target.clone())
     }
 
-    /// What the veil's Workspaces card shows, most recently used first after
-    /// the running one.
+    /// What the veil's Workspaces card shows, in the order the workspaces
+    /// were made, so no card moves when another one opens.
     pub fn listing_json(&self) -> String {
-        let mut workspaces: Vec<&Workspace> = self.workspaces.iter().collect();
-        workspaces.sort_by_key(|workspace| {
-            (
-                workspace.id != self.active,
-                std::cmp::Reverse(workspace.last_used_unix),
-            )
-        });
+        let workspaces = &self.workspaces;
         serde_json::json!({
             "active": self.active,
             "openAtLaunch": self.open_at_launch,
@@ -480,6 +474,9 @@ pub fn edit<T>(
 pub fn switch_to(app_files: &Path, id: &str, now_unix: u64) -> anyhow::Result<Workspace> {
     let (_, target) = edit(app_files, |registry| {
         let target = registry.switch_target(app_files, id)?;
+        // "Used 5 minutes ago" means when it was last on screen.
+        let left = registry.active.clone();
+        registry.get_mut(&left)?.last_used_unix = now_unix;
         registry.set_active(id, now_unix)?;
         Ok(target)
     })?;
