@@ -1096,3 +1096,40 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeOnOverlayRemoved(
     crate::android::diagnostics::host_event("compose-overlay", "overlay-removed");
     super::webview_handoff::wake_event_loop();
 }
+
+/// JNI: the edges of the running workspace that show a Plasma panel, as
+/// "bottom,top"; the veil watches them before it calls the desktop ready.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativePanelEdges(
+    env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jstring {
+    let username = crate::android::utils::application_context::get_application_context()
+        .local_config
+        .user
+        .username;
+    let rootfs = crate::core::config::rootfs();
+    let home = if username == "root" {
+        rootfs.join("root")
+    } else {
+        rootfs.join(format!("home/{username}"))
+    };
+    let read =
+        |name: &str| std::fs::read_to_string(home.join(".config").join(name)).unwrap_or_default();
+    let edges = crate::core::plasma_panels::visible_panel_edges(
+        &read("plasma-org.kde.plasma.desktop-appletsrc"),
+        &read("plasmashellrc"),
+    );
+    let text = edges
+        .iter()
+        .map(|edge| edge.name())
+        .collect::<Vec<_>>()
+        .join(",");
+    match env.new_string(text) {
+        Ok(value) => value.into_raw(),
+        Err(error) => {
+            log::error!("Could not allocate the panel edges: {error}");
+            std::ptr::null_mut()
+        }
+    }
+}

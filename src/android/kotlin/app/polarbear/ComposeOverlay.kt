@@ -84,6 +84,7 @@ object ComposeOverlay {
     @JvmStatic external fun nativeExportDiagnostics(): Boolean
     /** The Workspaces card's state as JSON (see Workspaces). */
     @JvmStatic external fun nativeWorkspaces(): String?
+    @JvmStatic external fun nativePanelEdges(): String?
     /** Open another workspace; false, with the reason in the state, when it can't. */
     @JvmStatic external fun nativeSwitchWorkspace(id: String): Boolean
     /** Rename a workspace; null on success, else why it was refused. */
@@ -333,7 +334,12 @@ object ComposeOverlay {
                 FileTransfers.cleanInterruptedImports()
                 // The veil says the desktop is ready once it shows the
                 // desktop, not Plasma's splash; a switch then lifts onto it.
-                DesktopSettle.watch(composeView?.rootView) {
+                val panels = try {
+                    nativePanelEdges()?.split(',')?.filter { it.isNotEmpty() }?.toSet().orEmpty()
+                } catch (_: UnsatisfiedLinkError) {
+                    emptySet()
+                }
+                DesktopSettle.watch(composeView?.rootView, panels) {
                     if (!desktopReadyLatched.get()) return@watch
                     desktopSettled = true
                     desktopReadyState.value = true

@@ -22,6 +22,7 @@ pub mod core {
     pub mod install_plan;
     pub mod mesa_layer;
     pub mod optional_apps;
+    pub mod plasma_panels;
     pub mod pointer_buttons;
     pub mod presentation;
     pub mod provisioning;
