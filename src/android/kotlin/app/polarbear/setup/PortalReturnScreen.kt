@@ -572,19 +572,12 @@ internal fun PortalReturnScreen(
                     onBlockedChanged = { updateBlocked = it },
                     immediate = sessionControls,
                 )
-                // Every workspace, as it was left; one tap opens another.
-                ReturnWorkspacesPanel(
-                    palette = palette,
-                    suppressed = repairPhase != ReturnRepairPhase.Hidden || updateBlocked,
-                    immediate = sessionControls,
-                )
-                // Optional apps can be added or removed after setup. Hidden
-                // while a repair, Debian upgrade or workspace switch owns the
-                // runtime, and while the Workspaces card is open.
+                // Apps, Files and Workspaces, one row of pills. Hidden while a
+                // repair or Debian upgrade owns the runtime; while a workspace
+                // opens, only its pill stays.
                 ReturnAppsPanel(
                     palette = palette,
-                    suppressed = repairPhase != ReturnRepairPhase.Hidden || updateBlocked ||
-                        opening != null || ComposeOverlay.activePanel == "workspaces",
+                    suppressed = repairPhase != ReturnRepairPhase.Hidden || updateBlocked,
                     immediate = sessionControls,
                 )
             }

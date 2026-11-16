@@ -67,8 +67,6 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -122,6 +120,12 @@ internal fun ReturnAppsPanel(
     }
     val panel = ComposeOverlay.activePanel
     LaunchedEffect(panel) { if (panel == "files") app.polarbear.FileTransfers.open() }
+    // Workspaces sits in this row once there is a second one to switch to.
+    LaunchedEffect(Unit) { app.polarbear.Workspaces.refresh() }
+    val workspaces by app.polarbear.Workspaces.state
+    val openingId by app.polarbear.Workspaces.opening
+    // While a workspace opens it owns the runtime: only its pill stays.
+    val switching = openingId != null || workspaces.switching != null
     AnimatedVisibility(
         visible = !suppressed && entered,
         enter = expandVertically(tween(420, easing = FastOutSlowInEasing), expandFrom = Alignment.Top) +
@@ -131,9 +135,8 @@ internal fun ReturnAppsPanel(
         exit = fadeOut(tween(220, easing = PortalEmphasizedAccelerate)) +
             shrinkVertically(tween(420, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top),
     ) {
-        Box(Modifier.dissolveBlur(this, radius = 10.dp).widthIn(max = AppsCardWidth).padding(top = 14.dp)) {
-            // Measure the retreating capsule first. Its animated width gives the
-            // growing surface space without overflowing a narrow window.
+        Box(Modifier.dissolveBlur(this, radius = 10.dp).widthIn(max = WorkspacesCardWidth).padding(top = 14.dp)) {
+            // The gap between pills closes while one of them is open as a card.
             val gap by animateDpAsState(if (panel == null) 10.dp else 0.dp,
                 spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness), label = "controls capsule spacing")
             // The report card takes the capsules' place, and the stack's height
@@ -141,45 +144,47 @@ internal fun ReturnAppsPanel(
             val capsuleRow by animateFloatAsState(if (panel == "report") 0f else 1f,
                 spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness), label = "controls capsule row")
             androidx.compose.ui.layout.Layout(content = {
-                SessionActionSlot(visible = panel != "files" && panel != "report" && catalog.isNotEmpty()) {
+                SessionActionSlot(visible = (panel == null || panel == "apps") && !switching && catalog.isNotEmpty()) {
                     SessionActionSurface(panel == "apps", palette, "apps surface") { expanded ->
                         if (expanded) AppsCard(catalog, states, icons, palette) { ComposeOverlay.activePanel = null }
-                        else AppsCapsule(catalog, states, icons, states.values.count { it.busy }, palette) {
+                        else AppsCapsule(palette) {
                             if (ComposeOverlay.activePanel == null) ComposeOverlay.activePanel = "apps"
                         }
                     }
                 }
-                SessionActionSlot(visible = panel != "apps" && panel != "report") {
+                SessionActionSlot(visible = (panel == null || panel == "files") && !switching) {
                     SessionActionSurface(panel == "files", palette, "files surface") { expanded ->
                         if (expanded) ReturnFilesPanel(palette) { ComposeOverlay.activePanel = null }
                         else FilesCapsule(palette) { if (ComposeOverlay.activePanel == null) ComposeOverlay.activePanel = "files" }
                     }
                 }
-                // Opened only from the pill's menu, so it never competes with Apps and Files.
+                SessionActionSlot(visible = (panel == null || panel == "workspaces") && workspaces.workspaces.size > 1) {
+                    WorkspacesSurface(palette)
+                }
+                // Opened only from the pill's menu, so it never competes with the pills.
                 SessionActionSlot(visible = panel == "report", fromEdge = false) {
                     SessionActionSurface(true, palette, "report surface") { _ ->
                         ReturnReportPanel(palette) { ComposeOverlay.activePanel = null }
                     }
                 }
             }) { children, constraints ->
+                // Every pill and card sees the same, final available width
+                // throughout a morph. Re-constraining against a retreating
+                // peer restarts its size spring every frame and feels sticky.
                 val relaxed = constraints.copy(minWidth = 0, minHeight = 0)
-                val peerIndex = if (panel == "files") 0 else 1
-                // Both cards see their final available width throughout the
-                // morph. Re-constraining against a retreating peer restarts
-                // their size spring every frame and makes Files feel sticky.
-                val peer = children[peerIndex].measure(relaxed)
+                val row = children.subList(0, 3).map { it.measure(relaxed) }
+                val report = children[3].measure(relaxed)
+                val shown = row.filter { it.width > 0 }
                 val spacing = gap.roundToPx()
-                val growing = children[1 - peerIndex].measure(relaxed)
-                val left = if (peerIndex == 0) peer else growing
-                val right = if (peerIndex == 1) peer else growing
-                val report = children[2].measure(relaxed)
-                val rowWidth = left.width + right.width + spacing
-                val rowHeight = (maxOf(left.height, right.height) * capsuleRow).roundToInt()
+                val rowWidth = shown.sumOf { it.width } + spacing * (shown.size - 1).coerceAtLeast(0)
+                val rowHeight = ((row.maxOfOrNull { it.height } ?: 0) * capsuleRow).roundToInt()
                 val width = constraints.constrainWidth(maxOf(rowWidth, report.width))
                 layout(width, constraints.constrainHeight(rowHeight + report.height)) {
-                    val x = (width - rowWidth) / 2
-                    left.placeRelative(x, 0)
-                    right.placeRelative(x + left.width + spacing, 0)
+                    var x = (width - rowWidth) / 2
+                    for (pill in row) {
+                        pill.placeRelative(x, 0)
+                        if (pill.width > 0) x += pill.width + spacing
+                    }
                     report.placeRelative((width - report.width) / 2, rowHeight)
                 }
             }
@@ -225,17 +230,11 @@ internal fun SessionActionSurface(expanded: Boolean, palette: PortalPalette, lab
 }
 
 @Composable
-private fun AppsCapsule(
-    catalog: List<EssentialApp>,
-    states: Map<String, ComposeOverlay.OptionalAppUiState>,
-    icons: Map<String, ImageBitmap>,
-    busy: Int,
-    palette: PortalPalette,
-    onClick: () -> Unit,
-) {
+private fun AppsCapsule(palette: PortalPalette, onClick: () -> Unit) {
     val tap = remember { MutableInteractionSource() }
     val pressed by tap.collectIsPressedAsState()
     val pressScale by animateFloatAsState(if (pressed) 0.975f else 1f, tween(110), label = "apps capsule press")
+    // The same shape as Files and Workspaces: a glyph, the name, a chevron.
     Row(
         modifier = Modifier
             .graphicsLayer {
@@ -249,37 +248,22 @@ private fun AppsCapsule(
                 onClickLabel = "Manage apps",
                 onClick = onClick,
             )
-            .padding(start = 12.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Installed apps lit, the rest resting nearly monochrome: the same
-        // language as the setup picker's header.
-        catalog.take(when {
-            androidx.compose.ui.platform.LocalDensity.current.fontScale >= 1.6f -> 0
-            androidx.compose.ui.platform.LocalDensity.current.fontScale >= 1.2f || androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 420 -> 3
-            else -> 6
-        }).forEach { app ->
-            val icon = icons[app.id] ?: return@forEach
-            val lit = states[app.id]?.installed == true
-            Image(
-                bitmap = icon,
-                contentDescription = null,
-                colorFilter = if (lit) null else ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0.15f) }),
-                modifier = Modifier
-                    .padding(end = 4.dp)
-                    .size(16.dp)
-                    .graphicsLayer { alpha = if (lit) 1f else 0.5f },
-            )
-        }
-        Spacer(Modifier.width(8.dp))
+        app.polarbear.setup.components.PortalIcon(
+            app.polarbear.setup.components.PortalGlyph.Apps,
+            palette.textPrimary,
+            size = 16.dp,
+        )
         Text(
             text = "Apps",
             fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
-            color = palette.textPrimary.copy(alpha = 0.92f),
+            color = palette.textPrimary,
         )
-        Spacer(Modifier.width(8.dp))
-        Text(text = "›", fontSize = 16.sp, fontWeight = FontWeight.Medium, color = palette.textMuted)
+        Text(text = "›", fontSize = 16.sp, color = palette.textMuted)
     }
 }
 

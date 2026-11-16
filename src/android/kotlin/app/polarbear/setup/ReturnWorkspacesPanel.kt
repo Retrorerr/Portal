@@ -14,7 +14,6 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -25,7 +24,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
@@ -103,15 +101,13 @@ import app.polarbear.setup.components.LocalPortalVeil
 import app.polarbear.setup.components.PortalEmphasized
 import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
-import app.polarbear.setup.components.dissolveBlur
 import app.polarbear.setup.components.findDesktopSurface
 import kotlinx.coroutines.delay
 
-/** Between the update slot and Apps, so the three never arrive together. */
-private const val WORKSPACES_ENTRANCE_DELAY_MS = 500L
 /** Long enough to see the chosen card answer the tap before the card folds. */
 private const val SWITCH_FOLD_DELAY_MS = 160L
-private val WorkspacesCardWidth = 560.dp
+/** Also the widest the veil's pill row lets any of its cards grow. */
+internal val WorkspacesCardWidth = 560.dp
 /** Tiles share the card's width, within these bounds; more than fit scroll. */
 private val TileMinWidth = 156.dp
 private val TileMaxWidth = 248.dp
@@ -120,46 +116,27 @@ private val TileGap = 12.dp
 private val TileFooterHeight = 46.dp
 /** Over the frozen old desktop, so the chosen one is what is seen. */
 private const val BACKDROP_ALPHA = 0.88f
+/** Long names end early so the pill stays beside Apps and Files. */
+private val CapsuleNameMaxWidth = 132.dp
 private val TileCorner = 14.dp
 
+/**
+ * The Workspaces pill in the veil's row beside Apps and Files, opening into
+ * every workspace as it was left; one tap opens another.
+ */
 @Composable
-internal fun ReturnWorkspacesPanel(
-    palette: PortalPalette,
-    suppressed: Boolean,
-    immediate: Boolean = false,
-) {
+internal fun WorkspacesSurface(palette: PortalPalette) {
     val state by Workspaces.state
-    var entered by remember { mutableStateOf(immediate) }
-    LaunchedEffect(Unit) {
-        Workspaces.refresh()
-        if (!immediate) delay(WORKSPACES_ENTRANCE_DELAY_MS)
-        entered = true
-    }
     val panel = ComposeOverlay.activePanel
-    // One workspace has nothing to switch to; the capsule waits for a second.
-    val visible = entered && !suppressed && state.workspaces.size > 1 &&
-        (panel == null || panel == "workspaces")
-    AnimatedVisibility(
-        visible = visible,
-        enter = expandVertically(tween(420, easing = FastOutSlowInEasing), expandFrom = Alignment.Top) +
-            fadeIn(tween(420, delayMillis = 60, easing = PortalEmphasizedDecelerate)) +
-            slideInVertically(tween(560, easing = PortalEmphasized)) { it / 3 } +
-            scaleIn(tween(560, easing = PortalEmphasized), initialScale = 0.96f),
-        exit = fadeOut(tween(220, easing = PortalEmphasizedAccelerate)) +
-            shrinkVertically(tween(420, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top),
-    ) {
-        Box(Modifier.dissolveBlur(this, radius = 10.dp).widthIn(max = WorkspacesCardWidth).padding(top = 14.dp)) {
-            SessionActionSurface(panel == "workspaces", palette, "workspaces surface") { expanded ->
-                if (expanded) {
-                    WorkspacesCard(state, palette) { ComposeOverlay.activePanel = null }
-                } else {
-                    WorkspacesCapsule(state, palette) {
-                        if (ComposeOverlay.activePanel == null && state.switching == null &&
-                            Workspaces.opening.value == null
-                        ) {
-                            ComposeOverlay.activePanel = "workspaces"
-                        }
-                    }
+    SessionActionSurface(panel == "workspaces", palette, "workspaces surface") { expanded ->
+        if (expanded) {
+            WorkspacesCard(state, palette) { ComposeOverlay.activePanel = null }
+        } else {
+            WorkspacesCapsule(state, palette) {
+                if (ComposeOverlay.activePanel == null && state.switching == null &&
+                    Workspaces.opening.value == null
+                ) {
+                    ComposeOverlay.activePanel = "workspaces"
                 }
             }
         }
@@ -230,11 +207,11 @@ private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, o
                 onClickLabel = "Switch workspace",
                 onClick = onClick,
             )
-            .padding(start = 12.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         StackGlyph(palette, busy = opening != null)
-        Spacer(Modifier.width(9.dp))
         AnimatedContent(
             targetState = label,
             transitionSpec = {
@@ -247,17 +224,15 @@ private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, o
         ) { text ->
             Text(
                 text = text,
+                modifier = Modifier.widthIn(max = CapsuleNameMaxWidth),
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
-                color = palette.textPrimary.copy(alpha = 0.92f),
+                color = palette.textPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (opening == null) {
-            Spacer(Modifier.width(8.dp))
-            Text(text = "›", fontSize = 16.sp, fontWeight = FontWeight.Medium, color = palette.textMuted)
-        }
+        if (opening == null) Text(text = "›", fontSize = 16.sp, color = palette.textMuted)
     }
 }
 
