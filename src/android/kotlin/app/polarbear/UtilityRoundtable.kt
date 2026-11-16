@@ -68,11 +68,8 @@ internal fun UtilityRoundtable(
         UtilitySuggestion.Veil -> PortalGlyph.Veil
     }
     val actions = buildList {
-        add(UtilityAction("report", "Report", PortalGlyph.Report))
-        add(UtilityAction("files", "Files", PortalGlyph.Files, if (active > 0) "$active copying" else if (failed) "Needs attention" else ""))
-        add(UtilityAction("apps", "Apps", PortalGlyph.Apps))
-        add(UtilityAction("workspaces", "Workspaces", PortalGlyph.Workspaces,
-            available = Workspaces.state.value.workspaces.size > 1))
+        // One way into the veil; Apps, Files, Workspaces and Report are chosen there.
+        add(UtilityAction("veil", "Veil", PortalGlyph.Veil, if (active > 0) "$active copying" else if (failed) "Files need attention" else ""))
         add(UtilityAction("keyboard", "Keyboard", PortalGlyph.Keyboard))
         add(UtilityAction("game", "Game settings", PortalGlyph.Options))
         add(UtilityAction("settings", "Portal settings", PortalGlyph.Settings))
