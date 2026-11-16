@@ -116,6 +116,8 @@ private val TileGap = 12.dp
 private val TileFooterHeight = 46.dp
 /** Over the frozen old desktop, so the chosen one is what is seen. */
 private const val BACKDROP_ALPHA = 0.88f
+/** Over the preview, enough for white text on a bright wallpaper. */
+private const val BACKDROP_SHADE = 0.38f
 /** Long names end early so the pill stays beside Apps and Files. */
 private val CapsuleNameMaxWidth = 132.dp
 private val TileCorner = 14.dp
@@ -178,6 +180,13 @@ internal fun WorkspaceSwitchBackdrop() {
                     scaleY = scale
                 }
                 .blur(18.dp),
+        )
+        // A soft shade over a bright wallpaper, so the veil's words stay readable.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { this.alpha = alpha / BACKDROP_ALPHA }
+                .background(Color.Black.copy(alpha = BACKDROP_SHADE)),
         )
     }
 }
