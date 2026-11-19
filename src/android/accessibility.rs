@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::android::anland::AnlandKeySink;
+use crate::android::utils::pointer_capture::ProjectedPointer;
 use crate::core::android_input::android_keycode_to_scancode;
 use jni::{
     objects::JObject,
@@ -12,7 +13,7 @@ use jni::{
 };
 use winit::{event::ElementState, event_loop::EventLoopProxy};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AppUserEvent {
     AccessibilityInputReady,
     PortalControlsOpened,
@@ -21,6 +22,12 @@ pub enum AppUserEvent {
     DesktopKey {
         scancode: u32,
         down: bool,
+    },
+    /// Tablet-controller input for a desktop on another display, with the
+    /// Android sample time (`CLOCK_MONOTONIC` ns; 0 for none).
+    ProjectedPointer {
+        pointer: ProjectedPointer,
+        time_ns: i64,
     },
     WaylandTraffic,
     /// An Android clipboard observation was queued. The worker never touches

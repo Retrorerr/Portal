@@ -14,11 +14,17 @@
 use std::sync::{mpsc, Mutex, OnceLock};
 
 use jni::objects::{JClass, JObject, JValue};
-use jni::sys::{_jobject, jboolean, jfloat, jint};
+use jni::sys::{_jobject, jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
+use winit::dpi::PhysicalPosition;
+use winit::event::{
+    DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+};
 use winit::platform::android::activity::AndroidApp;
 
+use crate::android::accessibility::{event_loop_proxy, AppUserEvent};
 use crate::android::anland::AnlandPointerSink;
+use crate::core::android_input::android_keycode_to_scancode;
 
 fn app_slot() -> &'static Mutex<Option<AndroidApp>> {
     static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
@@ -149,4 +155,167 @@ pub extern "system" fn Java_app_polarbear_PortalActivity_nativeCapturedWheel(
             sink.send_wheel(1, horizontal);
         }
     });
+}
+
+/// Input from the tablet control window follows the renderer's normal mouse path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ProjectedPointer {
+    Motion(f32, f32),
+    Button(MouseButton, ElementState),
+    Wheel(f32, f32),
+    FingerScroll(f32, f32, TouchPhase),
+    Pinch(TouchPhase, f32),
+}
+
+impl ProjectedPointer {
+    pub fn window_event(self) -> WindowEvent {
+        let device_id = DeviceId::dummy();
+        match self {
+            Self::Motion(x, y) => WindowEvent::CursorMoved {
+                device_id,
+                position: PhysicalPosition::new(x.into(), y.into()),
+            },
+            Self::Button(button, state) => WindowEvent::MouseInput {
+                device_id,
+                state,
+                button,
+            },
+            // winit flips the Android horizontal axis before forwarding it.
+            Self::Wheel(x, y) => WindowEvent::MouseWheel {
+                device_id,
+                delta: MouseScrollDelta::LineDelta(-x, y),
+                phase: TouchPhase::Moved,
+            },
+            Self::FingerScroll(x, y, phase) => WindowEvent::MouseWheel {
+                device_id,
+                delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(x.into(), y.into())),
+                phase,
+            },
+            Self::Pinch(phase, scale) => WindowEvent::AndroidTouchpadPinch {
+                device_id,
+                phase,
+                scale: scale.into(),
+            },
+        }
+    }
+}
+
+fn queue(event: AppUserEvent) {
+    if let Some(proxy) = event_loop_proxy() {
+        let _ = proxy.send_event(event);
+    }
+}
+
+fn queue_pointer(pointer: ProjectedPointer, time_ns: jlong) {
+    queue(AppUserEvent::ProjectedPointer { pointer, time_ns });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_DesktopControlActivity_nativeControlMotion(
+    _env: JNIEnv,
+    _class: JClass,
+    x: jfloat,
+    y: jfloat,
+    time_ns: jlong,
+) {
+    if x.is_finite() && y.is_finite() {
+        queue_pointer(ProjectedPointer::Motion(x, y), time_ns);
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_DesktopControlActivity_nativeControlButton(
+    _env: JNIEnv,
+    _class: JClass,
+    code: jint,
+    pressed: jboolean,
+    time_ns: jlong,
+) {
+    let button = match code {
+        0x110 => MouseButton::Left,
+        0x111 => MouseButton::Right,
+        0x112 => MouseButton::Middle,
+        0x113 => MouseButton::Back,
+        0x114 => MouseButton::Forward,
+        _ => return,
+    };
+    let state = if pressed != 0 {
+        ElementState::Pressed
+    } else {
+        ElementState::Released
+    };
+    queue_pointer(ProjectedPointer::Button(button, state), time_ns);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_DesktopControlActivity_nativeControlWheel(
+    _env: JNIEnv,
+    _class: JClass,
+    horizontal: jfloat,
+    vertical: jfloat,
+    time_ns: jlong,
+) {
+    if horizontal.is_finite() && vertical.is_finite() {
+        queue_pointer(ProjectedPointer::Wheel(horizontal, vertical), time_ns);
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_DesktopControlActivity_nativeControlFingerScroll(
+    _env: JNIEnv,
+    _class: JClass,
+    horizontal: jfloat,
+    vertical: jfloat,
+    finished: jboolean,
+    time_ns: jlong,
+) {
+    let phase = if finished == 0 {
+        TouchPhase::Moved
+    } else {
+        TouchPhase::Ended
+    };
+    if horizontal.is_finite() && vertical.is_finite() {
+        queue_pointer(
+            ProjectedPointer::FingerScroll(horizontal, vertical, phase),
+            time_ns,
+        );
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_DesktopControlActivity_nativeControlPinch(
+    _env: JNIEnv,
+    _class: JClass,
+    phase: jint,
+    scale: jfloat,
+    time_ns: jlong,
+) {
+    let phase = match phase {
+        0 => TouchPhase::Started,
+        1 => TouchPhase::Moved,
+        2 => TouchPhase::Ended,
+        3 => TouchPhase::Cancelled,
+        _ => return,
+    };
+    if scale.is_finite() {
+        queue_pointer(ProjectedPointer::Pinch(phase, scale), time_ns);
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_DesktopControlActivity_nativeControlKey(
+    _env: JNIEnv,
+    _class: JClass,
+    keycode: jint,
+    scan_code: jint,
+    pressed: jboolean,
+) {
+    let scancode = android_keycode_to_scancode(keycode.max(0) as u32)
+        .or_else(|| (1..=0x2ff).contains(&scan_code).then_some(scan_code as u32));
+    if let Some(scancode) = scancode {
+        queue(AppUserEvent::DesktopKey {
+            scancode,
+            down: pressed != 0,
+        });
+    }
 }

@@ -49,6 +49,15 @@ android:
           # onSetUpWindow default (ADJUST_RESIZE) is overridden at runtime in
           # PortalActivity as well — this manifest value is defense in depth.
           window_soft_input_mode: adjustNothing
+        - name: app.polarbear.DesktopControlActivity
+          launch_mode: singleTask
+          # Its own task on the tablet, never Portal's task on the monitor.
+          task_affinity: app.polarbear.portal.tabletcontrols
+          exclude_from_recents: true
+          # Rotation or attaching a keyboard must not end a grab.
+          config_changes: "orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden|navigation|uiMode"
+          exported: false
+          theme: "@style/PortalDesktopControlTheme"
       services:
         - name: app.polarbear.SessionService
           # The user-started Linux session remains active when its Android surface is suspended.
@@ -97,6 +106,8 @@ android:
       - name: android.permission.WRITE_EXTERNAL_STORAGE
         max_sdk_version: 28
       - name: android.permission.REQUEST_INSTALL_PACKAGES
+      # Optional floating controls for the external desktop.
+      - name: android.permission.SYSTEM_ALERT_WINDOW
       # Linux apps' microphone and cameras; asked for only when one is used.
       - name: android.permission.RECORD_AUDIO
       - name: android.permission.CAMERA

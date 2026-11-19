@@ -81,7 +81,7 @@ fun usageTipsPending(context: Context): Boolean {
         (!prefs.getBoolean(PREF_FILES_DISMISSED, false) && !allFilesGranted())
 }
 
-private fun openAccessibilitySettings(context: Context) {
+internal fun openAccessibilitySettings(context: Context) {
     // The details page (hidden in the SDK, but Settings lets an app open it
     // for its own service) shows Portal's switch directly; otherwise fall
     // back to the accessibility list.

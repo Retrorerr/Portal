@@ -50,7 +50,6 @@ import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
-import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.PointerIcon
@@ -69,6 +68,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 open class PortalActivity : GameActivity() {
+    internal val portalDisplays by lazy { PortalDisplays(this) }
+    private var activityDisplayId: Int? = null
+
     override fun onSetUpWindow() {
         super.onSetUpWindow()
         // Portal window policy, applied after the GameActivity defaults:
@@ -144,9 +146,11 @@ open class PortalActivity : GameActivity() {
         applyDesktopPointerIcon()
         ComposeOverlay.attachContext(this)
         SessionControls.attach(this)
+        DesktopControlActivity.bindDesktop(this)
         FileTransfers.attach(this)
         if (intent.getBooleanExtra("portal_open_files", false)) SessionControls.requestFiles(this)
         applyImmersive("onCreate")
+        activityDisplayId = currentDisplay()?.displayId
         GamepadBridge.attach(this)
         ClipboardWatch.attach(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -187,6 +191,11 @@ open class PortalActivity : GameActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        if (intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER) &&
+            !intent.getBooleanExtra(PortalDisplays.EXTRA_DISPLAY_MOVE, false)
+        ) {
+            DesktopControlActivity.showOnTablet(this)
+        }
         if (intent.getBooleanExtra("portal_open_files", false)) {
             SessionControls.requestFiles(this)
         }
@@ -225,10 +234,14 @@ open class PortalActivity : GameActivity() {
         TouchControls.attach(this)
         AppUpdateInstaller.onActivityResumed(this)
         CapturePermissions.refresh(this)
+        // Back from Android's Display over other apps page, or a revoke.
+        portalDisplays.refreshFloatingControls()
+        DesktopControlActivity.displayChanged()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        updateDisplayMode()
         CapturePermissions.reportRotation(this)
     }
 
@@ -277,6 +290,7 @@ open class PortalActivity : GameActivity() {
         // reapply without touching geometry.
         if (hasFocus) {
             applyImmersive("focus")
+            updateDisplayMode()
             // Android drops pointer capture with window focus; take it back
             // if the guest still holds its pointer lock.
             applyPointerCapture()
@@ -320,9 +334,13 @@ open class PortalActivity : GameActivity() {
         }
     }
 
-    private var pointerCaptureWanted = false
-    private var padX = Float.NaN
-    private var padY = Float.NaN
+    internal var pointerCaptureWanted = false
+        private set
+    private val capturedPointer = CapturedDesktopPointer(::nativeCapturedMotion, ::nativeCapturedButton, ::nativeCapturedWheel)
+
+    internal fun moveLockedDesktopPointer(dx: Float, dy: Float) = nativeCapturedMotion(dx, dy)
+
+    internal fun desktopSurface(): android.view.SurfaceView? = mSurfaceView
 
     private fun applyPointerCapture() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -422,62 +440,21 @@ open class PortalActivity : GameActivity() {
     fun overlayInputChanged() {
         applyDesktopPointerIcon()
         applyPointerCapture()
+        if (ComposeOverlay.isShowing() || SessionControls.isUtilityVisible()) {
+            DesktopControlActivity.releaseTabletInput()
+        }
     }
 
     override fun onPointerCaptureChanged(hasCapture: Boolean) {
         super.onPointerCaptureChanged(hasCapture)
         Log.i(TAG, "pointer capture=$hasCapture (wanted=$pointerCaptureWanted)")
-        padX = Float.NaN
-        padY = Float.NaN
+        capturedPointer.reset()
     }
 
     /** Captured mouse/touchpad input goes straight to the Anland session. */
-    private fun dispatchCaptured(event: MotionEvent): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || !window.decorView.hasPointerCapture()) {
-            return false
-        }
-        val mouse = event.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE)
-        if (!mouse && !event.isFromSource(InputDevice.SOURCE_TOUCHPAD)) return false
-        when (event.actionMasked) {
-            MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE -> {
-                evdevButton(event.actionButton)?.let {
-                    nativeCapturedButton(it, event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS)
-                }
-            }
-            MotionEvent.ACTION_SCROLL -> nativeCapturedWheel(
-                event.getAxisValue(MotionEvent.AXIS_HSCROLL),
-                event.getAxisValue(MotionEvent.AXIS_VSCROLL),
-            )
-            MotionEvent.ACTION_MOVE, MotionEvent.ACTION_HOVER_MOVE ->
-                if (mouse) {
-                    // x/y are this sample's motion; batched samples come first.
-                    var dx = event.x
-                    var dy = event.y
-                    for (i in 0 until event.historySize) {
-                        dx += event.getHistoricalX(i)
-                        dy += event.getHistoricalY(i)
-                    }
-                    if (dx != 0f || dy != 0f) nativeCapturedMotion(dx, dy)
-                } else if (event.pointerCount == 1) {
-                    // A captured touchpad reports absolute pad positions.
-                    if (!padX.isNaN()) nativeCapturedMotion(event.x - padX, event.y - padY)
-                    padX = event.x
-                    padY = event.y
-                } else {
-                    padX = Float.NaN
-                    padY = Float.NaN
-                }
-            MotionEvent.ACTION_DOWN -> {
-                padX = event.x
-                padY = event.y
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                padX = Float.NaN
-                padY = Float.NaN
-            }
-        }
-        return true
-    }
+    private fun dispatchCaptured(event: MotionEvent): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && window.decorView.hasPointerCapture() &&
+            capturedPointer.dispatch(event)
 
     /**
      * The GameActivity root FrameLayout (created in super.onCreate): first
@@ -538,6 +515,22 @@ open class PortalActivity : GameActivity() {
     private var desktopHighRefresh = false
     private var overlayHighRefresh = false
 
+    @Suppress("DEPRECATION")
+    internal fun currentDisplay(): Display? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        display
+    } else {
+        windowManager.defaultDisplay
+    }
+
+    private fun updateDisplayMode() {
+        val displayId = currentDisplay()?.displayId ?: return
+        if (activityDisplayId == displayId) return
+        activityDisplayId = displayId
+        applyHighRefresh()
+        DesktopControlActivity.displayChanged()
+        SessionService.refreshNotification()
+    }
+
     private fun applyHighRefresh() {
         val enable = desktopHighRefresh || overlayHighRefresh || utilityHighRefresh
         refreshHandler.removeCallbacks(idleRefreshCheck)
@@ -586,12 +579,7 @@ open class PortalActivity : GameActivity() {
      * varies its own rate (ARR), or has no such mode.
      */
     private fun idleRefreshModeId(): Int {
-        @Suppress("DEPRECATION")
-        val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            display
-        } else {
-            windowManager.defaultDisplay
-        } ?: return 0
+        val display = currentDisplay() ?: return 0
         if (display.refreshRate <= IDLE_REFRESH_HZ + 0.5f) return 0
         if (Build.VERSION.SDK_INT >= 36) {
             val arr = try {
@@ -641,12 +629,7 @@ open class PortalActivity : GameActivity() {
      * the panel each time it toggles.
      */
     private fun highRefreshMode(): Display.Mode? {
-        @Suppress("DEPRECATION")
-        val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            display
-        } else {
-            windowManager.defaultDisplay
-        } ?: return null
+        val display = currentDisplay() ?: return null
         val active = display.mode
         val peak = try {
             Settings.System.getFloat(contentResolver, "peak_refresh_rate", Float.POSITIVE_INFINITY)
@@ -712,14 +695,5 @@ open class PortalActivity : GameActivity() {
         // Android axis values: vertical > 0 is wheel up, horizontal > 0 is right.
         @JvmStatic private external fun nativeCapturedWheel(horizontal: Float, vertical: Float)
 
-        /** Android mouse button to Linux evdev code (BTN_LEFT...BTN_EXTRA). */
-        private fun evdevButton(button: Int): Int? = when (button) {
-            MotionEvent.BUTTON_PRIMARY -> 0x110
-            MotionEvent.BUTTON_SECONDARY -> 0x111
-            MotionEvent.BUTTON_TERTIARY -> 0x112
-            MotionEvent.BUTTON_BACK -> 0x113
-            MotionEvent.BUTTON_FORWARD -> 0x114
-            else -> null
-        }
     }
 }

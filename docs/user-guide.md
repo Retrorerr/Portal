@@ -76,6 +76,41 @@ screen timeout**. Both are on by default. Android handles the idle timeout, and
 an app that requests to keep the display awake can hold it on. Turn the timeout
 off in Portal settings to keep the display on whenever Portal is visible.
 
+**External display** in Portal settings appears when a monitor is connected
+and moves the running Plasma desktop to it, resized to fit. It uses Android's
+multi-display support and needs no Shizuku or screen capture permission. Connect
+a monitor or a wireless display that Android offers to apps as a separate
+screen, then choose its name. Choose **Built-in screen** to move the desktop
+back.
+
+While the desktop is on the monitor, the tablet keeps running Android and shows
+a small **Control desktop** button at the edge facing the monitor. Tap it to
+send the mouse, touchpad and keyboard to the monitor; the Portal notification's
+**Control desktop** does the same from anywhere. The touchpad supports
+tap-to-click, double tap, tap-and-drag, two-finger right click and scrolling,
+and two-finger pinch in apps that support it on the GPU renderer.
+
+On Android 14 and later, turn on Portal in Android's **Accessibility** settings
+to keep using Android by touch while the desktop has the mouse and keyboard.
+The touchpad then follows Android's own touchpad settings (speed, tap-to-click,
+scroll direction), and Android's arrow on the tablet hides until you hand
+control back. Until it's on, **External display** settings show a **Touch while
+controlling** row that opens the page, and touching the tablet's screen hands
+control back to Android.
+
+To hand control back to Android, tap Ctrl+Alt on its own or tap **Release**
+with a finger. The cursor stays on the monitor however far you push it, and
+clicks of the mouse or touchpad never release it. **Return to tablet**, on the
+button while you control the desktop and in the notification, moves the desktop
+back. **Tablet position** puts the button on the side of the tablet that faces
+the monitor.
+
+**Floating controls** keeps the button over other Android apps. It needs
+Android's **Display over other apps** permission, and turning it on opens that
+page if the permission is missing. With it off, the button closes after each
+release and comes back when the desktop moves or when you tap Portal's app
+icon or notification.
+
 **Use Portal keyboard** (off by default) shows the desktop keyboard wherever
 Android's keyboard would otherwise appear. It opens when you tap a text field,
 leaves when the field loses focus, and stays away while a hardware keyboard is

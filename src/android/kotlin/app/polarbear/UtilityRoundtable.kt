@@ -248,7 +248,7 @@ internal fun UtilityRoundtable(
                     shown == UtilityPage.Settings -> PortalSettingsContent(host, palette,
                         with(density) { (area.width-24*density.density).coerceAtLeast(1f).toDp() },
                         with(density) { (area.height-24*density.density).coerceAtLeast(1f).toDp() },
-                        onBack = onBack)
+                        settingsOpen = page == UtilityPage.Settings, onBack = onBack, onDisplayMove = onClose)
                     shown == UtilityPage.Menu && compact -> CompactRoundtable(actions,palette,frost,
                         with(density) { (area.width-24*density.density).coerceAtLeast(120*density.density).toDp() },
                         with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() },

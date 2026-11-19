@@ -462,6 +462,7 @@ fn note_motion_logged(x: f64, y: f64, detail: std::fmt::Arguments) {
 fn forward_anland_input(
     backend: &crate::android::backend::wayland::WaylandBackend,
     event: &WindowEvent,
+    time_ns: i64,
 ) {
     use crate::android::anland::protocol::InputEvent as AnlandInput;
     let Some(session) = backend.anland.as_ref() else {
@@ -469,7 +470,7 @@ fn forward_anland_input(
     };
     // KWin delivers each event with the time Android sampled it, so clients
     // see the real motion cadence instead of the arrival jitter.
-    let _stamp = session.stamp_input(winit::platform::android::input_event_time_ns());
+    let _stamp = session.stamp_input(time_ns);
     match event {
         WindowEvent::Touch(touch) => {
             let action = match touch.phase {
@@ -1316,6 +1317,23 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             return;
         };
 
+        if let AppUserEvent::ProjectedPointer { pointer, time_ns } = _event {
+            if compose_overlay::input_is_blocked() {
+                return;
+            }
+            let event = pointer.window_event();
+            if let Some(session) = backend.anland.as_ref() {
+                if session.surface_active() {
+                    forward_anland_input(backend, &event, time_ns);
+                    session.flush_input();
+                }
+            } else if backend.graphic_renderer.is_some() {
+                let event = centralize(event, backend);
+                handle(event, backend, event_loop);
+            }
+            return;
+        }
+
         if _event == AppUserEvent::PortalControlsOpened {
             if let Some(session) = backend.anland.as_ref() {
                 session.release_surface_inputs();
@@ -1489,7 +1507,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             // Project Anland: mirror raw input to the GPU producer. The
             // Smithay handlers below stay warm (state machines, gesture
             // tracking) but render nothing while their renderer is None.
-            forward_anland_input(backend, &event);
+            forward_anland_input(
+                backend,
+                &event,
+                winit::platform::android::input_event_time_ns(),
+            );
 
             match &event {
                 // Focus changes are common during rotation, popup dismissal and app switching.

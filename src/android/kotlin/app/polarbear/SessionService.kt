@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import android.view.Display
 
 /**
  * The native desktop is ongoing user work even when its SurfaceView is suspended. Without this
@@ -82,6 +83,13 @@ class SessionService : Service() {
 
         private fun isActive(): Boolean = synchronized(ownership) { ownership.active }
 
+        /** UI thread: expose the tablet handle whenever a running desktop moves away. */
+        internal fun refreshNotification() {
+            val service = instance ?: return
+            val manager = service.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, notification(service))
+        }
+
         /** Called at the native launch boundary, before guest setup/launch work can background. */
         fun setActive(context: Context, owner: Long, active: Boolean) {
             val changed = synchronized(ownership) { ownership.update(owner, active) }
@@ -146,11 +154,31 @@ class SessionService : Service() {
                 @Suppress("DEPRECATION")
                 Notification.Builder(context).setPriority(Notification.PRIORITY_LOW)
             }
+            // On another display, the notification is the tablet's way back to it.
+            val projected = DesktopControlActivity.projectedDesktop()
+            val display = projected?.currentDisplay()
+            var contentText = "Tap to return to Portal"
+            var content = open
+            if (projected != null && display != null) {
+                val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                val tablet = DesktopControlActivity.tabletOptions()
+                fun control(take: Boolean) = PendingIntent.getActivity(
+                    context, if (take) 1 else 2, DesktopControlActivity.controlIntent(context, take), flags, tablet,
+                )
+                val back = PendingIntent.getActivity(
+                    context, 3, PortalDisplays.moveIntent(context), flags,
+                    PortalDisplays.displayOptions(Display.DEFAULT_DISPLAY),
+                )
+                builder.addAction(Notification.Action.Builder(null, "Control desktop", control(true)).build())
+                builder.addAction(Notification.Action.Builder(null, "Return to tablet", back).build())
+                contentText = "On ${projected.portalDisplays.displayName(display)}"
+                content = control(false)
+            }
             return builder
                 .setSmallIcon(context.applicationInfo.icon)
                 .setContentTitle("Your desktop is running")
-                .setContentText("Tap to return to Portal")
-                .setContentIntent(open)
+                .setContentText(contentText)
+                .setContentIntent(content)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setShowWhen(false)

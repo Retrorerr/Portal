@@ -44,7 +44,9 @@ internal fun PortalSettingsContent(
     palette: PortalPalette,
     width: Dp,
     maxHeight: Dp,
+    settingsOpen: Boolean,
     onBack: () -> Unit,
+    onDisplayMove: () -> Unit,
 ) {
     UtilitySettingsCard(palette, width, maxHeight, onBack, header = {
         Text("Portal settings", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = palette.textPrimary)
@@ -85,6 +87,9 @@ internal fun PortalSettingsContent(
                 palette = palette,
                 onChange = host::setLowLatencyAudioEnabled,
             )
+        }
+        if (host.portalDisplays.supported) {
+            ExternalDisplaySettings(host.portalDisplays, palette, settingsOpen, onDisplayMove)
         }
     }
 }
@@ -153,9 +158,19 @@ internal fun SettingsRowText(title: String, subtitle: String?, palette: PortalPa
     }
 }
 
-/** A small, quiet pill for secondary actions (Done, Reset, Hide). */
+/**
+ * A small, quiet pill for secondary actions (Done, Reset, Hide). [animateLabel]
+ * off swaps a new label at once: in a window sized to its content, an animated
+ * width resizes the window every frame.
+ */
 @Composable
-internal fun QuietButton(text: String, palette: PortalPalette, accent: Boolean = false, onClick: () -> Unit) {
+internal fun QuietButton(
+    text: String,
+    palette: PortalPalette,
+    accent: Boolean = false,
+    animateLabel: Boolean = true,
+    onClick: () -> Unit,
+) {
     val shape = RoundedCornerShape(50)
     val fill by animateColorAsState(if (accent) palette.accent else palette.surfaceTop, tween(180), label = "button fill")
     Box(
@@ -167,12 +182,14 @@ internal fun QuietButton(text: String, palette: PortalPalette, accent: Boolean =
             .padding(horizontal = 16.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
-        AnimatedContent(text, transitionSpec = { fadeIn(tween(180)).togetherWith(fadeOut(tween(100))) }, label = "button label") { label -> Text(
-            label,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = if (accent) PortalColors.Charcoal else palette.textPrimary,
-        ) }
+        val color = if (accent) PortalColors.Charcoal else palette.textPrimary
+        if (animateLabel) {
+            AnimatedContent(text, transitionSpec = { fadeIn(tween(180)).togetherWith(fadeOut(tween(100))) }, label = "button label") { label ->
+                Text(label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = color)
+            }
+        } else {
+            Text(text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = color)
+        }
     }
 }
 
