@@ -241,3 +241,50 @@ python3 scripts/debug_data_state.py --serial DEVICE --record target/qa/data.json
 # Run first-run setup and the compatibility suites in Portal Debug.
 python3 scripts/debug_data_state.py --serial DEVICE --record target/qa/data.json restore
 ```
+
+## Graphics artifact testing
+
+Run the fullscreen SDL/OpenGL reference scene through both Wayland and Xwayland
+on a physical device. Recordings use host scrcpy in video-only, no-control mode.
+The visual check also needs FFmpeg. Put both executables on PATH or supply them
+with `--scrcpy` and `--ffmpeg`.
+
+```bash
+python3 scripts/app_compat.py --serial DEVICE --suite visual --repeat 3 --seconds 5 --output target/qa/visual
+```
+
+The runner samples the colors of an asymmetric tile pattern in each decoded
+frame, between the scene's start and end. An intervening blank frame or
+corruption at the sampled points fails the check. Missing markers, incomplete
+animation coverage, or an obscured desktop make the run inconclusive. The report
+gives the first affected video frame numbers and tile indices, numbered from
+zero with tiles starting at the top left.
+The output includes MP4 clips, Portal Debug Android logs, presentation
+timestamps, and the guest renderer details. Add `--perfetto` for a trace.
+The Xwayland reference runs without an IBus connection because it has no text
+fields. SDL2 can focus IBus when an X11 window receives focus, bringing the
+Android keyboard over the scene. This setting is scoped to the reference process.
+The Xwayland clip includes a brief neutral lead-in for KWin's fullscreen
+animation before the pixel check starts.
+
+Add `--record` to an existing GUI probe, or supply a guest script that opens the
+app or game, replays the affected interaction, and exits when done.
+
+```bash
+python3 scripts/app_compat.py --serial DEVICE --suite apps --case chromium --record --output target/qa/chromium
+python3 scripts/app_compat.py --serial DEVICE --suite replay --replay-command 'bash /home/user/replay.sh' --seconds 20 --repeat 1 --output target/qa/replay
+```
+
+The replay command runs in the live Debug desktop with a timeout of
+`--seconds` plus 15 seconds. It runs once for warmup and once per requested
+repeat. A successful replay produces a recording for review. The reference
+pixel checks apply to the known fullscreen scene. Keep recordings in local QA
+output since they can contain desktop contents.
+
+Repeat with the same app build and settings before and after a fix. Test
+portrait and landscape in separate recordings, plus integer and fractional
+scales and the hardware and fallback renderers on their supported devices.
+Recording can affect performance, so confirm pacing regressions with a
+recording-free comparison. The mirror can miss brief glitches and artifacts
+specific to the physical panel or external output. The pixel check assumes
+display geometry stays fixed for the clip.

@@ -8,20 +8,22 @@ client: guest Wayland commits and probe counters are recorded separately.
 import argparse
 import concurrent.futures
 import contextlib
-import fcntl
 import hashlib
 import tempfile
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import statistics
 import subprocess
 import time
 import uuid
 import xml.etree.ElementTree as ET
 from guest_exec import Session, PACKAGE
+from graphics_capture import MAX_RECORDING_SIZE, PATTERN, check_recording, recording_geometry, screen_recording
 
 REPO = Path(__file__).resolve().parents[1]
 SUITES = {
@@ -35,6 +37,7 @@ SUITES = {
     'portable': ['linux', 'windows', 'appimage'],
     'java': ['swing'],
 }
+VISUAL_BACKENDS = {'visual-wayland': 'wayland', 'visual-x11': 'x11'}
 PROBE_PACKAGES = ['python3-dbus', 'python3-websocket', 'python3-pyqt5', 'python3-pyqt5.qtquick', 'python3-pyqt6',
                   'python3-pyqt6.qtquick', 'python3-gi', 'gir1.2-gtk-3.0',
                   'gir1.2-gtk-4.0', 'python3-tk', 'python3-wxgtk4.0',
@@ -262,6 +265,23 @@ def installed_apk(session):
 
 
 @contextlib.contextmanager
+def device_lock(serial):
+    name = hashlib.sha256(serial.encode()).hexdigest()[:20]
+    with (Path(tempfile.gettempdir()) / ('portal-app-compat-' + name + '.lock')).open('a+b') as lock:
+        if os.name == 'nt':
+            import msvcrt
+            lock.seek(0)
+            try:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            except OSError as error:
+                raise RuntimeError('Another compatibility run has locked this device') from error
+        else:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+@contextlib.contextmanager
 def perfetto_capture(session, destination, duration):
     """Optional scheduler/graphics evidence for the exact measured flow."""
     metadata = dict(status='disabled')
@@ -302,8 +322,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial')
     parser.add_argument('--package', default=PACKAGE)
-    parser.add_argument('--suite', choices=['all', 'inventory', *SUITES], default='all')
-    parser.add_argument('--case', action='append', choices=sum(SUITES.values(), []), help='Limit the selected suite to these probes')
+    parser.add_argument('--suite', choices=['all', 'inventory', 'visual', 'replay', *SUITES], default='all')
+    parser.add_argument('--case', action='append', choices=[*sum(SUITES.values(), []), *VISUAL_BACKENDS],
+                        help='Limit the selected suite to these probes')
     parser.add_argument('--repeat', type=int, default=3)
     parser.add_argument('--seconds', type=float, default=4)
     parser.add_argument('--output', type=Path, required=True)
@@ -314,31 +335,50 @@ def main():
     parser.add_argument('--electron-runtime', default='electron', help='Independently installed Electron runtime for an owned rendering/input fixture')
     parser.add_argument('--electron-launch-flag', action='append', default=[], help='Explicit per-test flag for a native-launch comparison')
     parser.add_argument('--perfetto', action='store_true', help='Record a scheduler/graphics trace for each probe')
+    parser.add_argument('--record', action='store_true', help='Record Android composition during GUI probes')
+    parser.add_argument('--scrcpy', default='scrcpy', help='Host scrcpy executable for recordings')
+    parser.add_argument('--ffmpeg', default='ffmpeg', help='Host FFmpeg executable for --suite visual')
+    parser.add_argument('--replay-command', help='Guest shell command for an application or game replay')
     parser.add_argument('--env', action='append', default=[], metavar='KEY=VALUE', help='Explicit per-probe environment for fallback/renderer comparisons')
     parser.add_argument('--require-frame-pacing', action='store_true', help='Fail if an active GUI flow has presentation gaps over 100 ms or insufficient samples')
     parser.add_argument('--flatpak-installation', choices=['user', 'system'], default='user')
     args = parser.parse_args()
     if args.repeat < 1 or not 1 <= args.seconds <= 30:
         parser.error('repeat must be positive and seconds must be between 1 and 30')
+    if args.suite == 'visual' and (args.seconds < 2 or not shutil.which(args.ffmpeg)):
+        parser.error('The visual suite requires at least two seconds and host FFmpeg on PATH or supplied with --ffmpeg')
+    if (args.record or args.suite in ('visual', 'replay')) and not shutil.which(args.scrcpy):
+        parser.error('Recording requires host scrcpy on PATH or supplied with --scrcpy')
+    if (args.suite == 'replay') != bool(args.replay_command):
+        parser.error('--replay-command is required for and only supported by --suite replay')
     if any(not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*=.*', value, re.S) for value in args.env):
         parser.error('--env must be KEY=VALUE')
     overrides = dict(value.split('=', 1) for value in args.env)
     selected = sum(SUITES.values(), []) if args.suite == 'all' else SUITES.get(args.suite, [])
+    if args.suite == 'visual':
+        selected = list(VISUAL_BACKENDS)
+    elif args.suite == 'replay':
+        selected = ['replay']
     if args.case:
         if any(case not in selected for case in args.case):
             parser.error('--case must belong to the selected suite')
         selected = [case for case in selected if case in args.case]
     session = Session.connect(args.serial, args.package)
-    lock_name = hashlib.sha256(session.serial.encode()).hexdigest()[:20]
-    lock = open(Path(tempfile.gettempdir()) / ('portal-app-compat-' + lock_name + '.lock'), 'a')
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    with device_lock(session.serial):
+        return run_suite(args, session, selected, overrides)
+
+
+def run_suite(args, session, selected, overrides):
     args.output.mkdir(parents=True, exist_ok=True)
     visibility = visible_desktop(session, dismiss_veil=True) if args.suite != 'inventory' else None
+    crop = None
     if visibility:
-        screenshot = session.adb('exec-out', 'screencap', '-p', capture_output=True, check=True)
+        screenshot = session.adb('exec-out', 'screencap', '-p', capture_output=True, check=True, timeout=20)
         (args.output / 'desktop-before.png').write_bytes(screenshot.stdout)
+        if args.record or args.suite in ('visual', 'replay'):
+            crop = recording_geometry(screenshot.stdout, visibility['surface_bounds'])
     inventory = session.run("dpkg-query -W -f '${Package} ${Version} ${Architecture} ${db:Status-Status}\\n' | grep -E '^(libqt[56]|qtwayland|qt[56]-|libgtk|libreoffice|flatpak |box64 |wine|openjdk|chromium|ffmpeg |libavcodec|libva|mesa-|vulkan-|libegl|libgl|libsdl|libpyside|python3-(pyqt|pyside|gi|tk|wx))'; printf '\\n--- graphics/session ---\\n'; kscreen-doctor -o; printf '\\n--- installed Flatpaks ---\\n'; flatpak list --columns=application,arch,branch,runtime", capture_output=True, text=True)
-    (args.output / 'inventory.txt').write_text(inventory.stdout + inventory.stderr)
+    (args.output / 'inventory.txt').write_text(inventory.stdout + inventory.stderr, encoding='utf-8')
     report = dict(version=2, serial=session.serial, package=PACKAGE, apk_sha256=installed_apk(session), engine=session.record['engine'],
                   rootfs=session.record['rootfs'], user=session.environment['USER'],
                   session={k: v for k, v in session.environment.items() if k.startswith(('QT_', 'GTK_', 'GDK_', 'QSG_', 'LIBVA_', 'TERMUX_VA_', 'MESA_', 'GALLIUM_', 'VK_', 'EGL_', 'LIBGL_', 'SDL_', 'BOX64_', 'FEX_', 'FD_', 'TURNIP_', 'FLATPAK_'))
@@ -347,6 +387,10 @@ def main():
                   launcher_override=str(args.launcher) if args.launcher else None,
                   environment_overrides=overrides,
                   desktop_visibility=visibility, results=[])
+    if crop:
+        report['recording_geometry'] = dict(max_size=MAX_RECORDING_SIZE, surface_crop=crop)
+    if args.replay_command:
+        report['replay_command'] = args.replay_command
     report['selected_runtime'] = {}
     app_uid = session.adb('shell', 'run-as ' + PACKAGE + ' id -u', capture_output=True, text=True, check=True).stdout.strip()
     for name in ('renderer-mode', 'guest-engine', 'hw-video-decode'):
@@ -368,7 +412,12 @@ def main():
     directory = '/tmp/portal-compat-' + uuid.uuid4().hex
     session.run('mkdir -m 700 ' + shlex.quote(directory), check=True)
     report['probe_sources'] = {}
-    for probe in ('toolkit_probe.py', 'libreoffice_probe.py', 'media_probe.py', 'sdl_probe.py', 'vulkan_probe.py', 'gtk2_probe.py', 'windows_probe.py', 'vlc_probe.py', 'vlc_playback_probe.py', 'chromium_probe.py', 'electron_probe.py', 'JavaProbe.java', 'flatpak_probe.py', 'flatpak_sdl_probe.c'):
+    probes = ('toolkit_probe.py', 'libreoffice_probe.py', 'media_probe.py', 'sdl_probe.py', 'vulkan_probe.py', 'gtk2_probe.py', 'windows_probe.py', 'vlc_probe.py', 'vlc_playback_probe.py', 'chromium_probe.py', 'electron_probe.py', 'JavaProbe.java', 'flatpak_probe.py', 'flatpak_sdl_probe.c')
+    if args.suite == 'visual':
+        probes = ('sdl_probe.py',)
+    elif args.suite == 'replay':
+        probes = ()
+    for probe in probes:
         source = REPO / 'tests/compat' / probe
         report['probe_sources'][probe] = hashlib.sha256(source.read_bytes()).hexdigest()
         push(session, source, directory + '/' + probe)
@@ -392,7 +441,19 @@ def main():
             label = f'{case}-' + ('warmup' if run == 0 else str(run))
             env = {}
             timeout = args.seconds + 15
-            if case in ('gtk2', 'sdl'):
+            if case in VISUAL_BACKENDS:
+                env['SDL_VIDEODRIVER'] = VISUAL_BACKENDS[case]
+                if case == 'visual-x11':
+                    # SDL2 focuses its IBus context on X11 window focus even
+                    # after SDL_StopTextInput. The reference has no text fields,
+                    # so isolate its pixels from the Android keyboard overlay.
+                    env['IBUS_ADDRESS'] = '/dev/null'
+                command = shlex.join(['python3', directory + '/sdl_probe.py', '--seconds', str(args.seconds),
+                                      '--visual-pattern', json.dumps(PATTERN, separators=(',', ':'))])
+                level = 'visual_probe'
+            elif case == 'replay':
+                command, level = args.replay_command, 'recorded_replay'
+            elif case in ('gtk2', 'sdl'):
                 command = f'python3 {directory}/{case}_probe.py --seconds {args.seconds}'
                 level = 'gui_probe'
             elif case in SUITES['qt'] + SUITES['gtk']:
@@ -458,30 +519,42 @@ def main():
                 report['results'].append(dict(case=case, status='untested', reason='Requires a translated GUI application fixture; the portable suite tests console execution'))
                 break
             print(label, flush=True)
-            if level not in ('graphics_probe', 'execution_probe', 'hardware_decode'):
+            if level not in ('graphics_probe', 'execution_probe', 'hardware_decode', 'recorded_replay', 'visual_probe'):
                 env['WAYLAND_DEBUG'] = 'client'
             if args.library_path:
                 env['LD_LIBRARY_PATH'] = args.library_path
             env.update(overrides)
             try:
                 trace = args.output / (label + '.pftrace') if args.perfetto else None
-                codec_start = None
-                if level in ('hardware_decode', 'video_playback'):
-                    codec_start = float(session.adb('shell', 'date +%s.%N', capture_output=True, text=True, check=True).stdout)
+                clip = (args.output / (label + '.mp4') if crop and
+                        level not in ('graphics_probe', 'execution_probe', 'hardware_decode') else None)
+                codec_probe = level in ('hardware_decode', 'video_playback')
+                log_start = None
+                if codec_probe or clip:
+                    log_start = float(session.adb('shell', 'date +%s.%N', capture_output=True, text=True,
+                                                  check=True, timeout=10).stdout)
                 with perfetto_capture(session, trace, timeout + 10) as trace_metadata:
-                    result, measurements = capture(session, command, env, timeout)
+                    with screen_recording(session.serial, clip, math.ceil(timeout + 8), args.scrcpy) as recording:
+                        result, measurements = capture(session, command, env, timeout)
                 measurements['perfetto'] = trace_metadata
-                if codec_start is not None:
+                if clip:
+                    measurements['recording'] = recording
+                if log_start is not None:
                     raw = session.adb('shell', shlex.join(['logcat', '-d', '--uid=' + app_uid,
-                                      '-v', 'epoch', '-T', f'{codec_start:.3f}']), capture_output=True, text=True, timeout=20)
+                                      '-v', 'epoch', '-T', f'{log_start:.3f}']), capture_output=True, text=True, timeout=20)
                     lines = [line.lstrip() for line in raw.stdout.splitlines()
-                             if re.match(r'^\s*\d+\.\d+\s', line) and float(line.split()[0]) >= codec_start]
-                    (args.output / (label + '.android-codec.log')).write_text('\n'.join(lines) + '\n')
-                    measurements['android_codec_components'] = android_codec_components('\n'.join(lines))
-                    measurements['codec_capture_start_epoch'] = codec_start
-                (args.output / (label + '.stdout')).write_text(result.stdout)
-                (args.output / (label + '.stderr')).write_text(result.stderr)
-                observations = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{') and line.endswith('}')]
+                             if re.match(r'^\s*\d+\.\d+\s', line) and float(line.split()[0]) >= log_start]
+                    if clip:
+                        (args.output / (label + '.android.log')).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+                        measurements['android_capture_start_epoch'] = log_start
+                    if codec_probe:
+                        (args.output / (label + '.android-codec.log')).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+                        measurements['android_codec_components'] = android_codec_components('\n'.join(lines))
+                        measurements['codec_capture_start_epoch'] = log_start
+                (args.output / (label + '.stdout')).write_text(result.stdout, encoding='utf-8')
+                (args.output / (label + '.stderr')).write_text(result.stderr, encoding='utf-8')
+                observations = [] if case == 'replay' else [
+                    json.loads(line) for line in result.stdout.splitlines() if line.startswith('{') and line.endswith('}')]
                 rows = measurements.pop('_surface_rows')
                 periods = measurements.pop('_frame_periods')
                 measurements['desktop_presentation'] = presentation_for_flow(rows, periods, observations)
@@ -490,6 +563,8 @@ def main():
                     ''.join(','.join(map(str, row)) + '\n' for row in sorted(rows)))
                 unavailable = unavailable_launch(result.stderr)
                 success = result.returncode == 0 and (level == 'graphics_probe' or bool(observations))
+                if case == 'replay':
+                    success = result.returncode == 0 and recording['status'] == 'captured'
                 if level == 'launch_only':
                     success = result.returncode == 0 and any(o.get('qt_interface_window') for o in observations)
                 if level == 'packaged_graphics_probe':
@@ -498,11 +573,27 @@ def main():
                        o.get('resize_consistent') is False for o in observations):
                     success = False
                 status = ('available_launch' if level == 'launch_only' else 'passed') if success else ('unavailable' if unavailable else 'failed')
+                if case == 'replay' and success:
+                    status = 'recorded'
                 try:
-                    visible_desktop(session)
+                    after = visible_desktop(session)
                     visible_after = True
                 except RuntimeError:
                     visible_after = False
+                    status = 'invalid'
+                if level == 'visual_probe':
+                    if not success or not any(o.get('backend') == VISUAL_BACKENDS[case] for o in observations):
+                        visual = dict(status='inconclusive', reason='The requested SDL backend did not complete the scene')
+                    elif not visible_after or after['surface_bounds'] != visibility['surface_bounds']:
+                        visual = dict(status='inconclusive', reason='The desktop was hidden or its bounds changed')
+                    elif recording['status'] != 'captured':
+                        visual = dict(status='inconclusive', reason=recording.get('reason') or 'No recording')
+                    else:
+                        visual = check_recording(clip, crop, args.ffmpeg)
+                    measurements['visual_check'] = visual
+                    status = 'invalid' if visual['status'] == 'inconclusive' else visual['status']
+                elif clip and (recording['status'] != 'captured' or
+                               (visible_after and after['surface_bounds'] != visibility['surface_bounds'])):
                     status = 'invalid'
                 report['results'].append(dict(case=case, run=run, warmup=run == 0, status=status,
                                               desktop_visible_after=visible_after,

@@ -114,9 +114,11 @@ class Session:
         # the app's already-open O_PATH descriptor rather than dropping its
         # storage bind or changing its permissions. The engine opens this
         # descriptor itself; no fd number is assumed across engine versions.
+        # Descriptors can close between listing and reading each symlink.
         links = subprocess.check_output(['adb', '-s', serial, 'shell', shlex.join([
             'run-as', PACKAGE, 'sh', '-c',
-            f'for fd in /proc/{pid}/fd/*; do printf "%s " "$fd"; readlink "$fd"; done'
+            f'for fd in /proc/{pid}/fd/*; do '
+            'target=$(readlink "$fd" 2>/dev/null) || continue; printf "%s %s\\n" "$fd" "$target"; done'
         ])], text=True)
         storage_fd = next((line.split(' ', 1)[0] for line in links.splitlines()
                            if line.endswith(' /storage/emulated/0')), None)
