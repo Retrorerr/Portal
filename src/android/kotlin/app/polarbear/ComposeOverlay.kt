@@ -277,9 +277,16 @@ object ComposeOverlay {
     private var returnMode = false
     var sessionMode = false; private set
     private val activePanelState = mutableStateOf<String?>(null)
+    // A Files request after the final reveal commits has no veil left to open
+    // in, so removeNow issues it again once the overlay is gone.
+    private var filesAfterReveal = false
     var activePanel: String?
         get() = activePanelState.value
-        set(value) { activePanelState.value = value; SessionControls.overlayChanged() }
+        set(value) {
+            if (value != "files") filesAfterReveal = false
+            else if (revealCommitted.get() && composeView != null && FileTransfers.filesRequested) filesAfterReveal = true
+            activePanelState.value = value; SessionControls.overlayChanged()
+        }
     fun desktopIsReady() = desktopReadyLatched.get()
     fun controlsVisible() = isShowing() && (sessionMode || returnMode && desktopReadyLatched.get())
     private val dismissSignal = mutableStateOf(0)
@@ -703,6 +710,7 @@ object ComposeOverlay {
     }
 
     private fun doShow(activity: Activity, returnMode: Boolean, sessionMode: Boolean = false) {
+        filesAfterReveal = false
         // A recovery dismissal may have been requested before a queued show
         // runnable reached the UI thread. Consume it rather than attaching a
         // new veil after the runtime error page was selected.
@@ -842,6 +850,8 @@ object ComposeOverlay {
             container = null
             composeView = null
             sessionMode = false
+            activePanelState.value = null
+            FileTransfers.closeSave()
             SessionControls.overlayChanged()
             readyPreludeActive.set(false)
             returnMode = false
@@ -876,16 +886,24 @@ object ComposeOverlay {
         } catch (e: Exception) {
             Log.e(TAG, "overlay remove failed", e)
         } finally {
-            (container?.context as? PortalActivity)?.setOverlayHighRefresh(false)
+            val portal = container?.context as? PortalActivity
+            portal?.setOverlayHighRefresh(false)
+            val reopenFiles = filesAfterReveal && revealCommitted.get()
+            filesAfterReveal = false
             container = null
             composeView = null
             sessionMode = false
+            activePanelState.value = null
+            FileTransfers.closeSave()
             SessionControls.overlayChanged()
             readyPreludeActive.set(false)
             returnMode = false
             recoveryDismissRequested.set(false)
             Log.i(TAG, "overlay removed; native surface undisturbed")
             acknowledgeOverlayRemoved()
+            if (reopenFiles && portal != null) {
+                android.os.Handler(android.os.Looper.getMainLooper()).post { SessionControls.requestFiles(portal) }
+            }
         }
     }
 

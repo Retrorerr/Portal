@@ -118,10 +118,10 @@ step_restore() {
 
 step_packages() {
   log "packages (Debian): fonts, Panel Colorizer's D-Bus helper, fastfetch"
-  # fonts-*: UI + terminal fonts; python3-dbus/python3-gi: Panel Colorizer's service.py;
+  # fonts-*: UI + terminal fonts; python3-dbus: rice-key, Panel Colorizer's service.py; python3-gi: service.py;
   # fastfetch: the terminal greeter config; rofi + imagemagick + jq: the power menu and its blurred
   # backdrop; plasma-systemmonitor: Ctrl+Esc; alacritty: the laptop's second terminal (config only).
-  # qdbus6 / gdbus (widgets, rice-key) ship with Portal.
+  # qdbus6 / gdbus (widgets, rice-key's read-only fallback) ship with Portal.
   local need=() p
   for p in fonts-inter fonts-jetbrains-mono python3-dbus python3-gi fastfetch rofi imagemagick jq plasma-systemmonitor alacritty; do dpkg -s "$p" >/dev/null 2>&1 || need+=("$p"); done
   # JetBrainsMono Nerd Font (OFL, bundled from the laptop): Konsole + fastfetch's glyph keys
@@ -308,6 +308,9 @@ install_power_launcher() {
 step_power() {
   log "power menu: full-screen rofi over the blurred wallpaper (bar power button, Meta+Esc)"
   local scale W H s
+  { command -v jq && command -v rofi && command -v magick && python3 -c 'import dbus'; } >/dev/null 2>&1 \
+    || { echo "the power step needs rofi, imagemagick, jq and python3-dbus: run apply-portal.sh packages power" >&2; return 1; }
+  install -Dm755 "$F/bin/rice-key" ~/.local/bin/rice-key
   install -Dm644 -t ~/.config/rofi "$F"/rofi/colors.rasi
   install_power_launcher
   # rofi is an X11 client here, drawn at the screen's native pixels: scale the laptop's sizes

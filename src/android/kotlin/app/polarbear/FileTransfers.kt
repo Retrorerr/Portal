@@ -33,6 +33,8 @@ data class TransferItem(
     val bytes: Long = 0, val total: Long = -1, val error: String? = null,
     val source: String, val destination: String,
     val output: String? = null, val permission: String? = null,
+    /** An interrupted save whose output was already checked after a restart. */
+    val cleaned: Boolean = false,
 )
 data class GuestFile(val id: String, val name: String, val directory: Boolean, val size: Long, val modified: Long = 0)
 data class GuestFolder(
@@ -450,7 +452,7 @@ object FileTransfers {
         items.filter { it.id in retained }.forEach { item -> state.put(JSONObject().put("id", item.id).put("name", item.name)
             .put("kind", item.kind.name).put("phase", item.phase.name).put("source", item.source)
             .put("destination", item.destination).put("total", item.total)
-            .put("output", item.output).put("permission", item.permission)
+            .put("output", item.output).put("permission", item.permission).put("cleaned", item.cleaned)
             .put("importCleanupPending", item.id in interruptedImports)) }
         val bytes = state.toString().toByteArray()
         return journal.submit {
@@ -481,18 +483,40 @@ object FileTransfers {
                     phase, total = value.optLong("total", -1), source = value.getString("source"),
                     destination = value.getString("destination"),
                     output = value.optString("output").takeUnless { it.isEmpty() || it == "null" },
-                    permission = value.optString("permission").takeUnless { it.isEmpty() || it == "null" })
+                    permission = value.optString("permission").takeUnless { it.isEmpty() || it == "null" },
+                    cleaned = value.optBoolean("cleaned"))
             }
             interruptedImports = pendingImports
             cleanInterruptedImports()
-            val interruptedSaves = items.filter { it.phase == TransferPhase.Interrupted && it.kind == TransferKind.Save }
+            val interruptedSaves = items.filter { it.phase == TransferPhase.Interrupted && it.kind == TransferKind.Save && !it.cleaned }
             val permissions = items.mapNotNull { it.permission }.toSet()
             work.execute {
-                interruptedSaves.forEach { item ->
-                    val output = item.output ?: item.destination.takeUnless { it.startsWith("tree:") }
-                    output?.let { runCatching { DocumentsContract.deleteDocument(app.contentResolver, Uri.parse(it)) } }
+                // The bytes can all land before Done reaches the journal. Keep a
+                // whole file, remove a partial one, and check each save only once.
+                val handled = interruptedSaves.map { it.id }.toSet()
+                val completed = interruptedSaves.filter { item ->
+                    val output = (item.output ?: item.destination.takeUnless { it.startsWith("tree:") })
+                        ?.let(Uri::parse) ?: return@filter false
+                    val size = runCatching {
+                        app.contentResolver.query(output, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                            val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+                            if (cursor.moveToFirst() && index >= 0 && !cursor.isNull(index)) cursor.getLong(index) else null
+                        }
+                    }.getOrNull()
+                    val whole = item.total >= 0 && size == item.total
+                    if (!whole) runCatching { DocumentsContract.deleteDocument(app.contentResolver, output) }
+                    whole
+                }.map { it.id }.toSet()
+                main.post {
+                    if (handled.isNotEmpty()) {
+                        items = items.map {
+                            if (it.id !in handled) it
+                            else it.copy(cleaned = true, phase = if (it.id in completed) TransferPhase.Done else it.phase)
+                        }
+                        persist()
+                    }
+                    permissions.forEach(::releaseSavePermission)
                 }
-                main.post { permissions.forEach(::releaseSavePermission) }
             }
 
         }

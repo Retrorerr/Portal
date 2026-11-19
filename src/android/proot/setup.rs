@@ -86,12 +86,21 @@ const KWIN_SCRIPT_BORDERLESS_FULLSCREEN: [(&str, &str); 2] = [
 /// Opt-in helper deriving user desktop entries for Chromium/Electron apps
 /// (see `setup_chromium_no_sandbox`). Both guest engines emulate the user and PID
 /// namespaces their sandbox needs; `--no-sandbox` is only added where that
-/// emulation is unavailable, which `/proc/self/ns/user` tells.
+/// emulation is unavailable, which `/proc/self/ns/user` tells. It keeps a
+/// byte-exact record of each copy it writes and of the vendor entry behind it
+/// (see `record_chromium_entry`), the only proof that a copy is still Portal's.
+/// `--refresh` only replaces such copies and never creates an entry
+/// (see `refresh_chromium_entries`).
 const CHROMIUM_ENTRIES_HELPER: &str = r#"#!/bin/sh
 target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+record_dir="${XDG_DATA_HOME:-$HOME/.local/share}/portal/chromium-entries"
 mkdir -p "$target_dir" || exit 1
+mkdir -p "$record_dir"
 no_sandbox=0
 [ -L /proc/self/ns/user ] || no_sandbox=1
+refresh=0
+[ "$1" = --refresh ] && refresh=1
+seen=/
 
 for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop; do
     [ -f "$src" ] || continue
@@ -118,10 +127,24 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
         continue
     fi
 
-    dst="$target_dir/$(basename "$src")"
-    # Existing user entries belong to the user. Session startup migrates
-    # unchanged Portal copies after checking their complete vendor source.
+    name=$(basename "$src")
+    # The first source of a name wins, as at session startup: a second one
+    # must not read as a vendor change.
+    case "$seen" in */"$name"/*) continue ;; esac
+    seen="$seen$name/"
+
+    dst="$target_dir/$name"
+    record="$record_dir/$name"
+    # Existing user entries belong to the user. A copy is regenerated only
+    # while it is byte for byte what Portal last wrote and its vendor entry
+    # has changed since, so an unchanged vendor entry never undoes what
+    # session startup migrated.
+    move=-n
     if [ -e "$dst" ] || [ -L "$dst" ]; then
+        { [ -f "$dst" ] && [ ! -L "$dst" ] && cmp -s "$dst" "$record" &&
+          [ -f "$record.source" ] && ! cmp -s "$src" "$record.source"; } || continue
+        move=-f
+    elif [ "$refresh" -eq 1 ]; then
         continue
     fi
 
@@ -142,9 +165,12 @@ for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.des
                 sub(/^Exec=[^ ]+/, "& --disable-features=GlobalShortcutsPortal")
         }
         { print }
-    ' "$src" > "$tmp" || ! chmod 0644 "$tmp" || ! mv -n "$tmp" "$dst"; then
+    ' "$src" > "$tmp" || ! chmod 0644 "$tmp" || ! mv "$move" "$tmp" "$dst"; then
         rm -f "$tmp"
         printf 'Failed to update Portal desktop integration for %s\n' "$src" >&2
+    elif [ ! -e "$tmp" ] && ! { cp "$dst" "$record" && cp "$src" "$record.source"; }; then
+        # Without a record the copy simply stays unproven until session startup.
+        printf 'Failed to record Portal desktop integration for %s\n' "$src" >&2
     fi
     rm -f "$tmp"
 done
@@ -184,8 +210,8 @@ const PORTAL_IBUS_ENGINE: &str = include_str!("../../../assets/portal-ibus-engin
 const PORTAL_IBUS_COMPONENT: &str = include_str!("../../../assets/portal-ibus-component.xml");
 /// IBus lazy starter for the Plasma autostart entry. Returns in milliseconds
 /// and does all work detached with bounded waits: never apt-get, never a
-/// fixed sleep on the splash->desktop path. Packages are provisioned
-/// pre-session by `provision_ibus_packages`.
+/// fixed sleep on the splash->desktop path. Packages are provisioned by
+/// `provision_ibus_packages`, ahead of it or behind the running desktop.
 const PORTAL_IBUS_LAZY: &str = include_str!("../../../assets/portal-ibus-lazy.sh");
 const PORTAL_SYSTEM_SERVICES: &str = include_str!("../../../assets/portal-system-services.sh");
 /// Flatpak's bubblewrap front-end (`FLATPAK_BWRAP`, set by startplasma):
@@ -292,7 +318,8 @@ const QT_WAYLAND_OVERLAY: LibraryOverlay = LibraryOverlay {
         "22fe5be5ca8e7bcac0d4703282aca363da27257e4cc59020cb7b8b110431eae1",
     )],
 };
-const LIBRARY_OVERLAYS: [LibraryOverlay; 3] = [KPACKAGE_OVERLAY, KICONTHEMES_OVERLAY, QT_WAYLAND_OVERLAY];
+const LIBRARY_OVERLAYS: [LibraryOverlay; 3] =
+    [KPACKAGE_OVERLAY, KICONTHEMES_OVERLAY, QT_WAYLAND_OVERLAY];
 /// Portal's GLEW: Debian glew 2.2.0-4 plus `patches/glew/0001`, so
 /// glewInit() no longer fails on a context made current through EGL. SDL2
 /// runs on native Wayland here, where Debian's GLX-only GLEW gave every
@@ -988,8 +1015,7 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
     let plan = options.install_plan.as_ref()?;
     let selected_apps = plan.selected_apps();
     if selected_apps.is_empty() {
-        provision_ibus_packages(&rootfs());
-        return None;
+        return provision_ibus_stage();
     }
     let fs_root = &rootfs();
     if let Err(error) = validate_optional_app_apt_setup(fs_root) {
@@ -1029,8 +1055,7 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
         clear_deferred_optional_apps();
     }
     if missing.is_empty() && electron_apps.is_empty() {
-        provision_ibus_packages(fs_root);
-        return None;
+        return provision_ibus_stage();
     }
     // The stage owns its slice of the bar; each app moves through it.
     let (from, to) = stage_span("optional-apps", options);
@@ -1077,6 +1102,15 @@ fn setup_optional_apps(options: &SetupOptions) -> StageOutput {
     }))
 }
 
+/// The optional-apps stage with no app to install: only the IBus check.
+fn provision_ibus_stage() -> StageOutput {
+    let root = rootfs();
+    Some(thread::spawn(move || {
+        provision_ibus_packages(&root);
+        Ok(())
+    }))
+}
+
 /// Optional apps setup could not install; queued for the app manager.
 const DEFERRED_OPTIONAL_APPS: &str = "optional-apps-deferred";
 
@@ -1086,8 +1120,11 @@ fn defer_optional_apps(apps: &[OptionalApp]) -> anyhow::Result<()> {
         .map(|app| app.id())
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(crate::core::config::workspace_dir().join(DEFERRED_OPTIONAL_APPS), ids)
-        .context("could not record the optional apps left for later")
+    fs::write(
+        crate::core::config::workspace_dir().join(DEFERRED_OPTIONAL_APPS),
+        ids,
+    )
+    .context("could not record the optional apps left for later")
 }
 
 fn clear_deferred_optional_apps() {
@@ -1765,6 +1802,8 @@ fn kconfig_value<'a>(text: &'a str, group: &str, key: &str) -> Option<&'a str> {
 /// Keep the Chromium/Electron entries helper current and bring entries it
 /// already derived up to its current flags. Entries must still match their
 /// vendor source plus known Portal additions; a user edit takes ownership.
+/// Proven entries carrying only what the helper derives are recorded for it,
+/// as it alone regenerates a copy after its vendor entry changes.
 ///
 /// Earlier helpers forced `--password-store=basic`. Electron's safeStorage is
 /// unavailable with that store, so apps such as Claude could not keep their
@@ -1772,7 +1811,8 @@ fn kconfig_value<'a>(text: &'a str, group: &str, key: &str) -> Option<&'a str> {
 /// They also forced `--no-sandbox`, which PRoot's namespace emulation made
 /// unnecessary: derived entries drop it and keep Chromium's sandbox.
 /// Unchanged derived entries also retire forced Electron backend and stdio
-/// options; native runtime selection now works without them.
+/// options; native runtime selection now works without them. Options the
+/// vendor's own Exec carries stay.
 fn sync_chromium_entries(fs_root: &Path) {
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-no-sandbox-entries"),
@@ -1800,11 +1840,16 @@ fn sync_chromium_entries(fs_root: &Path) {
             .find_map(|directory| {
                 fs::read_to_string(fs_root.join(directory).join(entry.file_name())).ok()
             });
-        let Some(text) = native.as_deref().and_then(|source| {
-            crate::core::guest_compat::retire_electron_launch_options(&original, source)
-        }) else {
+        let Some(source) = native.as_deref() else {
             continue;
         };
+        let Some(text) =
+            crate::core::guest_compat::retire_electron_launch_options(&original, source)
+        else {
+            continue;
+        };
+        // The proof above matched the entries line by line, Exec lines included.
+        let mut vendor_exec = source.lines().filter(|line| line.starts_with("Exec="));
         let updated = text
             .split_inclusive('\n')
             .map(|line| {
@@ -1813,9 +1858,14 @@ fn sync_chromium_entries(fs_root: &Path) {
                 let Some(exec) = body.strip_prefix("Exec=") else {
                     return line.to_owned();
                 };
-                let exec = exec
-                    .replace(" --password-store=basic", "")
-                    .replace(" --no-sandbox", "");
+                let vendor = vendor_exec.next().unwrap_or_default();
+                let mut exec = exec.to_owned();
+                if !vendor.contains(" --password-store=basic") {
+                    exec = exec.replace(" --password-store=basic", "");
+                }
+                if !vendor.contains(" --no-sandbox") {
+                    exec = exec.replace(" --no-sandbox", "");
+                }
                 let exec = exec.as_str();
                 let (program, rest) = match exec.split_once(' ') {
                     Some((program, rest)) => (program, format!(" {rest}")),
@@ -1846,11 +1896,82 @@ fn sync_chromium_entries(fs_root: &Path) {
             }
             let temporary = path.with_extension("desktop.portal-tmp");
             if let Err(error) =
-                fs::write(&temporary, updated).and_then(|()| fs::rename(&temporary, &path))
+                fs::write(&temporary, &updated).and_then(|()| fs::rename(&temporary, &path))
             {
                 log::warn!("{} could not be updated: {error}", path.display());
+                continue;
             }
         }
+        if crate::core::guest_compat::is_helper_derived(&updated, source) {
+            record_chromium_entry(fs_root, &entry.file_name(), &updated, source);
+        }
+    }
+}
+
+/// What the helper compares a copy against: the bytes Portal last wrote and
+/// the vendor entry they came from. Kept outside the applications directory,
+/// so a menu never lists them and an edited copy can never match by accident.
+fn record_chromium_entry(fs_root: &Path, name: &std::ffi::OsStr, entry: &str, source: &str) {
+    let directory = fs_root.join("home/desktop/.local/share/portal/chromium-entries");
+    let mut source_name = name.to_owned();
+    source_name.push(".source");
+    let result = fs::create_dir_all(&directory).and_then(|()| {
+        for (path, text) in [
+            (directory.join(name), entry),
+            (directory.join(source_name), source),
+        ] {
+            if fs::read(&path).ok().as_deref() != Some(text.as_bytes()) {
+                fs::write(&path, text)?;
+            }
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        log::warn!("{} could not be recorded: {error}", name.to_string_lossy());
+    }
+}
+
+/// Follow vendor entries that changed under a recorded copy, as an upgrade or
+/// system update does: session startup then no longer proves that copy, and
+/// nothing else runs the helper unless an app is installed. Runs it only when
+/// it has work, and only as `--refresh`, so a removed entry stays removed and
+/// an edited one stays the user's.
+fn refresh_chromium_entries(fs_root: &Path) {
+    let data = fs_root.join("home/desktop/.local/share");
+    let records = data.join("portal/chromium-entries");
+    let Ok(listing) = fs::read_dir(&records) else {
+        return;
+    };
+    let outdated = listing.flatten().any(|record| {
+        let file_name = record.file_name();
+        let Some(name) = file_name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".source"))
+        else {
+            return false;
+        };
+        let vendor = ["usr/share/applications", "usr/local/share/applications"]
+            .into_iter()
+            .find_map(|directory| fs::read(fs_root.join(directory).join(name)).ok());
+        vendor.is_some()
+            && vendor != fs::read(record.path()).ok()
+            && fs::read(data.join("applications").join(name))
+                .is_ok_and(|copy| fs::read(records.join(name)).is_ok_and(|kept| kept == copy))
+    });
+    if !outdated {
+        return;
+    }
+    let output = PRootRuntime::new(fs_root).execute(
+        ProcessSpec::new("/usr/local/bin/localdesktop-no-sandbox-entries --refresh")
+            .with_user(DESKTOP_USER),
+        None,
+        None,
+    );
+    if !output.status.success() {
+        log::warn!(
+            "Portal desktop entries could not be refreshed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
@@ -2156,6 +2277,8 @@ fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
     // authentication is not a reliable boundary for guest-launched clients.
     // Keep an opt-in helper for Chromium/Electron desktop entries. Never run it
     // from session startup or apt: those hooks recreated user-removed entries.
+    // Only its `--refresh` mode, which cannot create one, runs on its own
+    // (see `refresh_chromium_entries`).
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-no-sandbox-entries"),
         CHROMIUM_ENTRIES_HELPER,
@@ -3098,11 +3221,6 @@ pub fn sync_session_runtime_files(fs_root: &Path, ui_scale: i32) {
     }
 
     sync_guest_network_config(fs_root);
-    // Existing installs also need dependency repair after an APK upgrade.
-    // Fresh setup owns apt in its ordered stages; never race those jobs.
-    if crate::core::provisioning::RuntimeArtifact::production().is_bootable(fs_root) {
-        provision_ibus_packages(fs_root);
-    }
     sync_android_timezone(fs_root);
     browser::repair_mozilla_profiles(fs_root);
     browser::sync_gecko_profiles(fs_root);
@@ -3409,8 +3527,10 @@ fn ensure_app_compatibility(root: &Path) {
         );
         keep_account_databases_readable();
         if !result.status.success() {
-            log::warn!("Desktop toolkit upgrade deferred; retrying next launch: {}",
-                String::from_utf8_lossy(&result.stderr));
+            log::warn!(
+                "Desktop toolkit upgrade deferred; retrying next launch: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
             return;
         }
     }
@@ -3420,8 +3540,8 @@ fn ensure_app_compatibility(root: &Path) {
         return;
     }
     let temporary = marker.with_extension("tmp");
-    if let Err(error) = fs::write(&temporary, b"installed\n")
-        .and_then(|()| fs::rename(&temporary, &marker))
+    if let Err(error) =
+        fs::write(&temporary, b"installed\n").and_then(|()| fs::rename(&temporary, &marker))
     {
         log::warn!("Desktop toolkit upgrade marker unavailable: {error}");
     }
@@ -3499,6 +3619,8 @@ pub fn spawn_background_installs() {
         thread::sleep(Duration::from_secs(20));
         let root = &rootfs();
         repair_package_dependencies(root);
+        // Existing installs also need the IBus repair after an APK upgrade.
+        provision_ibus_packages(root);
         keep_account_databases_readable();
         ensure_app_compatibility(root);
         ensure_desktop_extras(root);
@@ -3507,6 +3629,7 @@ pub fn spawn_background_installs() {
             install_mozilla_firefox(root);
             keep_account_databases_readable();
         }
+        refresh_chromium_entries(root);
         queue_deferred_optional_apps();
         BACKGROUND_INSTALLS_RUNNING.store(false, Ordering::Release);
     });
@@ -3860,7 +3983,10 @@ fn sync_library_overlays(fs_root: &Path) {
     }
     let notice = fs_root.join("usr/share/doc/portal-qtwayland");
     if fs::create_dir_all(&notice).is_ok() {
-        let _ = fs::write(notice.join("README.md"), include_str!("../../../assets/qtwayland-portal/README.md"));
+        let _ = fs::write(
+            notice.join("README.md"),
+            include_str!("../../../assets/qtwayland-portal/README.md"),
+        );
     }
 }
 
@@ -3922,9 +4048,11 @@ pub fn library_overlay_binds(fs_root: &Path) -> Vec<crate::core::runtime::BindMo
             log::info!("{tag}: stock library is not the Debian build it replaces ({stock}); using it as is");
             continue;
         }
-        if !overlay.abi_guards.iter().all(|(path, digest)| {
-            crate::core::guest_compat::library_matches(fs_root, path, digest)
-        }) {
+        if !overlay
+            .abi_guards
+            .iter()
+            .all(|(path, digest)| crate::core::guest_compat::library_matches(fs_root, path, digest))
+        {
             log::info!("{tag}: dependency ABI changed; using the guest's own library");
             continue;
         }
@@ -4255,10 +4383,12 @@ pub fn sync_guest_ssl_certificates(fs_root: &Path) {
     }
 }
 
-/// Repair the complete IBus bridge on older/partial images without blocking
-/// desktop startup. Fresh images include these dependencies. Check actual
-/// components rather than the old completion marker or daemon alone, so a
-/// missing binding/client plugin is repaired on the next launch too.
+/// Repair the complete IBus bridge on older/partial images. Fresh images
+/// include these dependencies. Check actual components rather than the old
+/// completion marker or daemon alone, so a missing binding/client plugin is
+/// repaired on the next launch too. Blocks its caller, a setup stage's thread
+/// or the background installs, so no apt job here outlives its turn and races
+/// the next one: the provisional first session starts those installs as well.
 fn provision_ibus_packages(fs_root: &Path) {
     const REQUIRED: &[&str] = &[
         "usr/bin/ibus-daemon",
@@ -4271,36 +4401,19 @@ fn provision_ibus_packages(fs_root: &Path) {
     if REQUIRED.iter().all(|path| fs_root.join(path).is_file()) {
         return;
     }
-    static RUNNING: AtomicBool = AtomicBool::new(false);
-    if RUNNING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-    let root = fs_root.to_path_buf();
-    std::thread::spawn(move || {
-        struct Reset;
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                RUNNING.store(false, Ordering::Release);
-            }
-        }
-        let _reset = Reset;
-        let output = PRootRuntime::new(&root).execute(
-            ProcessSpec::new("DEBIAN_FRONTEND=noninteractive apt-get update >>/tmp/portal-ibus-provision.log 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y ibus gir1.2-ibus-1.0 python3-gi libqt5gui5t64 qt6-qpa-plugins >>/tmp/portal-ibus-provision.log 2>&1"),
-            None,
-            None,
+    let output = PRootRuntime::new(fs_root).execute(
+        ProcessSpec::new("DEBIAN_FRONTEND=noninteractive apt-get update >>/tmp/portal-ibus-provision.log 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y ibus gir1.2-ibus-1.0 python3-gi libqt5gui5t64 qt6-qpa-plugins >>/tmp/portal-ibus-provision.log 2>&1"),
+        None,
+        None,
+    );
+    if output.status.success() && REQUIRED.iter().all(|path| fs_root.join(path).is_file()) {
+        log::info!("IBus input-method bridge dependencies ready");
+    } else {
+        log::warn!(
+            "IBus dependency repair deferred (status {:?}); retrying on a later launch",
+            output.status.code()
         );
-        if output.status.success() && REQUIRED.iter().all(|path| root.join(path).is_file()) {
-            log::info!("IBus input-method bridge dependencies ready");
-        } else {
-            log::warn!(
-                "IBus dependency repair deferred (status {:?}); retrying on a later launch",
-                output.status.code()
-            );
-        }
-    });
+    }
 }
 
 fn setup_mesa_layer(options: &SetupOptions) -> StageOutput {
@@ -5421,8 +5534,7 @@ fn can_rerun_in_place(failure: &SetupFailure) -> bool {
             )
     });
     idle && matches!(
-        crate::core::provisioning::RuntimeArtifact::production()
-            .classify_runtime(&rootfs()),
+        crate::core::provisioning::RuntimeArtifact::production().classify_runtime(&rootfs()),
         crate::core::provisioning::RuntimeClassification::Absent
             | crate::core::provisioning::RuntimeClassification::ValidatedImageOnly
     )
@@ -5965,9 +6077,7 @@ pub fn build_pending_wayland_backend(android_app: AndroidApp) -> anyhow::Result<
 /// Record a failed provisional Plasma launch and wake the lifecycle owner so
 /// it can stop the temporary guest and return to setup under the same plan.
 pub fn fail_initial_preferences_handoff(reason: &str) -> bool {
-    if crate::core::provisioning::RuntimeArtifact::production()
-        .is_bootable(&rootfs())
-    {
+    if crate::core::provisioning::RuntimeArtifact::production().is_bootable(&rootfs()) {
         return false;
     }
     let reason = reason.chars().take(512).collect::<String>();

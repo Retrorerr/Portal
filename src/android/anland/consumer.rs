@@ -100,6 +100,19 @@ const IDLE_SELECT_INTERVAL_NS: u64 = 10_000_000;
 /// the session, so `gamepad` reports them here.
 static PAD_INPUT_NS: AtomicU64 = AtomicU64::new(0);
 static PAD_ENGAGED: AtomicBool = AtomicBool::new(false);
+/// KWin damage hints are arriving from the running KWin. While they are, they
+/// carry every visible change and the CPU sampler stays out of presentation
+/// demand. Surface suspends and rebinds leave it set: the same KWin stays, and
+/// its resume repaint sends no hint. Losing the producer ends it (see
+/// `enter_fallback` and `note_desktop_session_ended`). Static because the
+/// guest session can end with no surface and no one holding this session.
+static DAMAGE_LIVE: AtomicBool = AtomicBool::new(false);
+
+/// The guest session is gone, with its KWin, possibly while the surface was
+/// suspended and no connection could notice.
+pub fn note_desktop_session_ended() {
+    DAMAGE_LIVE.store(false, Ordering::Release);
+}
 
 /// A gamepad event reached the guest; `engaged` = a pad is still held.
 pub fn note_gamepad_input(engaged: bool) {
@@ -294,9 +307,6 @@ struct Inner {
     client_cache: Mutex<(Vec<u32>, u64)>,
     /// Transition latch for busy logging (quiet -> active).
     client_active: AtomicBool,
-    /// KWin damage hints are arriving. While they are, they carry every
-    /// visible change and the CPU sampler stays out of presentation demand.
-    damage_live: AtomicBool,
     /// Kick channel: input forwarding and busy composites write here so the
     /// render loop wakes for an immediate select (input latency), then falls
     /// back to VSYNC-gated pacing. Only the render thread reads.
@@ -345,6 +355,11 @@ struct Inner {
     wheel_carry: Mutex<[f32; 2]>,
     /// Key/button presses actually delivered to KWin, released before resize.
     held_inputs: Mutex<std::collections::BTreeSet<(u32, i32)>>,
+    /// What `held_inputs` held when its connection ended. KWin may outlive
+    /// the connection with these still pressed, as it cancels only touches,
+    /// so the next connection releases them. The user may have long let go,
+    /// so `interactive` does not look here.
+    undelivered_releases: Mutex<std::collections::BTreeSet<(u32, i32)>>,
     /// Display-VSYNC tick source (Choreographer, timer fallback).
     vsync: Mutex<Option<sys::VsyncPump>>,
     /// Surface generation the once-per-generation first-motion diagnostic
@@ -695,7 +710,6 @@ impl AnlandSession {
             client_prev: Mutex::new((0, 0, 0)),
             client_cache: Mutex::new((Vec::new(), 0)),
             client_active: AtomicBool::new(false),
-            damage_live: AtomicBool::new(false),
             wake,
             demand_until_ns: AtomicU64::new(0),
             high_refresh_until_ns: AtomicU64::new(0),
@@ -711,6 +725,7 @@ impl AnlandSession {
             finger_axes: Mutex::new(0),
             wheel_carry: Mutex::new([0.0; 2]),
             held_inputs: Mutex::new(std::collections::BTreeSet::new()),
+            undelivered_releases: Mutex::new(std::collections::BTreeSet::new()),
             vsync: Mutex::new(Some(vsync)),
             motion_logged_gen: Mutex::new(0),
         });
@@ -894,14 +909,7 @@ impl AnlandSession {
         self.send_finger_stops();
         let held = std::mem::take(&mut *self.inner.held_inputs.lock().unwrap());
         for (kind, code) in held {
-            let release = if kind == INPUT_TYPE_KEY {
-                InputEvent::key(INPUT_ACTION_UP, code)
-            } else if kind == INPUT_TYPE_TOUCH {
-                InputEvent::touch(INPUT_ACTION_UP, 0.0, 0.0, code)
-            } else {
-                InputEvent::pointer_button(code as u32, false)
-            };
-            self.send_input(&release);
+            self.send_input(&release_event(kind, code));
         }
         self.send_input(&InputEvent::touch_frame());
         // That frame also closed any batch still waiting for flush_input.
@@ -1106,6 +1114,24 @@ fn send_wheel_inner(inner: &Arc<Inner>, axis: u32, value: f32) {
             &InputEvent::pointer_axis(axis, clicks, clicks as i32),
         );
     }
+}
+
+/// The event that lets go of a `held_inputs` entry.
+fn release_event(kind: u32, code: i32) -> InputEvent {
+    if kind == INPUT_TYPE_KEY {
+        InputEvent::key(INPUT_ACTION_UP, code)
+    } else if kind == INPUT_TYPE_TOUCH {
+        InputEvent::touch(INPUT_ACTION_UP, 0.0, 0.0, code)
+    } else {
+        InputEvent::pointer_button(code as u32, false)
+    }
+}
+
+/// One untimed event. Caller holds `io_lock`.
+fn send_input_event(data: &OwnedFd, ev: &InputEvent) -> std::io::Result<()> {
+    let mut wire = [0u8; INPUT_WIRE_LEN];
+    encode_input(&mut wire, ev);
+    sys::send_all(data, &wire)
 }
 
 fn send_input_inner(inner: &Arc<Inner>, ev: &InputEvent) {
@@ -1387,14 +1413,7 @@ impl AnlandSession {
         self.send_finger_stops();
         let held = std::mem::take(&mut *inner.held_inputs.lock().unwrap());
         for (kind, code) in held {
-            let release = if kind == INPUT_TYPE_KEY {
-                InputEvent::key(INPUT_ACTION_UP, code)
-            } else if kind == INPUT_TYPE_TOUCH {
-                InputEvent::touch(INPUT_ACTION_UP, 0.0, 0.0, code)
-            } else {
-                InputEvent::pointer_button(code as u32, false)
-            };
-            self.send_input(&release);
+            self.send_input(&release_event(kind, code));
         }
         self.send_input(&InputEvent::touch_frame());
         // That frame also closed any batch still waiting for flush_input.
@@ -1739,6 +1758,11 @@ fn teardown_generation(inner: &Arc<Inner>) {
         sys::munmap_index(g.shm_ptr as *mut u32);
         // OwnedFds drop here (under io_lock, so no select/send races).
     }
+    // Their releases have nowhere to go until the next connection. Left held,
+    // these would keep `interactive` true. Under gen, so no sender can still
+    // add one after.
+    let held = std::mem::take(&mut *inner.held_inputs.lock().unwrap());
+    inner.undelivered_releases.lock().unwrap().extend(held);
 }
 
 /// Drop to fallback and immediately re-deposit (reference `enter_fallback`).
@@ -1767,6 +1791,11 @@ fn enter_fallback(inner: &Arc<Inner>, expected: u64, reason: &str) {
         log::info!("anland.fallback reason={reason} (no desktop session)");
     }
     teardown_generation(inner);
+    // The producer went away or stalled: a restarted KWin that never sends
+    // hints gets the sampler back, and its first hint stands it down again.
+    // Silence from a running KWin stays live on purpose: a static screen sends
+    // none, and a busy client must not then hold full rate.
+    DAMAGE_LIVE.store(false, Ordering::Release);
     if inner.running.load(Ordering::Acquire) && inner.window_live.load(Ordering::Acquire) {
         if let Err(e) = deposit_generation(inner) {
             log::error!("anland.fallback re-deposit failed: {e}");
@@ -1856,6 +1885,15 @@ fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receive
     );
     // Seed the producer's render-loop pacing with the live display rate.
     let _ = send_display_refresh(&gen.data, inner.refresh_mhz.load(Ordering::Acquire));
+    // Still under `io_lock`, so no new press can come before them. A restarted
+    // KWin has none of them down, and a release alone is harmless to it.
+    let mut undelivered = inner.undelivered_releases.lock().unwrap();
+    if !undelivered.is_empty() {
+        undelivered.retain(|&(kind, code)| {
+            send_input_event(&gen.data, &release_event(kind, code)).is_err()
+        });
+        let _ = send_input_event(&gen.data, &InputEvent::touch_frame());
+    }
 }
 
 /// One of the display messages that ride the input framing, with a single
@@ -2015,7 +2053,7 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
         match socket.recv(&mut buf) {
             Ok(_) => {
                 recv_failures = 0;
-                inner.damage_live.store(true, Ordering::Release);
+                DAMAGE_LIVE.store(true, Ordering::Release);
             }
             Err(error)
                 if matches!(
@@ -2030,7 +2068,7 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
                 continue;
             }
             Err(error) => {
-                inner.damage_live.store(false, Ordering::Release);
+                DAMAGE_LIVE.store(false, Ordering::Release);
                 // Never give up: without hints, frame-callback clients drop
                 // to the idle heartbeat for the rest of the session.
                 // Logged once per error streak: a dead socket must not
@@ -2062,7 +2100,7 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
             log_ns = now;
         }
     }
-    inner.damage_live.store(false, Ordering::Release);
+    DAMAGE_LIVE.store(false, Ordering::Release);
     log::info!("anland.damage listener stopped hints={hints}");
 }
 
@@ -2968,7 +3006,7 @@ fn sample_client_activity(inner: &Arc<Inner>) {
     // hidden tab playing a stream, background decode) must not hold
     // full-rate, peak-refresh presentation of identical frames. The sampler
     // stays the fallback for sessions whose damage hints are unavailable.
-    if inner.damage_live.load(Ordering::Acquire) {
+    if DAMAGE_LIVE.load(Ordering::Acquire) {
         if inner.client_active.swap(false, Ordering::AcqRel) {
             log::info!("anland.demand damage hints live; sampler stands down");
         }

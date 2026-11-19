@@ -11,7 +11,7 @@ keep their own plugins; Portal does not set a global `QT_PLUGIN_PATH`.
 Portal also leaves `QT_QPA_PLATFORM` to the application and user. Modern Qt
 selects Wayland from the session and retains its XCB fallback. A global
 `wayland;xcb` override would break older Qt versions that interpret it as a
-single plugin name, including [Qt 5.9](https://github.com/qt/qtbase/blob/v5.9.9/src/gui/kernel/qguiapplication.cpp#L1035).
+single plugin name, including [Qt 5.9](https://github.com/qt/qtbase/blob/v5.9.9/src/gui/kernel/qguiapplication.cpp#L1121).
 
 The Qt 6 fractional-scale fix is built from the pinned Debian-compatible
 QtWayland source in `patches/qtwayland/6.8.2`. Its overlay is used only when

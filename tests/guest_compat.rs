@@ -85,7 +85,10 @@ fn electron_retirement_keeps_native_options_actions_and_user_edits() {
         assert_eq!(retire_electron_launch_options(&custom, source), None);
     }
     let native = source.replace("Exec=example", "Exec=example --ozone-platform=wayland");
-    assert_eq!(retire_electron_launch_options(&managed, &native), None);
+    assert_eq!(
+        retire_electron_launch_options(&managed, &native),
+        Some(managed.replace(" --no-stdio-init", ""))
+    );
     let explicit_platform = managed.replace(" --no-stdio-init", "");
     assert_eq!(
         retire_electron_launch_options(&explicit_platform, source),

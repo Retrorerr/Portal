@@ -23,7 +23,11 @@
 #   that inherits Portal's LIBVA_DRIVERS_PATH gets the driver directory
 #   read-only at /run/portal-va and the path pointed there. It is built
 #   against glibc 2.38 and the X11/DRM libraries every freedesktop runtime
-#   carries, and ships with the APK, so it always matches the bridge.
+#   carries, and ships with the APK, so it always matches the bridge. The
+#   bridge daemon listens in the guest's /tmp, which a sandbox only sees with
+#   host /tmp access, so its socket directory is bound too: the directory so
+#   a restarted daemon stays reachable, read-only as Flatpak binds its
+#   Wayland socket.
 #
 # Flatpak passes its arguments through `--args FD`; those are read here and
 # handed on in a new file. Arguments this does not understand go to bwrap
@@ -36,6 +40,7 @@ BWRAP = "/usr/bin/bwrap"
 GPU_NODES = (b"/dev/kgsl-3d0", b"/dev/dma_heap", b"/dev/ion")
 VA_DRIVERS = b"/usr/local/lib/portal/va"
 VA_SANDBOX = b"/run/portal-va"
+VA_SOCKET_DIR = b"/tmp/termux-va"
 
 # bwrap 0.11 options and how many arguments each takes.
 ARITY = {
@@ -151,11 +156,13 @@ def mirror(path, groups, depth=0):
 
 
 def shared(path, groups):
-    """Whether a bind already provides `path` or a parent."""
+    """Whether a bind already provides `path` or a parent from the same place
+    outside. Flatpak's private /tmp is a bind too, of a per-app directory."""
     for group in groups:
         if group[0] in BINDS:
             dest = group[2].rstrip(b"/")
-            if path == dest or path.startswith(dest + b"/"):
+            if (group[1].rstrip(b"/") == dest
+                    and (path == dest or path.startswith(dest + b"/"))):
                 return True
     return False
 
@@ -204,6 +211,8 @@ def adapt(groups):
             and os.path.isdir(VA_DRIVERS)):
         out.append([b"--ro-bind", VA_DRIVERS, VA_SANDBOX])
         out.append([b"--setenv", b"LIBVA_DRIVERS_PATH", VA_SANDBOX])
+        if os.path.isdir(VA_SOCKET_DIR) and not shared(VA_SOCKET_DIR, out):
+            out.append([b"--ro-bind", VA_SOCKET_DIR, VA_SOCKET_DIR])
         changed = True
     return out, changed
 

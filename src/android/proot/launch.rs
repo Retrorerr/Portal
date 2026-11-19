@@ -385,6 +385,7 @@ pub fn launch() {
             log: Some(Arc::new(|it| log::info!("guest-session: {}", it))),
         }
         .run_session(thread_cancel.clone(), broker_environment, extra_binds);
+        crate::android::anland::consumer::note_desktop_session_ended();
         let status = output.status.code();
         diagnostics::desktop_exit(
             status,

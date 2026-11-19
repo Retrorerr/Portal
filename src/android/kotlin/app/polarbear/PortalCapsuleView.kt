@@ -42,6 +42,9 @@ internal class PortalCapsuleView(
     private var scope = CoroutineScope(AndroidUiDispatcher.Main + SupervisorJob())
     private val anchor = Animatable(Offset.Zero, Offset.VectorConverter)
     private var settle: Job? = null
+    private var settleTarget = Offset.Zero
+    private var settleSaves = false
+    private var settleHeld = false
     private var tracker: VelocityTracker? = null
     private var down = Offset.Zero
     private var dragStart = Offset.Zero
@@ -121,8 +124,9 @@ internal class PortalCapsuleView(
         val y = if (topFraction.isFinite() && topFraction >= 0f) topFraction * height else area.top + area.height * 0.24f
         val target = UtilityMenuGeometry.dock(area, dockRight, y, density, resources.configuration.fontScale)
         settle?.cancel()
+        val destination = Offset(target.x,target.y)
+        settleTarget = destination; settleSaves = false; settleHeld = false
         settle = scope.launch {
-            val destination = Offset(target.x,target.y)
             if (!ready) { anchor.snapTo(destination); ready = true }
             else anchor.animateTo(destination, spring(dampingRatio = 0.88f, stiffness = 230f))
         }
@@ -225,7 +229,7 @@ internal class PortalCapsuleView(
         }
         if (!touchOwned) return false
         val result = super.dispatchTouchEvent(event)
-        if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) touchOwned = false
+        if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) { touchOwned = false; finishHeldSettle() }
         return result || SessionControls.isUtilityVisible()
     }
     override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
@@ -234,7 +238,8 @@ internal class PortalCapsuleView(
                 down = Offset(event.x,event.y); chord = false
                 dragEligible = page == UtilityPage.Dock && !SessionControls.isUtilityVisible() && hubBounds.contains(event.x,event.y)
                 dragStart = Offset(hubBounds.centerX(),hubBounds.centerY())
-                settle?.cancel()
+                // Hold a settle under the press so a tap lands on a still hub. Release finishes it.
+                if (dragEligible && settle?.isActive == true) { settle?.cancel(); settleHeld = true }
                 recycleTracker()
                 if (dragEligible) tracker = VelocityTracker.obtain().also { it.addMovement(event) }
             }
@@ -243,6 +248,7 @@ internal class PortalCapsuleView(
                 tracker?.addMovement(event)
                 val delta = Offset(event.x,event.y)-down
                 if (dragEligible && !chord && delta.getDistance() > slop) {
+                    settleHeld = false
                     dragPoint = dragStart + delta
                     freeMotion = true; dragging = true; page = UtilityPage.Dock; pendingAction = null
                     parent?.requestDisallowInterceptTouchEvent(true)
@@ -274,6 +280,7 @@ internal class PortalCapsuleView(
                         UtilityMenuGeometry.Point(current.x,current.y), UtilityMenuGeometry.Point(velocity.x,velocity.y),density,resources.configuration.fontScale)
                     dockRight = right
                     settle?.cancel()
+                    settleTarget = Offset(target.x,target.y); settleSaves = true
                     settle = scope.launch {
                         anchor.snapTo(current); dragging = false
                         anchor.animateTo(Offset(target.x,target.y), spring(dampingRatio = 0.86f, stiffness = 210f),
@@ -287,6 +294,17 @@ internal class PortalCapsuleView(
             }
         }
         return true
+    }
+    private fun finishHeldSettle() {
+        if (!settleHeld) return
+        settleHeld = false
+        settle = scope.launch {
+            anchor.animateTo(settleTarget, spring(dampingRatio = 0.86f, stiffness = 210f))
+            if (settleSaves) {
+                freeMotion = false
+                onPositionChanged(if (dockRight) 1f else 0f, anchor.value.y/height.coerceAtLeast(1))
+            }
+        }
     }
     private fun recycleTracker() { tracker?.recycle(); tracker = null }
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
@@ -303,7 +321,7 @@ internal class PortalCapsuleView(
         }
     }
     override fun onDetachedFromWindow() {
-        settle?.cancel(); settle = null
+        settle?.cancel(); settle = null; settleHeld = false
         recycleTracker(); scope.cancel()
         pendingAction = null
         requestPage(UtilityPage.Dock)
