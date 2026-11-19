@@ -725,6 +725,15 @@ fun PortalSetupScreen(
                         .then(surfaceWidth),
                 )
             }
+            // Setting up a new workspace: it can be given up for the one
+            // Portal came from, until the install is under way.
+            if (!previewOnly) {
+                WorkspaceSetupExit(
+                    palette = palette,
+                    enabled = phase == SetupPhase.Configure || phase == SetupPhase.Failed,
+                    modifier = Modifier.padding(top = 18.dp),
+                )
+            }
         }
 
     }

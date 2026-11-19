@@ -8,6 +8,10 @@ package app.polarbear.setup
 // then lifts by itself. Names are edited in place, and the card says which
 // workspace Portal opens at launch. Native state (Workspaces.state) is the
 // only source of truth.
+//
+// The last tile makes a new workspace: a separate Debian with its own apps,
+// files and settings. Portal restarts into the first-run installer for it,
+// as it does for a workspace whose install never finished.
 
 import android.text.format.DateUtils
 import androidx.compose.animation.AnimatedContent
@@ -81,6 +85,13 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -109,7 +120,7 @@ private const val SWITCH_FOLD_DELAY_MS = 160L
 /** Also the widest the veil's pill row lets any of its cards grow. */
 internal val WorkspacesCardWidth = 560.dp
 /** Tiles share the card's width, within these bounds; more than fit scroll. */
-private val TileMinWidth = 156.dp
+private val TileMinWidth = 128.dp
 private val TileMaxWidth = 248.dp
 private val TileGap = 12.dp
 /** Name and status, or the rename field and its note: the same height, so renaming never moves the card. */
@@ -281,10 +292,16 @@ private fun StackGlyph(palette: PortalPalette, busy: Boolean) {
 @Composable
 private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onClose: () -> Unit) {
     val view = LocalView.current
+    val context = LocalContext.current
     val veil = LocalPortalVeil.current
     val exclusionKey = remember { Any() }
     var renaming by remember { mutableStateOf<String?>(null) }
     var chosen by remember { mutableStateOf<String?>(null) }
+    /** The New workspace tile shows its name field. */
+    var naming by remember { mutableStateOf(false) }
+    /** A new workspace was made; Portal is restarting into its installer. */
+    var created by remember { mutableStateOf<String?>(null) }
+    val restarting = chosen != null || created != null
     DisposableEffect(veil) {
         onDispose {
             veil.gestureExclusions.remove(exclusionKey)
@@ -298,9 +315,16 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
     }
     LaunchedEffect(chosen) {
         val id = chosen ?: return@LaunchedEffect
+        val surface = findDesktopSurface(view.rootView)
+        if (state.workspaces.firstOrNull { it.id == id }?.needsSetup == true) {
+            // Its installer runs after a restart; the card stays to say so,
+            // or to show why it can't.
+            if (Workspaces.setUp(context, id, surface) != null) chosen = null
+            return@LaunchedEffect
+        }
         // The switch starts at once; only the card's fold waits for the
         // chosen tile to answer the tap.
-        Workspaces.switchTo(id, findDesktopSurface(view.rootView))
+        Workspaces.switchTo(id, surface)
         delay(SWITCH_FOLD_DELAY_MS)
         onClose()
     }
@@ -319,7 +343,8 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
             Column(Modifier.weight(1f).padding(start = 4.dp)) {
                 Text("Workspaces", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.textPrimary)
                 Text(
-                    "Each one keeps its own desktop. Tap one to open it; tap a name to rename it.",
+                    "Each one is its own Debian, with its own apps, files and settings. " +
+                        "Tap one to open it; tap a name to rename it.",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
                     color = palette.textMuted,
@@ -329,7 +354,8 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
         }
         Spacer(Modifier.height(14.dp))
         BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
-            val count = state.workspaces.size.coerceAtLeast(1)
+            // The New workspace tile shares the row.
+            val count = state.workspaces.size + 1
             val tileWidth = ((maxWidth - TileGap * (count - 1)) / count).coerceIn(TileMinWidth, TileMaxWidth)
             Row(
                 // At least the card's width, so a few tiles sit centred and
@@ -345,19 +371,36 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
                     running = workspace.id == state.active,
                     chosen = chosen == workspace.id,
                     renaming = renaming == workspace.id,
-                    renamingAny = renaming != null,
+                    renamingAny = renaming != null || naming,
                     palette = palette,
                     onOpen = {
                         when {
-                            // A tap away from the field ends the rename, unsaved.
+                            // A tap away from a field ends it, unsaved.
                             renaming != null -> renaming = null
-                            chosen == null && workspace.id != state.active -> chosen = workspace.id
+                            naming -> naming = false
+                            !restarting && workspace.id != state.active -> chosen = workspace.id
                         }
                     },
-                    onRename = { renaming = workspace.id },
+                    onRename = { if (!restarting) renaming = workspace.id },
                     onRenameDone = { renaming = null },
                 )
             }
+            NewWorkspaceTile(
+                width = tileWidth,
+                naming = naming,
+                created = created,
+                palette = palette,
+                onStart = {
+                    renaming = null
+                    if (!restarting) naming = true
+                },
+                onCreate = { name ->
+                    val refusal = Workspaces.create(context, name, findDesktopSurface(view.rootView))
+                    if (refusal == null) created = name.trim()
+                    refusal
+                },
+                onDone = { naming = false },
+            )
             }
         }
         AnimatedVisibility(
@@ -474,7 +517,19 @@ private fun WorkspaceTile(
         Spacer(Modifier.height(8.dp))
         Column(Modifier.height(TileFooterHeight)) {
         if (renaming) {
-            RenameField(workspace, palette, onRenameDone)
+            NameField(
+                initial = workspace.name,
+                note = "Enter saves",
+                palette = palette,
+                submit = { name ->
+                    if (name.trim() == workspace.name) null else Workspaces.rename(workspace.id, name)
+                },
+                onDone = onRenameDone,
+                // Main holds Portal's own files and the running one is in use.
+                onDelete = if (running || workspace.id == "main") null else { done ->
+                    Workspaces.delete(workspace.id, done)
+                },
+            )
         } else {
             Text(
                 text = workspace.name,
@@ -489,9 +544,13 @@ private fun WorkspaceTile(
             )
             Text(
                 text = when {
+                    chosen && workspace.needsSetup -> "Restarting Portal…"
                     chosen -> "Opening…"
                     running -> "Open now"
+                    workspace.needsSetup -> "Not set up yet · tap to set up"
                     workspace.lastUsedUnix <= 0 -> "Not opened yet"
+                    System.currentTimeMillis() - workspace.lastUsedUnix * 1000 <
+                        DateUtils.MINUTE_IN_MILLIS -> "Used just now"
                     else -> "Used " + DateUtils.getRelativeTimeSpanString(
                         workspace.lastUsedUnix * 1000,
                         System.currentTimeMillis(),
@@ -508,25 +567,151 @@ private fun WorkspaceTile(
     }
 }
 
+/**
+ * The last tile: a new workspace. Tapping it asks for a name; Enter makes
+ * the workspace and Portal restarts into its installer.
+ */
 @Composable
-private fun RenameField(workspace: Workspaces.Workspace, palette: PortalPalette, onDone: () -> Unit) {
+private fun NewWorkspaceTile(
+    width: androidx.compose.ui.unit.Dp,
+    naming: Boolean,
+    /** The name of the workspace just made, while Portal restarts into it. */
+    created: String?,
+    palette: PortalPalette,
+    onStart: () -> Unit,
+    onCreate: (String) -> String?,
+    onDone: () -> Unit,
+) {
+    val tap = remember { MutableInteractionSource() }
+    val pressed by tap.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = tween(110, easing = PortalEmphasized),
+        label = "new workspace tile press",
+    )
+    val active = naming || created != null
+    val ring by animateColorAsState(
+        if (active) palette.accent else palette.surfaceBorder,
+        tween(220),
+        label = "new workspace tile ring",
+    )
+    val shape = RoundedCornerShape(TileCorner)
+    Column(Modifier.width(width).semantics { contentDescription = "New workspace" }) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 10f)
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                }
+                .clip(shape)
+                .background(palette.surfaceTop.copy(alpha = 0.35f))
+                .border(if (active) 2.dp else 1.dp, ring, shape)
+                .clickable(
+                    interactionSource = tap,
+                    indication = null,
+                    role = Role.Button,
+                    enabled = created == null,
+                    onClickLabel = "Make a new workspace",
+                    onClick = onStart,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "+",
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Light,
+                color = if (active) palette.accent else palette.textMuted.copy(alpha = 0.75f),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Column(Modifier.height(TileFooterHeight)) {
+            when {
+                created != null -> {
+                    Text(
+                        text = created,
+                        modifier = Modifier.padding(start = 2.dp),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "Restarting Portal to set it up…",
+                        modifier = Modifier.padding(start = 2.dp),
+                        fontSize = 11.sp,
+                        color = palette.accent,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                naming -> NameField(
+                    initial = "",
+                    note = "Enter sets it up · Portal restarts",
+                    palette = palette,
+                    submit = onCreate,
+                    onDone = onDone,
+                )
+                else -> {
+                    Text(
+                        text = "New workspace",
+                        modifier = Modifier.padding(start = 2.dp),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.textPrimary,
+                        maxLines = 1,
+                    )
+                    Text(
+                        text = "A fresh Debian of its own",
+                        modifier = Modifier.padding(start = 2.dp),
+                        fontSize = 11.sp,
+                        color = palette.textSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A one-line name field: Enter submits, leaving it cancels. [submit] returns
+ * null when it was accepted, else the reason shown under the field.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun NameField(
+    initial: String,
+    note: String,
+    palette: PortalPalette,
+    submit: (String) -> String?,
+    onDone: () -> Unit,
+    /** Deletes the workspace; its callback gets null when deleted, else why not. */
+    onDelete: ((done: (String?) -> Unit) -> Unit)? = null,
+) {
+    var confirmDelete by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
     // The whole name selected, so typing replaces it.
     var value by remember {
-        mutableStateOf(TextFieldValue(workspace.name, selection = TextRange(0, workspace.name.length)))
+        mutableStateOf(TextFieldValue(initial, selection = TextRange(0, initial.length)))
     }
     var refusal by remember { mutableStateOf<String?>(null) }
     var focused by remember { mutableStateOf(false) }
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
+    // The field asks to be seen as the keyboard opens, not only on focus,
+    // which comes before the veil has made room for the keyboard.
+    val seen = remember { BringIntoViewRequester() }
+    val keyboard = WindowInsets.ime.getBottom(LocalDensity.current)
+    LaunchedEffect(keyboard) { if (keyboard > 0) seen.bringIntoView() }
     val save = {
-        if (value.text.trim() == workspace.name) {
-            onDone()
-        } else {
-            refusal = Workspaces.rename(workspace.id, value.text)
-            if (refusal == null) onDone()
-        }
+        refusal = submit(value.text)
+        if (refusal == null) onDone()
     }
-    Column {
+    Column(Modifier.bringIntoViewRequester(seen)) {
         BasicTextField(
             value = value,
             onValueChange = {
@@ -550,14 +735,114 @@ private fun RenameField(workspace: Workspaces.Workspace, palette: PortalPalette,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { save() }),
         )
-        Text(
-            text = refusal ?: "Enter saves",
-            modifier = Modifier.padding(start = 2.dp, top = 3.dp),
-            fontSize = 11.sp,
-            color = if (refusal != null) palette.accent else palette.textMuted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Row(Modifier.padding(start = 2.dp, top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = refusal ?: note,
+                modifier = Modifier.weight(1f),
+                fontSize = 11.sp,
+                color = if (refusal != null) palette.accent else palette.textMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (onDelete != null) {
+                // Two taps: a workspace's files go with it.
+                Text(
+                    text = when {
+                        deleting -> "Deleting…"
+                        confirmDelete -> "Tap to delete"
+                        else -> "Delete"
+                    },
+                    modifier = Modifier
+                        .padding(start = 6.dp)
+                        .clickable(enabled = !deleting, role = Role.Button) {
+                            if (!confirmDelete) {
+                                confirmDelete = true
+                            } else {
+                                deleting = true
+                                onDelete { reason ->
+                                    deleting = false
+                                    confirmDelete = false
+                                    if (reason != null) refusal = reason else onDone()
+                                }
+                            }
+                        },
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.accent,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Under the installer of a workspace that isn't set up yet: give it up and
+ * go back to one that works. It takes two taps, since its files are deleted.
+ * Shown only while the install hasn't started or has stopped on a failure.
+ */
+@Composable
+internal fun WorkspaceSetupExit(palette: PortalPalette, enabled: Boolean, modifier: Modifier = Modifier) {
+    val state by Workspaces.state
+    val context = LocalContext.current
+    // The registry is final once the native side has chosen this workspace.
+    LaunchedEffect(Unit) { Workspaces.refresh() }
+    val back = state.setupReturn
+    val name = state.name(state.active)
+    var confirming by remember { mutableStateOf(false) }
+    var leaving by remember { mutableStateOf(false) }
+    var refusal by remember { mutableStateOf<String?>(null) }
+    AnimatedVisibility(
+        visible = back != null && name != null && (enabled || leaving),
+        modifier = modifier,
+        enter = fadeIn(tween(420, delayMillis = 300, easing = PortalEmphasizedDecelerate)),
+        exit = fadeOut(tween(200, easing = PortalEmphasizedAccelerate)),
+    ) {
+        val backName = back?.name ?: return@AnimatedVisibility
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = when {
+                    leaving -> "Deleting “$name” and going back to $backName…"
+                    confirming -> "Delete “$name” and go back to $backName?"
+                    else -> "This is the new workspace “$name”: a separate Debian of its own."
+                },
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.textMuted,
+            )
+            if (!leaving) {
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (confirming) {
+                        PanelButton(text = "Keep setting up", primary = false, palette = palette) {
+                            confirming = false
+                        }
+                        PanelButton(text = "Delete and go back", primary = true, palette = palette) {
+                            leaving = true
+                            refusal = null
+                            Workspaces.abandonSetup(context) {
+                                refusal = it
+                                leaving = false
+                                confirming = false
+                            }
+                        }
+                    } else {
+                        PanelButton(text = "Back to $backName", primary = false, palette = palette) {
+                            confirming = true
+                        }
+                    }
+                }
+            }
+            refusal?.let {
+                Text(
+                    text = it,
+                    modifier = Modifier.padding(top = 8.dp),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.accent,
+                )
+            }
+        }
     }
 }
 
@@ -574,7 +859,9 @@ private fun OpenAtLaunchRow(state: Workspaces.State, palette: PortalPalette) {
             LaunchChoice("Open the last one used", state.openAtLaunch == null, palette) {
                 Workspaces.setOpenAtLaunch(null)
             }
-            state.workspaces.forEach { workspace ->
+            // A workspace still being set up isn't offered: Portal would
+            // start into its installer every time.
+            state.workspaces.filter { !it.needsSetup || state.openAtLaunch == it.id }.forEach { workspace ->
                 LaunchChoice(workspace.name, state.openAtLaunch == workspace.id, palette) {
                     Workspaces.setOpenAtLaunch(workspace.id)
                 }

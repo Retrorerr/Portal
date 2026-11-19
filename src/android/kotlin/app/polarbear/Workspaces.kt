@@ -5,13 +5,22 @@ package app.polarbear
 // mirrors its JSON for Compose and keeps each workspace's last frame, which
 // the Workspaces card shows so every workspace looks like itself before it
 // is opened.
+//
+// Each workspace is a separate Debian install with its own home, apps and
+// settings. A new one, or one whose install never finished, opens through a
+// restart of Portal into the ordinary first-run installer, which runs in
+// that workspace's empty folder.
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.util.Log
 import android.view.PixelCopy
 import android.view.SurfaceView
@@ -32,7 +41,13 @@ object Workspaces {
     /** How long "Opening …" outlasts the lift, so it leaves with the veil. */
     private const val OPENING_CLEAR_DELAY_MS = 700L
 
-    data class Workspace(val id: String, val name: String, val lastUsedUnix: Long)
+    data class Workspace(
+        val id: String,
+        val name: String,
+        val lastUsedUnix: Long,
+        /** Its Debian install hasn't finished; opening it resumes the installer. */
+        val needsSetup: Boolean = false,
+    )
 
     data class State(
         val active: String = "",
@@ -41,6 +56,8 @@ object Workspaces {
         /** The workspace being opened, until its desktop starts. */
         val switching: String? = null,
         val error: String? = null,
+        /** While the running workspace is being set up: where giving up goes back to. */
+        val setupReturn: Workspace? = null,
     ) {
         fun name(id: String?) = workspaces.firstOrNull { it.id == id }?.name
     }
@@ -75,10 +92,18 @@ object Workspaces {
             openAtLaunch = root.optString("openAtLaunch").takeIf { !root.isNull("openAtLaunch") && it.isNotEmpty() },
             workspaces = (0 until (list?.length() ?: 0)).map { index ->
                 val item = list!!.getJSONObject(index)
-                Workspace(item.getString("id"), item.getString("name"), item.optLong("lastUsed"))
+                Workspace(
+                    item.getString("id"),
+                    item.getString("name"),
+                    item.optLong("lastUsed"),
+                    item.optBoolean("needsSetup"),
+                )
             },
             switching = root.optString("switching").takeIf { !root.isNull("switching") && it.isNotEmpty() },
             error = root.optString("error").takeIf { !root.isNull("error") && it.isNotEmpty() },
+            setupReturn = root.optJSONObject("setupReturn")?.let {
+                Workspace(it.getString("id"), it.getString("name"), 0)
+            },
         )
     } catch (e: Exception) {
         Log.e(TAG, "unreadable workspace state", e)
@@ -130,6 +155,114 @@ object Workspaces {
                 state.value = state.value.copy(switching = id, error = null)
             }
         }
+    }
+
+    /** A switch started here is waiting for the new desktop. */
+    fun switchPending(): Boolean = returnAfterSwitch.get()
+
+    /**
+     * Make a new workspace, a fresh Debian of its own, and restart Portal
+     * into its installer. Null when the restart has begun, else why it
+     * can't. Main thread.
+     */
+    fun create(context: Context, name: String, surface: SurfaceView?): String? {
+        val refusal = try {
+            ComposeOverlay.nativeCreateWorkspace(name)
+        } catch (_: UnsatisfiedLinkError) {
+            "Portal couldn't make the workspace."
+        }
+        if (refusal == null) restartInto(context, surface)
+        return refusal
+    }
+
+    /**
+     * Open a workspace whose install hasn't finished: Portal restarts into
+     * its installer, which carries on where it stopped. Null when the
+     * restart has begun. Main thread.
+     */
+    fun setUp(context: Context, id: String, surface: SurfaceView?): String? {
+        val refusal = try {
+            ComposeOverlay.nativeSetUpWorkspace(id)
+        } catch (_: UnsatisfiedLinkError) {
+            "Portal couldn't open that workspace."
+        }
+        if (refusal == null) {
+            opening.value = id
+            restartInto(context, surface)
+        }
+        return refusal
+    }
+
+    /**
+     * From the installer: give up the running workspace's unfinished setup,
+     * delete it and restart into the workspace Portal goes back to. [refused]
+     * gets the reason, on the main thread, if it can't.
+     */
+    fun abandonSetup(context: Context, refused: (String) -> Unit) {
+        val activity = context.findActivity() ?: return refused("Portal couldn't restart.")
+        io.execute {
+            val refusal = try {
+                ComposeOverlay.nativeAbandonWorkspaceSetup()
+            } catch (_: UnsatisfiedLinkError) {
+                "Portal couldn't remove that workspace."
+            }
+            main.post { if (refusal == null) relaunch(activity) else refused(refusal) }
+        }
+    }
+
+    /**
+     * Delete a workspace that isn't running, with its files and preview.
+     * [done] gets null when deleted, else why not, on the main thread.
+     */
+    fun delete(id: String, done: (String?) -> Unit) {
+        val dir = previewDir
+        io.execute {
+            val refusal = try {
+                ComposeOverlay.nativeDeleteWorkspace(id)
+            } catch (_: UnsatisfiedLinkError) {
+                "Portal couldn't delete that workspace."
+            }
+            if (refusal == null) dir?.let { File(it, "$id.jpg").delete() }
+            main.post {
+                if (refusal == null) previews.remove(id)
+                done(refusal)
+            }
+        }
+    }
+
+    /** Save this desktop's frame, stop Plasma cleanly, then restart Portal. */
+    private fun restartInto(context: Context, surface: SurfaceView?) {
+        val activity = context.findActivity()
+        capture(state.value.active, surface) {
+            Thread({
+                try {
+                    ComposeOverlay.nativeStopForWorkspaceRestart()
+                } catch (_: UnsatisfiedLinkError) {
+                    Log.e(TAG, "nativeStopForWorkspaceRestart unavailable")
+                }
+                main.post { activity?.let(::relaunch) ?: Process.killProcess(Process.myPid()) }
+            }, "portal-workspace-restart").start()
+        }
+    }
+
+    /**
+     * A fresh process opens the workspace the registry names next. The new
+     * task is queued before this process ends, and Android starts it in a
+     * new one; the guest's processes end with this one.
+     */
+    private fun relaunch(activity: Activity) {
+        Log.i(TAG, "restarting Portal into another workspace")
+        val intent = activity.packageManager.getLaunchIntentForPackage(activity.packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        SessionService.endProcess(activity)
+        if (intent != null) activity.startActivity(intent)
+        Process.killProcess(Process.myPid())
+    }
+
+    private tailrec fun Context.findActivity(): Activity? = when (this) {
+        is Activity -> this
+        is ContextWrapper -> baseContext.findActivity()
+        else -> null
     }
 
     /**

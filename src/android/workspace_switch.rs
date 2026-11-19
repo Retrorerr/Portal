@@ -87,7 +87,7 @@ pub fn request(id: &str) -> bool {
                 })
                 .and_then(|registry| {
                     registry
-                        .switch_target(app_files(), id)
+                        .switch_target(app_files(), id, &workspaces::system_ready)
                         .map_err(|error| error.to_string())
                 }),
         };
@@ -143,7 +143,12 @@ fn stop_and_switch(id: &str) -> SwitchResult {
         thread::sleep(Duration::from_millis(20));
     }
     let stopped = started.elapsed();
-    match workspaces::switch_to(app_files(), id, workspaces::now_unix()) {
+    match workspaces::switch_to(
+        app_files(),
+        id,
+        workspaces::now_unix(),
+        &workspaces::system_ready,
+    ) {
         Ok(workspace) => {
             crate::android::diagnostics::host_event(
                 "workspace",
@@ -194,9 +199,10 @@ pub fn point_host_libraries_at_rootfs() {
 /// The Workspaces card's state: the registry listing plus the switch in
 /// flight and the last refusal.
 fn state_json() -> String {
+    let listing = workspaces::Registry::load(app_files())
+        .listing_json(app_files(), &workspaces::system_ready);
     let mut listing: serde_json::Value =
-        serde_json::from_str(&workspaces::Registry::load(app_files()).listing_json())
-            .unwrap_or_else(|_| serde_json::json!({ "workspaces": [] }));
+        serde_json::from_str(&listing).unwrap_or_else(|_| serde_json::json!({ "workspaces": [] }));
     if let Ok(state) = STATE.lock() {
         listing["switching"] = serde_json::json!(state.target);
         listing["error"] = serde_json::json!(state.error);
@@ -262,27 +268,11 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeRenameWorkspace(
     let (Some(id), Some(name)) = (read_string(&mut env, &id), read_string(&mut env, &name)) else {
         return std::ptr::null_mut();
     };
-    let refusal = match workspaces::edit(app_files(), |registry| registry.rename(&id, &name)) {
-        Ok(_) => None,
-        Err(error) => Some(match error.downcast_ref::<workspaces::WorkspaceError>() {
-            Some(error) => error.to_string(),
-            None => {
-                log::error!("Could not rename workspace {id}: {error:#}");
-                "Portal couldn't save the name.".to_owned()
-            }
-        }),
-    };
+    let refusal = workspaces::edit(app_files(), |registry| registry.rename(&id, &name))
+        .err()
+        .map(|error| refusal(&error, "Portal couldn't save the name."));
     publish();
-    match refusal {
-        None => std::ptr::null_mut(),
-        Some(reason) => env
-            .new_string(reason)
-            .map(|value| value.into_raw())
-            .unwrap_or_else(|_| {
-                let _ = env.exception_clear();
-                std::ptr::null_mut()
-            }),
-    }
+    string_result(&mut env, refusal)
 }
 
 /// JNI: choose the workspace Portal opens at launch; an empty id means the
@@ -303,4 +293,248 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeSetOpenAtLaunch(
     }
     publish();
     u8::from(saved.is_ok())
+}
+
+/// Holds the guest for a restart into another workspace: from here no
+/// session, update or app install starts in this process, which ends soon.
+fn reserve_for_restart(target: &str) -> Result<(), String> {
+    let Ok(mut state) = STATE.lock() else {
+        return Err("Portal couldn't start the switch.".into());
+    };
+    if state.target.is_some() {
+        return Err("Wait for the switch to finish first.".into());
+    }
+    if let Some(reason) = blocker() {
+        return Err(reason.into());
+    }
+    state.target = Some(target.to_owned());
+    state.error = None;
+    Ok(())
+}
+
+/// A restart that couldn't be reserved: only the reason goes on the card,
+/// since whatever holds the guest is someone else's.
+fn refuse(reason: String) -> String {
+    if let Ok(mut state) = STATE.lock() {
+        state.error = Some(reason.clone());
+    }
+    publish();
+    reason
+}
+
+/// Gives the guest back after a reserved restart was refused, with the
+/// reason on the card.
+fn release_restart(reason: String) -> String {
+    if let Ok(mut state) = STATE.lock() {
+        state.target = None;
+        state.error = Some(reason.clone());
+    }
+    publish();
+    reason
+}
+
+/// The words for a failed registry change.
+fn refusal(error: &anyhow::Error, fallback: &str) -> String {
+    match error.downcast_ref::<workspaces::WorkspaceError>() {
+        Some(error) => error.to_string(),
+        None => {
+            log::error!("{fallback} ({error:#})");
+            fallback.to_owned()
+        }
+    }
+}
+
+fn string_result(env: &mut JNIEnv, refusal: Option<String>) -> jstring {
+    match refusal {
+        None => std::ptr::null_mut(),
+        Some(reason) => env
+            .new_string(reason)
+            .map(|value| value.into_raw())
+            .unwrap_or_else(|_| {
+                let _ = env.exception_clear();
+                std::ptr::null_mut()
+            }),
+    }
+}
+
+/// Make a new workspace: an empty folder the next launch opens, where the
+/// first-run installer sets up a fresh Debian of its own.
+fn create(name: &str) -> Option<String> {
+    if let Err(reason) = reserve_for_restart("new") {
+        return Some(reason);
+    }
+    match workspaces::create(app_files(), name, workspaces::now_unix()) {
+        Ok(workspace) => {
+            if let Ok(mut state) = STATE.lock() {
+                state.target = Some(workspace.id.clone());
+            }
+            crate::android::diagnostics::host_event(
+                "workspace",
+                &format!("create id={}", workspace.id),
+            );
+            publish();
+            None
+        }
+        Err(error) => {
+            // The name field shows why, so the card's error line stays clear.
+            let reason = refusal(&error, "Portal couldn't make the workspace.");
+            if let Ok(mut state) = STATE.lock() {
+                state.target = None;
+            }
+            publish();
+            Some(reason)
+        }
+    }
+}
+
+/// Open a workspace whose install hasn't finished, through a restart into
+/// its installer.
+fn set_up(id: &str) -> Option<String> {
+    if let Err(reason) = reserve_for_restart(id) {
+        return Some(refuse(reason));
+    }
+    match workspaces::request_setup(
+        app_files(),
+        id,
+        workspaces::now_unix(),
+        &workspaces::system_ready,
+    ) {
+        Ok(workspace) => {
+            crate::android::diagnostics::host_event(
+                "workspace",
+                &format!("setup-resume id={}", workspace.id),
+            );
+            publish();
+            None
+        }
+        Err(error) => Some(release_restart(refusal(
+            &error,
+            "Portal couldn't open that workspace.",
+        ))),
+    }
+}
+
+/// From the installer: give up the running workspace's unfinished setup,
+/// delete its files and go back to a workspace that is set up. Blocking:
+/// the delete can take a while.
+fn abandon_setup() -> Option<String> {
+    if !crate::android::proot::setup::installation_idle_or_failed() {
+        return Some("Wait for the install to stop first.".into());
+    }
+    if let Err(reason) = reserve_for_restart("back") {
+        return Some(refuse(reason));
+    }
+    match workspaces::abandon_setup(app_files(), &workspaces::system_ready) {
+        Ok(back) => {
+            crate::android::diagnostics::host_event(
+                "workspace",
+                &format!("setup-abandoned back={}", back.id),
+            );
+            None
+        }
+        Err(error) => Some(release_restart(refusal(
+            &error,
+            "Portal couldn't remove that workspace.",
+        ))),
+    }
+}
+
+/// Stop the running session cleanly before Portal restarts, so Plasma and
+/// its apps save their settings. Blocking, bounded like a switch's stop.
+fn stop_for_restart() {
+    if !crate::android::proot::launch::is_running() {
+        return;
+    }
+    let started = Instant::now();
+    let app = crate::android::utils::application_context::get_application_context().android_app;
+    compose_overlay::notify_desktop_suspended(&app);
+    crate::android::proot::launch::stop();
+    while crate::android::proot::launch::is_running() {
+        if started.elapsed() > STOP_BUDGET {
+            log::warn!("Plasma didn't stop before the restart; it ends with the process");
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    crate::android::diagnostics::host_event(
+        "workspace",
+        &format!("restart-stop stop_ms={}", started.elapsed().as_millis()),
+    );
+}
+
+/// JNI: make a workspace. Null when Portal should now restart into it,
+/// else why it can't.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeCreateWorkspace(
+    mut env: JNIEnv,
+    _class: JObject,
+    name: JString,
+) -> jstring {
+    let refusal = match read_string(&mut env, &name) {
+        Some(name) => create(&name),
+        None => Some("Portal couldn't read the name.".into()),
+    };
+    string_result(&mut env, refusal)
+}
+
+/// JNI: open a workspace that isn't set up. Null when Portal should now
+/// restart into its installer, else why it can't.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeSetUpWorkspace(
+    mut env: JNIEnv,
+    _class: JObject,
+    id: JString,
+) -> jstring {
+    let refusal = match read_string(&mut env, &id) {
+        Some(id) => set_up(&id),
+        None => Some("Portal couldn't open that workspace.".into()),
+    };
+    string_result(&mut env, refusal)
+}
+
+/// JNI, off the main thread: give up the running workspace's setup. Null
+/// when Portal should now restart into the workspace it goes back to.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeAbandonWorkspaceSetup(
+    mut env: JNIEnv,
+    _class: JObject,
+) -> jstring {
+    let refusal = abandon_setup();
+    string_result(&mut env, refusal)
+}
+
+/// JNI, off the main thread: delete a workspace that isn't running, files
+/// and all. Null when deleted, else why not.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeDeleteWorkspace(
+    mut env: JNIEnv,
+    _class: JObject,
+    id: JString,
+) -> jstring {
+    let refusal = match read_string(&mut env, &id) {
+        // A switch or restart in flight owns the registry's next step.
+        Some(_) if in_progress() => Some("Wait for the switch to finish first.".to_owned()),
+        Some(id) => match workspaces::delete(app_files(), &id) {
+            Ok(removed) => {
+                crate::android::diagnostics::host_event(
+                    "workspace",
+                    &format!("deleted id={}", removed.id),
+                );
+                None
+            }
+            Err(error) => Some(refusal(&error, "Portal couldn't delete that workspace.")),
+        },
+        None => Some("Portal couldn't delete that workspace.".into()),
+    };
+    publish();
+    string_result(&mut env, refusal)
+}
+
+/// JNI, off the main thread: stop the session before Portal restarts.
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeStopForWorkspaceRestart(
+    _env: JNIEnv,
+    _class: JObject,
+) {
+    stop_for_restart();
 }

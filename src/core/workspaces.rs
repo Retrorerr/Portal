@@ -16,6 +16,13 @@
 //! The registry is written only once something differs from that implicit
 //! single-workspace state, so an install that never makes a second
 //! workspace never has one.
+//!
+//! A new workspace starts as an empty directory: a fresh Debian with its own
+//! home, apps and settings, shared with no other workspace. Portal restarts
+//! into it once (`open_next`) and the ordinary first-run installer sets it
+//! up there. Until that install has committed the workspace needs setup:
+//! opening it resumes the installer, and the installer can give it up and
+//! go back to a workspace that works.
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -57,6 +64,10 @@ pub struct Registry {
     /// The workspace Portal opens at launch; `None` means the last one used.
     #[serde(default)]
     pub open_at_launch: Option<String>,
+    /// Opened by the next launch only, ahead of `open_at_launch`: the
+    /// workspace Portal restarts into. Older Portals ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_next: Option<String>,
     pub workspaces: Vec<Workspace>,
 }
 
@@ -71,6 +82,13 @@ pub enum WorkspaceError {
     LastCannotBeRemoved,
     AlreadyActive,
     FilesMissing,
+    /// Its Debian install hasn't committed: opening it resumes the installer.
+    NeedsSetup,
+    /// Only a workspace still being set up can be given up from its installer.
+    AlreadySetUp,
+    /// Main is the app files directory itself; its files are never deleted.
+    MainIsPermanent,
+    FolderUnavailable,
 }
 
 impl std::fmt::Display for WorkspaceError {
@@ -89,6 +107,12 @@ impl std::fmt::Display for WorkspaceError {
             Self::LastCannotBeRemoved => write!(f, "Portal needs at least one workspace."),
             Self::AlreadyActive => write!(f, "That workspace is already open."),
             Self::FilesMissing => write!(f, "That workspace's files are missing."),
+            Self::NeedsSetup => write!(f, "That workspace isn't set up yet."),
+            Self::AlreadySetUp => write!(f, "That workspace is already set up."),
+            Self::MainIsPermanent => write!(f, "Main can't be deleted."),
+            Self::FolderUnavailable => {
+                write!(f, "Portal couldn't make the workspace's folder.")
+            }
         }
     }
 }
@@ -111,6 +135,23 @@ pub fn workspace_rootfs(app_files: &Path, id: &str) -> PathBuf {
 
 pub fn registry_path(app_files: &Path) -> PathBuf {
     app_files.join(WORKSPACES_DIR).join(REGISTRY_FILE)
+}
+
+/// Tells whether a rootfs holds a committed install. Production passes
+/// [`system_ready`]; tests pass their own.
+pub type SystemReady<'a> = &'a dyn Fn(&Path) -> bool;
+
+/// Whether a workspace's Debian install has committed. Main always counts:
+/// it is the install Portal had before workspaces (legacy markers included),
+/// and its own launch path repairs it rather than offering a fresh install.
+pub fn is_set_up(app_files: &Path, id: &str, system_ready: SystemReady) -> bool {
+    id == MAIN_ID || system_ready(&workspace_rootfs(app_files, id))
+}
+
+/// The production test of a committed install: the runtime's completion
+/// marker over a valid Debian 13 tree.
+pub fn system_ready(rootfs: &Path) -> bool {
+    crate::core::provisioning::RuntimeArtifact::production().is_bootable(rootfs)
 }
 
 /// Trims a name and folds runs of whitespace into one space, then checks it
@@ -168,6 +209,7 @@ impl Registry {
             version: REGISTRY_VERSION,
             active: MAIN_ID.to_owned(),
             open_at_launch: None,
+            open_next: None,
             workspaces: vec![Workspace {
                 id: MAIN_ID.to_owned(),
                 name: MAIN_NAME.to_owned(),
@@ -186,6 +228,15 @@ impl Registry {
             .iter_mut()
             .find(|workspace| workspace.id == id)
             .ok_or_else(|| WorkspaceError::Unknown(id.to_owned()))
+    }
+
+    /// Records that the running workspace was in use until now, as Portal
+    /// restarts out of it. [`Registry::setup_return`] goes back by this.
+    fn mark_left(&mut self, now_unix: u64) {
+        let active = self.active.clone();
+        if let Ok(workspace) = self.get_mut(&active) {
+            workspace.last_used_unix = now_unix;
+        }
     }
 
     pub fn active(&self) -> &Workspace {
@@ -249,6 +300,12 @@ impl Registry {
                 "launch workspace {launch} is not listed"
             );
         }
+        if let Some(next) = &self.open_next {
+            anyhow::ensure!(
+                ids.contains(next.as_str()),
+                "next workspace {next} is not listed"
+            );
+        }
         Ok(())
     }
 
@@ -259,12 +316,12 @@ impl Registry {
         })
     }
 
-    fn unique_id(&self, name: &str) -> String {
+    fn unique_id(&self, name: &str, also_taken: &dyn Fn(&str) -> bool) -> String {
         let base = slug(name);
         let mut id = base.clone();
         let mut n = 2;
         // `main` is reserved for the app files directory itself.
-        while id == MAIN_ID || self.get(&id).is_some() {
+        while id == MAIN_ID || self.get(&id).is_some() || also_taken(&id) {
             id = format!("{base}-{n}");
             n += 1;
         }
@@ -273,12 +330,21 @@ impl Registry {
 
     /// Registers a new workspace. Its files are the caller's to create.
     pub fn add(&mut self, name: &str, now_unix: u64) -> Result<Workspace, WorkspaceError> {
+        self.add_avoiding(name, now_unix, &|_| false)
+    }
+
+    fn add_avoiding(
+        &mut self,
+        name: &str,
+        now_unix: u64,
+        also_taken: &dyn Fn(&str) -> bool,
+    ) -> Result<Workspace, WorkspaceError> {
         let name = normalise_name(name)?;
         if self.name_taken(&name, None) {
             return Err(WorkspaceError::NameTaken);
         }
         let workspace = Workspace {
-            id: self.unique_id(&name),
+            id: self.unique_id(&name, also_taken),
             name,
             created_unix: now_unix,
             last_used_unix: 0,
@@ -313,6 +379,9 @@ impl Registry {
         if self.open_at_launch.as_deref() == Some(id) {
             self.open_at_launch = None;
         }
+        if self.open_next.as_deref() == Some(id) {
+            self.open_next = None;
+        }
         Ok(self.workspaces.remove(index))
     }
 
@@ -322,33 +391,131 @@ impl Registry {
         Ok(())
     }
 
-    /// The workspace a switch to `id` would open, if it can open.
-    pub fn switch_target(&self, app_files: &Path, id: &str) -> Result<Workspace, WorkspaceError> {
+    /// The workspace a switch to `id` would open, if it can open. One whose
+    /// install hasn't committed opens through a restart into its installer
+    /// instead ([`Registry::request_setup`]).
+    pub fn switch_target(
+        &self,
+        app_files: &Path,
+        id: &str,
+        system_ready: SystemReady,
+    ) -> Result<Workspace, WorkspaceError> {
         let target = self
             .get(id)
             .ok_or_else(|| WorkspaceError::Unknown(id.to_owned()))?;
         if self.active == id {
             return Err(WorkspaceError::AlreadyActive);
         }
-        if !workspace_rootfs(app_files, id).is_dir() {
+        if !workspace_dir(app_files, id).is_dir() {
             return Err(WorkspaceError::FilesMissing);
+        }
+        if !is_set_up(app_files, id, system_ready) {
+            return Err(WorkspaceError::NeedsSetup);
         }
         Ok(target.clone())
     }
 
-    /// What the veil's Workspaces card shows, in the order the workspaces
-    /// were made, so no card moves when another one opens.
-    pub fn listing_json(&self) -> String {
+    /// Registers a new, empty workspace, makes its folder and asks the next
+    /// launch to open it. A folder left behind by an earlier workspace is
+    /// never reused, so a new workspace is always a clean system.
+    pub fn create(
+        &mut self,
+        app_files: &Path,
+        name: &str,
+        now_unix: u64,
+    ) -> Result<Workspace, WorkspaceError> {
+        let workspace = self.add_avoiding(name, now_unix, &|id| {
+            fs::symlink_metadata(workspace_dir(app_files, id)).is_ok()
+        })?;
+        if fs::create_dir_all(workspace_dir(app_files, &workspace.id)).is_err() {
+            self.workspaces.retain(|listed| listed.id != workspace.id);
+            return Err(WorkspaceError::FolderUnavailable);
+        }
+        self.mark_left(now_unix);
+        self.open_next = Some(workspace.id.clone());
+        Ok(workspace)
+    }
+
+    /// Asks the next launch to open `id`, whose install hasn't committed, so
+    /// its installer starts or resumes there.
+    pub fn request_setup(
+        &mut self,
+        app_files: &Path,
+        id: &str,
+        now_unix: u64,
+        system_ready: SystemReady,
+    ) -> Result<Workspace, WorkspaceError> {
+        let target = self
+            .get(id)
+            .ok_or_else(|| WorkspaceError::Unknown(id.to_owned()))?
+            .clone();
+        if is_set_up(app_files, id, system_ready) {
+            return Err(WorkspaceError::AlreadySetUp);
+        }
+        // A folder that went missing starts again empty.
+        fs::create_dir_all(workspace_dir(app_files, id))
+            .map_err(|_| WorkspaceError::FolderUnavailable)?;
+        self.mark_left(now_unix);
+        self.open_next = Some(id.to_owned());
+        Ok(target)
+    }
+
+    /// Where the running workspace's installer goes back to if its setup is
+    /// given up: the most recently used workspace that is set up, else Main.
+    /// `None` when the running workspace is set up.
+    pub fn setup_return(&self, app_files: &Path, system_ready: SystemReady) -> Option<&Workspace> {
+        if is_set_up(app_files, &self.active, system_ready) {
+            return None;
+        }
+        self.workspaces
+            .iter()
+            .filter(|workspace| {
+                workspace.id != self.active && is_set_up(app_files, &workspace.id, system_ready)
+            })
+            .max_by_key(|workspace| workspace.last_used_unix)
+            .or_else(|| self.get(MAIN_ID))
+    }
+
+    /// Gives up the running workspace's unfinished setup: Portal goes back
+    /// to [`Registry::setup_return`] and the workspace is unregistered.
+    /// Returns (the one given up, the one to open). Deleting its files is the
+    /// caller's job, after this registry is saved.
+    pub fn abandon_setup(
+        &mut self,
+        app_files: &Path,
+        system_ready: SystemReady,
+    ) -> Result<(Workspace, Workspace), WorkspaceError> {
+        let id = self.active.clone();
+        if id == MAIN_ID {
+            return Err(WorkspaceError::MainIsPermanent);
+        }
+        let back = self
+            .setup_return(app_files, system_ready)
+            .ok_or(WorkspaceError::AlreadySetUp)?
+            .clone();
+        self.active = back.id.clone();
+        self.open_next = Some(back.id.clone());
+        let removed = self.remove(&id)?;
+        Ok((removed, back))
+    }
+
+    /// What the veil's Workspaces card and the installer show, in the order
+    /// the workspaces were made, so no card moves when another one opens.
+    pub fn listing_json(&self, app_files: &Path, system_ready: SystemReady) -> String {
         let workspaces = &self.workspaces;
         serde_json::json!({
             "active": self.active,
             "openAtLaunch": self.open_at_launch,
+            "setupReturn": self.setup_return(app_files, system_ready).map(|workspace| {
+                serde_json::json!({ "id": workspace.id, "name": workspace.name })
+            }),
             "workspaces": workspaces
                 .iter()
                 .map(|workspace| serde_json::json!({
                     "id": workspace.id,
                     "name": workspace.name,
                     "lastUsed": workspace.last_used_unix,
+                    "needsSetup": !is_set_up(app_files, &workspace.id, system_ready),
                 }))
                 .collect::<Vec<_>>(),
         })
@@ -471,9 +638,14 @@ pub fn edit<T>(
 
 /// Records `id` as the running workspace and points this process at it.
 /// The guest must already be stopped.
-pub fn switch_to(app_files: &Path, id: &str, now_unix: u64) -> anyhow::Result<Workspace> {
+pub fn switch_to(
+    app_files: &Path,
+    id: &str,
+    now_unix: u64,
+    system_ready: SystemReady,
+) -> anyhow::Result<Workspace> {
     let (_, target) = edit(app_files, |registry| {
-        let target = registry.switch_target(app_files, id)?;
+        let target = registry.switch_target(app_files, id, system_ready)?;
         // "Used 5 minutes ago" means when it was last on screen.
         let left = registry.active.clone();
         registry.get_mut(&left)?.last_used_unix = now_unix;
@@ -486,21 +658,28 @@ pub fn switch_to(app_files: &Path, id: &str, now_unix: u64) -> anyhow::Result<Wo
 
 /// Picks the workspace to open at launch and points this process at it.
 ///
-/// A launch target other than `main` whose directory has gone (deleted by
-/// hand, or a half-made workspace) is skipped for `main`, which always
-/// exists, so Portal never starts into nothing. The registry is written only
-/// when the active workspace changed.
+/// A one-shot `open_next` wins once and is cleared. A launch target other
+/// than `main` whose directory has gone (deleted by hand, or a half-made
+/// workspace) is skipped for `main`, which always exists, so Portal never
+/// starts into nothing. The registry is written only when something changed.
 pub fn activate(app_files: &Path, now_unix: u64) -> Workspace {
     let mut registry = Registry::load(app_files);
-    let mut target = registry.launch_target().clone();
+    let once = registry.open_next.take();
+    let mut target = once
+        .as_deref()
+        .and_then(|id| registry.get(id))
+        .unwrap_or_else(|| registry.launch_target())
+        .clone();
     if target.id != MAIN_ID && !workspace_dir(app_files, &target.id).is_dir() {
         log::warn!("Workspace {} has no directory; opening Main", target.id);
         if registry.get(MAIN_ID).is_some() {
             target = registry.get(MAIN_ID).cloned().expect("checked above");
         }
     }
-    if registry.active != target.id {
-        let _ = registry.set_active(&target.id, now_unix);
+    if registry.active != target.id || once.is_some() {
+        if registry.active != target.id {
+            let _ = registry.set_active(&target.id, now_unix);
+        }
         if let Err(error) = registry.save(app_files) {
             log::warn!("Could not record the active workspace: {error}");
         }
@@ -508,3 +687,98 @@ pub fn activate(app_files: &Path, now_unix: u64) -> Workspace {
     set_active_dir(workspace_dir(app_files, &target.id));
     target
 }
+
+/// Registers a new workspace with an empty folder and asks the next launch
+/// to open it, where the first-run installer sets it up.
+pub fn create(app_files: &Path, name: &str, now_unix: u64) -> anyhow::Result<Workspace> {
+    let (_, workspace) = edit(app_files, |registry| {
+        registry.create(app_files, name, now_unix)
+    })?;
+    Ok(workspace)
+}
+
+/// Asks the next launch to open `id` so its installer starts or resumes.
+pub fn request_setup(
+    app_files: &Path,
+    id: &str,
+    now_unix: u64,
+    system_ready: SystemReady,
+) -> anyhow::Result<Workspace> {
+    let (_, workspace) = edit(app_files, |registry| {
+        registry.request_setup(app_files, id, now_unix, system_ready)
+    })?;
+    Ok(workspace)
+}
+
+/// Gives up the running workspace's unfinished setup and deletes its files.
+/// Returns the workspace the next launch opens. The registry is saved
+/// before anything is deleted, so an interrupted delete leaves only an
+/// unlisted folder, which no new workspace reuses.
+pub fn abandon_setup(app_files: &Path, system_ready: SystemReady) -> anyhow::Result<Workspace> {
+    let (_, (removed, back)) = edit(app_files, |registry| {
+        registry.abandon_setup(app_files, system_ready)
+    })?;
+    if let Err(error) = delete_files(app_files, &removed.id) {
+        log::warn!(
+            "Workspace {} was given up but its files remain: {error:#}",
+            removed.id
+        );
+    }
+    Ok(back)
+}
+
+/// Deletes a workspace that isn't running, files and all. Main is never
+/// deleted: it is the app files directory itself. The registry is saved
+/// first, so an interrupted delete leaves only an unlisted folder.
+pub fn delete(app_files: &Path, id: &str) -> anyhow::Result<Workspace> {
+    let (_, removed) = edit(app_files, |registry| {
+        if id == MAIN_ID {
+            return Err(WorkspaceError::MainIsPermanent);
+        }
+        registry.remove(id)
+    })?;
+    delete_files(app_files, &removed.id)?;
+    Ok(removed)
+}
+
+/// Deletes one workspace's folder, never Main's (the app files directory
+/// itself). Directories the guest left without write permission are opened
+/// up first, since a rootfs may hold read-only trees.
+pub fn delete_files(app_files: &Path, id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        id != MAIN_ID && is_valid_id(id),
+        "refusing to delete workspace {id:?}"
+    );
+    let dir = workspace_dir(app_files, id);
+    if fs::symlink_metadata(&dir).is_err() || fs::remove_dir_all(&dir).is_ok() {
+        return Ok(());
+    }
+    open_up_directories(&dir);
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_up_directories(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        // symlink_metadata: a link is removed, never followed.
+        let Ok(metadata) = fs::symlink_metadata(&dir) else {
+            continue;
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+        let mode = metadata.permissions().mode();
+        if mode & 0o700 != 0o700 {
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(mode | 0o700));
+        }
+        if let Ok(entries) = fs::read_dir(&dir) {
+            pending.extend(entries.flatten().map(|entry| entry.path()));
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn open_up_directories(_dir: &Path) {}

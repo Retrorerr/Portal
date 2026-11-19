@@ -91,6 +91,16 @@ object ComposeOverlay {
     @JvmStatic external fun nativeRenameWorkspace(id: String, name: String): String?
     /** The workspace to open at launch; empty for the last one used. */
     @JvmStatic external fun nativeSetOpenAtLaunch(id: String): Boolean
+    /** Make a workspace the next launch opens; null on success, else why not. */
+    @JvmStatic external fun nativeCreateWorkspace(name: String): String?
+    /** Have the next launch resume a workspace's install; null on success. */
+    @JvmStatic external fun nativeSetUpWorkspace(id: String): String?
+    /** Off the main thread: give up the running workspace's setup; null on success. */
+    @JvmStatic external fun nativeAbandonWorkspaceSetup(): String?
+    /** Off the main thread: delete a workspace that isn't running; null on success. */
+    @JvmStatic external fun nativeDeleteWorkspace(id: String): String?
+    /** Off the main thread: stop the session before a restart into another workspace. */
+    @JvmStatic external fun nativeStopForWorkspaceRestart()
 
     /** Native workspace switcher bridge; the state lives in Workspaces. */
     @JvmStatic fun updateWorkspacesState(json: String) {
@@ -330,10 +340,16 @@ object ComposeOverlay {
             Log.i(TAG, "native desktop READY latched; Compose overlay remains attached")
         }
         android.os.Handler(android.os.Looper.getMainLooper()).post {
-            if (ready && desktopReadyLatched.get()) {
+            if (ready && desktopReadyLatched.get() && !Workspaces.switchPending()) {
                 FileTransfers.cleanInterruptedImports()
-                // The veil says the desktop is ready once it shows the
-                // desktop, not Plasma's splash; a switch then lifts onto it.
+                // At launch the veil turns ready at once, as it always has:
+                // sampling the desktop here held its reveal back by seconds
+                // and made the intro stutter.
+                desktopSettled = true
+            } else if (ready && desktopReadyLatched.get()) {
+                FileTransfers.cleanInterruptedImports()
+                // A workspace switch stays on "Opening …" until the new
+                // desktop shows past Plasma's splash, then lifts onto it.
                 val panels = try {
                     nativePanelEdges()?.split(',')?.filter { it.isNotEmpty() }?.toSet().orEmpty()
                 } catch (_: UnsatisfiedLinkError) {

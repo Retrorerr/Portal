@@ -5662,6 +5662,17 @@ fn start_installation_worker(registration: SetupRegistration, plan: InstallPlan)
     }
 }
 
+/// Whether the installer may be left: it hasn't started, or it stopped on a
+/// failure. A running install owns the workspace's files.
+pub fn installation_idle_or_failed() -> bool {
+    setup_coordinator().lock().is_ok_and(|coordinator| {
+        matches!(
+            coordinator.state,
+            InstallOperationState::Idle | InstallOperationState::Failed
+        )
+    })
+}
+
 /// Persist the exact proposal before process state changes or guest work
 /// begins. Duplicate calls attach only when they match the already accepted
 /// native plan.

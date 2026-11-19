@@ -158,7 +158,9 @@ internal fun ReturnAppsPanel(
                         else FilesCapsule(palette) { if (ComposeOverlay.activePanel == null) ComposeOverlay.activePanel = "files" }
                     }
                 }
-                SessionActionSlot(visible = (panel == null || panel == "workspaces") && workspaces.workspaces.size > 1) {
+                // Always offered once the list is read: the card is where a
+                // second workspace is made.
+                SessionActionSlot(visible = (panel == null || panel == "workspaces") && workspaces.workspaces.isNotEmpty()) {
                     WorkspacesSurface(palette)
                 }
                 // Opened only from the pill's menu, so it never competes with the pills.

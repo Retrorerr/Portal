@@ -2,8 +2,8 @@
 //! the veil's Workspaces card relies on.
 
 use localdesktop::core::workspaces::{
-    activate, active_dir, edit, normalise_name, registry_path, workspace_dir, workspace_rootfs,
-    Registry, WorkspaceError, MAIN_ID, MAX_NAME_CHARS,
+    abandon_setup, activate, active_dir, delete, delete_files, edit, normalise_name, registry_path,
+    workspace_dir, workspace_rootfs, Registry, WorkspaceError, MAIN_ID, MAX_NAME_CHARS,
 };
 use std::{fs, path::Path};
 
@@ -144,6 +144,18 @@ fn the_registry_round_trips_and_activation_follows_it() {
     assert_eq!(activate(temp.path(), 40).id, "uni");
     assert_eq!(active_dir(temp.path()), temp.path().join("workspaces/uni"));
     assert_eq!(Registry::read(temp.path()).unwrap().active, "uni");
+
+    // A new workspace opens once, ahead of the one chosen for launch; the
+    // launch after that goes back to the chosen one.
+    let (_, fresh) = edit(temp.path(), |registry| {
+        registry.create(temp.path(), "Fresh", 45)
+    })
+    .unwrap();
+    assert_eq!(activate(temp.path(), 50).id, fresh.id);
+    let saved = Registry::read(temp.path()).unwrap();
+    assert_eq!(saved.active, fresh.id);
+    assert_eq!(saved.open_next, None);
+    assert_eq!(activate(temp.path(), 60).id, "uni");
 }
 
 #[test]
@@ -185,24 +197,235 @@ fn a_switch_needs_another_workspace_whose_system_is_there() {
     let mut registry = Registry::implicit();
     let uni = registry.add("Uni", 1).unwrap();
     assert_eq!(
-        registry.switch_target(temp.path(), MAIN_ID),
+        registry.switch_target(temp.path(), MAIN_ID, &ready),
         Err(WorkspaceError::AlreadyActive)
     );
     assert_eq!(
-        registry.switch_target(temp.path(), "nope"),
+        registry.switch_target(temp.path(), "nope", &ready),
         Err(WorkspaceError::Unknown("nope".into()))
     );
-    // A workspace directory without its system is half made.
-    fs::create_dir_all(workspace_dir(temp.path(), &uni.id)).unwrap();
     assert_eq!(
-        registry.switch_target(temp.path(), &uni.id),
+        registry.switch_target(temp.path(), &uni.id, &ready),
         Err(WorkspaceError::FilesMissing)
     );
+    // A workspace whose install hasn't committed opens through its installer.
     fs::create_dir_all(workspace_rootfs(temp.path(), &uni.id)).unwrap();
     assert_eq!(
-        registry.switch_target(temp.path(), &uni.id).unwrap().name,
+        registry.switch_target(temp.path(), &uni.id, &ready),
+        Err(WorkspaceError::NeedsSetup)
+    );
+    mark_ready(temp.path(), &uni.id);
+    assert_eq!(
+        registry
+            .switch_target(temp.path(), &uni.id, &ready)
+            .unwrap()
+            .name,
         "Uni"
     );
+}
+
+/// Stands in for the runtime's completion marker.
+fn ready(rootfs: &Path) -> bool {
+    rootfs.join("ready").is_file()
+}
+
+fn mark_ready(files: &Path, id: &str) {
+    let rootfs = workspace_rootfs(files, id);
+    fs::create_dir_all(&rootfs).unwrap();
+    fs::write(rootfs.join("ready"), "").unwrap();
+}
+
+#[test]
+fn a_new_workspace_is_an_empty_folder_the_next_launch_opens() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut registry = Registry::implicit();
+    registry.set_open_at_launch(Some(MAIN_ID)).unwrap();
+    // A folder left by a workspace given up earlier is never reused.
+    fs::create_dir_all(workspace_dir(temp.path(), "uni").join("runtime-B")).unwrap();
+    let uni = registry.create(temp.path(), " Uni ", 7).unwrap();
+    assert_eq!((uni.id.as_str(), uni.name.as_str()), ("uni-2", "Uni"));
+    assert_eq!(uni.created_unix, 7);
+    let dir = workspace_dir(temp.path(), &uni.id);
+    assert!(dir.is_dir());
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    // The restart opens it once, ahead of the workspace chosen for launch.
+    assert_eq!(registry.open_next.as_deref(), Some("uni-2"));
+    assert_eq!(registry.open_at_launch.as_deref(), Some(MAIN_ID));
+    registry.validate().unwrap();
+    assert_eq!(
+        registry.create(temp.path(), "UNI", 8),
+        Err(WorkspaceError::NameTaken)
+    );
+    assert_eq!(
+        registry.create(temp.path(), "  ", 8),
+        Err(WorkspaceError::EmptyName)
+    );
+    assert_eq!(registry.workspaces.len(), 2);
+
+    let listing: serde_json::Value =
+        serde_json::from_str(&registry.listing_json(temp.path(), &ready)).unwrap();
+    assert_eq!(listing["workspaces"][0]["needsSetup"], false);
+    assert_eq!(listing["workspaces"][1]["needsSetup"], true);
+    // Main is running and set up, so its installer has nowhere to go back to.
+    assert!(listing["setupReturn"].is_null());
+}
+
+#[test]
+fn an_unfinished_workspace_reopens_its_installer() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut registry = Registry::implicit();
+    let uni = registry.add("Uni", 1).unwrap();
+    // Its folder went missing: it starts again empty.
+    registry
+        .request_setup(temp.path(), &uni.id, 2, &ready)
+        .unwrap();
+    assert!(workspace_dir(temp.path(), &uni.id).is_dir());
+    assert_eq!(registry.open_next.as_deref(), Some("uni"));
+    mark_ready(temp.path(), &uni.id);
+    assert_eq!(
+        registry.request_setup(temp.path(), &uni.id, 2, &ready),
+        Err(WorkspaceError::AlreadySetUp)
+    );
+    assert_eq!(
+        registry.request_setup(temp.path(), MAIN_ID, 2, &ready),
+        Err(WorkspaceError::AlreadySetUp)
+    );
+}
+
+#[test]
+fn giving_up_goes_back_to_the_workspace_it_was_started_from() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut registry = Registry::implicit();
+    let games = registry.add("Games", 1).unwrap();
+    mark_ready(temp.path(), &games.id);
+    registry.set_active(&games.id, 10).unwrap();
+    registry.set_active(MAIN_ID, 20).unwrap();
+    // Main is left at 30 for the new workspace, after Games was last used.
+    let uni = registry.create(temp.path(), "Uni", 30).unwrap();
+    assert_eq!(registry.get(MAIN_ID).unwrap().last_used_unix, 30);
+    registry.set_active(&uni.id, 31).unwrap();
+    assert_eq!(
+        registry.setup_return(temp.path(), &ready).unwrap().id,
+        MAIN_ID
+    );
+    // Reopening the unfinished one from Games marks Games as left.
+    registry.set_active(&games.id, 40).unwrap();
+    registry
+        .request_setup(temp.path(), &uni.id, 50, &ready)
+        .unwrap();
+    registry.set_active(&uni.id, 51).unwrap();
+    assert_eq!(
+        registry.setup_return(temp.path(), &ready).unwrap().id,
+        games.id
+    );
+}
+
+#[test]
+fn giving_up_a_setup_goes_back_to_the_last_workspace_that_works() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut registry = Registry::implicit();
+    let games = registry.add("Games", 1).unwrap();
+    mark_ready(temp.path(), &games.id);
+    let broken = registry.add("Broken", 1).unwrap();
+    registry.set_active(&games.id, 50).unwrap();
+    registry.set_active(&broken.id, 60).unwrap();
+    let uni = registry.create(temp.path(), "Uni", 70).unwrap();
+    registry.set_active(&uni.id, 80).unwrap();
+    registry.set_open_at_launch(Some(&uni.id)).unwrap();
+
+    // Broken was used later but isn't set up; Games is the last that works.
+    assert_eq!(
+        registry.setup_return(temp.path(), &ready).unwrap().id,
+        games.id
+    );
+    let (removed, back) = registry.abandon_setup(temp.path(), &ready).unwrap();
+    assert_eq!((removed.id.as_str(), back.id.as_str()), ("uni", "games"));
+    assert_eq!(registry.active, "games");
+    assert_eq!(registry.open_next.as_deref(), Some("games"));
+    assert_eq!(registry.open_at_launch, None);
+    assert!(registry.get("uni").is_none());
+    registry.validate().unwrap();
+    // A set-up workspace has no installer to leave.
+    assert_eq!(
+        registry.abandon_setup(temp.path(), &ready),
+        Err(WorkspaceError::AlreadySetUp)
+    );
+    registry.set_active(MAIN_ID, 90).unwrap();
+    assert_eq!(
+        registry.abandon_setup(temp.path(), &ready),
+        Err(WorkspaceError::MainIsPermanent)
+    );
+}
+
+#[test]
+fn giving_up_saves_the_registry_then_deletes_only_that_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_, uni) = edit(temp.path(), |registry| {
+        let uni = registry.create(temp.path(), "Uni", 1)?;
+        registry.set_active(&uni.id, 2)?;
+        Ok(uni)
+    })
+    .unwrap();
+    let rootfs = workspace_rootfs(temp.path(), &uni.id);
+    fs::create_dir_all(rootfs.join("usr/share/locked/deeper")).unwrap();
+    fs::write(rootfs.join("usr/share/locked/deeper/file"), "x").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            rootfs.join("usr/share/locked"),
+            fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+    }
+    fs::write(temp.path().join("renderer-mode"), "anland").unwrap();
+
+    let back = abandon_setup(temp.path(), &ready).unwrap();
+    assert_eq!(back.id, MAIN_ID);
+    assert!(!workspace_dir(temp.path(), &uni.id).exists());
+    // Main's files, which are Portal's own, are untouched.
+    assert!(temp.path().join("renderer-mode").is_file());
+    let saved = Registry::read(temp.path()).unwrap();
+    assert_eq!(saved.active, MAIN_ID);
+    assert_eq!(saved.open_next.as_deref(), Some(MAIN_ID));
+    assert!(saved.get(&uni.id).is_none());
+
+    // A finished workspace that isn't running can be deleted; Main and the
+    // running one can't.
+    let (_, games) = edit(temp.path(), |registry| {
+        registry.create(temp.path(), "Games", 3)
+    })
+    .unwrap();
+    mark_ready(temp.path(), &games.id);
+    assert_eq!(delete(temp.path(), &games.id).unwrap().id, games.id);
+    assert!(!workspace_dir(temp.path(), &games.id).exists());
+    assert!(Registry::read(temp.path())
+        .unwrap()
+        .get(&games.id)
+        .is_none());
+    assert_eq!(
+        delete(temp.path(), MAIN_ID)
+            .unwrap_err()
+            .downcast_ref::<WorkspaceError>(),
+        Some(&WorkspaceError::MainIsPermanent)
+    );
+    let (_, uni) = edit(temp.path(), |registry| {
+        let uni = registry.create(temp.path(), "Uni", 4)?;
+        registry.set_active(&uni.id, 5)?;
+        Ok(uni)
+    })
+    .unwrap();
+    assert_eq!(
+        delete(temp.path(), &uni.id)
+            .unwrap_err()
+            .downcast_ref::<WorkspaceError>(),
+        Some(&WorkspaceError::ActiveCannotBeRemoved)
+    );
+    assert!(workspace_dir(temp.path(), &uni.id).is_dir());
+
+    assert!(delete_files(temp.path(), MAIN_ID).is_err());
+    assert!(delete_files(temp.path(), "..").is_err());
+    assert!(temp.path().join("renderer-mode").is_file());
 }
 
 #[test]
@@ -214,7 +437,9 @@ fn the_card_lists_workspaces_in_the_order_they_were_made() {
     registry.set_active(&recent.id, 20).unwrap();
     registry.set_active(MAIN_ID, 30).unwrap();
     registry.set_open_at_launch(Some(&old.id)).unwrap();
-    let listing: serde_json::Value = serde_json::from_str(&registry.listing_json()).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let listing: serde_json::Value =
+        serde_json::from_str(&registry.listing_json(temp.path(), &ready)).unwrap();
     let names: Vec<&str> = listing["workspaces"]
         .as_array()
         .unwrap()

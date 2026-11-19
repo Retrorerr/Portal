@@ -28,6 +28,7 @@
 
 use std::fs;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -114,6 +115,8 @@ fn edit_file(path: &Path, edit: impl FnOnce(&str) -> Option<String>) -> io::Resu
 /// `/etc/gshadow` (mode 000, which only root could read), restoring its mode.
 fn read_guest_private(path: &Path) -> io::Result<String> {
     match fs::read_to_string(path) {
+        // Unix modes only: a Windows host running the tests has none to lift.
+        #[cfg(unix)]
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
             let original = fs::metadata(path)?.permissions();
             let mut readable = original.clone();
