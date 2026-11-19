@@ -26,7 +26,6 @@ import app.polarbear.gaming.EditBar
 import app.polarbear.gaming.GamePanel
 import app.polarbear.gaming.LayoutStore
 import java.util.concurrent.Executors
-import kotlin.math.min
 
 /**
  * On-screen controller and the quick game panel.
@@ -291,8 +290,8 @@ object TouchControls : ControlHost {
         for (control in Control.values()) {
             if (control in wanted && control !in views) {
                 val view = ControlView(host, control, this)
-                // Above the native surface (child 0), below the handle and Portal's own screens.
-                overlay.addView(view, min(1, overlay.childCount), FrameLayout.LayoutParams(1, 1, Gravity.TOP or Gravity.START))
+                // Above the desktop (and its touchpad), below the handle and Portal's own screens.
+                overlay.addView(view, host.desktopLayerTop(), FrameLayout.LayoutParams(1, 1, Gravity.TOP or Gravity.START))
                 views[control] = view
                 arriving += view
                 changed = true
@@ -667,7 +666,7 @@ object TouchControls : ControlHost {
             onEditController = { later { startEditing() } },
             onToggleController = { later { toggleController() } },
         )
-        val index = views.values.maxOfOrNull { overlay.indexOfChild(it) }?.plus(1) ?: min(1, overlay.childCount)
+        val index = views.values.maxOfOrNull { overlay.indexOfChild(it) }?.plus(1) ?: host.desktopLayerTop()
         handle = view
         overlay.addView(view, index.coerceIn(0, overlay.childCount), FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.TOP or Gravity.START))

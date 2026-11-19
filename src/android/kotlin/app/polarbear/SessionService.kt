@@ -170,7 +170,7 @@ class SessionService : Service() {
                     PortalDisplays.displayOptions(Display.DEFAULT_DISPLAY),
                 )
                 builder.addAction(Notification.Action.Builder(null, "Control desktop", control(true)).build())
-                builder.addAction(Notification.Action.Builder(null, "Return to tablet", back).build())
+                builder.addAction(Notification.Action.Builder(null, "Return to ${deviceNoun(context)}", back).build())
                 contentText = "On ${projected.portalDisplays.displayName(display)}"
                 content = control(false)
             }

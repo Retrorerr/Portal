@@ -22,9 +22,20 @@ import androidx.compose.runtime.setValue
 
 internal enum class TabletEdge { Left, Right }
 
-/** Moves the running Portal activity between Android displays. */
+/**
+ * Moves the desktop between Android displays: the running Portal activity
+ * where Android allows it, otherwise a [DesktopPresentation] on the monitor
+ * with this screen as the touchpad.
+ */
 internal class PortalDisplays(private val host: PortalActivity) {
-    data class Target(val id: Int, val name: String, val resolution: String, val current: Boolean)
+    data class Target(
+        val id: Int,
+        val name: String,
+        val resolution: String,
+        val current: Boolean,
+        /** Shown through a Presentation; the activity stays here as the touchpad. */
+        val presented: Boolean = false,
+    )
 
     private val displayManager = host.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private val activityManager = host.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -71,15 +82,19 @@ internal class PortalDisplays(private val host: PortalActivity) {
         return true
     }
 
-    val supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && host.packageManager.hasSystemFeature(
+    private val activitiesOnOtherDisplays = host.packageManager.hasSystemFeature(
         PackageManager.FEATURE_ACTIVITIES_ON_SECONDARY_DISPLAYS,
     )
 
+    // Any app may present on a monitor, with or without activities there.
+    val supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+
     fun targets(): List<Target> {
-        val currentId = host.currentDisplay()?.displayId
+        val activityId = host.currentDisplay()?.displayId
+        val currentId = host.presentedDisplay?.displayId ?: activityId
         val intent = launchIntent()
         val displays = displayManager.displays.filter {
-            it.displayId == currentId || canMoveTo(it, intent)
+            it.displayId == activityId || it.displayId == currentId || canMoveTo(it, intent) || canPresentOn(it)
         }.sortedBy { it.displayId }
         val names = displays.associateWith(::displayName)
         val nameCounts = names.values.groupingBy { it }.eachCount()
@@ -95,7 +110,8 @@ internal class PortalDisplays(private val host: PortalActivity) {
             val rotated = display.rotation == Surface.ROTATION_90 || display.rotation == Surface.ROTATION_270
             val width = if (rotated) mode.physicalHeight else mode.physicalWidth
             val height = if (rotated) mode.physicalWidth else mode.physicalHeight
-            Target(id, label, "$width × $height", id == currentId)
+            val presented = id != activityId && !canMoveTo(display, intent) && canPresentOn(display)
+            Target(id, label, "$width × $height", id == currentId, presented)
         }
     }
 
@@ -120,7 +136,20 @@ internal class PortalDisplays(private val host: PortalActivity) {
     fun moveTo(displayId: Int): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || movePending) return false
         val display = displayManager.displays.firstOrNull { it.displayId == displayId }
+        // A presented desktop first comes back to the activity's own screen.
+        host.presentedDisplay?.let { presented ->
+            if (presented.displayId == displayId) return true
+            host.endPresentation()
+            if (displayId == host.currentDisplay()?.displayId) return true
+        }
         val intent = launchIntent()
+        if (display != null && display.displayId != host.currentDisplay()?.displayId &&
+            !canMoveTo(display, intent) && canPresentOn(display)
+        ) {
+            if (host.presentDesktop(display)) return true
+            showMoveError()
+            return false
+        }
         if (!host.isTaskRoot || display == null || !canMoveTo(display, intent)) {
             showMoveError()
             return false
@@ -159,9 +188,18 @@ internal class PortalDisplays(private val host: PortalActivity) {
     private fun canMoveTo(display: Display, intent: Intent): Boolean {
         // Android may destroy a task when the owner of a private display removes it.
         if (!display.isValid || display.flags and Display.FLAG_PRIVATE != 0) return false
+        if (!activitiesOnOtherDisplays && display.displayId != Display.DEFAULT_DISPLAY) return false
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
         return activityManager.isActivityStartAllowedOnDisplay(host, display.displayId, intent)
     }
+
+    /**
+     * A monitor apps may show a Presentation on. Phones that mirror a monitor
+     * and keep activities off it (OxygenOS without desktop mode) still allow one.
+     */
+    private fun canPresentOn(display: Display): Boolean =
+        display.isValid && display.displayId != Display.DEFAULT_DISPLAY &&
+            display.flags and Display.FLAG_PRESENTATION != 0 && display.flags and Display.FLAG_PRIVATE == 0
 
     private fun requestFullscreen(displayId: Int) {
         if (displayId == Display.DEFAULT_DISPLAY || Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||

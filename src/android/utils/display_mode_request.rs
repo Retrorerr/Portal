@@ -128,12 +128,12 @@ fn apply(enable: bool) {
             let mut changed = !enable;
             if enable {
                 match env
-                    .call_method(&activity, "highRefreshTargetMillihz", "()I", &[])
+                    .call_method(&activity, "desktopRefreshTargetMillihz", "()I", &[])
                     .and_then(|value| value.i())
                 {
                     Ok(millihz) if millihz > 0 => {
-                        changed = TARGET_MILLIHZ.swap(millihz as u32, Ordering::AcqRel)
-                            != millihz as u32;
+                        changed =
+                            TARGET_MILLIHZ.swap(millihz as u32, Ordering::AcqRel) != millihz as u32;
                     }
                     Ok(_) => {}
                     Err(error) => {

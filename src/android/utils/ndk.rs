@@ -94,6 +94,42 @@ pub fn recycle_native_surface(android_app: &AndroidApp) {
     );
 }
 
+/// The display the desktop is shown on: a monitor while Portal presents it
+/// there (the activity itself stays on the phone), otherwise the activity's.
+fn desktop_display<'local>(
+    env: &mut JNIEnv<'local>,
+    activity: &JObject,
+) -> Option<JObject<'local>> {
+    match env
+        .call_method(activity, "desktopDisplay", "()Landroid/view/Display;", &[])
+        .and_then(|value| value.l())
+    {
+        Ok(display) if !display.is_null() => return Some(display),
+        Ok(_) => {}
+        Err(_) => {
+            let _ = env.exception_clear();
+        }
+    }
+    let window_manager = env
+        .call_method(
+            activity,
+            "getWindowManager",
+            "()Landroid/view/WindowManager;",
+            &[],
+        )
+        .and_then(|value| value.l())
+        .ok()?;
+    #[allow(deprecated)]
+    env.call_method(
+        window_manager,
+        "getDefaultDisplay",
+        "()Landroid/view/Display;",
+        &[],
+    )
+    .and_then(|value| value.l())
+    .ok()
+}
+
 /// Current Android display refresh rate expressed in Wayland mode units (millihertz).
 ///
 /// This is the legacy `Display.getRefreshRate()` reading. New code should prefer
@@ -104,25 +140,7 @@ pub fn refresh_rate_millihz(android_app: &AndroidApp) -> i32 {
     run_in_jvm(
         |env, app| {
             let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
-            let window_manager = env
-                .call_method(
-                    activity,
-                    "getWindowManager",
-                    "()Landroid/view/WindowManager;",
-                    &[],
-                )
-                .and_then(|value| value.l())
-                .ok()?;
-            #[allow(deprecated)]
-            let display = env
-                .call_method(
-                    window_manager,
-                    "getDefaultDisplay",
-                    "()Landroid/view/Display;",
-                    &[],
-                )
-                .and_then(|value| value.l())
-                .ok()?;
+            let display = desktop_display(env, &activity)?;
             env.call_method(display, "getRefreshRate", "()F", &[])
                 .and_then(|value| value.f())
                 .ok()
@@ -145,25 +163,7 @@ pub fn active_refresh_millihz(android_app: &AndroidApp) -> i32 {
     run_in_jvm(
         |env, app| {
             let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
-            let window_manager = env
-                .call_method(
-                    activity,
-                    "getWindowManager",
-                    "()Landroid/view/WindowManager;",
-                    &[],
-                )
-                .and_then(|value| value.l())
-                .ok()?;
-            #[allow(deprecated)]
-            let display = env
-                .call_method(
-                    window_manager,
-                    "getDefaultDisplay",
-                    "()Landroid/view/Display;",
-                    &[],
-                )
-                .and_then(|value| value.l())
-                .ok()?;
+            let display = desktop_display(env, &activity)?;
             // Prefer the active Mode (API 23+): exact mode refresh, not a snapshot.
             if let Ok(mode) = env
                 .call_method(&display, "getMode", "()Landroid/view/Display$Mode;", &[])
@@ -203,30 +203,24 @@ pub fn active_refresh_millihz(android_app: &AndroidApp) -> i32 {
 /// failure, or a null/empty mode array so callers fall back to the active
 /// rate and finally to the sane default. Never panics, never contains
 /// non-positive entries (those are filtered here; full validity filtering
-/// stays in [`select_preferred_refresh_with_peak_millihz`]).
+/// stays in [`select_preferred_refresh_with_peak_millihz`]). Only modes at the
+/// active resolution count: Portal switches refresh rates, never resolutions,
+/// so a monitor's 75 Hz at 1280x1024 is no target while it shows 1080p.
 pub fn supported_refresh_rates_millihz(android_app: &AndroidApp) -> Vec<i32> {
     run_in_jvm(
         |env, app| {
             let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
-            let window_manager = env
-                .call_method(
-                    activity,
-                    "getWindowManager",
-                    "()Landroid/view/WindowManager;",
-                    &[],
-                )
+            let display = desktop_display(env, &activity)?;
+            let active_size = match env
+                .call_method(&display, "getMode", "()Landroid/view/Display$Mode;", &[])
                 .and_then(|value| value.l())
-                .ok()?;
-            #[allow(deprecated)]
-            let display = env
-                .call_method(
-                    window_manager,
-                    "getDefaultDisplay",
-                    "()Landroid/view/Display;",
-                    &[],
-                )
-                .and_then(|value| value.l())
-                .ok()?;
+            {
+                Ok(mode) if !mode.is_null() => mode_physical_size(env, &mode),
+                _ => {
+                    let _ = env.exception_clear();
+                    None
+                }
+            };
             let modes = env
                 .call_method(
                     &display,
@@ -256,6 +250,9 @@ pub fn supported_refresh_rates_millihz(android_app: &AndroidApp) -> Vec<i32> {
                     let _ = env.exception_clear();
                     continue;
                 }
+                if active_size.is_some() && mode_physical_size(env, &mode_obj) != active_size {
+                    continue;
+                }
                 let hz: f32 = env
                     .call_method(&mode_obj, "getRefreshRate", "()F", &[])
                     .and_then(|v| v.f())
@@ -273,6 +270,20 @@ pub fn supported_refresh_rates_millihz(android_app: &AndroidApp) -> Vec<i32> {
     .into_iter()
     .filter(|millihz| *millihz > 0)
     .collect()
+}
+
+/// A `Display.Mode`'s physical size; `None` (exception cleared) when unreadable.
+fn mode_physical_size(env: &mut JNIEnv, mode: &JObject) -> Option<(i32, i32)> {
+    let mut read = |name: &str| {
+        let value = env
+            .call_method(mode, name, "()I", &[])
+            .and_then(|value| value.i());
+        if value.is_err() {
+            let _ = env.exception_clear();
+        }
+        value.ok()
+    };
+    Some((read("getPhysicalWidth")?, read("getPhysicalHeight")?))
 }
 
 /// The user's Android peak refresh setting (`Settings.System.peak_refresh_rate`)
@@ -500,6 +511,17 @@ pub fn density_dpi(android_app: &AndroidApp) -> i32 {
     run_in_jvm(
         |env, app| {
             let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            // A monitor's density while Portal presents the desktop there.
+            match env
+                .call_method(&activity, "desktopDensityDpi", "()I", &[])
+                .and_then(|it| it.i())
+            {
+                Ok(dpi) if dpi > 0 => return Some(dpi),
+                Ok(_) => {}
+                Err(_) => {
+                    let _ = env.exception_clear();
+                }
+            }
             let resources = env
                 .call_method(
                     activity,

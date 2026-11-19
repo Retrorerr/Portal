@@ -53,6 +53,9 @@ import android.view.Display
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.PointerIcon
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.compose.runtime.getValue
@@ -216,6 +219,11 @@ open class PortalActivity : GameActivity() {
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             intent.getStringExtra(UpdatePreview.EXTRA)?.let(UpdatePreview::play)
         }
+        // Debug builds: show the desktop on a display as External display would.
+        //   adb shell am start -n app.polarbear/.PortalActivity --activity-single-top --es portal_display 5
+        if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            intent.getStringExtra(EXTRA_DEBUG_DISPLAY)?.toIntOrNull()?.let { portalDisplays.moveTo(it) }
+        }
     }
 
     override fun onStart() {
@@ -308,10 +316,8 @@ open class PortalActivity : GameActivity() {
      */
     fun recycleNativeSurface() {
         runOnUiThread {
-            val host = overlayHost()
-            val surface = (0 until host.childCount)
-                .map(host::getChildAt)
-                .firstOrNull { it is android.view.SurfaceView }
+            // The presented monitor's view while the desktop is shown there.
+            val surface = desktopSurface()
             if (surface == null) {
                 Log.w(TAG, "No native SurfaceView to recycle")
                 return@runOnUiThread
@@ -340,7 +346,142 @@ open class PortalActivity : GameActivity() {
 
     internal fun moveLockedDesktopPointer(dx: Float, dy: Float) = nativeCapturedMotion(dx, dy)
 
-    internal fun desktopSurface(): android.view.SurfaceView? = mSurfaceView
+    /** The view the desktop is drawn in: on a presented monitor, or this activity's own. */
+    internal fun desktopSurface(): SurfaceView? = presentation?.desktopView ?: mSurfaceView
+
+    /**
+     * Where [overlayHost] takes views drawn over the desktop (touch controls,
+     * the capsule): above the native SurfaceView (child 0) and, while the
+     * desktop is presented, the touchpad, but below Portal's own screens.
+     */
+    internal fun desktopLayerTop(): Int {
+        val host = overlayHost()
+        val base = presentedPad?.let(host::indexOfChild)?.takeIf { it >= 0 } ?: 0
+        return (base + 1).coerceAtMost(host.childCount)
+    }
+
+    // Where the desktop draws. GameActivity gives native code its own
+    // SurfaceView's surface; while the desktop is presented on a monitor
+    // ([DesktopPresentation]) native code gets that window's surface instead,
+    // through the same callbacks, so every renderer just sees a new window.
+    // The phone's SurfaceView stays (it holds the IME connection) under the
+    // touchpad.
+    @Volatile private var presentation: DesktopPresentation? = null
+    private var presentedPad: PresentedDesktopPad? = null
+
+    /** The holder whose surface native code currently draws into. */
+    private var nativeHolder: SurfaceHolder? = null
+
+    private fun desktopHolder(): SurfaceHolder? = presentation?.holder ?: mSurfaceView?.holder
+
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        if (holder !== desktopHolder()) return
+        releaseNativeSurface()
+        nativeHolder = holder
+        super.surfaceCreated(holder)
+    }
+
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        if (holder === nativeHolder) super.surfaceChanged(holder, format, width, height)
+    }
+
+    override fun surfaceRedrawNeeded(holder: SurfaceHolder) {
+        if (holder === nativeHolder) super.surfaceRedrawNeeded(holder)
+    }
+
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        if (holder === nativeHolder) releaseNativeSurface()
+    }
+
+    /** Takes the desktop off its surface; native code suspends rendering until the next one. */
+    private fun releaseNativeSurface() {
+        val holder = nativeHolder ?: return
+        nativeHolder = null
+        super.surfaceDestroyed(holder)
+    }
+
+    /** Hands native code the desktop holder's surface when it already exists; otherwise its creation will. */
+    private fun attachNativeSurface() {
+        val holder = desktopHolder() ?: return
+        if (holder === nativeHolder || holder.surface?.isValid != true) return
+        releaseNativeSurface()
+        nativeHolder = holder
+        super.surfaceCreated(holder)
+        val frame = holder.surfaceFrame
+        super.surfaceChanged(holder, PixelFormat.RGBA_8888, frame.width(), frame.height())
+    }
+
+    /** The display the desktop is presented on, while this activity stays here. */
+    internal val presentedDisplay: Display? get() = presentation?.display
+
+    /**
+     * Shows the desktop on [display] in a Presentation; this screen becomes
+     * its touchpad. False when Android refuses the window.
+     */
+    internal fun presentDesktop(display: Display): Boolean {
+        if (presentation?.display?.displayId == display.displayId) return true
+        endPresentation()
+        val shown = DesktopPresentation(this, display, this) { ended ->
+            if (presentation === ended) {
+                Log.i(TAG, "Presentation on display ${ended.display.displayId} ended")
+                endPresentation()
+            }
+        }
+        presentation = shown
+        try {
+            shown.show()
+        } catch (error: RuntimeException) {
+            // InvalidDisplayException included: the monitor went, or Android refused the window.
+            Log.w(TAG, "Could not present the desktop on display ${display.displayId}", error)
+            presentation = null
+            return false
+        }
+        Log.i(TAG, "Presenting the desktop on display ${display.displayId} (${display.name})")
+        // Native code moves when the Presentation's surface is created.
+        attachNativeSurface()
+        val pad = PresentedDesktopPad(this, portalDisplays.displayName(display))
+        overlayHost().addView(pad, 1.coerceAtMost(overlayHost().childCount),
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        presentedPad = pad
+        applyHighRefresh()
+        desktopDisplayChanged()
+        return true
+    }
+
+    /** Brings the desktop back to this activity's own surface. */
+    internal fun endPresentation() {
+        val ending = presentation ?: return
+        presentation = null
+        presentedPad?.let { overlayHost().removeView(it) }
+        presentedPad = null
+        if (nativeHolder === ending.holder) releaseNativeSurface()
+        try {
+            ending.dismiss()
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Presentation was already gone", error)
+        }
+        attachNativeSurface()
+        applyHighRefresh()
+        desktopDisplayChanged()
+    }
+
+    private fun desktopDisplayChanged() {
+        DesktopControlActivity.displayChanged()
+        SessionService.refreshNotification()
+    }
+
+    /** Native (any thread): the display the desktop is shown on. */
+    fun desktopDisplay(): Display? = presentation?.display ?: currentDisplay()
+
+    /** Native (any thread): density of the display the desktop is shown on. */
+    fun desktopDensityDpi(): Int = presentation?.densityDpi ?: resources.displayMetrics.densityDpi
+
+    /**
+     * Native (any thread): refresh rate in millihertz to advertise for the
+     * desktop's output; see [highRefreshTargetMillihz].
+     */
+    fun desktopRefreshTargetMillihz(): Int = presentation?.display?.let { Math.round(it.refreshRate * 1000f) }
+        ?: highRefreshTargetMillihz()
 
     private fun applyPointerCapture() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -532,7 +673,8 @@ open class PortalActivity : GameActivity() {
     }
 
     private fun applyHighRefresh() {
-        val enable = desktopHighRefresh || overlayHighRefresh || utilityHighRefresh
+        // A desktop presented on a monitor doesn't draw on this screen.
+        val enable = desktopHighRefresh && presentation == null || overlayHighRefresh || utilityHighRefresh
         refreshHandler.removeCallbacks(idleRefreshCheck)
         requestDisplayMode(if (enable) highRefreshModeId() else 0, "enable=$enable")
         if (!enable) {
@@ -563,7 +705,7 @@ open class PortalActivity : GameActivity() {
      * explicitly; the next interaction replaces it with the peak mode.
      */
     private val idleRefreshCheck = Runnable {
-        if (desktopHighRefresh || overlayHighRefresh || utilityHighRefresh) return@Runnable
+        if (desktopHighRefresh && presentation == null || overlayHighRefresh || utilityHighRefresh) return@Runnable
         try {
             val modeId = idleRefreshModeId()
             if (modeId != 0) requestDisplayMode(modeId, "idle panel still fast")
@@ -684,6 +826,7 @@ open class PortalActivity : GameActivity() {
         private const val PREF_HIDE_ANDROID_CURSOR = "hide_android_cursor"
         private const val PREF_USE_ANDROID_SCREEN_TIMEOUT = "use_android_screen_timeout"
         private const val PREF_USE_PORTAL_KEYBOARD = "use_portal_keyboard"
+        private const val EXTRA_DEBUG_DISPLAY = "portal_display"
         private const val IDLE_REFRESH_CHECK_MS = 1000L
         private const val IDLE_REFRESH_HZ = 60f
         private val processHostsActivity = AtomicBoolean(false)

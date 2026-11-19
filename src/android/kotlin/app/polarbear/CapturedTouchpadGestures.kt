@@ -9,16 +9,19 @@ import app.polarbear.TouchpadGestures.Point
  * Android's raw pointer capture bypasses its touchpad gesture recognizer. This
  * feeds those contacts to [TouchpadGestures] in millimetres, so tap slop and
  * motion stay consistent across touchpads. Mouse capture still uses Android's
- * processed events.
+ * processed events. A touchscreen used as the touchpad gives
+ * [screenUnitsPerMm], its pixels per millimetre.
  */
 internal class CapturedTouchpadGestures(
     move: (Float, Float) -> Unit,
     button: (Int, Boolean) -> Unit,
     scroll: (Float, Float, Boolean) -> Unit,
     pinch: (TouchpadGestures.PinchPhase, Float) -> Unit,
+    private val screenUnitsPerMm: Float = 0f,
 ) {
     private val gestures = TouchpadGestures(move, button, scroll, pinch)
-    private var primaryDevice = -1
+    // Null until a contact arrives: injected input (adb, accessibility) has device id -1.
+    private var primaryDevice: Int? = null
     private var xUnitsPerMm = 1f
     private var yUnitsPerMm = 1f
 
@@ -28,12 +31,12 @@ internal class CapturedTouchpadGestures(
     fun timeout(now: Long) = gestures.timeout(now)
 
     fun startCapture(now: Long) {
-        primaryDevice = -1
+        primaryDevice = null
         gestures.startCapture(now)
     }
 
     fun reset() {
-        primaryDevice = -1
+        primaryDevice = null
         gestures.reset()
     }
 
@@ -51,8 +54,13 @@ internal class CapturedTouchpadGestures(
             MotionEvent.ACTION_DOWN -> {
                 if (primaryDevice != event.deviceId) {
                     primaryDevice = event.deviceId
-                    xUnitsPerMm = unitsPerMm(event.device, MotionEvent.AXIS_X, 110f)
-                    yUnitsPerMm = unitsPerMm(event.device, MotionEvent.AXIS_Y, 70f)
+                    if (screenUnitsPerMm > 0f && event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN)) {
+                        xUnitsPerMm = screenUnitsPerMm
+                        yUnitsPerMm = screenUnitsPerMm
+                    } else {
+                        xUnitsPerMm = unitsPerMm(event.device, MotionEvent.AXIS_X, 110f)
+                        yUnitsPerMm = unitsPerMm(event.device, MotionEvent.AXIS_Y, 70f)
+                    }
                 }
                 gestures.down(event.eventTime, position(event, 0), event.buttonState != 0)
             }

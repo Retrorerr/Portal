@@ -83,6 +83,15 @@ a monitor or a wireless display that Android offers to apps as a separate
 screen, then choose its name. Choose **Built-in screen** to move the desktop
 back.
 
+Many phones only mirror a monitor and don't let apps move to it unless
+Android's desktop mode is on. There, Portal still shows the desktop on the
+monitor, and the phone's screen becomes a touchpad for it: move the pointer
+with one finger, tap to click, and scroll with two fingers. When a text field on
+the desktop has focus, the phone's keyboard opens over the touchpad. **Control
+desktop** at the top hands a connected mouse and keyboard to the desktop, and
+**Show desktop on this phone** brings it back. The monitor's row in **External
+display** says when this applies.
+
 While the desktop is on the monitor, the tablet keeps running Android and shows
 a small **Control desktop** button at the edge facing the monitor. Tap it to
 send the mouse, touchpad and keyboard to the monitor; the Portal notification's

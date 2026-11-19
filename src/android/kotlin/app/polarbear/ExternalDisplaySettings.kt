@@ -68,11 +68,15 @@ internal fun ExternalDisplaySettings(
     Spacer(Modifier.height(18.dp))
     Text("External display", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.textPrimary)
     Spacer(Modifier.height(8.dp))
+    // Tablet position, floating controls and touch apply when the activity
+    // itself moves; a presented desktop keeps this screen as its touchpad.
+    val activityMoves = targets.any { it.id != Display.DEFAULT_DISPLAY && !it.presented }
     SettingsGroup(palette) {
-        targets.forEach { target ->
+        targets.forEachIndexed { index, target ->
             DisplayRow(target, palette) { if (displays.moveTo(target.id)) onMove() }
-            SettingsDivider(palette)
+            if (activityMoves || index < targets.lastIndex) SettingsDivider(palette)
         }
+        if (!activityMoves) return@SettingsGroup
         Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             SettingsRowText("Tablet position", "Puts Control desktop on the side facing the monitor",
                 palette, Modifier.weight(1f).padding(end = 12.dp))
@@ -131,7 +135,10 @@ private fun DisplayRow(target: PortalDisplays.Target, palette: PortalPalette, on
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        SettingsRowText(target.name, target.resolution, palette, Modifier.weight(1f).padding(end = 12.dp))
+        val detail = if (target.presented) {
+            "${target.resolution} · this ${deviceNoun(LocalContext.current)} becomes the touchpad"
+        } else target.resolution
+        SettingsRowText(target.name, detail, palette, Modifier.weight(1f).padding(end = 12.dp))
         if (target.current) {
             Canvas(Modifier.size(18.dp)) {
                 val stroke = 2.dp.toPx()

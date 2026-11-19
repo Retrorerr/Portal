@@ -63,10 +63,6 @@ internal class DesktopControlView(
     /** Ctrl and Alt are down together with nothing else pressed since. */
     private var releaseChord = false
     private var timeNs = 0L
-    private var x = 0f
-    private var y = 0f
-    private var width = 0
-    private var height = 0
     private val captureTimeout = Runnable {
         if (waiting) {
             relinquish("capture timeout")
@@ -146,7 +142,7 @@ internal class DesktopControlView(
                             // must not undo it.
                             QuietButton(if (captured) "Release" else "Control desktop", palette, accent = true,
                                 animateLabel = false, onClick = ::primaryAction)
-                            if (captured) QuietButton("Return to tablet", palette, animateLabel = false,
+                            if (captured) QuietButton("Return to ${deviceNoun(context)}", palette, animateLabel = false,
                                 onClick = ::returnToTablet)
                         }
                         val note = message ?: releaseHint.takeIf { captured }
@@ -242,12 +238,12 @@ internal class DesktopControlView(
         waiting = false
         captured = true
         TabletGrab.active = true
-        resizeCursor(surface.width, surface.height)
+        DesktopCursor.fit(surface.width, surface.height)
         touchpad.startCapture(SystemClock.uptimeMillis())
         timeNs = 0L
-        if (!host.pointerCaptureWanted) DesktopControlActivity.nativeControlMotion(x, y, timeNs)
+        if (!host.pointerCaptureWanted) DesktopControlActivity.nativeControlMotion(DesktopCursor.x, DesktopCursor.y, timeNs)
         val via = if (routed) "accessibility" else "pointer capture"
-        Log.i(TAG, "Grabbed input ($via) for display ${host.currentDisplay()?.displayId} at ${width}x$height")
+        Log.i(TAG, "Grabbed input ($via) for display ${host.desktopDisplay()?.displayId} at ${surface.width}x${surface.height}")
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
@@ -400,26 +396,10 @@ internal class DesktopControlView(
             release("desktop unavailable")
             return
         }
-        if (host.pointerCaptureWanted) {
-            // A guest pointer lock (games) takes raw relative motion.
-            host.moveLockedDesktopPointer(dx, dy)
-            return
-        }
-        resizeCursor(surface.width, surface.height)
-        x = (x + dx).coerceIn(0f, (width - 1).toFloat())
-        y = (y + dy).coerceIn(0f, (height - 1).toFloat())
-        DesktopControlActivity.nativeControlMotion(x, y, timeNs)
+        DesktopCursor.move(host, surface, dx, dy, timeNs)
     }
 
-    private fun resizeCursor(newWidth: Int, newHeight: Int) {
-        if (newWidth == width && newHeight == height) return
-        x = if (width > 1) x * (newWidth - 1) / (width - 1) else (newWidth - 1) / 2f
-        y = if (height > 1) y * (newHeight - 1) / (height - 1) else (newHeight - 1) / 2f
-        width = newWidth
-        height = newHeight
-    }
-
-    private companion object {
+    internal companion object {
         const val TAG = "PortalDesktopControl"
         const val CAPTURE_TIMEOUT_MS = 2000L
         const val CLICK_GUARD_MS = 500L
@@ -445,3 +425,42 @@ internal class DesktopControlView(
         }
     }
 }
+
+/**
+ * The desktop cursor as Portal's own controls place it, in the desktop
+ * surface's pixels. Shared by every control so the cursor carries on from
+ * where the last one left it. UI thread.
+ */
+internal object DesktopCursor {
+    var x = 0f
+        private set
+    var y = 0f
+        private set
+    private var width = 0
+    private var height = 0
+
+    /** Keeps the cursor at the same relative place when the desktop's size changes. */
+    fun fit(newWidth: Int, newHeight: Int) {
+        if (newWidth == width && newHeight == height) return
+        x = if (width > 1) x * (newWidth - 1) / (width - 1) else (newWidth - 1) / 2f
+        y = if (height > 1) y * (newHeight - 1) / (height - 1) else (newHeight - 1) / 2f
+        width = newWidth
+        height = newHeight
+    }
+
+    fun move(host: PortalActivity, surface: SurfaceView, dx: Float, dy: Float, timeNs: Long) {
+        if (host.pointerCaptureWanted) {
+            // A guest pointer lock (games) takes raw relative motion.
+            host.moveLockedDesktopPointer(dx, dy)
+            return
+        }
+        fit(surface.width, surface.height)
+        x = (x + dx).coerceIn(0f, (width - 1).toFloat())
+        y = (y + dy).coerceIn(0f, (height - 1).toFloat())
+        DesktopControlActivity.nativeControlMotion(x, y, timeNs)
+    }
+}
+
+/** What Portal calls the device it runs on, for labels such as Return to phone. */
+internal fun deviceNoun(context: Context): String =
+    if (context.resources.configuration.smallestScreenWidthDp >= 600) "tablet" else "phone"
