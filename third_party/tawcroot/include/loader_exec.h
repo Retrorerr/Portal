@@ -74,6 +74,9 @@ extern const struct tawc_loader_io tawcroot_loader_io_prod;
  * if we hardcode 4096. Passed as 0 (or a non-power-of-two) falls back
  * to 4096. */
 size_t tawcroot_loader_page_size(void);
+/* The loaded guest's main-thread stack [lo, hi) above its guard page,
+ * or 0/0 before a guest is loaded. */
+void tawcroot_loader_guest_stack(uintptr_t *lo, uintptr_t *hi);
 void tawcroot_loader_set_host_auxv(uint64_t hwcap, uint64_t hwcap2,
                                    uintptr_t sysinfo_ehdr,
                                    uint64_t clktck, uint64_t flags,

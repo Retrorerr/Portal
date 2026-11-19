@@ -162,6 +162,20 @@ long tawcroot_build_filter(struct sock_filter *prog, size_t prog_cap,
 			EMIT_OR_FAIL(TAWC_BPF_S(BPF_LD | BPF_W | BPF_ABS, 0));
 			continue;
 		}
+		/* mprotect: only PROT_GROWSDOWN requests (glibc making the
+		 * main stack executable). JITs, Wine and ld.so call mprotect
+		 * constantly; everything else runs natively. */
+		if (trap_nrs[t] == TAWC_SYS_mprotect) {
+			EMIT_OR_FAIL(TAWC_BPF_J(BPF_JMP | BPF_JEQ | BPF_K,
+					(uint32_t)trap_nrs[t], 0, 4));
+			EMIT_OR_FAIL(TAWC_BPF_S(BPF_LD | BPF_W | BPF_ABS, 32));
+			EMIT_OR_FAIL(TAWC_BPF_J(BPF_JMP | BPF_JSET | BPF_K,
+					0x01000000u /* PROT_GROWSDOWN */, 0, 1));
+			EMIT_OR_FAIL(TAWC_BPF_S(BPF_RET | BPF_K, SECCOMP_RET_TRAP));
+			EMIT_OR_FAIL(TAWC_BPF_S(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+			EMIT_OR_FAIL(TAWC_BPF_S(BPF_LD | BPF_W | BPF_ABS, 0));
+			continue;
+		}
 		EMIT_OR_FAIL(TAWC_BPF_J(BPF_JMP | BPF_JEQ | BPF_K,
 				(uint32_t)trap_nrs[t], 0, 1));
 		EMIT_OR_FAIL(TAWC_BPF_S(BPF_RET | BPF_K, SECCOMP_RET_TRAP));

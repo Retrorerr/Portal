@@ -54,6 +54,17 @@ static uint64_t  g_guest_minsigstksz     = 32768;
 
 size_t tawcroot_loader_page_size(void) { return g_host_page_size; }
 
+/* The guest main thread's stack, above its guard page. Zero until this
+ * incarnation has loaded a guest. */
+static uintptr_t g_guest_stack_lo = 0;
+static uintptr_t g_guest_stack_hi = 0;
+
+void tawcroot_loader_guest_stack(uintptr_t *lo, uintptr_t *hi)
+{
+	*lo = g_guest_stack_lo;
+	*hi = g_guest_stack_hi;
+}
+
 /* True iff `v` is a non-zero power of two. */
 static int is_pow2(uint64_t v)
 {
@@ -465,6 +476,17 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 	 * kernel placed below. */
 	if (tawc_mprotect(stack, PAGE, TAWC_MM_PROT_NONE) != 0)
 		LOADER_FAIL(70);
+	g_guest_stack_lo = (uintptr_t)stack + PAGE;
+	g_guest_stack_hi = (uintptr_t)stack + STACK_SZ;
+	/* A program whose PT_GNU_STACK asks for an executable stack gets
+	 * one from the kernel, and ld.so then takes it as given. We still
+	 * run on tawcroot's own stack here, so this is an ordinary execmem
+	 * request rather than an execstack one. Failure leaves the stack
+	 * non-executable, as before. */
+	if (bin_img.stack_exec)
+		(void)tawc_mprotect((void *)g_guest_stack_lo,
+		                    STACK_SZ - PAGE,
+		                    PROT_RW | TAWC_MM_PROT_EXEC);
 
 	uint8_t random16[16];
 	if (tawc_getrandom(random16, 16, 0) != 16) LOADER_FAIL(71);

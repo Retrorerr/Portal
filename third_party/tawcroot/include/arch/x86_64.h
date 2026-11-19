@@ -46,3 +46,20 @@ static inline uintptr_t tawcroot_arch_resume_pc(const ucontext_t *uc)
 {
 	return (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
 }
+
+/* Three-argument syscall issued with SP temporarily at `sp`. The kernel
+ * reads the caller's SP for some checks (SELinux execstack). The caller
+ * must block signals: nothing may run on `sp`. */
+static inline long tawcroot_arch_syscall3_on_sp(long nr, long a, long b,
+						long c, uintptr_t sp)
+{
+	long ret;
+	__asm__ volatile("mov %%rsp, %%r12\n\t"
+			 "mov %[sp], %%rsp\n\t"
+			 "syscall\n\t"
+			 "mov %%r12, %%rsp"
+			 : "=a"(ret)
+			 : "0"(nr), "D"(a), "S"(b), "d"(c), [sp] "r"(sp)
+			 : "rcx", "r11", "r12", "memory");
+	return ret;
+}

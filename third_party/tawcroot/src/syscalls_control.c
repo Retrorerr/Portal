@@ -31,6 +31,7 @@
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "identity.h"
+#include "loader_exec.h"
 #include "raw_sys.h"
 #include "signal_shadow.h"
 #include "syscalls_control.h"
@@ -489,8 +490,56 @@ static long handle_umount2(const tawcroot_syscall_args *args, ucontext_t *uc)
 	return 0;
 }
 
+#define TAWC_PROT_GROWSDOWN 0x01000000L
+#define TAWC_PROT_GROWSUP   0x02000000L
+
+/* Never used as memory: only a stack pointer value that lies outside every
+ * guest stack while signals are blocked. */
+static unsigned char g_side_sp[64] __attribute__((aligned(16)));
+
+/* mprotect(PROT_GROWSDOWN) reaches us only from glibc making the main
+ * stack executable (an execstack library at startup, or the
+ * glibc.rtld.execstack=2 tunable). Two things stop it natively:
+ *   - the loader's stack is a plain mapping, not VM_GROWSDOWN, so the
+ *     kernel answers EINVAL;
+ *   - SELinux checks execstack, which apps never get, instead of
+ *     execmem whenever the mapping holds the caller's SP.
+ * Apply the kernel's GROWSDOWN range (from the bottom of the stack up to
+ * the requested end) with SP parked outside the stack. Anything else gets
+ * the kernel's own answer. */
+static long handle_mprotect(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	const uintptr_t addr = (uintptr_t)args->a;
+	const size_t len = (size_t)args->b;
+	long prot = args->c;
+	const size_t page = tawcroot_loader_page_size();
+	uintptr_t lo, hi;
+	tawcroot_loader_guest_stack(&lo, &hi);
+
+	const uintptr_t end = addr + ((len + page - 1) & ~(uintptr_t)(page - 1));
+	if (!(prot & TAWC_PROT_GROWSDOWN) || (prot & TAWC_PROT_GROWSUP) ||
+	    !lo || !len || (addr & (page - 1)) || addr < lo || addr >= hi ||
+	    end <= addr || end > hi)
+		return TAWC_RAW(TAWC_SYS_mprotect, args->a, args->b, args->c,
+				0, 0, 0);
+
+	prot &= ~TAWC_PROT_GROWSDOWN;
+	uint64_t all = ~0ULL, old = 0;
+	long rc = TAWC_RAW(TAWC_SYS_rt_sigprocmask, SIG_SETMASK, (long)&all,
+			   (long)&old, 8, 0, 0);
+	if (rc < 0) return rc;
+	rc = tawcroot_arch_syscall3_on_sp(TAWC_SYS_mprotect, (long)lo,
+					  (long)(end - lo), prot,
+					  (uintptr_t)(g_side_sp + sizeof g_side_sp));
+	(void)TAWC_RAW(TAWC_SYS_rt_sigprocmask, SIG_SETMASK, (long)&old, 0, 8,
+		       0, 0);
+	return rc;
+}
+
 void tawcroot_control_register(void)
 {
+	tawcroot_dispatch_install(TAWC_SYS_mprotect, handle_mprotect);
 	tawcroot_dispatch_install(TAWC_SYS_set_robust_list, handle_set_robust_list);
 	tawcroot_dispatch_install(TAWC_SYS_get_robust_list, handle_get_robust_list);
 	/* Some Android 4.19 kernels backport pidfd_open but not P_PIDFD

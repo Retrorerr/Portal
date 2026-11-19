@@ -221,6 +221,10 @@ struct tawc_loader_image {
 	int        phdr_present;
 	uint64_t   phdr_vaddr;
 	uint64_t   phdr_filesz;
+
+	/* PT_GNU_STACK carries PF_X: the kernel would map this program's
+	 * stack executable, and ld.so assumes it is. */
+	int        stack_exec;
 };
 
 /* Parse the ELF header out of `buf` (which must contain at least

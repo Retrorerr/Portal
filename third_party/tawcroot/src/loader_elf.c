@@ -37,6 +37,7 @@ static void zero_image_tail(struct tawc_loader_image *img)
 	img->phdr_present  = 0;
 	img->phdr_vaddr    = 0;
 	img->phdr_filesz   = 0;
+	img->stack_exec    = 0;
 	for (unsigned i = 0; i < TAWC_LOADER_MAX_LOADS; i++) {
 		struct tawc_loader_seg z = { 0 };
 		img->loads[i] = z;
@@ -214,11 +215,15 @@ long tawc_loader_parse_phdrs(const void *phdr_buf, size_t phdr_buf_len,
 			img->phdr_vaddr   = ph->p_vaddr;
 			img->phdr_filesz  = ph->p_filesz;
 			break;
+		case TAWC_PT_GNU_STACK:
+			/* Like the kernel, only the program's own header
+			 * decides; the interpreter's is ignored by the caller. */
+			img->stack_exec = (ph->p_flags & 0x1) != 0;
+			break;
 		default:
-			/* PT_DYNAMIC / PT_TLS / PT_GNU_STACK / etc — irrelevant
-			 * to the loader. ld.so reads PT_DYNAMIC + PT_TLS via
-			 * the AT_PHDR pointer. PT_GNU_STACK influences stack
-			 * exec; we always make our synthesized stack non-exec. */
+			/* PT_DYNAMIC / PT_TLS / etc — irrelevant to the
+			 * loader. ld.so reads PT_DYNAMIC + PT_TLS via the
+			 * AT_PHDR pointer. */
 			break;
 		}
 	}
