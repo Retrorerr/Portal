@@ -103,6 +103,12 @@ pub struct Activity {
     pub label: Option<String>,
     #[serde(rename(serialize = "android:launchMode"))]
     pub launch_mode: Option<String>,
+    #[serde(rename(serialize = "android:taskAffinity"))]
+    pub task_affinity: Option<String>,
+    #[serde(rename(serialize = "android:excludeFromRecents"))]
+    pub exclude_from_recents: Option<bool>,
+    #[serde(rename(serialize = "android:theme"))]
+    pub theme: Option<String>,
     #[serde(rename(serialize = "android:name"))]
     pub name: Option<String>,
     #[serde(rename(serialize = "android:screenOrientation"))]
