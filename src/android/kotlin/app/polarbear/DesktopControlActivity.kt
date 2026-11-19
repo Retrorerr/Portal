@@ -10,11 +10,15 @@ import android.os.Bundle
 import android.util.Log
 import android.view.Display
 import android.view.Gravity
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams
 import androidx.activity.ComponentActivity
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -36,8 +40,11 @@ object TabletGrab {
         fun lost(reason: String)
     }
 
-    /** UI thread, like the accessibility service's callbacks. */
-    internal var routed: Routed? = null
+    /**
+     * UI thread, like the accessibility service's callbacks. Observed, so
+     * every control shows a grab another one holds.
+     */
+    internal var routed: Routed? by mutableStateOf(null)
 
     @JvmStatic fun isRouted(): Boolean = routed != null
     @JvmStatic fun routeMotion(event: MotionEvent) { routed?.motion(event) }
@@ -64,8 +71,8 @@ class DesktopControlActivity : ComponentActivity() {
         val grab = intent.getBooleanExtra(EXTRA_TAKE_CONTROL, false)
         // A grab without focus belongs to the floating handle, which stays on
         // screen while Android apps are used by touch.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || host == null || (!grab && showOverlay(host)) ||
-            (grab && overlay?.view?.takeRoutedControl() == true)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || host == null || (grab && openTouchpadInstead(host)) ||
+            (!grab && showOverlay(host)) || (grab && overlay?.view?.takeRoutedControl() == true)
         ) {
             finish()
             return
@@ -108,7 +115,7 @@ class DesktopControlActivity : ComponentActivity() {
         stopObserving?.invoke()
         if (current.get() === this) {
             current.clear()
-            overlay?.setHidden(false)
+            overlay?.let { it.setHidden(handleHidden(it.host)) }
         }
         super.onDestroy()
     }
@@ -122,15 +129,17 @@ class DesktopControlActivity : ComponentActivity() {
 
         fun bindDesktop(host: PortalActivity) { desktop = WeakReference(host) }
 
+        /** Portal while its desktop is on another display: moved there, or presented there. */
         fun projectedDesktop(): PortalActivity? = desktop.get()?.takeIf { host ->
-            !host.isFinishing && !host.isDestroyed && host.currentDisplay()?.let {
+            !host.isFinishing && !host.isDestroyed && host.desktopDisplay()?.let {
                 it.displayId != Display.DEFAULT_DISPLAY && it.isValid
             } == true
         }
 
         /**
          * UI thread: the floating handle exists exactly while the desktop is on
-         * another display and Floating controls is on.
+         * another display and Floating controls is on. It hides while the
+         * controller or a phone's touchpad page shows the same controls.
          */
         fun displayChanged() {
             val host = projectedDesktop()
@@ -170,9 +179,33 @@ class DesktopControlActivity : ComponentActivity() {
 
         /** The floating handle when Android allows it, otherwise the controller itself. */
         fun showOnTablet(host: PortalActivity) {
-            if (projectedDesktop() !== host) return
+            // A phone presenting the desktop shows its touchpad page instead.
+            if (projectedDesktop() !== host || host.presentedDisplay != null) return
             if (current.get() == null && !showOverlay(host)) start(host, takeControl = false)
         }
+
+        /**
+         * A phone presenting the desktop with only its own touchscreen has
+         * nothing to hand over: Control desktop brings its touchpad page
+         * forward instead. False when a grab should go ahead.
+         */
+        fun openTouchpadInstead(host: PortalActivity): Boolean {
+            if (host.presentedDisplay == null || externalPointerConnected()) return false
+            host.portalDisplays.bringPortalForward()
+            return true
+        }
+
+        /** A mouse or touchpad other than the device's own screen; true where Android can't tell. */
+        private fun externalPointerConnected(): Boolean {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
+            return InputDevice.getDeviceIds().any { id ->
+                val device = InputDevice.getDevice(id) ?: return@any false
+                device.isExternal && !device.isVirtual &&
+                    (device.supportsSource(InputDevice.SOURCE_MOUSE) || device.supportsSource(InputDevice.SOURCE_TOUCHPAD))
+            }
+        }
+
+        private fun handleHidden(host: PortalActivity) = current.get() != null || host.showsPresentedPad
 
         private fun start(host: PortalActivity, takeControl: Boolean) {
             if (projectedDesktop() !== host) return
@@ -188,6 +221,7 @@ class DesktopControlActivity : ComponentActivity() {
             overlay?.let {
                 if (it.host === host) {
                     it.placeAtEdge()
+                    it.setHidden(handleHidden(host))
                     return true
                 }
                 it.close()
@@ -204,7 +238,7 @@ class DesktopControlActivity : ComponentActivity() {
                 }
                 handle.show()
                 overlay = handle
-                handle.setHidden(current.get() != null)
+                handle.setHidden(handleHidden(host))
                 return true
             } catch (error: RuntimeException) {
                 Log.w(TAG, "Could not show the floating tablet controls", error)

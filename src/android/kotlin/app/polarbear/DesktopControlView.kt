@@ -103,6 +103,12 @@ internal class DesktopControlView(
     /** Holds the desktop's input without needing this window's focus. */
     val holdsRoutedGrab: Boolean get() = captured && routed
 
+    /**
+     * A routed grab another control holds, such as the phone's touchpad page
+     * before Home; this one shows it and can release it.
+     */
+    private val grabbedElsewhere: Boolean get() = TabletGrab.routed.let { it != null && it !== routedInput }
+
     private fun routedMotion(event: MotionEvent): Boolean {
         if (!captured || !routed) return false
         timeNs = eventTimeNs(event)
@@ -140,9 +146,10 @@ internal class DesktopControlView(
                             // While Android grants the grab the button stays as it
                             // was: a second click from the same touchpad press
                             // must not undo it.
-                            QuietButton(if (captured) "Release" else "Control desktop", palette, accent = true,
+                            val grabbed = captured || grabbedElsewhere
+                            QuietButton(if (grabbed) "Release" else "Control desktop", palette, accent = true,
                                 animateLabel = false, onClick = ::primaryAction)
-                            if (captured) QuietButton("Return to ${deviceNoun(context)}", palette, animateLabel = false,
+                            if (grabbed) QuietButton("Return to ${deviceNoun(context)}", palette, animateLabel = false,
                                 onClick = ::returnToTablet)
                         }
                         val note = message ?: releaseHint.takeIf { captured }
@@ -160,12 +167,14 @@ internal class DesktopControlView(
         when {
             waiting -> Unit
             captured -> if (SystemClock.uptimeMillis() - grabbedAt >= CLICK_GUARD_MS) release("button")
+            grabbedElsewhere -> TabletGrab.routed?.lost("button")
             else -> takeControl()
         }
     }
 
     private fun returnToTablet() {
         relinquish("return")
+        TabletGrab.routed?.lost("return")
         if (host.portalDisplays.moveTo(Display.DEFAULT_DISPLAY) && holdsGrab) close()
     }
 
@@ -190,7 +199,7 @@ internal class DesktopControlView(
     // While the desktop holds the pointer only a finger or pen works these
     // controls: no click of the mouse or touchpad may hand it back.
     override fun dispatchTouchEvent(event: MotionEvent): Boolean =
-        if (captured && !isDirectTouch(event)) true else super.dispatchTouchEvent(event)
+        if ((captured || grabbedElsewhere) && !isDirectTouch(event)) true else super.dispatchTouchEvent(event)
 
     // Captured events follow the focus path; taking them here keeps them
     // even when the Compose child holds focus.
@@ -296,6 +305,10 @@ internal class DesktopControlView(
             return
         }
         message = null
+        if (DesktopControlActivity.openTouchpadInstead(host)) {
+            if (host.showsPresentedPad) message = "Connect a mouse or touchpad to hand it to the desktop."
+            return
+        }
         if (takeRoutedControl()) return
         if (!holdsGrab) {
             DesktopControlActivity.startControl(host)

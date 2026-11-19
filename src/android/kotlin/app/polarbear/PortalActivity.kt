@@ -224,17 +224,32 @@ open class PortalActivity : GameActivity() {
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             intent.getStringExtra(EXTRA_DEBUG_DISPLAY)?.toIntOrNull()?.let { portalDisplays.moveTo(it) }
         }
+        // Return to phone in the notification. A moved activity is already
+        // back from the launch display; a presented desktop comes back here.
+        if (intent.getBooleanExtra(PortalDisplays.EXTRA_RETURN, false)) endPresentation()
     }
+
+    /** Started, so this screen shows Portal: while presenting, the touchpad page. */
+    internal var onScreen = false
+        private set
+
+    /** The phone's touchpad page is on screen, with its own Control desktop. */
+    internal val showsPresentedPad: Boolean get() = onScreen && presentedPad != null
 
     override fun onStart() {
         super.onStart()
+        onScreen = true
         SessionService.sync(this)
         SetupService.setPortalVisible(this, true)
+        DesktopControlActivity.displayChanged()
     }
 
     override fun onStop() {
         SetupService.setPortalVisible(this, false)
         super.onStop()
+        onScreen = false
+        // A presented desktop stays on the monitor; the floating controls take over here.
+        DesktopControlActivity.displayChanged()
     }
 
     override fun onResume() {
@@ -437,6 +452,7 @@ open class PortalActivity : GameActivity() {
             return false
         }
         Log.i(TAG, "Presenting the desktop on display ${display.displayId} (${display.name})")
+        applyScreenTimeout()
         // Native code moves when the Presentation's surface is created.
         attachNativeSurface()
         val pad = PresentedDesktopPad(this, portalDisplays.displayName(display))
@@ -565,7 +581,11 @@ open class PortalActivity : GameActivity() {
 
     private fun applyScreenTimeout() {
         val flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-        if (useAndroidScreenTimeout && !screenInhibition.active) window.clearFlags(flag) else window.addFlags(flag)
+        val keepOn = !useAndroidScreenTimeout || screenInhibition.active
+        // A presented desktop's window too: after Home it is the only one on screen.
+        for (target in listOfNotNull(window, presentation?.window)) {
+            if (keepOn) target.addFlags(flag) else target.clearFlags(flag)
+        }
     }
 
     private fun applyDesktopPointerIcon() {

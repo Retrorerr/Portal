@@ -156,7 +156,7 @@ class SessionService : Service() {
             }
             // On another display, the notification is the tablet's way back to it.
             val projected = DesktopControlActivity.projectedDesktop()
-            val display = projected?.currentDisplay()
+            val display = projected?.desktopDisplay()
             var contentText = "Tap to return to Portal"
             var content = open
             if (projected != null && display != null) {
@@ -166,13 +166,14 @@ class SessionService : Service() {
                     context, if (take) 1 else 2, DesktopControlActivity.controlIntent(context, take), flags, tablet,
                 )
                 val back = PendingIntent.getActivity(
-                    context, 3, PortalDisplays.moveIntent(context), flags,
+                    context, 3, PortalDisplays.returnIntent(context), flags,
                     PortalDisplays.displayOptions(Display.DEFAULT_DISPLAY),
                 )
                 builder.addAction(Notification.Action.Builder(null, "Control desktop", control(true)).build())
                 builder.addAction(Notification.Action.Builder(null, "Return to ${deviceNoun(context)}", back).build())
                 contentText = "On ${projected.portalDisplays.displayName(display)}"
-                content = control(false)
+                // A phone presenting the desktop opens its touchpad page.
+                content = if (projected.presentedDisplay != null) open else control(false)
             }
             return builder
                 .setSmallIcon(context.applicationInfo.icon)

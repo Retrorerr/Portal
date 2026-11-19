@@ -68,17 +68,17 @@ internal fun ExternalDisplaySettings(
     Spacer(Modifier.height(18.dp))
     Text("External display", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.textPrimary)
     Spacer(Modifier.height(8.dp))
-    // Tablet position, floating controls and touch apply when the activity
-    // itself moves; a presented desktop keeps this screen as its touchpad.
-    val activityMoves = targets.any { it.id != Display.DEFAULT_DISPLAY && !it.presented }
+    // The controls below also apply to a phone presenting the desktop, once
+    // Portal is behind other apps.
+    val device = deviceNoun(context)
     SettingsGroup(palette) {
-        targets.forEachIndexed { index, target ->
+        targets.forEach { target ->
             DisplayRow(target, palette) { if (displays.moveTo(target.id)) onMove() }
-            if (activityMoves || index < targets.lastIndex) SettingsDivider(palette)
+            SettingsDivider(palette)
         }
-        if (!activityMoves) return@SettingsGroup
         Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            SettingsRowText("Tablet position", "Puts Control desktop on the side facing the monitor",
+            SettingsRowText("${device.replaceFirstChar(Char::uppercaseChar)} position",
+                "Puts Control desktop on the side facing the monitor",
                 palette, Modifier.weight(1f).padding(end = 12.dp))
             SlidingSegmentedControl(
                 options = TabletEdge.entries,
@@ -94,7 +94,7 @@ internal fun ExternalDisplaySettings(
         SettingsDivider(palette)
         SettingsToggle(
             title = "Floating controls",
-            subtitle = "Keep Control desktop on the tablet over other apps",
+            subtitle = "Keep Control desktop on the $device over other apps",
             checked = displays.floatingControls,
             palette = palette,
             onChange = displays::setFloatingControls,

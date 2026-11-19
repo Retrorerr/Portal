@@ -140,7 +140,11 @@ internal class PortalDisplays(private val host: PortalActivity) {
         host.presentedDisplay?.let { presented ->
             if (presented.displayId == displayId) return true
             host.endPresentation()
-            if (displayId == host.currentDisplay()?.displayId) return true
+            if (displayId == host.currentDisplay()?.displayId) {
+                // From the floating controls Portal may be behind other apps.
+                bringPortalForward()
+                return true
+            }
         }
         val intent = launchIntent()
         if (display != null && display.displayId != host.currentDisplay()?.displayId &&
@@ -183,6 +187,16 @@ internal class PortalDisplays(private val host: PortalActivity) {
         return true
     }
 
+    /** Shows Portal on its own screen when other apps cover it, as Return to phone and the touchpad need. */
+    fun bringPortalForward() {
+        if (host.onScreen || host.isFinishing || host.isDestroyed) return
+        try {
+            host.startActivity(launchIntent(), displayOptions(host.currentDisplay()?.displayId ?: Display.DEFAULT_DISPLAY))
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Could not bring Portal forward", error)
+        }
+    }
+
     private fun launchIntent(): Intent = moveIntent(host)
 
     private fun canMoveTo(display: Display, intent: Intent): Boolean {
@@ -220,6 +234,7 @@ internal class PortalDisplays(private val host: PortalActivity) {
 
     companion object {
         internal const val EXTRA_DISPLAY_MOVE = "app.polarbear.extra.DISPLAY_MOVE"
+        internal const val EXTRA_RETURN = "app.polarbear.extra.RETURN_TO_DEVICE"
         private const val PREF_FLOATING_CONTROLS = "floating_tablet_controls"
         private const val PREF_RELEASE_HINTS = "tablet_release_hints"
         private const val RELEASE_HINTS = 3
@@ -231,6 +246,9 @@ internal class PortalDisplays(private val host: PortalActivity) {
             // Match the launcher task and deliver to the live GameActivity at its top.
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             .putExtra(EXTRA_DISPLAY_MOVE, true)
+
+        /** Brings the desktop back to the device's own screen, moved or presented; start it there. */
+        fun returnIntent(context: Context): Intent = moveIntent(context).putExtra(EXTRA_RETURN, true)
 
         fun displayOptions(displayId: Int): android.os.Bundle? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             ActivityOptions.makeBasic().setLaunchDisplayId(displayId).toBundle()
