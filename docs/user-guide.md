@@ -237,7 +237,7 @@ Linux apps see the tablet's cameras as ordinary video devices and its microphone
 
 ## Android storage
 
-Grant **All files access** only if you want the Linux guest to work with shared Android files. Portal's own Debian runtime remains in the app's private storage.
+Grant **All files access** only if you want the Linux guest to work with shared Android files. Fully close and reopen Portal after granting permission, then type `/android` into Dolphin's address bar or run `ls /android` in a terminal. Android downloads are in `/android/Download`, and photos taken on the device are in `/android/DCIM`. Portal's own Debian runtime remains in the app's private storage.
 
 Uninstalling Portal removes that private storage. Export important files before uninstalling, changing signing keys, or moving between incompatible builds.
 
