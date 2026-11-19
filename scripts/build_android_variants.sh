@@ -201,6 +201,31 @@ if [ "$validate_only" = 1 ]; then
     exit 0
 fi
 
+# Two builds sharing target/x corrupt each other's Gradle and Kotlin outputs.
+mkdir -p "$target_dir"
+exec 9>"$target_dir/.portal-build.lock"
+if command -v flock >/dev/null 2>&1; then
+    flock -n 9 || die "another Portal build is running (it holds $target_dir/.portal-build.lock)"
+fi
+
+# An interrupted or overlapping build can leave Kotlin's incremental caches
+# pointing at classes that no longer exist ("Unresolved reference" in files
+# that are fine). Rebuild once from clean Kotlin outputs before giving up.
+run_xbuild() {
+    local -n variant="$1"
+    shift
+    local log="$target_dir/xbuild-last.log"
+    cargo run --manifest-path "$xbuild_manifest_path" -- "$@" 2>&1 | tee "$log" && return 0
+    local first=$?
+    # Any failure other than a Kotlin compile is real and fails at once.
+    grep -Eq 'Task :app:compile[A-Za-z]*Kotlin FAILED' "$log" ||
+        die "${variant[name]} xbuild failed with exit code $first"
+    echo "warning: ${variant[name]} Kotlin compile failed; retrying once with clean Kotlin caches." >&2
+    rm -rf "${variant[gradle_root]}/app/build/kotlin" "${variant[gradle_root]}/app/build/tmp/kotlin-classes"
+    cargo run --manifest-path "$xbuild_manifest_path" -- "$@" ||
+        die "${variant[name]} xbuild failed with exit code $? (first attempt: $first)"
+}
+
 # Restore manifest.yaml however the build ends, including Ctrl-C, so a later
 # Stable build can never pick up the debug identity.
 manifest_backup="$(mktemp)"
@@ -217,8 +242,7 @@ cd "$repo_root"
 
 if [ "$debug_only" = 0 ]; then
     echo 'Building optimized Stable Portal (app.polarbear.portal)...'
-    cargo run --manifest-path "$xbuild_manifest_path" -- build --release --platform android --arch arm64 --format apk ||
-        die "Stable xbuild failed with exit code $?"
+    run_xbuild stable build --release --platform android --arch arm64 --format apk
 
     assert_generated_variant stable
     stable_unsigned="${stable[gradle_root]}/app/build/outputs/apk/release/app-release-unsigned.apk"
@@ -230,8 +254,7 @@ fi
 echo 'Building DEBUG Portal (app.polarbear)...'
 cp -f "$debug_manifest_path" "$manifest_path"
 assert_manifest_variant debug
-cargo run --manifest-path "$xbuild_manifest_path" -- build --debug --features portal-debug --platform android --arch arm64 --format apk ||
-    die "DEBUG xbuild failed with exit code $?"
+run_xbuild debug build --debug --features portal-debug --platform android --arch arm64 --format apk
 
 assert_generated_variant debug
 debug_gradle_apk="${debug[gradle_root]}/app/build/outputs/apk/debug/app-debug.apk"

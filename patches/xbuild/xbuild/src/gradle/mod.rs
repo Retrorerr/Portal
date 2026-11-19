@@ -400,6 +400,8 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
         Command::new("gradle")
     };
     cmd.current_dir(&gradle);
+    // A daemon would outlive the build holding the caller's output handles.
+    cmd.arg("--no-daemon");
     cmd.arg(match (format, opt) {
         (Format::Aab, Opt::Debug) => "bundleDebug",
         (Format::Aab, Opt::Release) => "bundleRelease",

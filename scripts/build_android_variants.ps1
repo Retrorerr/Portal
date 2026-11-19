@@ -192,7 +192,57 @@ function Assert-AllVariants {
     Assert-ApkVariant -Variant $debug -AaptPath $AaptPath
 }
 
-$ndkBin = Join-Path $env:LOCALAPPDATA 'Android\Sdk\ndk\27.2.12479018\toolchains\llvm\prebuilt\windows-x86_64\bin'
+function Invoke-XBuild {
+    param(
+        [Parameter(Mandatory)]$Variant,
+        [Parameter(Mandatory)][string[]]$XBuildArgs
+    )
+
+    $logPath = Join-Path $targetDir 'xbuild-last.log'
+    # Echo the build live and keep a copy to tell a Kotlin failure from others.
+    & {
+        $ErrorActionPreference = 'Continue'
+        & cargo run --manifest-path $xbuildManifestPath -- @XBuildArgs 2>&1 |
+            Tee-Object -FilePath $logPath | ForEach-Object { Write-Host "$_" }
+    }
+    if ($LASTEXITCODE -eq 0) { return }
+    $firstExit = $LASTEXITCODE
+
+    # An interrupted or overlapping build can leave Kotlin's incremental caches
+    # pointing at classes that no longer exist ("Unresolved reference" in files
+    # that are fine). Rebuild once from clean Kotlin outputs before giving up;
+    # any other failure is real and fails at once.
+    if (-not (Select-String -LiteralPath $logPath -Pattern 'Task :app:compile\w*Kotlin FAILED' -Quiet)) {
+        throw "$($Variant.Name) xbuild failed with exit code $firstExit"
+    }
+    Write-Warning "$($Variant.Name) Kotlin compile failed; retrying once with clean Kotlin caches."
+    foreach ($cache in @('app\build\kotlin', 'app\build\tmp\kotlin-classes')) {
+        $path = Join-Path $Variant.GradleRoot $cache
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force
+        }
+    }
+    & cargo run --manifest-path $xbuildManifestPath -- @XBuildArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "$($Variant.Name) xbuild failed with exit code $LASTEXITCODE (first attempt: $firstExit)"
+    }
+}
+
+$sdkRoot = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT,
+    $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Android\Sdk' })) |
+    Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } |
+    Select-Object -First 1
+if (-not $sdkRoot) {
+    throw 'Android SDK not found. Set ANDROID_HOME or install it under %LOCALAPPDATA%\Android\Sdk.'
+}
+$env:ANDROID_HOME = $sdkRoot
+$env:ANDROID_SDK_ROOT = $sdkRoot
+# One-shot Gradle: a daemon outlives the build holding this script's output.
+if ($env:GRADLE_OPTS -notmatch 'org\.gradle\.daemon') {
+    $env:GRADLE_OPTS = ("$env:GRADLE_OPTS -Dorg.gradle.daemon=false").Trim()
+}
+
+$ndkBin = Join-Path $sdkRoot 'ndk\27.2.12479018\toolchains\llvm\prebuilt\windows-x86_64\bin'
 $gradleBin = Join-Path $env:LOCALAPPDATA 'Gradle\gradle-8.14.3\bin'
 foreach ($candidate in @($ndkBin, $gradleBin)) {
     if (Test-Path -LiteralPath $candidate) {
@@ -210,15 +260,21 @@ if ($ValidateOnly) {
     exit 0
 }
 
+# Two builds sharing target\x corrupt each other's Gradle and Kotlin outputs.
+New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+$lockPath = Join-Path $targetDir '.portal-build.lock'
+try {
+    $buildLock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
+} catch [System.IO.IOException] {
+    throw "Another Portal build is running (it holds $lockPath). Wait for it or end it, then build again."
+}
+
 $originalManifest = [System.IO.File]::ReadAllBytes($manifestPath)
 Push-Location $repoRoot
 try {
     if (-not $DebugOnly) {
         Write-Host 'Building optimized Stable Portal (app.polarbear.portal)...'
-        & cargo run --manifest-path $xbuildManifestPath -- build --release --platform android --arch arm64 --format apk
-        if ($LASTEXITCODE -ne 0) {
-            throw "Stable xbuild failed with exit code $LASTEXITCODE"
-        }
+        Invoke-XBuild -Variant $stable -XBuildArgs @('build', '--release', '--platform', 'android', '--arch', 'arm64', '--format', 'apk')
 
         Assert-GeneratedVariant -Variant $stable
         $stableUnsigned = Join-Path $stable.GradleRoot 'app\build\outputs\apk\release\app-release-unsigned.apk'
@@ -232,10 +288,7 @@ try {
     Write-Host 'Building DEBUG Portal (app.polarbear)...'
     Copy-Item -LiteralPath $debugManifestPath -Destination $manifestPath -Force
     Assert-ManifestVariant -Variant $debug
-    & cargo run --manifest-path $xbuildManifestPath -- build --debug --features portal-debug --platform android --arch arm64 --format apk
-    if ($LASTEXITCODE -ne 0) {
-        throw "DEBUG xbuild failed with exit code $LASTEXITCODE"
-    }
+    Invoke-XBuild -Variant $debug -XBuildArgs @('build', '--debug', '--features', 'portal-debug', '--platform', 'android', '--arch', 'arm64', '--format', 'apk')
 
     Assert-GeneratedVariant -Variant $debug
     $debugGradleApk = Join-Path $debug.GradleRoot 'app\build\outputs\apk\debug\app-debug.apk'
@@ -251,6 +304,7 @@ try {
 finally {
     [System.IO.File]::WriteAllBytes($manifestPath, $originalManifest)
     Pop-Location
+    $buildLock.Dispose()
 }
 
 if ($DebugOnly) {
