@@ -15,7 +15,10 @@ import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-internal enum class PortalGlyph { Veil, Report, Files, Apps, Keyboard, Controller, Options, Settings, Close, Import, Export, Parent, Home }
+internal enum class PortalGlyph {
+    Veil, Report, Files, Apps, Keyboard, Controller, Options, Settings, Close, Import, Export, Parent, Home,
+    Monitor, Phone, Tablet, Return, Mouse, Portal, Accessibility, Layers,
+}
 
 /** The same small stroke, corner and proportions across Portal's utility actions. */
 @Composable
@@ -76,6 +79,38 @@ internal fun PortalIcon(glyph: PortalGlyph, color: Color, modifier: Modifier = M
                 PortalGlyph.Parent -> { line(5f,13f,12f,6f); line(12f,6f,19f,13f); line(12f,6f,12f,21f) }
                 PortalGlyph.Home -> { line(2f,11f,12f,3f); line(12f,3f,22f,11f); line(5f,9f,5f,21f)
                     line(5f,21f,19f,21f); line(19f,21f,19f,9f); line(10f,21f,10f,15f); line(10f,15f,14f,15f); line(14f,15f,14f,21f) }
+                PortalGlyph.Monitor -> { box(2f,3.5f,20f,13.5f); line(12f,17f,12f,20.5f); line(8f,20.5f,16f,20.5f) }
+                PortalGlyph.Phone -> { box(6.5f,2f,11f,20f,2.5f); line(10.5f,18.5f,13.5f,18.5f) }
+                PortalGlyph.Tablet -> { box(2.5f,4f,19f,16f,2.5f); line(10.5f,17f,13.5f,17f) }
+                // The desktop coming down into this device.
+                PortalGlyph.Return -> {
+                    box(6.5f,2f,11f,20f,2.5f)
+                    line(12f,6.5f,12f,14.5f); line(9.25f,11.75f,12f,14.5f); line(12f,14.5f,14.75f,11.75f)
+                }
+                PortalGlyph.Mouse -> { box(6.5f,2.5f,11f,19f,5.5f); line(12f,3f,12f,8.5f) }
+                // The Portal mark: its loop in the glyph colour, the threshold in orange.
+                PortalGlyph.Portal -> {
+                    val mark = Stroke(1.8f, cap = StrokeCap.Round)
+                    drawPath(Path().apply {
+                        moveTo(12.53f,20.71f); cubicTo(10.94f,21.28f,9.42f,20.71f,8.32f,19.28f)
+                        cubicTo(5.95f,16.25f,6.40f,10.40f,8.40f,6.52f)
+                        cubicTo(9.91f,3.57f,12.45f,2.47f,14.49f,3.70f)
+                        cubicTo(17.19f,5.33f,17.85f,9.87f,16.58f,13.96f)
+                    }, color, style = mark)
+                    drawPath(Path().apply {
+                        moveTo(16.34f,15.80f); cubicTo(15.76f,17.32f,15.03f,18.50f,14.05f,19.28f)
+                    }, Color(0xFFF07949), style = mark)
+                }
+                PortalGlyph.Accessibility -> {
+                    drawCircle(color, radius = 10f, center = Offset(12f,12f), style = stroke)
+                    drawCircle(color, radius = 1.4f, center = Offset(12f,6.6f))
+                    line(7f,9.6f,17f,9.6f); line(12f,9.6f,12f,14f); line(12f,14f,9.2f,18.2f); line(12f,14f,14.8f,18.2f)
+                }
+                // A window floating over another: controls kept above other apps.
+                PortalGlyph.Layers -> {
+                    box(2.5f,7.5f,14f,13.5f)
+                    drawRoundRect(color, Offset(9f,3f), Size(12.5f,10f), CornerRadius(2f))
+                }
             }
         }
     }

@@ -67,6 +67,10 @@ internal class PortalCapsuleView(
     private var hubBounds = android.graphics.RectF()
     private var keyboardBounds = android.graphics.RectF()
     private var keyboardMinimized by mutableStateOf(false)
+    // The phone's touchpad page has its own buttons for these pages: the tab
+    // hides, and each page comes from and goes back to the button that opened it.
+    private var dockHidden by mutableStateOf(false)
+    private var padAnchor: Offset? = null
     // Opened in place of Android's keyboard, so it also leaves with the text focus.
     private var keyboardForText = false
     // The user minimised that keyboard: it returns as the chip until they tap it or close it.
@@ -75,7 +79,7 @@ internal class PortalCapsuleView(
         setContent { app.polarbear.setup.PortalTheme {
             app.polarbear.setup.components.PortalUiDensity {
             UtilityRoundtable(host, ready, page, presentationId, { if (dragging) dragPoint else anchor.value }, area,
-                dockRight, { dragging }, directPosition = { freeMotion },
+                dockRight, { dragging }, directPosition = { freeMotion }, dockHidden = dockHidden,
                 onHub = { if (page == UtilityPage.Dock) reveal() else dismiss() },
                 onAction = { action -> when (action) {
                     "settings" -> changePage(UtilityPage.Settings)
@@ -120,6 +124,7 @@ internal class PortalCapsuleView(
         if (width <= 0 || height <= 0 || dragging) return
         updateArea()
         freeMotion = false
+        if (dockHidden) { snapToPadAnchor(); return }
         dockRight = !centerFraction.isFinite() || centerFraction >= 0.5f
         val y = if (topFraction.isFinite() && topFraction >= 0f) topFraction * height else area.top + area.height * 0.24f
         val target = UtilityMenuGeometry.dock(area, dockRight, y, density, resources.configuration.fontScale)
@@ -168,6 +173,41 @@ internal class PortalCapsuleView(
             try { action?.invoke() } finally { releaseInput() }
         }
     }
+    /** Hides the edge tab; its pages open from the touchpad's buttons, starting at ([x], [y]). */
+    fun hideDockAt(x: Float, y: Float) {
+        padAnchor = Offset(x, y)
+        dockHidden = true
+        if (page == UtilityPage.Dock && width > 0 && height > 0) snapToPadAnchor()
+    }
+
+    /** The touchpad page left: the tab returns to its edge. */
+    fun showDock() {
+        if (!dockHidden) return
+        dockHidden = false
+        padAnchor = null
+        if (width > 0 && height > 0) onSizeChanged()
+    }
+
+    /** Opens [next] out of the touchpad button at ([x], [y]); it closes back into it. */
+    fun openFrom(next: UtilityPage, x: Float, y: Float) {
+        if (dockHidden && page == UtilityPage.Dock && !dragging) {
+            padAnchor = Offset(x, y)
+            snapToPadAnchor()
+        }
+        if (next == UtilityPage.Keyboard) keyboardForText = false
+        changePage(next)
+    }
+
+    private fun snapToPadAnchor() {
+        val point = padAnchor ?: return
+        if (page != UtilityPage.Dock || dragging) return
+        updateArea()
+        settle?.cancel()
+        settleTarget = point; settleSaves = false; settleHeld = false
+        // Undispatched, so a page opened right after starts from this point.
+        settle = scope.launch(start = CoroutineStart.UNDISPATCHED) { anchor.snapTo(point); ready = true }
+    }
+
     fun reveal() { changePage(UtilityPage.Menu) }
     fun showGameOptions() { changePage(UtilityPage.Gaming) }
     fun dismiss(): Boolean {
@@ -205,7 +245,7 @@ internal class PortalCapsuleView(
     }
     private fun ownsPointerAt(x: Float, y: Float): Boolean =
         if (page == UtilityPage.Keyboard) keyboardBounds.contains(x, y)
-        else SessionControls.isUtilityVisible() || hubBounds.contains(x, y)
+        else SessionControls.isUtilityVisible() || !dockHidden && hubBounds.contains(x, y)
 
     @RequiresApi(Build.VERSION_CODES.N)
     override fun onResolvePointerIcon(event: MotionEvent, pointerIndex: Int): PointerIcon? {
@@ -219,7 +259,7 @@ internal class PortalCapsuleView(
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         if (page == UtilityPage.Keyboard && !keyboardBounds.contains(event.x,event.y)) return false
-        if (!SessionControls.isUtilityVisible() && !hubBounds.contains(event.x,event.y)) return false
+        if (!SessionControls.isUtilityVisible() && (dockHidden || !hubBounds.contains(event.x,event.y))) return false
         return super.dispatchGenericMotionEvent(event)
     }
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
@@ -236,7 +276,7 @@ internal class PortalCapsuleView(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 down = Offset(event.x,event.y); chord = false
-                dragEligible = page == UtilityPage.Dock && !SessionControls.isUtilityVisible() && hubBounds.contains(event.x,event.y)
+                dragEligible = page == UtilityPage.Dock && !dockHidden && !SessionControls.isUtilityVisible() && hubBounds.contains(event.x,event.y)
                 dragStart = Offset(hubBounds.centerX(),hubBounds.centerY())
                 // Hold a settle under the press so a tap lands on a still hub. Release finishes it.
                 if (dragEligible && settle?.isActive == true) { settle?.cancel(); settleHeld = true }

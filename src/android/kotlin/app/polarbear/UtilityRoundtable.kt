@@ -46,6 +46,9 @@ internal fun UtilityRoundtable(
     // starting, ending or settling used to rebuild the whole roundtable,
     // stalling the UI thread for a frame or two each time.
     dockRight: Boolean, dragging: () -> Boolean, directPosition: () -> Boolean = dragging,
+    // The phone's touchpad page opens these pages from its own buttons: no tab
+    // shows, and a closing page fades as it reaches the button it came from.
+    dockHidden: Boolean = false,
     onHub: () -> Unit, onAction: (String) -> Unit, onBack: () -> Unit, onOutside: () -> Unit,
     onHubBounds: (android.graphics.RectF) -> Unit, onActionBounds: (String, android.graphics.RectF) -> Unit = { _, _ -> },
     onAnimating: (Boolean) -> Unit = {}, onSettled: (UtilityPage,Int) -> Unit,
@@ -94,7 +97,8 @@ internal fun UtilityRoundtable(
     val moving = { dragging() || directPosition() || transition.isRunning || surfaceResizing || keyboardMotion.isMoving }
     var resting by remember { mutableStateOf(false) }
     val parked = { resting && page == UtilityPage.Dock }
-    val frost = rememberUtilityFrost(ready,
+    // Nothing of the desktop shows behind the touchpad page to frost.
+    val frost = rememberUtilityFrost(ready && !dockHidden,
         crop = {
             if (page == UtilityPage.Keyboard && !moving() && !keyboardCaptureBounds.isEmpty)
                 androidx.compose.ui.geometry.Rect(keyboardCaptureBounds.left,keyboardCaptureBounds.top,keyboardCaptureBounds.right,keyboardCaptureBounds.bottom)
@@ -206,6 +210,10 @@ internal fun UtilityRoundtable(
         },
             tween(420, easing = PortalEmphasized), label = "utility surface corner")
         val elevation = animateDpAsState(if (page == UtilityPage.Dock) 3.dp else 12.dp, tween(420, easing = PortalEmphasized), label = "utility lift")
+        val tabHidden = page == UtilityPage.Dock && dockHidden
+        val presence = animateFloatAsState(if (tabHidden) 0f else 1f,
+            if (tabHidden) tween(200, delayMillis = 140, easing = PortalEmphasizedAccelerate) else tween(120, easing = PortalEmphasizedDecelerate),
+            label = "utility tab presence")
         val shape = remember {
             object : Shape {
                 override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline =
@@ -218,7 +226,7 @@ internal fun UtilityRoundtable(
                 onResizing = { surfaceResizing = it },
                 onTargetSize = { shown, size -> if (shown == UtilityPage.Keyboard) keyboardMotion.resize(size, keyboardMinimized) },
                 modifier = Modifier.graphicsLayer {
-                    alpha = arrival.value * opacity.value
+                    alpha = arrival.value * opacity.value * presence.value
                     scaleX = lift.value; scaleY = lift.value
                     shadowElevation = elevation.value.toPx()
                     this.shape = RoundedCornerShape(corner.value); clip = true
@@ -267,7 +275,8 @@ internal fun UtilityRoundtable(
                         Box(Modifier.size(width = if (docked) dockWidth else hub, height = if (docked) dockHeight else hub)
                             .graphicsLayer { scaleX = press; scaleY = press }
                             .hoverable(interaction)
-                            .clickable(interactionSource = interaction, indication = null, enabled = page == shown && LocalUtilityContentActive.current, role = Role.Button,
+                            .clickable(interactionSource = interaction, indication = null,
+                                enabled = page == shown && LocalUtilityContentActive.current && !(docked && dockHidden), role = Role.Button,
                                 onClickLabel = if (docked) "Open Portal menu" else "Close Portal menu", onClick = onHub)
                             .semantics {
                                 contentDescription = if (docked) "Open Portal menu" else "Close Portal menu"

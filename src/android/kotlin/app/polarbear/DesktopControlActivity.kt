@@ -196,7 +196,7 @@ class DesktopControlActivity : ComponentActivity() {
         }
 
         /** A mouse or touchpad other than the device's own screen; true where Android can't tell. */
-        private fun externalPointerConnected(): Boolean {
+        fun externalPointerConnected(): Boolean {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
             return InputDevice.getDeviceIds().any { id ->
                 val device = InputDevice.getDevice(id) ?: return@any false

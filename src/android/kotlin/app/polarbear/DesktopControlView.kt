@@ -50,6 +50,8 @@ internal class DesktopControlView(
     private val host: PortalActivity,
     private val holdsGrab: Boolean,
     private val close: () -> Unit,
+    /** False for a holder whose host draws its own button, such as the phone's touchpad page. */
+    showControls: Boolean = true,
 ) : FrameLayout(context) {
     private var captured by mutableStateOf(false)
     private var waiting by mutableStateOf(false)
@@ -109,6 +111,18 @@ internal class DesktopControlView(
      */
     private val grabbedElsewhere: Boolean get() = TabletGrab.routed.let { it != null && it !== routedInput }
 
+    /** The desktop has the mouse and keyboard, through this control or another. Compose-observable. */
+    val grabbed: Boolean get() = captured || grabbedElsewhere
+
+    /** Why the last attempt failed, until the next one. Compose-observable. */
+    val failure: String? get() = message
+
+    /** The first few grabs show which keys hand control back. Compose-observable. */
+    val showsReleaseKeys: Boolean get() = captured && releaseHint != null
+
+    /** The button's action: take control, or hand it back. */
+    fun toggle() = primaryAction()
+
     private fun routedMotion(event: MotionEvent): Boolean {
         if (!captured || !routed) return false
         timeNs = eventTimeNs(event)
@@ -126,7 +140,7 @@ internal class DesktopControlView(
 
     init {
         isFocusableInTouchMode = holdsGrab
-        addView(controls(), LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+        if (showControls) addView(controls(), LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
     }
 
     private fun controls() = ComposeView(context).apply {

@@ -16,6 +16,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.ComposeView
 import app.polarbear.gaming.Control
 import app.polarbear.gaming.ControlHost
@@ -621,6 +622,29 @@ object TouchControls : ControlHost {
 
     fun overlayChanged() { activity?.let(::refresh) }
 
+    // The phone's touchpad page stands in for the capsule's tab: where its
+    // Portal button is, or null when no touchpad page is up.
+    private var padButton: Offset? = null
+
+    /** The touchpad page is up, with its Portal button at ([x], [y]) in the overlay host. */
+    fun hideCapsuleForPad(x: Float, y: Float) {
+        padButton = Offset(x, y)
+        handle?.hideDockAt(x, y)
+    }
+
+    /** The touchpad page left; the capsule's tab returns to its edge. */
+    fun restoreCapsule() {
+        padButton = null
+        handle?.showDock()
+    }
+
+    /** Opens a capsule page from a touchpad button at ([x], [y]); false while no capsule is up. */
+    internal fun openFromPad(page: UtilityPage, x: Float, y: Float): Boolean {
+        val view = handle ?: return false
+        view.openFrom(page, x, y)
+        return true
+    }
+
     fun closeUtilityMenu(): Boolean = handle?.dismiss() ?: false
     /** False only when there is no Portal keyboard to show, so Android's may. */
     fun showTextKeyboard(): Boolean = handle?.also { it.showTextKeyboard() } != null
@@ -666,6 +690,7 @@ object TouchControls : ControlHost {
             onEditController = { later { startEditing() } },
             onToggleController = { later { toggleController() } },
         )
+        padButton?.let { view.hideDockAt(it.x, it.y) }
         val index = views.values.maxOfOrNull { overlay.indexOfChild(it) }?.plus(1) ?: host.desktopLayerTop()
         handle = view
         overlay.addView(view, index.coerceIn(0, overlay.childCount), FrameLayout.LayoutParams(

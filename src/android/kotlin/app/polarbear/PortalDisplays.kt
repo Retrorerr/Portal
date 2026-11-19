@@ -75,10 +75,15 @@ internal class PortalDisplays(private val host: PortalActivity) {
     private fun canDrawOverlays() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Settings.canDrawOverlays(host)
 
     /** The release keys are shown on the first few grabs only. */
-    fun takeReleaseHint(): Boolean {
-        val shown = preferences.getInt(PREF_RELEASE_HINTS, 0)
-        if (shown >= RELEASE_HINTS) return false
-        preferences.edit().putInt(PREF_RELEASE_HINTS, shown + 1).apply()
+    fun takeReleaseHint(): Boolean = takeHint(PREF_RELEASE_HINTS, RELEASE_HINTS)
+
+    /** The touchpad's gesture guide is shown the first few times the phone becomes one. */
+    fun takeTouchpadHint(): Boolean = takeHint(PREF_TOUCHPAD_HINTS, TOUCHPAD_HINTS)
+
+    private fun takeHint(key: String, limit: Int): Boolean {
+        val shown = preferences.getInt(key, 0)
+        if (shown >= limit) return false
+        preferences.edit().putInt(key, shown + 1).apply()
         return true
     }
 
@@ -238,6 +243,8 @@ internal class PortalDisplays(private val host: PortalActivity) {
         private const val PREF_FLOATING_CONTROLS = "floating_tablet_controls"
         private const val PREF_RELEASE_HINTS = "tablet_release_hints"
         private const val RELEASE_HINTS = 3
+        private const val PREF_TOUCHPAD_HINTS = "touchpad_gesture_hints"
+        private const val TOUCHPAD_HINTS = 4
 
         /** Starts Portal's task on [displayId]; Android moves the running activity there. */
         fun moveIntent(context: Context): Intent = Intent.makeMainActivity(

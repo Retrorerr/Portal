@@ -85,6 +85,9 @@ object SessionControls {
         else if (!ComposeOverlay.isShowing()) open(host)
     }
     @JvmStatic fun isUtilityVisible() = utilityVisible
+
+    /** [isUtilityVisible] for Compose: the phone's touchpad page steps aside while a capsule page is open. */
+    internal val utilityOpen = mutableStateOf(false)
     fun acquireUtility(owner: Any, keyboard: Boolean = false): Boolean {
         if (utilityOwner === owner) return true
         if (!(if (keyboard) nativeUtilityKeyboardInput() else nativeUtilityInput(true))) return false
@@ -101,6 +104,7 @@ object SessionControls {
     }
     private fun publishUtilityVisible(visible: Boolean) {
         utilityVisible = visible
+        utilityOpen.value = visible
         backCallback?.isEnabled = visible || ComposeOverlay.controlsVisible()
         activity.get()?.overlayInputChanged()
     }
