@@ -1,7 +1,10 @@
 package app.polarbear
 
 import android.content.Context
+import android.hardware.input.InputManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.Display
@@ -10,25 +13,42 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceView
 import android.widget.FrameLayout
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.setup.AppearanceMode
 import app.polarbear.setup.PortalTheme
+import app.polarbear.setup.components.PortalEmphasizedAccelerate
+import app.polarbear.setup.components.PortalEmphasizedDecelerate
+import app.polarbear.setup.components.PortalGlyph
 import app.polarbear.setup.components.PortalUiDensity
 import app.polarbear.setup.resolvePalette
 
@@ -143,33 +163,103 @@ internal class DesktopControlView(
         if (showControls) addView(controls(), LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
     }
 
+    /**
+     * The touchpad's round buttons on the edge facing the monitor, sliding in
+     * from it and back out to it. They only grow inward, away from the edge,
+     * so nothing already on screen moves.
+     */
     private fun controls() = ComposeView(context).apply {
         setContent {
             PortalTheme {
                 PortalUiDensity {
                     val palette = resolvePalette(AppearanceMode.System)
-                    val shape = RoundedCornerShape(26.dp)
-                    Column(
-                        Modifier.padding(10.dp).widthIn(max = 360.dp)
-                            .shadow(10.dp, shape, clip = false)
-                            .background(palette.background, shape)
-                            .border(1.dp, palette.surfaceBorder, shape)
-                            .padding(5.dp),
-                    ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            // While Android grants the grab the button stays as it
-                            // was: a second click from the same touchpad press
-                            // must not undo it.
-                            val grabbed = captured || grabbedElsewhere
-                            QuietButton(if (grabbed) "Release" else "Control desktop", palette, accent = true,
-                                animateLabel = false, onClick = ::primaryAction)
-                            if (grabbed) QuietButton("Return to ${deviceNoun(context)}", palette, animateLabel = false,
-                                onClick = ::returnToTablet)
+                    // TabletEdge is where this device sits beside the monitor.
+                    val atLeft = host.portalDisplays.tabletEdge == TabletEdge.Right
+                    val presence = remember { Animatable(0f) }
+                    LaunchedEffect(present) {
+                        if (present) {
+                            presence.animateTo(1f, tween(380, easing = PortalEmphasizedDecelerate))
+                        } else {
+                            presence.animateTo(0f, tween(200, easing = PortalEmphasizedAccelerate))
+                            away = true
+                            gone?.let { done -> gone = null; done() }
                         }
-                        val note = message ?: releaseHint.takeIf { captured }
-                        if (note != null) {
-                            Text(note, Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 5.dp),
-                                color = palette.textMuted, fontSize = 12.sp, lineHeight = 16.sp)
+                    }
+                    // While Android grants the grab the button stays as it was: a
+                    // second click from the same touchpad press must not undo it.
+                    // Leaving, the controls keep what they last showed: Return
+                    // ends the grab a moment before they slide off.
+                    val shown = remember { booleanArrayOf(false) }
+                    if (present && !returning) shown[0] = captured || grabbedElsewhere
+                    val grabbed = shown[0]
+                    // A phone with only its touchscreen has no mouse to hand over.
+                    val touchpad = !grabbed && host.presentedDisplay != null && !pointerConnected
+                    val failure = message
+                    val parts = listOf<@Composable () -> Unit>(
+                        {
+                            PadButton(
+                                if (touchpad) PortalGlyph.Phone else PortalGlyph.Mouse,
+                                when {
+                                    grabbed -> "Release"
+                                    touchpad -> "Touchpad"
+                                    else -> "Use mouse"
+                                },
+                                palette, ButtonSize,
+                                accent = grabbed,
+                                description = when {
+                                    grabbed -> "Give the mouse and keyboard back to Android"
+                                    touchpad -> "Use this phone as the desktop’s touchpad"
+                                    else -> "Use the mouse and keyboard on the desktop"
+                                },
+                                onClick = ::primaryAction,
+                            )
+                        },
+                        {
+                            AnimatedVisibility(
+                                grabbed,
+                                enter = fadeIn(tween(200, delayMillis = 60)) + scaleIn(tween(320, easing = PortalEmphasizedDecelerate), initialScale = 0.8f),
+                                exit = fadeOut(tween(120)) + scaleOut(tween(160, easing = PortalEmphasizedAccelerate), targetScale = 0.8f),
+                                label = "return button",
+                            ) {
+                                PadButton(PortalGlyph.Return, "Return", palette, ButtonSize,
+                                    description = "Show the desktop on this ${deviceNoun(context)}", onClick = ::returnToTablet)
+                            }
+                        },
+                        {
+                            AnimatedVisibility(
+                                failure != null || showsReleaseKeys,
+                                enter = fadeIn(tween(220, delayMillis = 80)),
+                                exit = fadeOut(tween(140)),
+                                label = "control note",
+                            ) {
+                                val shape = RoundedCornerShape(20.dp)
+                                Box(
+                                    Modifier.widthIn(max = 220.dp)
+                                        .shadow(6.dp, shape, ambientColor = palette.pillShadow, spotColor = palette.pillShadow)
+                                        .clip(shape).background(palette.background).background(palette.surfaceTop)
+                                        .border(1.dp, palette.surfaceBorder, shape)
+                                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                                ) {
+                                    if (failure != null) {
+                                        Text(failure, color = palette.textMuted, fontSize = 12.sp, lineHeight = 16.sp)
+                                    } else {
+                                        ReleaseKeys(palette)
+                                    }
+                                }
+                            }
+                        },
+                    )
+                    Row(
+                        Modifier.padding(12.dp).graphicsLayer {
+                            val shown = presence.value
+                            alpha = shown
+                            translationX = (1f - shown) * (size.width + 12.dp.toPx()) * (if (atLeft) -1f else 1f)
+                        },
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        (if (atLeft) parts else parts.asReversed()).forEachIndexed { index, part ->
+                            key(if (atLeft) index else parts.lastIndex - index) { part() }
                         }
                     }
                 }
@@ -177,19 +267,73 @@ internal class DesktopControlView(
         }
     }
 
+    /** The controls are on screen; [slideOut] takes them off to their edge. Compose-observable. */
+    private var present by mutableStateOf(true)
+    private var away = false
+    private var gone: (() -> Unit)? = null
+
+    fun slideIn() {
+        gone = null
+        away = false
+        present = true
+    }
+
+    /** Slides the controls off to their edge, then runs [then]; at once if they are already off. */
+    fun slideOut(then: () -> Unit) {
+        if (!present && away) {
+            then()
+            return
+        }
+        gone = then
+        present = false
+    }
+
+    private var pointerConnected by mutableStateOf(DesktopControlActivity.externalPointerConnected())
+    private val inputManager = if (showControls) context.getSystemService(InputManager::class.java) else null
+    private val devices = object : InputManager.InputDeviceListener {
+        override fun onInputDeviceAdded(deviceId: Int) = devicesChanged()
+        override fun onInputDeviceRemoved(deviceId: Int) = devicesChanged()
+        override fun onInputDeviceChanged(deviceId: Int) = devicesChanged()
+    }
+
+    private fun devicesChanged() {
+        pointerConnected = DesktopControlActivity.externalPointerConnected()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        inputManager?.registerInputDeviceListener(devices, Handler(Looper.getMainLooper()))
+        devicesChanged()
+    }
+
+    // Sliding off, the window takes no touches; until then Return's pinned
+    // buttons must not grab again.
     private fun primaryAction() {
         when {
-            waiting -> Unit
+            waiting || returning -> Unit
             captured -> if (SystemClock.uptimeMillis() - grabbedAt >= CLICK_GUARD_MS) release("button")
             grabbedElsewhere -> TabletGrab.routed?.lost("button")
             else -> takeControl()
         }
     }
 
+    /** Return was tapped: the controls stay as they are until they slide off. Compose-observable. */
+    private var returning by mutableStateOf(false)
+    private val returnTimeout = Runnable { returning = false }
+
     private fun returnToTablet() {
+        if (returning) return
+        returning = true
         relinquish("return")
         TabletGrab.routed?.lost("return")
-        if (host.portalDisplays.moveTo(Display.DEFAULT_DISPLAY) && holdsGrab) close()
+        if (!host.portalDisplays.moveTo(Display.DEFAULT_DISPLAY)) {
+            returning = false
+            return
+        }
+        if (holdsGrab) close()
+        // Should the desktop not leave the monitor after all, show what is true.
+        removeCallbacks(returnTimeout)
+        postDelayed(returnTimeout, RETURN_TIMEOUT_MS)
     }
 
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
@@ -407,6 +551,7 @@ internal class DesktopControlView(
     }
 
     override fun onDetachedFromWindow() {
+        inputManager?.unregisterInputDeviceListener(devices)
         dispose()
         super.onDetachedFromWindow()
     }
@@ -430,8 +575,11 @@ internal class DesktopControlView(
         const val TAG = "PortalDesktopControl"
         const val CAPTURE_TIMEOUT_MS = 2000L
         const val CLICK_GUARD_MS = 500L
+        const val RETURN_TIMEOUT_MS = 2000L
         const val BUTTON_BACK = 0x113
         const val BUTTON_FORWARD = 0x114
+        /** As on the phone's touchpad page, where a label fits on one line. */
+        val ButtonSize = 72.dp
 
         fun isCtrl(code: Int) = code == KeyEvent.KEYCODE_CTRL_LEFT || code == KeyEvent.KEYCODE_CTRL_RIGHT
         fun isAlt(code: Int) = code == KeyEvent.KEYCODE_ALT_LEFT || code == KeyEvent.KEYCODE_ALT_RIGHT

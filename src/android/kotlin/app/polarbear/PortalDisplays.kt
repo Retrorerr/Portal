@@ -19,6 +19,7 @@ import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import app.polarbear.setup.components.keyServiceEnabled
 
 internal enum class TabletEdge { Left, Right }
 
@@ -60,10 +61,11 @@ internal class PortalDisplays(private val host: PortalActivity) {
     /** Keep Control desktop floating on the tablet (Display over other apps). */
     val floatingControls: Boolean get() = floatingWanted && overlayAllowed
 
-    fun setFloatingControls(enabled: Boolean) {
+    /** Switched on without Android's permission, the setup for it grows out of [origin]. */
+    fun setFloatingControls(enabled: Boolean, origin: androidx.compose.ui.geometry.Rect? = null) {
         floatingWanted = enabled
         preferences.edit().putBoolean(PREF_FLOATING_CONTROLS, enabled).apply()
-        if (enabled && !overlayAllowed) openOverlaySettings(host)
+        if (enabled && !overlayAllowed && !setUp(DisplayPermission.Overlay, origin)) openOverlaySettings(host)
         DesktopControlActivity.displayChanged()
     }
 
@@ -73,6 +75,47 @@ internal class PortalDisplays(private val host: PortalActivity) {
     }
 
     private fun canDrawOverlays() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Settings.canDrawOverlays(host)
+
+    /**
+     * What the desktop on a monitor works better with and Android doesn't allow
+     * yet, leaving out what the user put off unless [all].
+     */
+    fun missingPermissions(all: Boolean = false): List<DisplayPermission> = DisplayPermission.entries.filter {
+        it.applies && !granted(it) && (all || !preferences.getBoolean(putOffKey(it), false)) &&
+            // Floating controls the user switched off need no permission.
+            (it != DisplayPermission.Overlay || floatingWanted)
+    }
+
+    fun granted(permission: DisplayPermission): Boolean = when (permission) {
+        DisplayPermission.Overlay -> canDrawOverlays()
+        // Switched on is enough: Android may still be binding the service.
+        DisplayPermission.Accessibility -> keyServiceEnabled(host)
+    }
+
+    fun putOff(permission: DisplayPermission) {
+        preferences.edit().putBoolean(putOffKey(permission), true).apply()
+    }
+
+    private fun putOffKey(permission: DisplayPermission) = "display_setup_put_off_${permission.name.lowercase()}"
+
+    /**
+     * Moves the desktop to [target]; to a monitor, first through the setup for
+     * what it lacks there, growing out of [origin] (window pixels).
+     */
+    fun choose(target: Target, origin: androidx.compose.ui.geometry.Rect?, moved: () -> Unit) {
+        if (!target.current && target.id != Display.DEFAULT_DISPLAY) {
+            val preview = DisplaySetup.previewNext.also { DisplaySetup.previewNext = false }
+            val steps = if (preview) DisplaySetup.everyStep() else missingPermissions()
+            if (DisplaySetup.show(host, target, steps, origin, moved, preview)) return
+        }
+        if (moveTo(target.id)) moved()
+    }
+
+    /** The setup's step for [permission] alone, growing out of [origin]; the desktop stays where it is. */
+    fun setUp(permission: DisplayPermission, origin: androidx.compose.ui.geometry.Rect?): Boolean {
+        val monitor = targets().firstOrNull { it.id != Display.DEFAULT_DISPLAY } ?: return false
+        return DisplaySetup.show(host, monitor, listOf(permission), origin, moved = null)
+    }
 
     /** The release keys are shown on the first few grabs only. */
     fun takeReleaseHint(): Boolean = takeHint(PREF_RELEASE_HINTS, RELEASE_HINTS)

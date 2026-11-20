@@ -163,7 +163,7 @@ open class PortalActivity : GameActivity() {
 
     // Controller keys and sticks go to the guest's evdev pads before the view tree.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
-        SessionControls.onShortcut(event) || SessionControls.onBackKey(event) || TouchControls.dispatchUtilityKey(event) || dispatchMouseSideButton(event) || TouchControls.onBackKey(event) || GamepadBridge.dispatchKey(event) ||
+        DisplaySetup.dispatchKey(event) || SessionControls.onShortcut(event) || SessionControls.onBackKey(event) || TouchControls.dispatchUtilityKey(event) || dispatchMouseSideButton(event) || TouchControls.onBackKey(event) || GamepadBridge.dispatchKey(event) ||
             super.dispatchKeyEvent(event)
 
     /**
@@ -221,12 +221,18 @@ open class PortalActivity : GameActivity() {
         }
         // Debug builds: show the desktop on a display as External display would.
         //   adb shell am start -n app.polarbear/.PortalActivity --activity-single-top --es portal_display 5
-        //   (add --ef portal_display_slow 8 to slow the touchpad's transitions down for screenshots)
+        //   (add --ef portal_display_slow 8 to slow the touchpad's transitions down for screenshots,
+        //   --ez portal_display_setup true to go through every step of the monitor setup first)
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             if (intent.hasExtra(EXTRA_DEBUG_DISPLAY_SLOW)) {
                 PresentedDesktopPad.slow = intent.getFloatExtra(EXTRA_DEBUG_DISPLAY_SLOW, 1f).coerceIn(1f, 20f)
             }
-            intent.getStringExtra(EXTRA_DEBUG_DISPLAY)?.toIntOrNull()?.let { portalDisplays.moveTo(it) }
+            // Without portal_display, the setup plays for the next monitor chosen in Portal settings.
+            val setup = intent.getBooleanExtra(EXTRA_DEBUG_DISPLAY_SETUP, false)
+            when (val display = intent.getStringExtra(EXTRA_DEBUG_DISPLAY)?.toIntOrNull()) {
+                null -> if (setup) DisplaySetup.previewNext = true
+                else -> if (setup) DisplaySetup.preview(this, display) else portalDisplays.moveTo(display)
+            }
         }
         // Return to phone in the notification. A moved activity is already
         // back from the launch display; a presented desktop comes back here.
@@ -893,6 +899,7 @@ open class PortalActivity : GameActivity() {
         private const val PREF_USE_PORTAL_KEYBOARD = "use_portal_keyboard"
         private const val EXTRA_DEBUG_DISPLAY = "portal_display"
         private const val EXTRA_DEBUG_DISPLAY_SLOW = "portal_display_slow"
+        private const val EXTRA_DEBUG_DISPLAY_SETUP = "portal_display_setup"
         private const val IDLE_REFRESH_CHECK_MS = 1000L
         private const val IDLE_REFRESH_HZ = 60f
         private val processHostsActivity = AtomicBoolean(false)

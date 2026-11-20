@@ -1,8 +1,16 @@
 package app.polarbear
 
-import android.os.Build
 import android.view.Display
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,24 +23,29 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import app.polarbear.setup.PortalPalette
+import app.polarbear.setup.components.PortalGlyph
 import app.polarbear.setup.components.SlidingSegmentedControl
-import app.polarbear.setup.components.openAccessibilitySettings
 
 @Composable
 internal fun ExternalDisplaySettings(
@@ -42,13 +55,13 @@ internal fun ExternalDisplaySettings(
     onMove: () -> Unit,
 ) {
     var targets by remember(displays) { mutableStateOf(displays.targets()) }
-    var touchKept by remember { mutableStateOf(touchKeptWhileControlling()) }
+    var touchOff by remember { mutableStateOf(touchNeedsSetup(displays)) }
     DisposableEffect(displays, settingsOpen) {
         // The capsule keeps its settings content composed after the page closes.
         val stopObserving = if (settingsOpen) displays.observe { targets = displays.targets() } else null
         if (settingsOpen) {
             targets = displays.targets()
-            touchKept = touchKeptWhileControlling()
+            touchOff = touchNeedsSetup(displays)
         }
         onDispose { stopObserving?.invoke() }
     }
@@ -56,7 +69,7 @@ internal fun ExternalDisplaySettings(
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) touchKept = touchKeptWhileControlling()
+            if (event == Lifecycle.Event.ON_RESUME) touchOff = touchNeedsSetup(displays)
         }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
@@ -64,6 +77,13 @@ internal fun ExternalDisplaySettings(
     val context = LocalContext.current
     // Nothing to choose until Android offers a second display for apps.
     if (targets.none { it.id != Display.DEFAULT_DISPLAY }) return
+
+    // The setup grows out of the row it is for, edge to edge of the group.
+    val inset = with(LocalDensity.current) { 14.dp.toPx() }
+    fun Modifier.rowBounds(onBounds: (Rect) -> Unit) = onGloballyPositioned { coordinates ->
+        val bounds = coordinates.boundsInWindow()
+        onBounds(Rect(bounds.left - inset, bounds.top, bounds.right + inset, bounds.bottom))
+    }
 
     Spacer(Modifier.height(18.dp))
     Text("External display", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.textPrimary)
@@ -73,59 +93,84 @@ internal fun ExternalDisplaySettings(
     val device = deviceNoun(context)
     SettingsGroup(palette) {
         targets.forEach { target ->
-            DisplayRow(target, palette) { if (displays.moveTo(target.id)) onMove() }
+            key(target.id) {
+                var row by remember { mutableStateOf<Rect?>(null) }
+                DisplayRow(target, device, palette, Modifier.rowBounds { row = it }) { displays.choose(target, row, onMove) }
+            }
             SettingsDivider(palette)
         }
-        Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            SettingsRowText("${device.replaceFirstChar(Char::uppercaseChar)} position",
-                "Puts Control desktop on the side facing the monitor",
-                palette, Modifier.weight(1f).padding(end = 12.dp))
-            SlidingSegmentedControl(
-                options = TabletEdge.entries,
-                selected = displays.tabletEdge,
-                onSelect = displays::setTabletPosition,
-                label = { if (it == TabletEdge.Left) "Left" else "Right" },
+        var floatingRow by remember { mutableStateOf<Rect?>(null) }
+        Box(Modifier.rowBounds { floatingRow = it }) {
+            SettingsToggle(
+                title = "Floating controls",
+                subtitle = "Over other apps on this $device",
+                checked = displays.floatingControls,
                 palette = palette,
-                modifier = Modifier.width(132.dp),
-                height = 36.dp,
-                enabled = LocalUtilityContentActive.current,
+                icon = PortalGlyph.Layers,
+                onChange = { displays.setFloatingControls(it, floatingRow) },
             )
         }
-        SettingsDivider(palette)
-        SettingsToggle(
-            title = "Floating controls",
-            subtitle = "Keep Control desktop on the $device over other apps",
-            checked = displays.floatingControls,
-            palette = palette,
-            onChange = displays::setFloatingControls,
-        )
-        if (!touchKept) {
-            SettingsDivider(palette)
-            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                SettingsRowText(
-                    "Touch while controlling",
-                    "Turn on Portal in Accessibility to keep using Android by touch while the desktop has " +
-                        "the mouse and keyboard",
-                    palette, Modifier.weight(1f).padding(end = 12.dp),
+        // Which edge they keep to only matters while they float.
+        AnimatedVisibility(
+            displays.floatingControls,
+            enter = fadeIn(tween(200, delayMillis = 60)) + expandVertically(spring(dampingRatio = 1f, stiffness = 380f)),
+            exit = fadeOut(tween(120)) + shrinkVertically(spring(dampingRatio = 1f, stiffness = 380f)),
+            label = "floating controls side",
+        ) {
+            Row(Modifier.fillMaxWidth().padding(start = SettingsGlyphInset, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                SettingsRowText("Side facing the monitor", null, palette, Modifier.weight(1f).padding(end = 12.dp))
+                // TabletEdge is where this device sits: to the monitor's right, its left side faces it.
+                SlidingSegmentedControl(
+                    options = listOf(TabletEdge.Right, TabletEdge.Left),
+                    selected = displays.tabletEdge,
+                    onSelect = displays::setTabletPosition,
+                    label = { if (it == TabletEdge.Right) "Left" else "Right" },
+                    palette = palette,
+                    modifier = Modifier.width(132.dp),
+                    height = 36.dp,
+                    enabled = LocalUtilityContentActive.current,
                 )
-                QuietButton("Turn on", palette) { openAccessibilitySettings(context) }
+            }
+        }
+        // Put off in the setup, or never asked: the same step, from here.
+        AnimatedVisibility(
+            touchOff,
+            enter = fadeIn(tween(200, delayMillis = 60)) + expandVertically(spring(dampingRatio = 1f, stiffness = 380f)),
+            exit = fadeOut(tween(120)) + shrinkVertically(spring(dampingRatio = 1f, stiffness = 380f)),
+            label = "touch setup",
+        ) {
+            Column {
+                SettingsDivider(palette)
+                var row by remember { mutableStateOf<Rect?>(null) }
+                Row(
+                    Modifier.fillMaxWidth().rowBounds { row = it }.padding(vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    SettingsGlyph(PortalGlyph.Accessibility, palette)
+                    SettingsRowText(
+                        DisplayPermission.Accessibility.title, "While the mouse controls the desktop",
+                        palette, Modifier.weight(1f).padding(end = 12.dp),
+                    )
+                    QuietButton("Turn on", palette) { displays.setUp(DisplayPermission.Accessibility, row) }
+                }
             }
         }
     }
 }
 
 /**
- * Whether Control desktop leaves the touchscreen to Android: true once Portal's
- * accessibility service runs, and on Android before 14, where it can't.
+ * Whether Control desktop would take the whole touchscreen: Portal's
+ * accessibility service is off, on Android 14 and later, where it can leave
+ * touch to Android.
  */
-private fun touchKeptWhileControlling(): Boolean =
-    Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE || KeyboardAccessibilityService.canRouteMotion()
+private fun touchNeedsSetup(displays: PortalDisplays): Boolean =
+    DisplayPermission.Accessibility.applies && !displays.granted(DisplayPermission.Accessibility)
 
 /** One display: tap to move the desktop there; the current one carries a check. */
 @Composable
-private fun DisplayRow(target: PortalDisplays.Target, palette: PortalPalette, onClick: () -> Unit) {
+private fun DisplayRow(target: PortalDisplays.Target, device: String, palette: PortalPalette, modifier: Modifier, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth()
+        modifier.fillMaxWidth()
             .selectable(
                 selected = target.current,
                 enabled = LocalUtilityContentActive.current && !target.current,
@@ -135,10 +180,13 @@ private fun DisplayRow(target: PortalDisplays.Target, palette: PortalPalette, on
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        val detail = if (target.presented) {
-            "${target.resolution} · this ${deviceNoun(LocalContext.current)} becomes the touchpad"
-        } else target.resolution
-        SettingsRowText(target.name, detail, palette, Modifier.weight(1f).padding(end = 12.dp))
+        val glyph = when {
+            target.id != Display.DEFAULT_DISPLAY -> PortalGlyph.Monitor
+            device == "tablet" -> PortalGlyph.Tablet
+            else -> PortalGlyph.Phone
+        }
+        SettingsGlyph(glyph, palette)
+        SettingsRowText(target.name, target.resolution, palette, Modifier.weight(1f).padding(end = 12.dp))
         if (target.current) {
             Canvas(Modifier.size(18.dp)) {
                 val stroke = 2.dp.toPx()

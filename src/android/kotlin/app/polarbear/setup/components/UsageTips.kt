@@ -70,6 +70,14 @@ private fun keyServiceState(context: Context): KeyServiceState {
     return if (enabled) KeyServiceState.NotRunning else KeyServiceState.Off
 }
 
+/** Portal's accessibility service is switched on, though Android may not run it yet. */
+internal fun keyServiceEnabled(context: Context): Boolean = keyServiceState(context) != KeyServiceState.Off
+
+/** Portal's App info, where Android 13+ keeps "Allow restricted settings" for apps from outside a store. */
+internal fun openAppInfo(context: Context) {
+    launch(context, Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+}
+
 /** All files access exists from Android 11; older devices have no such tip. */
 private fun allFilesGranted(): Boolean =
     Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()

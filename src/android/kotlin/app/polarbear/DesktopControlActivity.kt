@@ -288,6 +288,7 @@ private class DesktopControlOverlay(
     private var stopObserving: (() -> Unit)? = null
     private var added = false
     private var closed = false
+    private var hidden = false
 
     fun show() {
         manager.addView(view, layout)
@@ -308,12 +309,27 @@ private class DesktopControlOverlay(
         updateLayout()
     }
 
-    /** Hidden while the controller holds the tablet; it shows the same controls. */
+    /**
+     * Hidden while the controller holds the tablet or the phone's touchpad page
+     * is up; they show the same controls. The handle slides off to its edge
+     * and back out of it.
+     */
     fun setHidden(hidden: Boolean) {
-        if (closed) return
-        val flags = if (hidden) layout.flags or LayoutParams.FLAG_NOT_TOUCHABLE
-        else layout.flags and LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-        view.visibility = if (hidden) android.view.View.INVISIBLE else android.view.View.VISIBLE
+        if (closed || hidden == this.hidden) return
+        this.hidden = hidden
+        if (hidden) {
+            setTouchable(false)
+            view.slideOut { if (this.hidden && !closed) view.visibility = android.view.View.INVISIBLE }
+        } else {
+            view.visibility = android.view.View.VISIBLE
+            setTouchable(true)
+            view.slideIn()
+        }
+    }
+
+    private fun setTouchable(touchable: Boolean) {
+        val flags = if (touchable) layout.flags and LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        else layout.flags or LayoutParams.FLAG_NOT_TOUCHABLE
         if (flags == layout.flags) return
         layout.flags = flags
         updateLayout()
@@ -332,13 +348,30 @@ private class DesktopControlOverlay(
         if (closed) return
         closed = true
         stopObserving?.invoke()
+        onClose(this)
+        // Its grab ends now; the handle itself slides off to its edge first.
+        view.dispose()
+        if (!added || hidden || !view.isAttachedToWindow) {
+            remove()
+            return
+        }
+        setTouchable(false)
+        view.slideOut(::remove)
+        // In case the slide never runs (the window already gone from the display).
+        view.postDelayed(::remove, 600)
+    }
+
+    private var removed = false
+
+    private fun remove() {
+        if (removed) return
+        removed = true
         try {
             if (added) manager.removeView(view)
-        } catch (error: IllegalArgumentException) {
+        } catch (error: RuntimeException) {
             Log.d("PortalDesktopControl", "Floating tablet controls were already removed", error)
         } finally {
             owner.destroy()
-            onClose(this)
         }
     }
 }

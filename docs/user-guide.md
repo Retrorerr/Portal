@@ -83,43 +83,62 @@ a monitor or a wireless display that Android offers to apps as a separate
 screen, then choose its name. Choose **Built-in screen** to move the desktop
 back.
 
+The first time you choose a monitor, Portal asks for the Android permissions
+the desktop works better with there, one short step each, with an animation of
+what it does:
+
+- **Controls over other apps** (Android's **Display over other apps**) keeps
+  Portal's floating controls on the tablet or phone over any app.
+- **Touch stays with Android** (Portal in Android's **Accessibility**
+  settings, Android 14 and later) keeps the tablet or phone working by touch
+  while the desktop has the mouse and keyboard.
+
+**Allow** or **Turn on** opens Android's page; find Portal there, switch it on
+and come back, and the step ticks itself off. **Not now** skips a step, and
+Portal doesn't ask again: switch **Floating controls** on, or tap **Turn on**
+next to **Touch stays with Android**, in Portal settings to do it later. If
+Android greys out the Accessibility switch for a Portal installed outside an
+app store, the step points to App info, where ⋮ › **Allow restricted
+settings** unlocks it. Back, or a tap outside the step, cancels and leaves the
+desktop where it is.
+
 Many phones only mirror a monitor and don't let apps move to it unless
 Android's desktop mode is on. There, Portal still shows the desktop on the
-monitor, and the phone's screen becomes a touchpad for it: move the pointer
-with one finger, tap to click, and scroll with two fingers. When a text field on
-the desktop has focus, the phone's keyboard opens over the touchpad. **Control
-desktop** at the top hands a connected mouse and keyboard to the desktop, and
-**Show desktop on this phone** brings it back. The monitor's row in **External
-display** says when this applies. Leave Portal and the desktop stays on the
-monitor while the phone runs Android, with the same controls a tablet gets
-(below). There, **Control desktop** opens the touchpad when no mouse or touchpad
-is connected.
+monitor: the desktop shrinks into a chip with the monitor's name, and the
+phone's screen becomes a touchpad for it. Move the pointer with one finger, tap
+to click, tap with two fingers to right-click, and scroll with two fingers. When
+a text field on the desktop has focus, the phone's keyboard opens over the
+touchpad. The buttons along the bottom are **Use mouse** (shown while a mouse or
+touchpad is connected), which hands it and the keyboard to the desktop,
+**Keyboard**, **Portal** for Portal's menu, and **Return**, which brings the
+desktop back to the phone. Leave Portal and the desktop stays on the monitor
+while the phone runs Android, with the same floating controls a tablet gets
+(below); with no mouse or touchpad connected, the floating button is
+**Touchpad** and brings the touchpad back.
 
 While the desktop is on the monitor, the tablet keeps running Android and shows
-a small **Control desktop** button at the edge facing the monitor. Tap it to
-send the mouse, touchpad and keyboard to the monitor; the Portal notification's
-**Control desktop** does the same from anywhere. The touchpad supports
-tap-to-click, double tap, tap-and-drag, two-finger right click and scrolling,
-and two-finger pinch in apps that support it on the GPU renderer.
+a round **Use mouse** button that slides in from the edge facing the monitor.
+Tap it to send the mouse, touchpad and keyboard to the monitor; the Portal
+notification's **Control desktop** does the same from anywhere. The touchpad
+supports tap-to-click, double tap, tap-and-drag, two-finger right click and
+scrolling, and two-finger pinch in apps that support it on the GPU renderer.
 
-On Android 14 and later, turn on Portal in Android's **Accessibility** settings
-to keep using Android by touch while the desktop has the mouse and keyboard.
-The touchpad then follows Android's own touchpad settings (speed, tap-to-click,
-scroll direction), and Android's arrow on the tablet hides until you hand
-control back. Until it's on, **External display** settings show a **Touch while
-controlling** row that opens the page, and touching the tablet's screen hands
-control back to Android.
+With **Touch stays with Android** on, the touchpad follows Android's own
+touchpad settings (speed, tap-to-click, scroll direction), and Android's arrow
+on the tablet hides until you hand control back. Without it, touching the
+tablet's screen hands control back to Android.
 
 To hand control back to Android, tap Ctrl+Alt on its own or tap **Release**
-with a finger. The cursor stays on the monitor however far you push it, and
-clicks of the mouse or touchpad never release it. **Return to tablet** (on a
-phone, **Return to phone**), on the button while you control the desktop and in
-the notification, moves the desktop back. **Tablet position** puts the button
-on the side of the tablet that faces the monitor.
+with a finger; the first few times, the button shows those keys beside it. The
+cursor stays on the monitor however far you push it, and clicks of the mouse or
+touchpad never release it. **Return**, next to **Release** while you control
+the desktop, and **Return to tablet** (on a phone, **Return to phone**) in the
+notification move the desktop back. **Side facing the monitor** puts the button
+on that side of the tablet.
 
 **Floating controls** keeps the button over other Android apps. It needs
-Android's **Display over other apps** permission, and turning it on opens that
-page if the permission is missing. With it off, the button closes after each
+Android's **Display over other apps** permission; switching it on asks for the
+permission first if it is missing. With it off, the button closes after each
 release and comes back when the desktop moves or when you tap Portal's app
 icon or notification.
 

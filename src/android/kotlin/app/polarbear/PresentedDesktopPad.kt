@@ -659,8 +659,9 @@ private class Fingers {
     }
 }
 
+/** A round button with its glyph and a word: the touchpad's, and the floating controls'. */
 @Composable
-private fun PadButton(
+internal fun PadButton(
     glyph: PortalGlyph,
     label: String,
     palette: PortalPalette,

@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.setup.PortalColors
 import app.polarbear.setup.PortalPalette
+import app.polarbear.setup.components.PortalGlyph
+import app.polarbear.setup.components.PortalIcon
 import app.polarbear.setup.components.PortalSwitch
 
 internal val UtilitySettingsWidth = 440.dp
@@ -193,6 +195,15 @@ internal fun QuietButton(
     }
 }
 
+/** Space a row's leading glyph takes, so rows beneath it can line up with its text. */
+internal val SettingsGlyphInset = 34.dp
+
+/** A row's leading glyph, showing what the row is about. */
+@Composable
+internal fun SettingsGlyph(glyph: PortalGlyph, palette: PortalPalette) {
+    PortalIcon(glyph, palette.textSecondary, Modifier.padding(end = 14.dp), size = 20.dp)
+}
+
 @Composable
 internal fun SettingsToggle(
     title: String,
@@ -200,6 +211,7 @@ internal fun SettingsToggle(
     checked: Boolean,
     palette: PortalPalette,
     accessory: @Composable () -> Unit = {},
+    icon: PortalGlyph? = null,
     onChange: (Boolean) -> Unit,
 ) {
     Row(
@@ -216,6 +228,7 @@ internal fun SettingsToggle(
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (icon != null) SettingsGlyph(icon, palette)
         SettingsRowText(title, subtitle, palette, Modifier.weight(1f).padding(end = 12.dp))
         accessory()
         PortalSwitch(checked, palette)
