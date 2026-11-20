@@ -8,8 +8,10 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.Display
+import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.PixelCopy
+import android.view.PointerIcon
 import android.view.SurfaceView
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -55,6 +57,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -110,6 +113,7 @@ import app.polarbear.setup.components.PortalIcon
 import app.polarbear.setup.components.PortalUiDensity
 import app.polarbear.setup.resolvePalette
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -157,6 +161,16 @@ internal class PresentedDesktopPad(
     private var touched by mutableStateOf(false)
     private val fingers = Fingers()
 
+    /**
+     * A connected mouse or touchpad goes to the desktop by itself until it is
+     * handed back here; coming back to the front, a newly connected one or Use
+     * mouse wants that again. Compose-observable.
+     */
+    private var mouseWanted by mutableStateOf(true)
+
+    /** This screen's window has focus: Portal is in front. Compose-observable. */
+    private var focused by mutableStateOf(false)
+
     /** Where the monitor chip sits; the desktop leaves into it and comes back out of it. */
     private var chipBounds by mutableStateOf<Rect?>(null)
     private var leaving by mutableStateOf(false)
@@ -176,6 +190,9 @@ internal class PresentedDesktopPad(
             LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
         )
         addView(grab, LayoutParams(1, 1))
+        grab.handedBack = { mouseWanted = false }
+        // Until the desktop takes a mouse, it works this screen, with Android's arrow.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) pointerIcon = PointerIcon.getSystemIcon(host, PointerIcon.TYPE_ARROW)
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
             safe = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             insets
@@ -186,13 +203,17 @@ internal class PresentedDesktopPad(
         super.onAttachedToWindow()
         inputManager?.registerInputDeviceListener(devices, Handler(Looper.getMainLooper()))
         devicesChanged()
+        focused = hasWindowFocus()
         ViewCompat.getRootWindowInsets(this)?.let {
             safe = it.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
         }
     }
 
     private fun devicesChanged() {
-        pointerConnected = DesktopControlActivity.externalPointerConnected()
+        val connected = DesktopControlActivity.externalPointerConnected()
+        // A mouse or touchpad connected now goes to the desktop.
+        if (connected && !pointerConnected) mouseWanted = true
+        pointerConnected = connected
     }
 
     @Composable
@@ -221,6 +242,22 @@ internal class PresentedDesktopPad(
                     } else {
                         launch { rise.animateTo(1f, tween(scaled(560), easing = PortalEmphasizedDecelerate)) }
                         enter.animateTo(1f, tween(scaled(220), easing = PortalEmphasizedDecelerate))
+                    }
+                }
+                // Once the pad has arrived, a connected mouse or touchpad goes to the
+                // desktop as if Use mouse had been tapped, and again whenever Portal
+                // comes back in front, until it is handed back here.
+                LaunchedEffect(Unit) {
+                    snapshotFlow {
+                        mouseWanted && pointerConnected && focused && rise.value > 0f && !leaving &&
+                            !SessionControls.utilityOpen.value && !grab.grabbed && !grab.asksAboutTouch
+                    }.collectLatest { take ->
+                        if (!take) return@collectLatest
+                        // The monitor's surface may still be on its way.
+                        repeat(40) {
+                            if (grab.takeControlQuietly()) return@collectLatest
+                            delay(250)
+                        }
                     }
                 }
                 // Leaving: the buttons go at once. Once the desktop shows on this
@@ -462,6 +499,25 @@ internal class PresentedDesktopPad(
         gestures.dispatch(event)
         scheduleGestureTimer()
         return true
+    }
+
+    // A mouse or touchpad's hover and scroll stop here too: below the pad lies
+    // the desktop's own surface, which would take them as positions on this
+    // screen rather than on the monitor.
+    override fun onHoverEvent(event: MotionEvent): Boolean = true
+
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean =
+        event.isFromSource(InputDevice.SOURCE_CLASS_POINTER) || super.onGenericMotionEvent(event)
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        focused = hasWindowFocus
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        // Back in front, a connected mouse goes to the desktop again.
+        if (visibility == VISIBLE) mouseWanted = true
     }
 
     private fun scheduleGestureTimer() {

@@ -379,8 +379,11 @@ internal class DesktopControlView(
     private fun primaryAction() {
         when {
             waiting || returning -> Unit
-            captured -> if (SystemClock.uptimeMillis() - grabbedAt >= CLICK_GUARD_MS) release("button")
-            grabbedElsewhere -> TabletGrab.routed?.lost("button")
+            captured -> if (SystemClock.uptimeMillis() - grabbedAt >= CLICK_GUARD_MS) handBack("button")
+            grabbedElsewhere -> {
+                TabletGrab.routed?.lost("button")
+                handedBack?.invoke()
+            }
             // Asked about touch, Use mouse again goes ahead without it.
             askingTouch -> if (SystemClock.uptimeMillis() - askedAt >= CLICK_GUARD_MS) goWithoutTouch()
             else -> takeControl()
@@ -397,7 +400,7 @@ internal class DesktopControlView(
     private fun goWithoutTouch() {
         if (!askingTouch) return
         askingTouch = false
-        host.portalDisplays.putOff(DisplayPermission.Accessibility)
+        host.portalDisplays.putOffAsk(DisplayPermission.Accessibility)
         takeControl()
     }
 
@@ -527,7 +530,7 @@ internal class DesktopControlView(
                 heldKeys.any { isCtrl(it.first) } && heldKeys.any { isAlt(it.first) }
         } else {
             if (releaseChord && (isCtrl(event.keyCode) || isAlt(event.keyCode))) {
-                release("Ctrl+Alt")
+                handBack("Ctrl+Alt")
                 return true
             }
             if (heldKeys.remove(key)) DesktopControlActivity.nativeControlKey(key.first, key.second, false)
@@ -564,6 +567,25 @@ internal class DesktopControlView(
             DesktopControlActivity.startControl(host)
             return
         }
+        capturePointer()
+    }
+
+    /**
+     * The touchpad page's own grab of a connected mouse or touchpad: through
+     * Portal's accessibility service when it runs, otherwise pointer capture.
+     * It never asks about the service (the monitor setup just did, and Use
+     * mouse still will) and says nothing while the desktop isn't ready yet.
+     * False when it didn't start.
+     */
+    fun takeControlQuietly(): Boolean {
+        if (captured || waiting) return true
+        if (askingTouch || !holdsGrab || readySurface() == null) return false
+        message = null
+        if (!takeRoutedControl()) capturePointer()
+        return true
+    }
+
+    private fun capturePointer() {
         waiting = true
         requestCaptureWhenFocused()
         postDelayed(captureTimeout, CAPTURE_TIMEOUT_MS)
@@ -604,6 +626,14 @@ internal class DesktopControlView(
     /** End a grab and close the controller. */
     fun release(reason: String) {
         if (relinquish(reason) && holdsGrab) close()
+    }
+
+    /** The user handed the mouse back on purpose: Release, or Ctrl+Alt. */
+    var handedBack: (() -> Unit)? = null
+
+    private fun handBack(reason: String) {
+        release(reason)
+        handedBack?.invoke()
     }
 
     /** Returns true when a grab or pending grab was active. */

@@ -76,8 +76,12 @@ internal class PortalDisplays(private val host: PortalActivity) {
      */
     fun refreshPermissions() {
         overlayAllowed = canDrawOverlays()
-        val allowed = DisplayPermission.entries.filter { preferences.getBoolean(putOffKey(it), false) && granted(it) }
-        if (allowed.isNotEmpty()) preferences.edit().apply { allowed.forEach { remove(putOffKey(it)) } }.apply()
+        val allowed = DisplayPermission.entries.filter {
+            (preferences.getBoolean(putOffKey(it), false) || preferences.getBoolean(askPutOffKey(it), false)) && granted(it)
+        }
+        if (allowed.isNotEmpty()) {
+            preferences.edit().apply { allowed.forEach { remove(putOffKey(it)); remove(askPutOffKey(it)) } }.apply()
+        }
     }
 
     private fun canDrawOverlays() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Settings.canDrawOverlays(host)
@@ -98,15 +102,27 @@ internal class PortalDisplays(private val host: PortalActivity) {
         DisplayPermission.Accessibility -> keyServiceEnabled(host)
     }
 
-    /** Android doesn't allow [permission] and the user hasn't put it off: Portal asks before going without it. */
+    /**
+     * Android doesn't allow [permission] and the user hasn't put off asking about
+     * it where it's used: Portal asks before going without it. Not now in the
+     * monitor setup still leaves this one ask, at the moment it matters.
+     */
     fun asksFor(permission: DisplayPermission): Boolean =
-        permission.applies && !preferences.getBoolean(putOffKey(permission), false) && !granted(permission)
+        permission.applies && !preferences.getBoolean(askPutOffKey(permission), false) && !granted(permission)
 
+    /** Not now in the monitor setup. */
     fun putOff(permission: DisplayPermission) {
         preferences.edit().putBoolean(putOffKey(permission), true).apply()
     }
 
+    /** Not now where the permission is used, such as Use mouse's ask. */
+    fun putOffAsk(permission: DisplayPermission) {
+        preferences.edit().putBoolean(askPutOffKey(permission), true).apply()
+    }
+
     private fun putOffKey(permission: DisplayPermission) = "display_setup_put_off_${permission.name.lowercase()}"
+
+    private fun askPutOffKey(permission: DisplayPermission) = "display_ask_put_off_${permission.name.lowercase()}"
 
     /**
      * Moves the desktop to [target]; to a monitor, first through the setup for

@@ -107,10 +107,12 @@ On the monitor, the desktop shrinks into a chip with the monitor's name, and
 the tablet's or phone's screen becomes a touchpad for it. Move the pointer with
 one finger, tap to click, tap with two fingers to right-click, and scroll with
 two fingers. When a text field on the desktop has focus, the on-screen keyboard
-opens over the touchpad. The buttons along the bottom are **Use mouse** (shown
-while a mouse or touchpad is connected), which hands it and the keyboard to the
-desktop, **Keyboard**, **Portal** for Portal's menu, and **Return**, which
-brings the desktop back.
+opens over the touchpad. The buttons along the bottom are **Keyboard**,
+**Portal** for Portal's menu, and **Return**, which brings the desktop back. A
+connected mouse or touchpad and keyboard go to the desktop as soon as the
+touchpad appears, and again each time you come back to Portal. **Release** (or
+Ctrl+Alt) hands them back to Android, which then shows its own pointer on the
+touchpad, and **Use mouse** sends them to the desktop again.
 
 Leave Portal and the desktop stays on the monitor while the tablet or phone
 runs Android. A round **Use mouse** button slides in from the edge facing the
@@ -125,11 +127,13 @@ goes straight back to Android with the button.
 
 With the accessibility service on, the touchpad follows Android's own touchpad
 settings (speed, tap-to-click, scroll direction), and Android's arrow on the
-tablet hides until you hand control back. Without it, touching the tablet's
-screen hands control back to Android, so when it is off, **Use mouse** and
-**Control desktop** say so first: **Turn on** opens Android's page, and **Not
-now** (or **Use mouse** again) goes ahead without it. Force-stopping Portal in
-Android's settings switches the service off.
+tablet hides until you hand control back. Without it, the desktop keeps the
+mouse only while Portal is on screen: touching the tablet outside Portal, or
+leaving Portal, hands control back to Android. So when it is off, **Use mouse**
+and **Control desktop** say so first, even if you skipped the step when you
+chose the monitor: **Turn on** opens Android's page, and **Not now** (or **Use
+mouse** again) goes ahead without it. Force-stopping Portal in Android's
+settings switches the service off.
 
 To hand control back to Android, tap Ctrl+Alt on its own or tap **Release**
 with a finger; the first few times, the button shows those keys beside it. The
