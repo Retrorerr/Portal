@@ -347,7 +347,10 @@ internal class PresentedDesktopPad(
         }
     }
 
-    /** Above the buttons: why taking the mouse failed, or which keys hand it back. */
+    /**
+     * Above the buttons: whether to turn the accessibility service back on, why
+     * taking the mouse failed, or which keys hand it back.
+     */
     @Composable
     private fun GrabNote(palette: PortalPalette) {
         val failure = grab.failure
@@ -357,18 +360,29 @@ internal class PresentedDesktopPad(
             shownFailure = failure
             if (failure != null) { delay(4_000); shownFailure = null }
         }
+        val text = shownFailure
+        val note = when {
+            grab.asksAboutTouch -> ControlNote.Touch
+            text != null -> ControlNote.Failure(text)
+            grab.showsReleaseKeys -> ControlNote.Keys
+            else -> null
+        }
+        // The note keeps what it showed while it folds away.
+        val lastNote = remember { arrayOfNulls<ControlNote>(1) }
+        if (note != null) lastNote[0] = note
         AnimatedVisibility(
-            shownFailure != null || grab.showsReleaseKeys,
+            note != null,
             enter = fadeIn(tween(220)) + androidx.compose.animation.expandVertically(spring(dampingRatio = 1f, stiffness = 380f)),
             exit = fadeOut(tween(160)) + androidx.compose.animation.shrinkVertically(spring(dampingRatio = 1f, stiffness = 380f)),
             label = "touchpad note",
         ) {
             Box(Modifier.padding(bottom = 16.dp).widthIn(max = 320.dp), contentAlignment = Alignment.Center) {
-                val text = shownFailure
-                if (text != null) {
-                    Text(text, color = palette.textMuted, fontSize = 12.sp, lineHeight = 16.sp, textAlign = TextAlign.Center)
-                } else {
-                    ReleaseKeys(palette)
+                when (val shown = lastNote[0]) {
+                    ControlNote.Touch -> NoteCard(palette) { grab.TurnOnTouch(palette) }
+                    ControlNote.Keys -> ReleaseKeys(palette)
+                    is ControlNote.Failure ->
+                        Text(shown.text, color = palette.textMuted, fontSize = 12.sp, lineHeight = 16.sp, textAlign = TextAlign.Center)
+                    null -> Unit
                 }
             }
         }

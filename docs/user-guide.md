@@ -77,7 +77,7 @@ an app that requests to keep the display awake can hold it on. Turn the timeout
 off in Portal settings to keep the display on whenever Portal is visible.
 
 **External display** in Portal settings appears when a monitor is connected
-and moves the running Plasma desktop to it, resized to fit. It uses Android's
+and shows the running Plasma desktop on it, resized to fit. It uses Android's
 multi-display support and needs no Shizuku or screen capture permission. Connect
 a monitor or a wireless display that Android offers to apps as a separate
 screen, then choose its name. Choose **Built-in screen** to move the desktop
@@ -103,26 +103,25 @@ app store, the step points to App info, where ⋮ › **Allow restricted
 settings** unlocks it. Back, or a tap outside the step, cancels and leaves the
 desktop where it is.
 
-Many phones only mirror a monitor and don't let apps move to it unless
-Android's desktop mode is on. There, Portal still shows the desktop on the
-monitor: the desktop shrinks into a chip with the monitor's name, and the
-phone's screen becomes a touchpad for it. Move the pointer with one finger, tap
-to click, tap with two fingers to right-click, and scroll with two fingers. When
-a text field on the desktop has focus, the phone's keyboard opens over the
-touchpad. The buttons along the bottom are **Use mouse** (shown while a mouse or
-touchpad is connected), which hands it and the keyboard to the desktop,
-**Keyboard**, **Portal** for Portal's menu, and **Return**, which brings the
-desktop back to the phone. Leave Portal and the desktop stays on the monitor
-while the phone runs Android, with the same floating controls a tablet gets
-(below); with no mouse or touchpad connected, the floating button is
-**Touchpad** and brings the touchpad back.
+On the monitor, the desktop shrinks into a chip with the monitor's name, and
+the tablet's or phone's screen becomes a touchpad for it. Move the pointer with
+one finger, tap to click, tap with two fingers to right-click, and scroll with
+two fingers. When a text field on the desktop has focus, the on-screen keyboard
+opens over the touchpad. The buttons along the bottom are **Use mouse** (shown
+while a mouse or touchpad is connected), which hands it and the keyboard to the
+desktop, **Keyboard**, **Portal** for Portal's menu, and **Return**, which
+brings the desktop back.
 
-While the desktop is on the monitor, the tablet keeps running Android and shows
-a round **Use mouse** button that slides in from the edge facing the monitor.
-Tap it to send the mouse, touchpad and keyboard to the monitor; the Portal
-notification's **Control desktop** does the same from anywhere. The touchpad
-supports tap-to-click, double tap, tap-and-drag, two-finger right click and
-scrolling, and two-finger pinch in apps that support it on the GPU renderer.
+Leave Portal and the desktop stays on the monitor while the tablet or phone
+runs Android. A round **Use mouse** button slides in from the edge facing the
+monitor; tap it to send the mouse, touchpad and keyboard to the monitor. The
+Portal notification's **Control desktop** does the same from anywhere. With no
+mouse or touchpad connected, the button is **Touchpad** and brings the touchpad
+back. A connected touchpad supports tap-to-click, double tap, tap-and-drag,
+two-finger right click and scrolling, and two-finger pinch in apps that support
+it on the GPU renderer. If Android won't let Portal show the desktop on a
+monitor this way, Portal moves its whole window there instead, and the tablet
+goes straight back to Android with the button.
 
 With the accessibility service on, the touchpad follows Android's own touchpad
 settings (speed, tap-to-click, scroll direction), and Android's arrow on the

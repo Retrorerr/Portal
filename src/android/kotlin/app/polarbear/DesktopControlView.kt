@@ -92,6 +92,9 @@ internal class DesktopControlView(
     /** Use mouse found Portal's accessibility service off and asks about it first. Compose-observable. */
     private var askingTouch by mutableStateOf(false)
     private var askedAt = 0L
+
+    /** Asking to turn the accessibility service back on, in [TurnOnTouch]. Compose-observable. */
+    val asksAboutTouch: Boolean get() = askingTouch
     private var releaseHint by mutableStateOf<String?>(null)
     private var grabbedAt = 0L
     /** The grab comes through the accessibility service rather than pointer capture. */
@@ -208,8 +211,9 @@ internal class DesktopControlView(
                     val shown = remember { booleanArrayOf(false) }
                     if (present && !returning) shown[0] = captured || grabbedElsewhere
                     val grabbed = shown[0]
-                    // A phone with only its touchscreen has no mouse to hand over.
+                    // A tablet or phone with only its touchscreen has no mouse to hand over.
                     val touchpad = !grabbed && host.presentedDisplay != null && !pointerConnected
+                    val device = deviceNoun(context)
                     val failure = message
                     val note = when {
                         askingTouch -> ControlNote.Touch
@@ -223,7 +227,11 @@ internal class DesktopControlView(
                     val parts = listOf<@Composable () -> Unit>(
                         {
                             PadButton(
-                                if (touchpad) PortalGlyph.Phone else PortalGlyph.Mouse,
+                                when {
+                                    !touchpad -> PortalGlyph.Mouse
+                                    device == "tablet" -> PortalGlyph.Tablet
+                                    else -> PortalGlyph.Phone
+                                },
                                 when {
                                     grabbed -> "Release"
                                     touchpad -> "Touchpad"
@@ -233,7 +241,7 @@ internal class DesktopControlView(
                                 accent = grabbed,
                                 description = when {
                                     grabbed -> "Give the mouse and keyboard back to Android"
-                                    touchpad -> "Use this phone as the desktop’s touchpad"
+                                    touchpad -> "Use this $device as the desktop’s touchpad"
                                     else -> "Use the mouse and keyboard on the desktop"
                                 },
                                 onClick = ::primaryAction,
@@ -261,15 +269,7 @@ internal class DesktopControlView(
                                     scaleOut(tween(160, easing = PortalEmphasizedAccelerate), targetScale = 0.9f, transformOrigin = origin),
                                 label = "control note",
                             ) {
-                                val shape = RoundedCornerShape(20.dp)
-                                Box(
-                                    Modifier.widthIn(max = 240.dp)
-                                        .shadow(6.dp, shape, ambientColor = palette.pillShadow, spotColor = palette.pillShadow)
-                                        .clip(shape).background(palette.background).background(palette.surfaceTop)
-                                        .border(1.dp, palette.surfaceBorder, shape)
-                                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                                        .semantics { liveRegion = LiveRegionMode.Polite },
-                                ) {
+                                NoteCard(palette, Modifier.widthIn(max = 240.dp)) {
                                     when (val shown = lastNote[0]) {
                                         ControlNote.Touch -> TurnOnTouch(palette)
                                         ControlNote.Keys -> ReleaseKeys(palette)
@@ -299,9 +299,13 @@ internal class DesktopControlView(
         }
     }
 
-    /** Use mouse with Portal's accessibility service off: turn it back on, or go ahead without it. */
+    /**
+     * Use mouse with Portal's accessibility service off: turn it back on, or go
+     * ahead without it. Shown beside the controls' buttons, or by a holder that
+     * draws its own, such as the phone's touchpad page.
+     */
     @Composable
-    private fun TurnOnTouch(palette: PortalPalette) {
+    internal fun TurnOnTouch(palette: PortalPalette) {
         Column {
             Row {
                 PortalIcon(PortalGlyph.Accessibility, palette.textSecondary, Modifier.padding(top = 1.dp, end = 10.dp), size = 18.dp)
@@ -551,7 +555,7 @@ internal class DesktopControlView(
         if (takeRoutedControl()) return
         // Without Portal's accessibility service a touch on this screen ends the
         // grab; switched off since it was last on, the controls ask about it first.
-        if (showControls && host.portalDisplays.asksFor(DisplayPermission.Accessibility)) {
+        if (host.portalDisplays.asksFor(DisplayPermission.Accessibility)) {
             askingTouch = true
             askedAt = SystemClock.uptimeMillis()
             return
@@ -689,11 +693,27 @@ internal class DesktopControlView(
     }
 }
 
-/** What the note beside the controls' buttons says. */
-private sealed interface ControlNote {
+/** What the note beside the controls' buttons, or above the touchpad's, says. */
+internal sealed interface ControlNote {
     class Failure(val text: String) : ControlNote
     object Keys : ControlNote
     object Touch : ControlNote
+}
+
+/** The note's card, beside the controls' buttons or above the touchpad's. */
+@Composable
+internal fun NoteCard(palette: PortalPalette, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    val shape = RoundedCornerShape(20.dp)
+    Box(
+        modifier
+            .shadow(6.dp, shape, ambientColor = palette.pillShadow, spotColor = palette.pillShadow)
+            .clip(shape).background(palette.background).background(palette.surfaceTop)
+            .border(1.dp, palette.surfaceBorder, shape)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+    ) {
+        content()
+    }
 }
 
 /**

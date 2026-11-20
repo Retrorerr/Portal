@@ -24,9 +24,9 @@ import app.polarbear.setup.components.keyServiceEnabled
 internal enum class TabletEdge { Left, Right }
 
 /**
- * Moves the desktop between Android displays: the running Portal activity
- * where Android allows it, otherwise a [DesktopPresentation] on the monitor
- * with this screen as the touchpad.
+ * Moves the desktop between Android displays: to a monitor as a
+ * [DesktopPresentation], with this screen as its touchpad, or, where Android
+ * takes no Presentation there, the running Portal activity itself.
  */
 internal class PortalDisplays(private val host: PortalActivity) {
     data class Target(
@@ -168,7 +168,7 @@ internal class PortalDisplays(private val host: PortalActivity) {
             val rotated = display.rotation == Surface.ROTATION_90 || display.rotation == Surface.ROTATION_270
             val width = if (rotated) mode.physicalHeight else mode.physicalWidth
             val height = if (rotated) mode.physicalWidth else mode.physicalHeight
-            val presented = id != activityId && !canMoveTo(display, intent) && canPresentOn(display)
+            val presented = presentsOn(display, activityId, intent)
             Target(id, label, "$width × $height", id == currentId, presented)
         }
     }
@@ -205,12 +205,12 @@ internal class PortalDisplays(private val host: PortalActivity) {
             }
         }
         val intent = launchIntent()
-        if (display != null && display.displayId != host.currentDisplay()?.displayId &&
-            !canMoveTo(display, intent) && canPresentOn(display)
-        ) {
+        if (display != null && presentsOn(display, host.currentDisplay()?.displayId, intent)) {
             if (host.presentDesktop(display)) return true
-            showMoveError()
-            return false
+            if (!canMoveTo(display, intent)) {
+                showMoveError()
+                return false
+            }
         }
         if (!host.isTaskRoot || display == null || !canMoveTo(display, intent)) {
             showMoveError()
@@ -264,6 +264,16 @@ internal class PortalDisplays(private val host: PortalActivity) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
         return activityManager.isActivityStartAllowedOnDisplay(host, display.displayId, intent)
     }
+
+    /**
+     * The desktop goes to [display] as a Presentation, and this device's screen
+     * becomes its touchpad, wherever Android allows one: tablets that could move
+     * Portal there behave like phones that can only present. Moving the activity
+     * is the fallback, for displays that take no Presentation.
+     */
+    private fun presentsOn(display: Display, activityId: Int?, intent: Intent): Boolean =
+        display.displayId != activityId && canPresentOn(display) &&
+            (activityId == Display.DEFAULT_DISPLAY || !canMoveTo(display, intent))
 
     /**
      * A monitor apps may show a Presentation on. Phones that mirror a monitor
