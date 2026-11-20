@@ -56,15 +56,69 @@ defaultPref("browser.shell.skipDefaultBrowserCheckOnFirstRun", true);
 // after kills during startup.
 defaultPref("browser.sessionstore.max_resumed_crashes", -1);
 defaultPref("toolkit.startup.max_resumed_crashes", -1);
-// Firefox here rejects requestPointerLock({unadjustedMovement: true}) with
-// NotSupportedError. Games retry without the option, but by then fullscreen
-// has used up the click's activation, so the retry is denied too and the game
-// drops out of fullscreen (surfd.net). Off, the option is ignored and the
-// first request locks.
-defaultPref("dom.pointer-lock.unadjusted-movement.enabled", false);
 // WebGPU is off by default on Linux; on, wgpu finds the Adreno through the
 // turnip Vulkan driver, which WebGPU games (Bevy/wgpu web builds) need.
 defaultPref("dom.webgpu.enabled", true);
+// Firefox on Linux has no raw pointer movement (its widgets never support
+// it), so requestPointerLock({unadjustedMovement: true}) rejects with
+// NotSupportedError. Games retry without the option, but the rejection comes
+// after the click's handler has returned, so the retry is refused for lacking
+// user input and the game drops out of fullscreen (surfd.net). This pref made
+// Firefox ignore the option; Firefox 158 removed it (older builds such as an
+// ESR may still read it). The script below does the same for every Firefox:
+// in each page, before the page's own scripts, a lock asking for unadjusted
+// movement asks for the plain lock instead. It runs in every content process
+// (a process script), so it needs no file besides this one.
+defaultPref("dom.pointer-lock.unadjusted-movement.enabled", false);
+(function () {
+  function pageShim() {
+    const proto = Element.prototype;
+    const lock = proto.requestPointerLock;
+    if (typeof lock !== "function") {
+      return;
+    }
+    const requestPointerLock = {
+      requestPointerLock(options) {
+        if (options !== null && typeof options === "object" && options.unadjustedMovement) {
+          options = Object.assign({}, options, { unadjustedMovement: false });
+        }
+        return lock.call(this, options);
+      },
+    }.requestPointerLock;
+    Object.defineProperty(proto, "requestPointerLock", {
+      value: requestPointerLock,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  function processScript(shimSource) {
+    const utils = Components.utils;
+    Services.obs.addObserver(function (win) {
+      try {
+        if (!win.document.nodePrincipal.isContentPrincipal) {
+          return;
+        }
+        const sandbox = utils.Sandbox(win, {
+          sandboxPrototype: win,
+          wantXrays: false,
+          sameZoneAs: win,
+        });
+        utils.evalInSandbox("(" + shimSource + ")();", sandbox);
+      } catch (e) {
+        utils.reportError(e);
+      }
+    }, "content-document-global-created");
+  }
+  try {
+    const services = typeof Services !== "undefined" ? Services
+      : ChromeUtils.importESModule("resource://gre/modules/Services.sys.mjs").Services;
+    const source = "(" + processScript + ")(" + JSON.stringify(String(pageShim)) + ");";
+    services.ppmm.loadProcessScript("data:," + encodeURIComponent(source), true);
+  } catch (e) {
+    Components.utils.reportError(e);
+  }
+})();
 
 "#;
 
@@ -377,7 +431,10 @@ pub fn sync_gecko_profiles(fs_root: &Path) {
             let current = fs::read_to_string(&path).unwrap_or_default();
             let merged = merge_user_js(&current, &block);
             if let Err(error) = write_if_changed(&path, &merged, None) {
-                log::warn!("Browser prefs {} could not be written: {error}", path.display());
+                log::warn!(
+                    "Browser prefs {} could not be written: {error}",
+                    path.display()
+                );
             }
         }
     }
@@ -513,7 +570,9 @@ pub fn sync_default_applications(fs_root: &Path) {
 /// the binary under `/usr/lib/firefox*/`, and that directory's name is the
 /// package's desktop id (`firefox`, `firefox-esr`, `firefox-beta`, ...).
 fn packaged_entry_for_userapp(fs_root: &Path, userapp: &str) -> Option<String> {
-    let exec = userapp.lines().find_map(|line| line.strip_prefix("Exec="))?;
+    let exec = userapp
+        .lines()
+        .find_map(|line| line.strip_prefix("Exec="))?;
     let program = exec.split_whitespace().next()?;
     let dir = program.strip_prefix("/usr/lib/")?.split('/').next()?;
     if !dir.starts_with("firefox") {
@@ -606,12 +665,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pages_get_the_plain_pointer_lock_whatever_the_firefox_version() {
+        // Firefox 158 dropped the pref; the process script must carry the fix
+        // into every content process, before the page's scripts run.
+        for needed in [
+            "ppmm.loadProcessScript(",
+            "\"content-document-global-created\"",
+            "isContentPrincipal",
+            "{ unadjustedMovement: false }",
+            "defaultPref(\"dom.pointer-lock.unadjusted-movement.enabled\", false);",
+        ] {
+            assert!(FIREFOX_CFG.contains(needed), "{needed}");
+        }
+        // Raw strings end at `"#`; the script must not contain one.
+        assert!(!FIREFOX_CFG.contains("\"#"));
+        // Only preferences go to user.js, never the script.
+        let block = portal_user_js_block();
+        assert!(block
+            .lines()
+            .skip(1)
+            .take_while(|line| *line != USER_JS_END)
+            .all(|line| line.starts_with("user_pref(")));
+    }
+
+    #[test]
     fn unclosed_portal_block_keeps_the_users_lines() {
         let block = portal_user_js_block();
         let managed = block.lines().nth(1).unwrap();
-        let user_js = format!(
-            "user_pref(\"a\", 1);\n{USER_JS_BEGIN}\n{managed}\nuser_pref(\"b\", 2);\n"
-        );
+        let user_js =
+            format!("user_pref(\"a\", 1);\n{USER_JS_BEGIN}\n{managed}\nuser_pref(\"b\", 2);\n");
         let merged = merge_user_js(&user_js, &block);
         assert!(merged.contains("user_pref(\"a\", 1);"));
         assert!(merged.contains("user_pref(\"b\", 2);"));
