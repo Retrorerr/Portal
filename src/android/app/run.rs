@@ -459,6 +459,20 @@ fn note_motion_logged(x: f64, y: f64, detail: std::fmt::Arguments) {
         log::info!("anland.input motion x={x:.1} y={y:.1} ({detail})");
     }
 }
+static LAST_PROJECTED_DROP_LOG_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Input from a tablet grab that the desktop could not take, at most once per second.
+fn note_projected_drop(reason: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    if now.wrapping_sub(LAST_PROJECTED_DROP_LOG_NS.load(Ordering::Relaxed)) >= 1_000_000_000 {
+        LAST_PROJECTED_DROP_LOG_NS.store(now, Ordering::Relaxed);
+        log::warn!("Projected pointer dropped: {reason}");
+    }
+}
+
 fn forward_anland_input(
     backend: &crate::android::backend::wayland::WaylandBackend,
     event: &WindowEvent,
@@ -1319,6 +1333,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
 
         if let AppUserEvent::ProjectedPointer { pointer, time_ns } = _event {
             if compose_overlay::input_is_blocked() {
+                note_projected_drop("Portal controls hold input");
                 return;
             }
             let event = pointer.window_event();
@@ -1326,6 +1341,8 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 if session.surface_active() {
                     forward_anland_input(backend, &event, time_ns);
                     session.flush_input();
+                } else {
+                    note_projected_drop("no live desktop surface");
                 }
             } else if backend.graphic_renderer.is_some() {
                 let event = centralize(event, backend);

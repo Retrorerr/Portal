@@ -1389,8 +1389,11 @@ impl<T: 'static> EventLoop<T> {
 
         self.pending_redraw |= self.redraw_flag.get_and_reset();
 
+        // User events are the app's own and arrive while paused too, such as
+        // input for a desktop shown on another display while this activity is
+        // in the background; only redraws wait for the activity to resume.
         timeout =
-            if self.running && (self.pending_redraw || self.user_events_receiver.has_incoming()) {
+            if (self.running && self.pending_redraw) || self.user_events_receiver.has_incoming() {
                 // If we already have work to do then we don't want to block on the next poll
                 Some(Duration::ZERO)
             } else {
@@ -1418,10 +1421,10 @@ impl<T: 'static> EventLoop<T> {
                     //
                     // For now, user_events and redraw_requests are the only reasons to expect
                     // a wake up here so we can ignore the wake up if there are no events/requests.
-                    // We also ignore wake ups while suspended.
+                    // While suspended, only user events wake the loop.
                     self.pending_redraw |= self.redraw_flag.get_and_reset();
-                    if !self.running
-                        || (!self.pending_redraw && !self.user_events_receiver.has_incoming())
+                    if !(self.running && self.pending_redraw)
+                        && !self.user_events_receiver.has_incoming()
                     {
                         return;
                     }

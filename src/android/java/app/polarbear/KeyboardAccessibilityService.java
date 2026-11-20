@@ -64,13 +64,29 @@ public class KeyboardAccessibilityService extends AccessibilityService {
         return now == sources;
     }
 
+    private static int routedEvents;
+    private static long routedLoggedAt;
+
+    /** Routed motion is hot: a count at most every two seconds keeps a test observable. */
+    private static void noteRoutedMotion(MotionEvent event) {
+        routedEvents++;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - routedLoggedAt < 2000) return;
+        Log.i(TAG, "Routed motion: " + routedEvents + " events, last source 0x"
+                + Integer.toHexString(event.getSource()) + " action " + event.getActionMasked());
+        routedEvents = 0;
+        routedLoggedAt = now;
+    }
+
     @Override
     public void onMotionEvent(MotionEvent event) {
         // Whatever ended the grab, Android gets its mouse and touchpad back.
         if (!TabletGrab.isRouted()) {
+            Log.i(TAG, "Motion after the grab ended; Android gets the mouse back");
             routeMotion(false);
             return;
         }
+        noteRoutedMotion(event);
         TabletGrab.routeMotion(event);
     }
 
