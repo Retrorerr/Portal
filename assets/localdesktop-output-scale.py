@@ -137,12 +137,22 @@ def size_key(short_side, long_side):
     return f"{short_side}x{long_side}"
 
 
+def remembered_density(state, fallback):
+    density = state.get("density")
+    if isinstance(density, int) and not isinstance(density, bool) and density > 0:
+        return density
+    return fallback
+
+
 def apply_size(observed):
     short_side, long_side, density = observed
     key = size_key(short_side, long_side)
     state = load_state()
     previous = state.get("current")
     if previous == key:
+        if state.get("density") != density:
+            state["density"] = density
+            save_state(state)
         return
     output_id, live_scale = live_output()
     scales = state["scales"]
@@ -157,6 +167,7 @@ def apply_size(observed):
             set_scale(output_id, target)
         scales[key] = target
         state["current"] = key
+        state["density"] = density
         save_state(state)
         log(f"tracking size={key} scale={scale_text(live_scale)}->{scale_text(target)}")
         return
@@ -171,11 +182,16 @@ def apply_size(observed):
             old_short = int(previous.split("x")[0])
         except ValueError:
             old_short = short_side
-        multiplier = live_scale / baseline_scale(old_short, density)
+        # The live scale is relative to the screen Portal left, so measure it
+        # against that screen's density: a monitor reports a far lower one
+        # than the phone it is connected to.
+        old_density = remembered_density(state, density)
+        multiplier = live_scale / baseline_scale(old_short, old_density)
         target = seeded_scale(short_side, density, multiplier)
     scales.pop(key, None)
     scales[key] = target
     state["current"] = key
+    state["density"] = density
     if abs(target - live_scale) > 0.001:
         set_scale(output_id, target)
         log(f"size={previous}->{key} scale={scale_text(live_scale)}->{scale_text(target)}")
