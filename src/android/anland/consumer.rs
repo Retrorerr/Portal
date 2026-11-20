@@ -2594,6 +2594,7 @@ fn render_loop(inner: Arc<Inner>) {
             close_silently(rfence);
         } else {
             inner.frames_queued.fetch_add(1, Ordering::Relaxed);
+            crate::android::utils::desktop_frames::rendered_on(window);
             note_rendered_frame(&inner, &mut frame_streak, sys::now_ns());
             frames_since_drain = frames_since_drain.saturating_add(1);
             pacer.frame_queued(

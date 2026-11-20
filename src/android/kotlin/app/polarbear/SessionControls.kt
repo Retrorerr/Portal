@@ -21,8 +21,11 @@ object SessionControls {
     @JvmStatic private external fun nativeKeyboardWanted(): Boolean
     @JvmStatic private external fun nativeDesktopKey(code: Int, down: Boolean)
     @JvmStatic private external fun nativeDesktopFrames(): Long
+    @JvmStatic private external fun nativeDesktopWindowChanges(): Long
     /** Frames Portal presented to the desktop surface; 0 (unknown) means sample anyway. */
     internal fun desktopFrames(): Long = try { nativeDesktopFrames() } catch (_: UnsatisfiedLinkError) { 0L }
+    /** How often the desktop's rendered frames moved to another window; -1 when unknown. */
+    internal fun desktopWindowChanges(): Long = try { nativeDesktopWindowChanges() } catch (_: UnsatisfiedLinkError) { -1L }
     var desktopKeyboardVisible by androidx.compose.runtime.mutableStateOf(false)
         private set
     internal var desktopKeyboardRevision by androidx.compose.runtime.mutableIntStateOf(0)

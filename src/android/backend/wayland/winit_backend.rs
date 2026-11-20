@@ -739,6 +739,7 @@ where
         self.window.pre_present_notify();
         self.egl_surface.swap_buffers(damage.as_deref_mut())?;
         crate::android::utils::desktop_frames::presented();
+        crate::android::utils::desktop_frames::rendered_on(self.native_window_ptr());
         let surface_after = self.egl_surface.get_surface_handle();
         Ok(self
             .frame_timestamps

@@ -221,7 +221,11 @@ open class PortalActivity : GameActivity() {
         }
         // Debug builds: show the desktop on a display as External display would.
         //   adb shell am start -n app.polarbear/.PortalActivity --activity-single-top --es portal_display 5
+        //   (add --ef portal_display_slow 8 to slow the touchpad's transitions down for screenshots)
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            if (intent.hasExtra(EXTRA_DEBUG_DISPLAY_SLOW)) {
+                PresentedDesktopPad.slow = intent.getFloatExtra(EXTRA_DEBUG_DISPLAY_SLOW, 1f).coerceIn(1f, 20f)
+            }
             intent.getStringExtra(EXTRA_DEBUG_DISPLAY)?.toIntOrNull()?.let { portalDisplays.moveTo(it) }
         }
         // Return to phone in the notification. A moved activity is already
@@ -383,11 +387,20 @@ open class PortalActivity : GameActivity() {
     // touchpad.
     @Volatile private var presentation: DesktopPresentation? = null
     private var presentedPad: PresentedDesktopPad? = null
+    /** The touchpad page after the desktop came back, until the desktop shows through it here. */
+    private var leavingPad: PresentedDesktopPad? = null
+
+    /**
+     * Native code keeps drawing here while the touchpad copies the desktop from
+     * this screen, so the copy is the desktop and not a surface it has left.
+     */
+    private var holdingPhoneSurface = false
 
     /** The holder whose surface native code currently draws into. */
     private var nativeHolder: SurfaceHolder? = null
 
-    private fun desktopHolder(): SurfaceHolder? = presentation?.holder ?: mSurfaceView?.holder
+    private fun desktopHolder(): SurfaceHolder? =
+        presentation?.holder?.takeUnless { holdingPhoneSurface } ?: mSurfaceView?.holder
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         if (holder !== desktopHolder()) return
@@ -435,7 +448,10 @@ open class PortalActivity : GameActivity() {
      */
     internal fun presentDesktop(display: Display): Boolean {
         if (presentation?.display?.displayId == display.displayId) return true
+        // Between monitors this screen has no desktop on it to carry over.
+        val fromHere = presentation == null
         endPresentation()
+        finishLeavingPad()
         val shown = DesktopPresentation(this, display, this) { ended ->
             if (presentation === ended) {
                 Log.i(TAG, "Presentation on display ${ended.display.displayId} ended")
@@ -443,19 +459,31 @@ open class PortalActivity : GameActivity() {
             }
         }
         presentation = shown
+        holdingPhoneSurface = fromHere
         try {
             shown.show()
         } catch (error: RuntimeException) {
             // InvalidDisplayException included: the monitor went, or Android refused the window.
             Log.w(TAG, "Could not present the desktop on display ${display.displayId}", error)
             presentation = null
+            holdingPhoneSurface = false
             return false
         }
         Log.i(TAG, "Presenting the desktop on display ${display.displayId} (${display.name})")
         applyScreenTimeout()
-        // Native code moves when the Presentation's surface is created.
+        // The touchpad carries the desktop as this screen shows it into its
+        // monitor chip. Native code moves to the monitor once that copy is
+        // taken, or when the Presentation's surface is created.
+        val snapshot = if (fromHere) {
+            DesktopSnapshot.take(mSurfaceView) {
+                if (presentation === shown && holdingPhoneSurface) {
+                    holdingPhoneSurface = false
+                    attachNativeSurface()
+                }
+            }
+        } else null
         attachNativeSurface()
-        val pad = PresentedDesktopPad(this, portalDisplays.displayName(display))
+        val pad = PresentedDesktopPad(this, portalDisplays.displayName(display), snapshot)
         overlayHost().addView(pad, 1.coerceAtMost(overlayHost().childCount),
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         presentedPad = pad
@@ -468,7 +496,18 @@ open class PortalActivity : GameActivity() {
     internal fun endPresentation() {
         val ending = presentation ?: return
         presentation = null
-        presentedPad?.let { overlayHost().removeView(it) }
+        holdingPhoneSurface = false
+        presentedPad?.let { pad ->
+            finishLeavingPad()
+            leavingPad = pad
+            // The touchpad stays until the desktop shows here again, then opens onto it.
+            pad.leave {
+                if (leavingPad === pad) {
+                    leavingPad = null
+                    overlayHost().removeView(pad)
+                }
+            }
+        }
         presentedPad = null
         if (nativeHolder === ending.holder) releaseNativeSurface()
         try {
@@ -479,6 +518,12 @@ open class PortalActivity : GameActivity() {
         attachNativeSurface()
         applyHighRefresh()
         desktopDisplayChanged()
+    }
+
+    private fun finishLeavingPad() {
+        val pad = leavingPad ?: return
+        leavingPad = null
+        overlayHost().removeView(pad)
     }
 
     private fun desktopDisplayChanged() {
@@ -847,6 +892,7 @@ open class PortalActivity : GameActivity() {
         private const val PREF_USE_ANDROID_SCREEN_TIMEOUT = "use_android_screen_timeout"
         private const val PREF_USE_PORTAL_KEYBOARD = "use_portal_keyboard"
         private const val EXTRA_DEBUG_DISPLAY = "portal_display"
+        private const val EXTRA_DEBUG_DISPLAY_SLOW = "portal_display_slow"
         private const val IDLE_REFRESH_CHECK_MS = 1000L
         private const val IDLE_REFRESH_HZ = 60f
         private val processHostsActivity = AtomicBoolean(false)

@@ -1,18 +1,23 @@
 package app.polarbear
 
+import android.graphics.Bitmap
 import android.hardware.input.InputManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.view.Display
 import android.view.MotionEvent
+import android.view.PixelCopy
+import android.view.SurfaceView
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -50,19 +55,30 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
@@ -94,6 +110,8 @@ import app.polarbear.setup.components.PortalIcon
 import app.polarbear.setup.components.PortalUiDensity
 import app.polarbear.setup.resolvePalette
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The phone's screen while the desktop is shown on a monitor through
@@ -103,8 +121,15 @@ import kotlinx.coroutines.delay
  * Portal's keyboard and menu, which grow out of them and close back into them,
  * and bring the desktop back. With a mouse connected, one more hands it and the
  * keyboard to the desktop.
+ *
+ * The desktop leaves this screen by shrinking into the monitor chip ([snapshot]
+ * is its picture) and comes back out of it ([leave]).
  */
-internal class PresentedDesktopPad(private val host: PortalActivity, private val monitor: String) : FrameLayout(host) {
+internal class PresentedDesktopPad(
+    private val host: PortalActivity,
+    private val monitor: String,
+    private val snapshot: DesktopSnapshot?,
+) : FrameLayout(host) {
     private var timeNs = 0L
     private val heldButtons = mutableSetOf<Int>()
     private val gestures = CapturedTouchpadGestures(
@@ -131,6 +156,12 @@ internal class PresentedDesktopPad(private val host: PortalActivity, private val
     private val guide = host.portalDisplays.takeTouchpadHint()
     private var touched by mutableStateOf(false)
     private val fingers = Fingers()
+
+    /** Where the monitor chip sits; the desktop leaves into it and comes back out of it. */
+    private var chipBounds by mutableStateOf<Rect?>(null)
+    private var leaving by mutableStateOf(false)
+    private var left: (() -> Unit)? = null
+    private var leaveBase = 0L
 
     private val inputManager = host.getSystemService(InputManager::class.java)
     private val devices = object : InputManager.InputDeviceListener {
@@ -172,9 +203,47 @@ internal class PresentedDesktopPad(private val host: PortalActivity, private val
                 val density = LocalDensity.current
                 val top = with(density) { safe.top.toDp() }
                 val bottom = with(density) { safe.bottom.toDp() }
-                // The chip drops in from the top edge and the buttons rise from the bottom one.
-                val arrival = remember { Animatable(0f) }
-                LaunchedEffect(Unit) { arrival.animateTo(1f, tween(560, easing = PortalEmphasizedDecelerate)) }
+                // Arriving: the desktop as this screen last showed it shrinks into
+                // the monitor chip while the pad fills in around it (with no copy
+                // of it, the pad fades in and the chip drops in); then the buttons
+                // rise. Until the copy settles, the pad stays clear over the desktop.
+                val enter = remember { Animatable(0f) }
+                val rise = remember { Animatable(0f) }
+                val settled = snapshot?.settled ?: true
+                val carried = remember(settled) { settled && snapshot?.image != null }
+                LaunchedEffect(settled) {
+                    if (!settled || leaving) return@LaunchedEffect
+                    if (carried) {
+                        launch { delay(scaled(180).toLong()); rise.animateTo(1f, tween(scaled(520), easing = PortalEmphasizedDecelerate)) }
+                        // A softer tail than the emphasized curve: the picture lands in the chip.
+                        enter.animateTo(1f, tween(scaled(620), easing = FastOutSlowInEasing))
+                        snapshot?.drop()
+                    } else {
+                        launch { rise.animateTo(1f, tween(scaled(560), easing = PortalEmphasizedDecelerate)) }
+                        enter.animateTo(1f, tween(scaled(220), easing = PortalEmphasizedDecelerate))
+                    }
+                }
+                // Leaving: the buttons go at once. Once the desktop shows on this
+                // screen again, the chip opens out over the whole screen onto it.
+                val out = remember { Animatable(0f) }
+                val reveal = remember { Animatable(0f) }
+                LaunchedEffect(leaving) {
+                    if (!leaving) return@LaunchedEffect
+                    snapshot?.drop()
+                    enter.snapTo(1f)
+                    val started = SystemClock.uptimeMillis()
+                    val chromeGone = launch { out.animateTo(1f, tween(scaled(150), easing = LinearOutSlowInEasing)) }
+                    // Plasma goes on redrawing for its new size for a second or two
+                    // after this; waiting for that would make every return feel slow.
+                    val back = withTimeoutOrNull(REVEAL_WAIT_MS) {
+                        while (SessionControls.desktopWindowChanges() <= leaveBase) withFrameNanos { }
+                    }
+                    Log.i(TAG, if (back != null) "desktop back on this screen after ${SystemClock.uptimeMillis() - started}ms"
+                        else "no desktop frame here after ${REVEAL_WAIT_MS}ms; opening anyway")
+                    chromeGone.join()
+                    reveal.animateTo(1f, tween(scaled(520), easing = PortalEmphasized))
+                    left?.let { done -> left = null; post { done() } }
+                }
                 // A capsule page (menu, keyboard, settings) grows out of a button
                 // here: the buttons and the guide step aside until it closes back.
                 val chrome = animateFloatAsState(
@@ -189,26 +258,56 @@ internal class PresentedDesktopPad(private val host: PortalActivity, private val
                     if (fingers.down) tween(90) else tween(320, easing = PortalEmphasizedAccelerate),
                     label = "touchpad finger glow",
                 )
+                val hole = remember { Path() }
+                val frame = remember { Path() }
                 Box(
-                    Modifier.fillMaxSize().background(palette.background)
-                        .drawBehind { fingers.draw(this, palette.accent, glow.value) },
+                    Modifier.fillMaxSize().drawBehind {
+                        val screen = Rect(Offset.Zero, size)
+                        val chip = chipBounds ?: screen
+                        // Carried, the picture covers the screen at first: the pad shows
+                        // only where it has shrunk away, never the surface behind it.
+                        val fill = if (carried) 1f else enter.value
+                        val open = reveal.value
+                        if (open > 0f) {
+                            // The chip opening out onto the desktop behind the pad.
+                            val opening = lerp(chip, screen, open)
+                            val radius = CornerRadius(chip.height / 2f * (1f - open))
+                            hole.reset()
+                            hole.fillType = PathFillType.EvenOdd
+                            hole.addRect(screen)
+                            hole.addRoundRect(RoundRect(opening, radius))
+                            drawPath(hole, palette.background, alpha = fill)
+                            val thinning = 1f - ease(0f, 0.4f, open)
+                            if (thinning > 0f) drawChipShape(opening, radius, palette, thinning)
+                        } else {
+                            drawRect(palette.background, alpha = fill)
+                        }
+                        val picture = snapshot?.image
+                        if (picture != null && !leaving) drawCarried(picture, screen, chip, enter.value, palette, frame)
+                        fingers.draw(this, palette.accent, glow.value)
+                    },
                 ) {
                     MonitorChip(
                         palette,
                         Modifier.align(Alignment.TopCenter).padding(top = top + 20.dp, start = 24.dp, end = 24.dp)
+                            .onGloballyPositioned { chipBounds = it.boundsInRoot() }
                             .graphicsLayer {
-                                alpha = arrival.value
-                                translationY = (1f - arrival.value) * -14.dp.toPx()
+                                // Carried in, its name shows once the picture has become the chip.
+                                val shown = if (carried) ease(0.9f, 1f, enter.value) else rise.value
+                                alpha = shown * (1f - ease(0f, 0.12f, reveal.value))
+                                translationY = if (carried) 0f else (1f - rise.value) * -14.dp.toPx()
                             },
                     )
                     AnimatedVisibility(
-                        guide && !touched,
+                        guide && !touched && settled && !leaving,
                         Modifier.align(Alignment.Center).padding(horizontal = 24.dp)
                             .graphicsLayer { alpha = chrome.value },
-                        enter = fadeIn(tween(420, delayMillis = 240, easing = PortalEmphasizedDecelerate)) +
-                            scaleIn(tween(520, delayMillis = 240, easing = PortalEmphasized), initialScale = 0.96f),
-                        exit = fadeOut(tween(200, easing = PortalEmphasizedAccelerate)) +
-                            scaleOut(tween(240, easing = PortalEmphasizedAccelerate), targetScale = 0.97f),
+                        enter = fadeIn(tween(scaled(420), delayMillis = scaled(if (carried) 520 else 240), easing = PortalEmphasizedDecelerate)) +
+                            scaleIn(tween(scaled(520), delayMillis = scaled(if (carried) 520 else 240), easing = PortalEmphasized), initialScale = 0.96f),
+                        // Leaving, it clears out before the desktop opens up behind it.
+                        exit = if (leaving) fadeOut(tween(scaled(110), easing = LinearOutSlowInEasing))
+                        else fadeOut(tween(scaled(200), easing = PortalEmphasizedAccelerate)) +
+                            scaleOut(tween(scaled(240), easing = PortalEmphasizedAccelerate), targetScale = 0.97f),
                         label = "touchpad gestures",
                     ) {
                         GestureGuide(palette)
@@ -216,8 +315,9 @@ internal class PresentedDesktopPad(private val host: PortalActivity, private val
                     Column(
                         Modifier.align(Alignment.BottomCenter).padding(bottom = bottom + 28.dp)
                             .graphicsLayer {
-                                alpha = arrival.value * chrome.value
-                                translationY = (1f - arrival.value) * 22.dp.toPx()
+                                val gone = out.value
+                                alpha = rise.value * chrome.value * (1f - gone)
+                                translationY = (1f - rise.value) * 22.dp.toPx() + gone * 18.dp.toPx()
                                 val settle = 0.94f + 0.06f * chrome.value
                                 scaleX = settle; scaleY = settle
                             },
@@ -316,10 +416,31 @@ internal class PresentedDesktopPad(private val host: PortalActivity, private val
         }
     }
 
+    /**
+     * The desktop went back to this screen: the buttons go, and once the desktop
+     * shows here again the monitor chip opens out onto it; then [done] removes the pad.
+     */
+    fun leave(done: () -> Unit) {
+        if (leaving) return
+        leaveBase = SessionControls.desktopWindowChanges()
+        left = done
+        leaving = true
+        removeCallbacks(gestureTimer)
+        gestures.reset()
+        releaseButtons()
+        fingers.lift()
+        // A held mouse and keyboard go back to Android at once.
+        removeView(grab)
+    }
+
+    // While it leaves, the pad still covers the desktop: it keeps every touch
+    // until it has opened onto it.
+    override fun onInterceptTouchEvent(event: MotionEvent): Boolean = leaving || super.onInterceptTouchEvent(event)
+
     // Touches the buttons don't take land here. Only a finger or pen works
     // the pad: a mouse goes to the desktop through Use mouse.
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (!DesktopControlView.isDirectTouch(event)) return true
+        if (leaving || !DesktopControlView.isDirectTouch(event)) return true
         timeNs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) event.eventTimeNanos
         else event.eventTime * 1_000_000L
         if (event.actionMasked == MotionEvent.ACTION_DOWN) touched = true
@@ -348,18 +469,143 @@ internal class PresentedDesktopPad(private val host: PortalActivity, private val
         }
     }
 
+    private fun releaseButtons() {
+        for (code in heldButtons) DesktopControlActivity.nativeControlButton(code, false, 0L)
+        heldButtons.clear()
+    }
+
     override fun onDetachedFromWindow() {
         inputManager?.unregisterInputDeviceListener(devices)
         removeCallbacks(gestureTimer)
         gestures.reset()
-        for (code in heldButtons) DesktopControlActivity.nativeControlButton(code, false, 0L)
-        heldButtons.clear()
+        releaseButtons()
+        snapshot?.drop()
         TouchControls.restoreCapsule()
         super.onDetachedFromWindow()
     }
 
-    private companion object {
-        const val MM_PER_INCH = 25.4f
+    companion object {
+        private const val TAG = "PortalTouchpad"
+        private const val MM_PER_INCH = 25.4f
+        /** Longest the desktop's return waits for its first frame on this screen. */
+        private const val REVEAL_WAIT_MS = 1_500L
+
+        /** Debug builds: stretches the transitions (portal_display_slow) for screenshots. */
+        @Volatile internal var slow = 1f
+
+        private fun scaled(ms: Int): Int = (ms * slow).toInt()
+    }
+}
+
+/** 0 before [from], 1 after [to], easing in and out between. */
+private fun ease(from: Float, to: Float, value: Float): Float {
+    val t = ((value - from) / (to - from)).coerceIn(0f, 1f)
+    return t * t * (3f - 2f * t)
+}
+
+/** The monitor chip's pill, filled and outlined, at [alpha]. */
+private fun DrawScope.drawChipShape(bounds: Rect, radius: CornerRadius, palette: PortalPalette, alpha: Float) {
+    drawRoundRect(palette.surfaceTop, bounds.topLeft, bounds.size, radius, alpha = alpha)
+    drawRoundRect(palette.surfaceBorder, bounds.topLeft, bounds.size, radius, alpha = alpha, style = Stroke(1.dp.toPx()))
+}
+
+/**
+ * The desktop's picture at [progress] of its way from the whole screen into the
+ * monitor chip: it takes the chip's shape and fill as it goes and fades into it.
+ */
+private fun DrawScope.drawCarried(
+    picture: ImageBitmap,
+    screen: Rect,
+    chip: Rect,
+    progress: Float,
+    palette: PortalPalette,
+    frame: Path,
+) {
+    if (progress >= 1f) return
+    val bounds = lerp(screen, chip, progress)
+    val radius = CornerRadius(chip.height / 2f * progress)
+    // The picture stays until it is almost the chip, then the chip's fill takes over.
+    val fill = ease(0.55f, 0.9f, progress)
+    if (fill > 0f) drawRoundRect(palette.surfaceTop, bounds.topLeft, bounds.size, radius, alpha = fill)
+    val shown = 1f - ease(0.6f, 0.95f, progress)
+    if (shown > 0f) {
+        frame.reset()
+        frame.addRoundRect(RoundRect(bounds, radius))
+        clipPath(frame) {
+            // Cropped to fill the shape, as the chip narrows it.
+            val fit = maxOf(bounds.width / picture.width, bounds.height / picture.height)
+            translate(bounds.center.x - picture.width * fit / 2f, bounds.center.y - picture.height * fit / 2f) {
+                scale(fit, fit, pivot = Offset.Zero) { drawImage(picture, alpha = shown) }
+            }
+        }
+    }
+    if (fill > 0f) {
+        drawRoundRect(palette.surfaceBorder, bounds.topLeft, bounds.size, radius, alpha = fill, style = Stroke(1.dp.toPx()))
+    }
+}
+
+/**
+ * The desktop as this screen showed it just before it left for a monitor; the
+ * touchpad shrinks it into its monitor chip. Main thread.
+ */
+internal class DesktopSnapshot private constructor() {
+    /** The copy once it landed; dropped once the touchpad has arrived. */
+    var image by mutableStateOf<ImageBitmap?>(null)
+        private set
+
+    /** The copy landed, failed or took too long: the touchpad arrives now either way. */
+    var settled by mutableStateOf(false)
+        private set
+
+    /** Lets the picture go. Never recycled: a frame being drawn may still hold it. */
+    fun drop() {
+        image = null
+    }
+
+    companion object {
+        private const val TAG = "PortalTouchpad"
+        /** How long the move to the monitor waits for the copy. */
+        private const val WAIT_MS = 250L
+
+        /** Copies [surface]; [then] runs on the main thread once the copy has settled, either way. */
+        fun take(surface: SurfaceView?, then: () -> Unit): DesktopSnapshot {
+            val snapshot = DesktopSnapshot()
+            val main = Handler(Looper.getMainLooper())
+            val started = SystemClock.uptimeMillis()
+            fun settle(bitmap: Bitmap?, why: String) {
+                if (snapshot.settled) return
+                if (bitmap != null) {
+                    // The desktop is opaque whatever its buffer's alpha channel holds.
+                    bitmap.setHasAlpha(false)
+                    bitmap.prepareToDraw()
+                    snapshot.image = bitmap.asImageBitmap()
+                }
+                snapshot.settled = true
+                Log.i(TAG, "desktop copy for the monitor move: $why after ${SystemClock.uptimeMillis() - started}ms")
+                then()
+            }
+            val width = surface?.width ?: 0
+            val height = surface?.height ?: 0
+            if (surface == null || width < 2 || height < 2 || surface.holder.surface?.isValid != true ||
+                SessionControls.desktopFrames() == 0L
+            ) {
+                main.post { settle(null, "no desktop to copy") }
+                return snapshot
+            }
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val giveUp = Runnable { settle(null, "gave up") }
+            main.postDelayed(giveUp, WAIT_MS)
+            try {
+                PixelCopy.request(surface, bitmap, { code ->
+                    main.removeCallbacks(giveUp)
+                    settle(bitmap.takeIf { code == PixelCopy.SUCCESS }, "code $code")
+                }, main)
+            } catch (_: IllegalArgumentException) {
+                main.removeCallbacks(giveUp)
+                main.post { settle(null, "surface refused") }
+            }
+            return snapshot
+        }
     }
 }
 
@@ -387,6 +633,12 @@ private class Fingers {
                 down = n > 0
             }
         }
+        revision++
+    }
+
+    /** The pad stopped taking touches; any glow fades. */
+    fun lift() {
+        down = false
         revision++
     }
 
@@ -506,7 +758,7 @@ private fun GestureGuide(palette: PortalPalette) {
 private fun GestureTile(gesture: PadGesture, index: Int, palette: PortalPalette) {
     val play = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
-        delay(560L + index * 220L)
+        delay(360L + index * 220L)
         play.animateTo(1f, tween(1100, easing = FastOutSlowInEasing))
     }
     Column(
