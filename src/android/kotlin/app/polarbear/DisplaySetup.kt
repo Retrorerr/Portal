@@ -136,12 +136,21 @@ internal enum class DisplayPermission {
             Accessibility -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
         }
 
-    /** What it gives, as the setup and Portal settings name it. */
+    /** What the setup and Portal settings call it. */
     val title: String
         get() = when (this) {
             Overlay -> "Controls over other apps"
-            Accessibility -> "Touch stays with Android"
+            Accessibility -> "Accessibility service"
         }
+
+    /** Where Android has it off, Portal says so. */
+    val offTitle: String get() = "$title is off"
+
+    /** Why to turn it on, on a [device] (tablet or phone). */
+    fun offReason(device: String): String = when (this) {
+        Overlay -> "Turn it on to reach the desktop from any app on your $device."
+        Accessibility -> "Turn it on to keep using your $device’s screen while the mouse controls Portal."
+    }
 }
 
 /**
@@ -506,7 +515,7 @@ internal class DisplaySetupView(
                 textAlign = TextAlign.Center, minLines = 2,
             )
             Spacer(Modifier.height(if (compact) 12.dp else 18.dp))
-            SetupButton(if (step == DisplayPermission.Overlay) "Allow" else "Turn on", granted, palette, onAllow)
+            SetupButton(if (step == DisplayPermission.Overlay) "Allow" else "Turn on", granted, palette, onClick = onAllow)
             // Where to look on Android's page (Android often opens its whole
             // list), or why it didn't take.
             val listed = step == DisplayPermission.Accessibility || Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
@@ -578,7 +587,13 @@ private fun MonitorChip(name: String, palette: PortalPalette) {
 
 /** Opens Android's page for the step; once it is allowed, a check. */
 @Composable
-private fun SetupButton(label: String, granted: Boolean, palette: PortalPalette, onClick: () -> Unit) {
+internal fun SetupButton(
+    label: String,
+    granted: Boolean,
+    palette: PortalPalette,
+    modifier: Modifier = Modifier.fillMaxWidth().height(48.dp),
+    onClick: () -> Unit,
+) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val press by animateFloatAsState(
@@ -586,7 +601,7 @@ private fun SetupButton(label: String, granted: Boolean, palette: PortalPalette,
     )
     val shape = RoundedCornerShape(50)
     Box(
-        Modifier.fillMaxWidth().height(48.dp)
+        modifier
             .graphicsLayer { scaleX = press; scaleY = press }
             .clip(shape).background(palette.accent)
             .clickable(interactionSource = interaction, indication = null, enabled = !granted, role = Role.Button, onClick = onClick)

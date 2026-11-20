@@ -89,14 +89,15 @@ what it does:
 
 - **Controls over other apps** (Android's **Display over other apps**) keeps
   Portal's floating controls on the tablet or phone over any app.
-- **Touch stays with Android** (Portal in Android's **Accessibility**
-  settings, Android 14 and later) keeps the tablet or phone working by touch
-  while the desktop has the mouse and keyboard.
+- **Accessibility service** (Portal in Android's **Accessibility** settings,
+  Android 14 and later) keeps the tablet or phone working by touch while the
+  desktop has the mouse and keyboard.
 
 **Allow** or **Turn on** opens Android's page; find Portal there, switch it on
 and come back, and the step ticks itself off. **Not now** skips a step, and
-Portal doesn't ask again: switch **Floating controls** on, or tap **Turn on**
-next to **Touch stays with Android**, in Portal settings to do it later. If
+Portal doesn't ask again until the permission has been on: switch **Floating
+controls** on, or tap **Turn on** next to **Accessibility service is off**, in
+Portal settings to do it later. If
 Android greys out the Accessibility switch for a Portal installed outside an
 app store, the step points to App info, where ⋮ › **Allow restricted
 settings** unlocks it. Back, or a tap outside the step, cancels and leaves the
@@ -123,10 +124,13 @@ notification's **Control desktop** does the same from anywhere. The touchpad
 supports tap-to-click, double tap, tap-and-drag, two-finger right click and
 scrolling, and two-finger pinch in apps that support it on the GPU renderer.
 
-With **Touch stays with Android** on, the touchpad follows Android's own
-touchpad settings (speed, tap-to-click, scroll direction), and Android's arrow
-on the tablet hides until you hand control back. Without it, touching the
-tablet's screen hands control back to Android.
+With the accessibility service on, the touchpad follows Android's own touchpad
+settings (speed, tap-to-click, scroll direction), and Android's arrow on the
+tablet hides until you hand control back. Without it, touching the tablet's
+screen hands control back to Android, so when it is off, **Use mouse** and
+**Control desktop** say so first: **Turn on** opens Android's page, and **Not
+now** (or **Use mouse** again) goes ahead without it. Force-stopping Portal in
+Android's settings switches the service off.
 
 To hand control back to Android, tap Ctrl+Alt on its own or tap **Release**
 with a finger; the first few times, the button shows those keys beside it. The

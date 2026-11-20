@@ -9,6 +9,7 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
 import androidx.compose.animation.AnimatedContent
@@ -139,8 +140,8 @@ internal fun developerOptionsEnabled(context: Context): Boolean =
         0,
     ) != 0
 
-internal fun launch(context: Context, intent: Intent): Boolean = try {
-    context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+internal fun launch(context: Context, intent: Intent, options: Bundle? = null): Boolean = try {
+    context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), options)
     true
 } catch (error: ActivityNotFoundException) {
     Log.w(TAG, "no activity for $intent", error)

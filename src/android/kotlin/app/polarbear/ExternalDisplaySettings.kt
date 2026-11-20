@@ -148,7 +148,7 @@ internal fun ExternalDisplaySettings(
                 ) {
                     SettingsGlyph(PortalGlyph.Accessibility, palette)
                     SettingsRowText(
-                        DisplayPermission.Accessibility.title, "While the mouse controls the desktop",
+                        DisplayPermission.Accessibility.offTitle, DisplayPermission.Accessibility.offReason(device),
                         palette, Modifier.weight(1f).padding(end = 12.dp),
                     )
                     QuietButton("Turn on", palette) { displays.setUp(DisplayPermission.Accessibility, row) }

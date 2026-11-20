@@ -267,8 +267,8 @@ open class PortalActivity : GameActivity() {
         TouchControls.attach(this)
         AppUpdateInstaller.onActivityResumed(this)
         CapturePermissions.refresh(this)
-        // Back from Android's Display over other apps page, or a revoke.
-        portalDisplays.refreshFloatingControls()
+        // Back from Android's permission pages, or a revoke.
+        portalDisplays.refreshPermissions()
         DesktopControlActivity.displayChanged()
     }
 

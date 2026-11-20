@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
@@ -89,16 +90,17 @@ fun usageTipsPending(context: Context): Boolean {
         (!prefs.getBoolean(PREF_FILES_DISMISSED, false) && !allFilesGranted())
 }
 
-internal fun openAccessibilitySettings(context: Context) {
+/** [options] can name the display, for a page opened from outside Portal's activity. */
+internal fun openAccessibilitySettings(context: Context, options: Bundle? = null) {
     // The details page (hidden in the SDK, but Settings lets an app open it
     // for its own service) shows Portal's switch directly; otherwise fall
     // back to the accessibility list.
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         val details = Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS")
             .putExtra(Intent.EXTRA_COMPONENT_NAME, keyServiceComponent(context).flattenToString())
-        if (launch(context, details)) return
+        if (launch(context, details, options)) return
     }
-    launch(context, Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    launch(context, Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS), options)
 }
 
 private fun openAllFilesSetting(context: Context) {

@@ -69,9 +69,15 @@ internal class PortalDisplays(private val host: PortalActivity) {
         DesktopControlActivity.displayChanged()
     }
 
-    /** UI thread, on resume: Android's permission page may have changed the answer. */
-    fun refreshFloatingControls() {
+    /**
+     * UI thread, on resume: Android's pages may have changed the answers. Once
+     * Android allows a permission, an earlier Not now no longer stands: should
+     * it be switched off again, Portal asks before going without it.
+     */
+    fun refreshPermissions() {
         overlayAllowed = canDrawOverlays()
+        val allowed = DisplayPermission.entries.filter { preferences.getBoolean(putOffKey(it), false) && granted(it) }
+        if (allowed.isNotEmpty()) preferences.edit().apply { allowed.forEach { remove(putOffKey(it)) } }.apply()
     }
 
     private fun canDrawOverlays() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Settings.canDrawOverlays(host)
@@ -91,6 +97,10 @@ internal class PortalDisplays(private val host: PortalActivity) {
         // Switched on is enough: Android may still be binding the service.
         DisplayPermission.Accessibility -> keyServiceEnabled(host)
     }
+
+    /** Android doesn't allow [permission] and the user hasn't put it off: Portal asks before going without it. */
+    fun asksFor(permission: DisplayPermission): Boolean =
+        permission.applies && !preferences.getBoolean(putOffKey(permission), false) && !granted(permission)
 
     fun putOff(permission: DisplayPermission) {
         preferences.edit().putBoolean(putOffKey(permission), true).apply()

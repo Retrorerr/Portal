@@ -22,9 +22,13 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,16 +44,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.setup.AppearanceMode
+import app.polarbear.setup.PortalPalette
 import app.polarbear.setup.PortalTheme
 import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
 import app.polarbear.setup.components.PortalGlyph
+import app.polarbear.setup.components.PortalIcon
 import app.polarbear.setup.components.PortalUiDensity
+import app.polarbear.setup.components.openAccessibilitySettings
 import app.polarbear.setup.resolvePalette
 
 /**
@@ -71,11 +84,14 @@ internal class DesktopControlView(
     private val holdsGrab: Boolean,
     private val close: () -> Unit,
     /** False for a holder whose host draws its own button, such as the phone's touchpad page. */
-    showControls: Boolean = true,
+    private val showControls: Boolean = true,
 ) : FrameLayout(context) {
     private var captured by mutableStateOf(false)
     private var waiting by mutableStateOf(false)
     private var message by mutableStateOf<String?>(null)
+    /** Use mouse found Portal's accessibility service off and asks about it first. Compose-observable. */
+    private var askingTouch by mutableStateOf(false)
+    private var askedAt = 0L
     private var releaseHint by mutableStateOf<String?>(null)
     private var grabbedAt = 0L
     /** The grab comes through the accessibility service rather than pointer capture. */
@@ -195,6 +211,15 @@ internal class DesktopControlView(
                     // A phone with only its touchscreen has no mouse to hand over.
                     val touchpad = !grabbed && host.presentedDisplay != null && !pointerConnected
                     val failure = message
+                    val note = when {
+                        askingTouch -> ControlNote.Touch
+                        failure != null -> ControlNote.Failure(failure)
+                        showsReleaseKeys -> ControlNote.Keys
+                        else -> null
+                    }
+                    // The note keeps what it showed while it fades out.
+                    val lastNote = remember { arrayOfNulls<ControlNote>(1) }
+                    if (note != null) lastNote[0] = note
                     val parts = listOf<@Composable () -> Unit>(
                         {
                             PadButton(
@@ -226,24 +251,31 @@ internal class DesktopControlView(
                             }
                         },
                         {
+                            // It grows out of the buttons and goes back into them.
+                            val origin = TransformOrigin(if (atLeft) 0f else 1f, 0.5f)
                             AnimatedVisibility(
-                                failure != null || showsReleaseKeys,
-                                enter = fadeIn(tween(220, delayMillis = 80)),
-                                exit = fadeOut(tween(140)),
+                                note != null,
+                                enter = fadeIn(tween(220, delayMillis = 80)) +
+                                    scaleIn(tween(320, easing = PortalEmphasizedDecelerate), initialScale = 0.9f, transformOrigin = origin),
+                                exit = fadeOut(tween(140)) +
+                                    scaleOut(tween(160, easing = PortalEmphasizedAccelerate), targetScale = 0.9f, transformOrigin = origin),
                                 label = "control note",
                             ) {
                                 val shape = RoundedCornerShape(20.dp)
                                 Box(
-                                    Modifier.widthIn(max = 220.dp)
+                                    Modifier.widthIn(max = 240.dp)
                                         .shadow(6.dp, shape, ambientColor = palette.pillShadow, spotColor = palette.pillShadow)
                                         .clip(shape).background(palette.background).background(palette.surfaceTop)
                                         .border(1.dp, palette.surfaceBorder, shape)
-                                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                        .semantics { liveRegion = LiveRegionMode.Polite },
                                 ) {
-                                    if (failure != null) {
-                                        Text(failure, color = palette.textMuted, fontSize = 12.sp, lineHeight = 16.sp)
-                                    } else {
-                                        ReleaseKeys(palette)
+                                    when (val shown = lastNote[0]) {
+                                        ControlNote.Touch -> TurnOnTouch(palette)
+                                        ControlNote.Keys -> ReleaseKeys(palette)
+                                        is ControlNote.Failure ->
+                                            Text(shown.text, color = palette.textMuted, fontSize = 12.sp, lineHeight = 16.sp)
+                                        null -> Unit
                                     }
                                 }
                             }
@@ -267,6 +299,37 @@ internal class DesktopControlView(
         }
     }
 
+    /** Use mouse with Portal's accessibility service off: turn it back on, or go ahead without it. */
+    @Composable
+    private fun TurnOnTouch(palette: PortalPalette) {
+        Column {
+            Row {
+                PortalIcon(PortalGlyph.Accessibility, palette.textSecondary, Modifier.padding(top = 1.dp, end = 10.dp), size = 18.dp)
+                Column {
+                    Text(
+                        DisplayPermission.Accessibility.offTitle, color = palette.textPrimary,
+                        fontSize = 13.sp, lineHeight = 17.sp, fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        DisplayPermission.Accessibility.offReason(deviceNoun(context)),
+                        Modifier.padding(top = 2.dp), color = palette.textMuted, fontSize = 12.sp, lineHeight = 16.sp,
+                    )
+                }
+            }
+            Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                SetupButton("Turn on", granted = false, palette, Modifier.weight(1f).height(40.dp), onClick = ::turnOnTouch)
+                Box(
+                    Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(50))
+                        .clickable(role = Role.Button, onClick = ::goWithoutTouch)
+                        .padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Not now", color = palette.textMuted, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                }
+            }
+        }
+    }
+
     /** The controls are on screen; [slideOut] takes them off to their edge. Compose-observable. */
     private var present by mutableStateOf(true)
     private var away = false
@@ -280,6 +343,7 @@ internal class DesktopControlView(
 
     /** Slides the controls off to their edge, then runs [then]; at once if they are already off. */
     fun slideOut(then: () -> Unit) {
+        askingTouch = false
         if (!present && away) {
             then()
             return
@@ -313,8 +377,24 @@ internal class DesktopControlView(
             waiting || returning -> Unit
             captured -> if (SystemClock.uptimeMillis() - grabbedAt >= CLICK_GUARD_MS) release("button")
             grabbedElsewhere -> TabletGrab.routed?.lost("button")
+            // Asked about touch, Use mouse again goes ahead without it.
+            askingTouch -> if (SystemClock.uptimeMillis() - askedAt >= CLICK_GUARD_MS) goWithoutTouch()
             else -> takeControl()
         }
+    }
+
+    /** Turn on: Android's page for Portal's service, on this screen. Use mouse asks again until it's on. */
+    private fun turnOnTouch() {
+        askingTouch = false
+        openAccessibilitySettings(context, DesktopControlActivity.tabletOptions())
+    }
+
+    /** Not now: the grab goes ahead without the service. Portal asks again once it has been on. */
+    private fun goWithoutTouch() {
+        if (!askingTouch) return
+        askingTouch = false
+        host.portalDisplays.putOff(DisplayPermission.Accessibility)
+        takeControl()
     }
 
     /** Return was tapped: the controls stay as they are until they slide off. Compose-observable. */
@@ -400,6 +480,7 @@ internal class DesktopControlView(
 
     private fun beginGrab(surface: SurfaceView) {
         removeCallbacks(captureTimeout)
+        askingTouch = false
         grabbedAt = SystemClock.uptimeMillis()
         releaseHint = if (host.portalDisplays.takeReleaseHint()) "Ctrl+Alt hands control back" else null
         waiting = false
@@ -457,7 +538,7 @@ internal class DesktopControlView(
     }
 
     fun takeControl() {
-        if (captured || waiting) return
+        if (captured || waiting || askingTouch) return
         if (readySurface() == null) {
             message = "The desktop isn’t ready on the monitor yet."
             return
@@ -468,6 +549,13 @@ internal class DesktopControlView(
             return
         }
         if (takeRoutedControl()) return
+        // Without Portal's accessibility service a touch on this screen ends the
+        // grab; switched off since it was last on, the controls ask about it first.
+        if (showControls && host.portalDisplays.asksFor(DisplayPermission.Accessibility)) {
+            askingTouch = true
+            askedAt = SystemClock.uptimeMillis()
+            return
+        }
         if (!holdsGrab) {
             DesktopControlActivity.startControl(host)
             return
@@ -599,6 +687,13 @@ internal class DesktopControlView(
                 (event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN) || event.isFromSource(InputDevice.SOURCE_STYLUS))
         }
     }
+}
+
+/** What the note beside the controls' buttons says. */
+private sealed interface ControlNote {
+    class Failure(val text: String) : ControlNote
+    object Keys : ControlNote
+    object Touch : ControlNote
 }
 
 /**
