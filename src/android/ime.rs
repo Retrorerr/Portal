@@ -80,9 +80,7 @@ fn set_source_active(source: u8, active: bool) {
     } else {
         ACTIVE_SOURCES.fetch_and(!source, Ordering::AcqRel) & !source
     };
-    log::info!(
-        "Portal ime: source {source:#x} active={active}, sources={sources:#x}"
-    );
+    log::info!("Portal ime: source {source:#x} active={active}, sources={sources:#x}");
     refresh_visibility();
 }
 
@@ -105,7 +103,9 @@ pub fn take_visibility_request() -> Option<bool> {
     match VISIBILITY_REQUEST.swap(0, Ordering::AcqRel) {
         1 => Some(true),
         -1 => Some(false),
-        REFRESH_VISIBILITY => Some(is_wayland_text_input_active() && !is_hardware_keyboard_present()),
+        REFRESH_VISIBILITY => {
+            Some(is_wayland_text_input_active() && !is_hardware_keyboard_present())
+        }
         _ => None,
     }
 }
@@ -201,10 +201,17 @@ pub fn send_engine_enter() -> bool {
 
 /// Events FIFO protocol: `ACTIVATE`/`DEACTIVATE` with an optional `:<source>` suffix
 /// (`:ibus` from the IBus engine). Untagged lines and the legacy `1`/`0` come from the KWin
-/// input-method bridge.
+/// input-method bridge. `KEY:<evdev code>:<count>` is the IBus engine asking for BackSpace or
+/// Return presses, which X11 clients only take as real keys.
 pub fn handle_fifo_line(line: &str) {
     let trimmed = line.trim();
     log::info!("Portal IME FIFO line received: '{trimmed}'");
+    if let Some((scancode, count)) = crate::core::ime_policy::parse_ime_key_request(trimmed) {
+        if !crate::android::accessibility::tap_ime_key(scancode, count) {
+            log::info!("Dropped IME key request {scancode} x{count}: no desktop session");
+        }
+        return;
+    }
     let (command, source) = match trimmed.split_once(':') {
         Some((command, "ibus")) => (command, SOURCE_IBUS),
         Some((command, _)) => (command, SOURCE_IM_BRIDGE),
@@ -226,7 +233,8 @@ pub fn dispatch_committed_text(text: String) -> bool {
     //   zwp_input_method_context_v1 (commit_string / delete / keysym);
     //   the IBus engine has no editable focus and drops the command.
     // - X11/GTK client focused (e.g. Firefox URL bar): the Portal IBus
-    //   engine holds the editable FocusIn (forward_key_event); the bridge
+    //   engine holds the editable FocusIn (CommitText, and BackSpace/Return
+    //   typed as real keys it asks for on the events FIFO); the bridge
     //   has no active context and drops the command.
     // FIFO writes only mean "framed"; delivery is decided focus-side.
     // (X11 must NOT go through clipboard+Ctrl+V: direct commits only.)

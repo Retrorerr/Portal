@@ -162,9 +162,46 @@ impl TapDetector {
     }
 }
 
+/// evdev keys the guest IBus engine may ask the host to type.
+pub const IME_KEY_BACKSPACE: u32 = 14;
+pub const IME_KEY_ENTER: u32 = 28;
+/// Most taps one engine key request may ask for.
+pub const MAX_IME_KEY_TAPS: usize = 64;
+
+/// Parse the IBus engine's `KEY:<evdev code>:<count>` events-FIFO line. Commit text, deletes
+/// and Return reach X11 clients by different routes: Chromium/CEF (Steam) ignore IBus's
+/// forwarded keys and DeleteSurroundingText, so the engine commits text itself and asks the
+/// host to type BackSpace and Return as real keys. Only those two keys are accepted, so a
+/// guest process writing to the FIFO cannot type anything else.
+pub fn parse_ime_key_request(line: &str) -> Option<(u32, usize)> {
+    let rest = line.trim().strip_prefix("KEY:")?;
+    let (code, count) = rest.split_once(':')?;
+    let code: u32 = code.parse().ok()?;
+    let count: usize = count.parse().ok()?;
+    if !matches!(code, IME_KEY_BACKSPACE | IME_KEY_ENTER) || count == 0 {
+        return None;
+    }
+    Some((code, count.min(MAX_IME_KEY_TAPS)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_key_requests_allow_only_backspace_and_enter() {
+        assert_eq!(parse_ime_key_request("KEY:14:3\n"), Some((14, 3)));
+        assert_eq!(parse_ime_key_request("KEY:28:1"), Some((28, 1)));
+        assert_eq!(
+            parse_ime_key_request("KEY:14:1000"),
+            Some((14, MAX_IME_KEY_TAPS))
+        );
+        assert_eq!(parse_ime_key_request("KEY:14:0"), None);
+        assert_eq!(parse_ime_key_request("KEY:30:1"), None);
+        assert_eq!(parse_ime_key_request("KEY:14"), None);
+        assert_eq!(parse_ime_key_request("KEY:-1:2"), None);
+        assert_eq!(parse_ime_key_request("ACTIVATE:ibus"), None);
+    }
 
     #[test]
     fn short_still_press_is_a_tap() {

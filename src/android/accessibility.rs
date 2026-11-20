@@ -197,6 +197,43 @@ pub fn release_service_keys() {
     }
 }
 
+/// Tap an evdev key `count` times for the guest IME: the IBus engine asks for the BackSpace
+/// and Return presses that X11 clients only accept as real keys. False while no desktop
+/// session takes keys.
+pub fn tap_ime_key(scancode: u32, count: usize) -> bool {
+    let mut bridge = bridge()
+        .lock()
+        .expect("Failed to lock accessibility bridge");
+    if !bridge.runtime_active {
+        return false;
+    }
+    if let Some(sink) = bridge.anland_keys.clone() {
+        drop(bridge);
+        for _ in 0..count {
+            sink.send_key(scancode, true);
+            sink.send_key(scancode, false);
+        }
+        return true;
+    }
+    for _ in 0..count {
+        for state in [ElementState::Pressed, ElementState::Released] {
+            bridge.pending_events.push_back(AccessibilityKeyEvent {
+                scancode,
+                state,
+                event_time_ms: 0,
+            });
+        }
+    }
+    let proxy = bridge.proxy.clone();
+    drop(bridge);
+    if let Some(proxy) = proxy {
+        if let Err(err) = proxy.send_event(AppUserEvent::AccessibilityInputReady) {
+            log::warn!("Failed to wake event loop for IME keys: {err}");
+        }
+    }
+    true
+}
+
 pub fn drain_pending_events() -> Vec<AccessibilityKeyEvent> {
     let mut bridge = bridge()
         .lock()

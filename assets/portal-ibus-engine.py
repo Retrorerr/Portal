@@ -2,14 +2,25 @@
 """
 Portal IBus engine: X11/GTK input-method bridge to the Android IME.
 
-GTK3/X11 apps with GTK_IM_MODULE=ibus (e.g. Firefox on XWayland) open an IBus
-input context per editable widget. This engine receives the real editable-focus
-lifecycle (FocusIn/FocusOut) and forwards host commits arriving on
-/tmp/portal-ime-engine.fifo into the client via the IBus Engine API
-(CommitText / DeleteSurroundingText / ForwardKeyEvent).
+GTK3/X11 apps with GTK_IM_MODULE=ibus (Chromium/CEF/Electron on X11, GTK,
+Qt XCB) open an IBus input context per editable widget. This engine receives
+the real editable-focus lifecycle (FocusIn/FocusOut) and delivers host commits
+arriving on /tmp/portal-ime-engine.fifo into the client.
+
+Delivery, per what every IBus client implements:
+  text       CommitText (the IM context's commit signal; any language)
+  BackSpace  a real key press, asked of the host (KEY:14:<n> on the events
+  Return     FIFO, KEY:28:1), which types it through the compositor
+ForwardKeyEvent and DeleteSurroundingText are not used: GTK turns a forwarded
+key into a synthetic GdkEvent that Chromium/CEF (Steam) ignore, and Chromium
+ignores DeleteSurroundingText from IBus, so text, deletes and Enter vanished
+there. Host commands run strictly in order: text after a key request waits
+until the key has passed through this engine's ProcessKeyEvent (or a short
+timeout), so a correction's "delete 3, type the" cannot land as "the" then
+three deletes.
 
 Host protocol on the command FIFO (same vocabulary as portal-ime-bridge):
-  COMMIT:<base64 utf-8>   commit text (UTF-8, any language)
+  COMMIT:<base64 utf-8>   commit text (UTF-8, any language; "\n" = Return)
   DELETE:<n>              delete n chars before cursor
   ENTER                   Return key press+release
   PREEDIT:<base64 utf-8>  update preedit (empty hides): the word Android is
@@ -52,8 +63,7 @@ def log(msg):
             pass
 
 
-def notify_portal(active):
-    val = b"ACTIVATE:ibus\n" if active else b"DEACTIVATE:ibus\n"
+def write_events(val):
     try:
         fd = os.open(EVENTS_FIFO, os.O_RDWR | os.O_NONBLOCK)
         try:
@@ -61,8 +71,27 @@ def notify_portal(active):
             log(f"Notified Portal: {val.strip().decode()}")
         finally:
             os.close(fd)
+        return True
     except Exception as e:
         log(f"Could not write events FIFO: {e}")
+        return False
+
+
+def notify_portal(active):
+    write_events(b"ACTIVATE:ibus\n" if active else b"DEACTIVATE:ibus\n")
+
+
+# Host key requests: evdev code -> the keysyms its press arrives as.
+KEY_BACKSPACE = 14
+KEY_ENTER = 28
+KEY_SYMS = {KEY_BACKSPACE: (0xFF08,), KEY_ENTER: (0xFF0D, 0xFF8D)}
+MAX_KEYS_PER_REQUEST = 64
+# How long text waits for a requested key to come back through
+# ProcessKeyEvent before going anyway (a client that does not route keys
+# through IBus), and how long it waits after the last one so the client has
+# applied it: the engine sees a key before the client handles it.
+KEY_TIMEOUT_MS = 400
+KEY_SETTLE_MS = 40
 
 
 def main():
@@ -140,6 +169,8 @@ def main():
         def do_process_key_event(self, keyval, keycode, state):
             # Never consume physical keys: hardware keyboards and Portal's
             # evdev key path keep working untouched.
+            if not state & IBus.ModifierType.RELEASE_MASK:
+                queue.key_seen(keyval)
             return False
 
         def do_set_cursor_location(self, x, y, w, h):
@@ -167,62 +198,18 @@ def main():
             if self.focused and self.preedit:
                 text = self.preedit
                 self.clear_preedit()
-                self.host_commit_keys(text)
+                self.host_commit(text)
 
-        def host_commit_keys(self, text):
-            # Delivery via a single ForwardKeyEvent per keysym (Unicode-safe:
-            # keysyms, not keycodes, so no layout guessing; UCS keysyms
-            # 0x01000000|codepoint cover all of Unicode incl. non-BMP).
-            # NOTE: exactly ONE call per char — press+release pairs double
-            # every character (verified: the release is implied). Plain
-            # CommitText is deliberately not used: it silently no-ops on
-            # clients whose IM context isn't in a committable state.
+        def host_commit(self, text):
             if not self.focused:
-                log("commit-keys ignored, no focus")
+                log("commit ignored, no focus")
                 return
-            log(f"CommitKeys ({len(text)} chars)")
+            log(f"CommitText ({len(text)} chars)")
             self.clear_preedit()
             try:
-                for ch in text:
-                    o = ord(ch)
-                    if ch == "\n":
-                        sym = 0xFF0D
-                    elif o < 0x100:
-                        sym = o
-                    elif o <= 0x10FFFF:
-                        sym = 0x01000000 | o
-                    else:
-                        continue
-                    self.forward_key_event(sym, 0, 0)
+                self.commit_text(IBus.Text.new_from_string(text))
             except Exception as e:
-                log(f"CommitKeys failed: {e}")
-
-        def host_delete(self, count):
-            # BackSpace keysyms (DeleteSurroundingText is ignored by some
-            # widgets; forwarded keysyms land everywhere commits do).
-            if not self.focused:
-                log("delete ignored, no focus")
-                return
-            log(f"DeleteKeys({count})")
-            self.clear_preedit()
-            try:
-                for _ in range(min(count, 64)):
-                    self.forward_key_event(0xFF08, 0, 0)
-            except Exception as e:
-                log(f"DeleteKeys failed: {e}")
-
-        def host_enter(self):
-            if not self.focused:
-                log("enter ignored, no focus")
-                return
-            log("ForwardKeyEvent(Return)")
-            self.clear_preedit()
-            try:
-                # keysym 0xff0d Return; keycode 0 lets the client map it.
-                # Single call (press+release pairs double input).
-                self.forward_key_event(0xff0d, 0, 0)
-            except Exception as e:
-                log(f"ForwardKeyEvent failed: {e}")
+                log(f"CommitText failed: {e}")
 
         def host_preedit(self, text):
             if not self.focused:
@@ -346,47 +333,124 @@ def main():
                 # never let it turn into a busy loop.
                 time.sleep(0.1)
 
+    def focused_engine():
+        # Each GTK editable gets its own engine; target the focused one.
+        return next((e for e in reversed(active) if e.focused), None)
+
+    class HostQueue:
+        """Host commands in arrival order, run on the main loop. A key
+        request holds everything after it until the key is seen or times
+        out."""
+
+        def __init__(self):
+            self.items = []
+            self.waiting = None  # [evdev code, presses still expected]
+            self.timer = 0
+
+        def push(self, item):
+            # A run of the same key (a held-down delete) still queued becomes
+            # one request.
+            last = self.items[-1] if self.items else None
+            if (item[0] == "key" and last and last[0] == "key"
+                    and last[1] == item[1]
+                    and last[2] + item[2] <= MAX_KEYS_PER_REQUEST):
+                last[2] += item[2]
+            else:
+                self.items.append(item)
+            self.run()
+            return False
+
+        def key_seen(self, keyval):
+            if not self.waiting or keyval not in KEY_SYMS[self.waiting[0]]:
+                return
+            self.waiting[1] -= 1
+            if self.waiting[1] <= 0:
+                self.rearm(KEY_SETTLE_MS)
+
+        def rearm(self, delay):
+            if self.timer:
+                GLib.source_remove(self.timer)
+            self.timer = GLib.timeout_add(delay, self.release)
+
+        def release(self):
+            if self.waiting and self.waiting[1] > 0:
+                log(f"key {self.waiting[0]}: {self.waiting[1]} press(es) "
+                    "not seen; continuing")
+            self.timer = 0
+            self.waiting = None
+            self.run()
+            return False
+
+        def run(self):
+            while self.items and not self.waiting:
+                item = self.items.pop(0)
+                eng = focused_engine()
+                if eng is None:
+                    log(f"{item[0]} ignored, no focus")
+                    continue
+                kind = item[0]
+                if kind == "key":
+                    code = item[1]
+                    count = min(item[2], MAX_KEYS_PER_REQUEST)
+                    eng.clear_preedit()
+                    log(f"KeyRequest({code} x{count})")
+                    if write_events(f"KEY:{code}:{count}\n".encode()):
+                        self.waiting = [code, count]
+                        self.rearm(KEY_TIMEOUT_MS)
+                elif kind == "commit":
+                    eng.host_commit(item[1])
+                elif kind == "preedit":
+                    eng.host_preedit(item[1])
+                elif kind == "flush":
+                    eng.host_flush()
+
+    queue = HostQueue()
+
+    def enqueue(*items):
+        for item in items:
+            GLib.idle_add(queue.push, list(item))
+
+    def commit_items(text):
+        # A line break is the Return key: CommitText of "\n" is dropped or
+        # inserted literally depending on the widget.
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        items = []
+        for i, part in enumerate(text.split("\n")):
+            if i:
+                items.append(("key", KEY_ENTER, 1))
+            if part:
+                items.append(("commit", part))
+        return items
+
     def handle_command(line):
         if not line:
             return
         log(f"cmd: {line[:40]}")
-        if not active:
-            log("no engine instance yet; dropping")
-            return
-        # Each GTK editable gets its own engine; target the focused one.
-        eng = next((e for e in reversed(active) if e.focused), active[-1])
-        if line.startswith("COMMIT:"):
+        if line.startswith("COMMIT:") or line.startswith("COMMITKEYS:"):
             try:
-                text = base64.b64decode(line[7:]).decode("utf-8", errors="ignore")
-                if text in ("\n", "\r\n", "\r"):
-                    GLib.idle_add(eng.host_enter)
-                else:
-                    GLib.idle_add(eng.host_commit_keys, text)
+                text = base64.b64decode(line.split(":", 1)[1]).decode(
+                    "utf-8", errors="ignore")
             except Exception as e:
                 log(f"COMMIT decode failed: {e}")
-        elif line.startswith("COMMITKEYS:"):
-            try:
-                text = base64.b64decode(line[11:]).decode("utf-8", errors="ignore")
-            except Exception as e:
-                log(f"COMMITKEYS decode failed: {e}")
                 return
-            GLib.idle_add(eng.host_commit_keys, text)
+            enqueue(*commit_items(text))
         elif line.startswith("DELETE:"):
             try:
                 count = int(line[7:])
             except Exception:
                 count = 1
-            GLib.idle_add(eng.host_delete, count)
+            if count > 0:
+                enqueue(("key", KEY_BACKSPACE, count))
         elif line == "ENTER" or line.startswith("ENTER:"):
-            GLib.idle_add(eng.host_enter)
+            enqueue(("key", KEY_ENTER, 1))
         elif line.startswith("PREEDIT:"):
             try:
                 text = base64.b64decode(line[8:]).decode("utf-8", errors="ignore")
             except Exception:
                 text = ""
-            GLib.idle_add(eng.host_preedit, text)
+            enqueue(("preedit", text))
         elif line == "FLUSH":
-            GLib.idle_add(eng.host_flush)
+            enqueue(("flush",))
         else:
             log(f"unknown command: {line[:30]}")
 
