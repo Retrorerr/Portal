@@ -35,7 +35,11 @@
          return mGlobals.viewporter.get();
 --- a/src/client/qwaylandscreen.cpp
 +++ b/src/client/qwaylandscreen.cpp
-@@ -189,6 +189,22 @@
+@@ -8,2 +8,3 @@
+ #include "qwaylandcursor_p.h"
++#include "fractional-output-scale.h"
+ #include "qwaylandwindow_p.h"
+@@ -189,6 +190,16 @@
  
  qreal QWaylandScreen::devicePixelRatio() const
  {
@@ -45,15 +49,9 @@
 +        const QSize logical = mXdgGeometry.size();
 +        if ((native.width() > native.height()) != (logical.width() > logical.height()))
 +            native.transpose();
-+        const qreal sx = qreal(native.width()) / logical.width();
-+        const qreal sy = qreal(native.height()) / logical.height();
-+        // KWin rounds logical dimensions to pixels. Accept that bounded
-+        // rounding error, but reject nonuniform or bogus compositor data.
-+        const qreal tolerance = qMax(qreal(1) / logical.width(), qreal(1) / logical.height());
-+        const qreal scale = qMax(sx, sy);
-+        if (scale >= 1 && qAbs(sx - sy) <= tolerance
-+                && qCeil(scale - tolerance) == mScale)
-+            return qRound(scale * 120) / qreal(120);
++        return qreal(::PortalWayland::outputScale(native.width(), native.height(),
++                                                 logical.width(), logical.height(), mScale))
++                / ::PortalWayland::scaleDenominator;
 +    }
      return qreal(mScale);
  }

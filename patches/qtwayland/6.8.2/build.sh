@@ -20,10 +20,12 @@ if [ ! -f "$archive" ]; then
     mv "$archive.part" "$archive"
 fi
 printf '%s  %s\n' "$archive_sha" "$archive" | sha256sum -c -
+c++ -std=c++17 -fsyntax-only "$patches/../../../tests/compat/qt_fractional_output_scale.cpp"
 source="$work/qtwayland-everywhere-src-$version"
 # Always start from the verified archive; never stack a patch twice.
 [ ! -e "$source" ] || { echo "Source already exists: $source; use a fresh work directory" >&2; exit 1; }
 tar -xf "$archive" -C "$work"
+cp "$patches/fractional-output-scale.h" "$source/src/client/"
 for patch in "$patches"/[0-9][0-9][0-9][0-9]-*.patch; do
     patch -d "$source" -p1 < "$patch"
 done

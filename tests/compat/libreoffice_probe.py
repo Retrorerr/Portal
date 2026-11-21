@@ -16,6 +16,8 @@ from com.sun.star.beans import PropertyValue
 parser = argparse.ArgumentParser()
 parser.add_argument('component', choices=['writer', 'calc', 'impress'])
 parser.add_argument('--seconds', type=float, default=4)
+parser.add_argument('--expect-scale', type=float, default=os.environ.get('PORTAL_QA_EXPECT_OFFICE_SCALE'),
+                    help='Verify the KDE/Qt Wayland frame DPI against a known display scale')
 args = parser.parse_args()
 
 
@@ -143,12 +145,21 @@ with tempfile.TemporaryDirectory(prefix='portal-office-probe-') as directory:
         rect = window.getPosSize()
         info = window.getInfo()
         flow_end_ns = time.monotonic_ns()
+        dpi_x, dpi_y = info.PixelPerMeterX * 0.0254, info.PixelPerMeterY * 0.0254
+        modules = backend_modules(process.pid)
         print(json.dumps(dict(component=args.component, document_saved=True, viewport_updates=count,
                               elapsed=time.monotonic()-start,
                               flow_start_ns=flow_start_ns, flow_end_ns=flow_end_ns,
-                              backend_modules=backend_modules(process.pid),
+                              backend_modules=modules,
                               window=[rect.X, rect.Y, rect.Width, rect.Height],
-                              dpi_x=info.PixelPerMeterX * 0.0254, dpi_y=info.PixelPerMeterY * 0.0254)), flush=True)
+                              dpi_x=dpi_x, dpi_y=dpi_y, expected_scale=args.expect_scale)), flush=True)
+        if args.expect_scale is not None:
+            assert 'libvclplug_qt6lo.so' in modules, 'Expected the Qt 6 backend'
+            expected_dpi = 96 * args.expect_scale
+            # UNO converts whole-pixel DPI through integer pixels per metre.
+            if max(abs(dpi_x - expected_dpi), abs(dpi_y - expected_dpi)) > 1.0:
+                raise RuntimeError(f'Display scale {args.expect_scale:g} requires {expected_dpi:.1f} DPI; '
+                                   f'LibreOffice initialized at {dpi_x:.1f} x {dpi_y:.1f} DPI')
         phase('terminate')
         # Terminate with the saved document still attached. Closing its last
         # frame first can leave an in-flight Start Center activation racing

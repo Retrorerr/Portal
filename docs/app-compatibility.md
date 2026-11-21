@@ -18,10 +18,11 @@ QtWayland source in `patches/qtwayland/6.8.2`. Its overlay is used only when
 the installed QtCore and original QtWayland library match the tested hashes.
 An upgraded or independently bundled Qt is left intact. The former managed
 LibreOffice preload launcher is retired without removing custom launchers.
-The same overlay reports the final fractional scale from a window's first resize
-and merges pointer and touch motion within one Wayland dispatch. Applications
-that size buffers from that resize, such as LibreOffice's dialogs, keep their
-full layout, and applications that repaint per input event keep up with touch.
+The overlay accounts for rounding of both logical output dimensions before
+the first resize. At 275% LibreOffice's KDE/Qt frames use 264 DPI while laying
+out the interface. The Office probe can check this with
+`--env PORTAL_QA_EXPECT_OFFICE_SCALE=2.75` at that display scale. The same
+overlay merges pointer and touch motion within one Wayland dispatch.
 Portal-derived Electron launchers no longer force `--ozone-platform=wayland`
 or `--no-stdio-init`. Existing entries lose those options only when their
 contents still match the vendor entry plus Portal's known additions. Modified
