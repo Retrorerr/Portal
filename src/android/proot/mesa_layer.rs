@@ -54,13 +54,14 @@ use std::{
 /// Built-in release: lfdevs mesa-for-android-container's tag rebuilt with
 /// `patches/mesa/kgsl-layer-26.3.0` (KGSL implicit sync, merged-submit BO
 /// lifetime, wait timeouts in ms and checked error paths, blitter scissor,
-/// EGL displays on the shim's DRM render device, Adreno 740 UBWC flag hint) by
+/// EGL displays on the shim's DRM render device, Adreno 740 UBWC flag hint,
+/// 3D-pipe clears on Adreno 8xx) by
 /// `.github/workflows/mesa-kgsl-layer-arm64.yml`. Every
 /// byte is hard-pinned; any mismatch fails closed and retries later.
-pub const LAYER_VERSION: &str = "26.3.0-20261105";
-pub const LAYER_URL: &str = "https://github.com/Retrorerr/Portal/releases/download/mesa-26.3.0-devel-portal-20261105/mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz";
-pub const LAYER_COMPRESSED_BYTES: u64 = 11647718;
-pub const LAYER_SHA256: &str = "29cc81aa1654b8b5be88e672b4a018be5ff9c8e453f9e7b4edcb3c889452b69b";
+pub const LAYER_VERSION: &str = "26.3.0-20261121";
+pub const LAYER_URL: &str = "https://github.com/Retrorerr/Portal/releases/download/mesa-26.3.0-devel-portal-20261121/mesa-for-android-container_26.3.0-devel-20260824_debian_trixie_arm64.tar.gz";
+pub const LAYER_COMPRESSED_BYTES: u64 = 11646207;
+pub const LAYER_SHA256: &str = "c00e9666f7f95e059368e75de53998b04b6fa9e2b67626ecadf8dcb0dbab70ea";
 /// Completion marker beside the layer (version + sha, exact match required).
 pub const LAYER_MARKER: &str = "mesa-kgsl-layer.complete";
 /// A refreshed pin (JSON [`LayerPin`]); absent means the built-in one.

@@ -162,14 +162,14 @@ flatpak_kgsl_env_default() {
 # first setup runs "flatpak-gl" before the desktop starts, and each session
 # start repeats the (otherwise instant) check in the background for setups
 # that were offline, images without Flatpak until app_store, and pin bumps.
-flatpak_gl_tag=flatpak-gl-portal-26.3.0-20261105
+flatpak_gl_tag=flatpak-gl-portal-26.3.0-20261121
 flatpak_gl_url=https://github.com/Retrorerr/Portal/releases/download/$flatpak_gl_tag
 flatpak_gl_branches="24.08 25.08 26.08"
 flatpak_gl_sha256() {
 	case "$1" in
-	24.08) echo 1ac386fca4bb6081b8fd9cf96f9e5635f1bd02f620c2a2ee59ffc5c67e3d888f ;;
-	25.08) echo c0920c3349ef03403fdac98a4dca71d51c2409947fbb6f62414b7ee4c6cda163 ;;
-	26.08) echo dc858745c2bc442e193eda1858d8c71b19a637084caf3264d5fc54faf87d0325 ;;
+	24.08) echo ba1e0b045cde500a116961f7ca807aa964051721d4b9836ae630bb9e00569039 ;;
+	25.08) echo 11f4a51664f6f48cc9d9cd8b7bb583742a1fac91ba57f2ff90439df4e12db627 ;;
+	26.08) echo e09fd5b587b4761a6b50b31de708cefd6c1dfd7b92be9ec76c596ef779752681 ;;
 	esac
 }
 flatpak_gl_portal() {
