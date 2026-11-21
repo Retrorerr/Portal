@@ -1538,21 +1538,21 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
     );
     // Started by Plasma's session so it inherits the session bus and KWin's
     // Wayland socket, which kscreen-doctor needs.
-    let output_scale_autostart =
-        fs_root.join("etc/xdg/autostart/localdesktop-output-scale.desktop");
-    if let Some(parent) = output_scale_autostart.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Err(error) = fs::write(&output_scale_autostart, OUTPUT_SCALE_AUTOSTART) {
+    if let Err(error) = sync_guest_asset(
+        &fs_root.join("etc/xdg/autostart/localdesktop-output-scale.desktop"),
+        OUTPUT_SCALE_AUTOSTART.as_bytes(),
+        0o644,
+    ) {
         log::warn!("Output scale autostart not installed: {error}");
     }
     write_executable(
         &fs_root.join("usr/local/bin/portal-kwallet-unlock"),
         KWALLET_UNLOCK_HELPER,
     );
-    if let Err(error) = fs::write(
-        fs_root.join("etc/xdg/autostart/portal-kwallet-unlock.desktop"),
-        KWALLET_UNLOCK_AUTOSTART,
+    if let Err(error) = sync_guest_asset(
+        &fs_root.join("etc/xdg/autostart/portal-kwallet-unlock.desktop"),
+        KWALLET_UNLOCK_AUTOSTART.as_bytes(),
+        0o644,
     ) {
         log::warn!("Wallet unlock autostart not installed: {error}");
     }
@@ -1610,35 +1610,35 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/portal-ibus-lazy"),
         PORTAL_IBUS_LAZY,
     );
-    let ibus_component_path = fs_root.join("usr/share/ibus/component/portal.xml");
-    if let Some(parent) = ibus_component_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(ibus_component_path, PORTAL_IBUS_COMPONENT);
-    let ime_desktop_path = fs_root.join("usr/share/applications/portal-ime.desktop");
-    if let Some(parent) = ime_desktop_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(ime_desktop_path, PORTAL_IME_DESKTOP);
+    let _ = sync_guest_asset(
+        &fs_root.join("usr/share/ibus/component/portal.xml"),
+        PORTAL_IBUS_COMPONENT.as_bytes(),
+        0o644,
+    );
+    let _ = sync_guest_asset(
+        &fs_root.join("usr/share/applications/portal-ime.desktop"),
+        PORTAL_IME_DESKTOP.as_bytes(),
+        0o644,
+    );
     repair_virtual_keyboard_toggle(fs_root);
     skip_hidden_splash(fs_root);
     // Debian's chromium launcher sources /etc/chromium.d. Under Wayland Chromium
     // reports text fields to the input method only with --enable-wayland-ime,
     // so without it no field ever opens the Android keyboard. X11 ignores it.
-    let chromium_ime = fs_root.join("etc/chromium.d/portal-wayland-ime");
-    if let Some(parent) = chromium_ime.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(chromium_ime, CHROMIUM_WAYLAND_IME);
+    let _ = sync_guest_asset(
+        &fs_root.join("etc/chromium.d/portal-wayland-ime"),
+        CHROMIUM_WAYLAND_IME.as_bytes(),
+        0o644,
+    );
     // Stop guest PipeWire clients from clamping RLIMIT_RTTIME to 0 through
     // the RTKit-less realtime portal (see the asset for the failure mode).
     for relative in PIPEWIRE_CLIENT_NO_RT_PATHS {
-        let path = fs_root.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("Failed to create PipeWire client config directory");
-        }
-        fs::write(&path, PIPEWIRE_CLIENT_NO_RT)
-            .expect("Failed to install PipeWire client realtime policy");
+        sync_guest_asset(
+            &fs_root.join(relative),
+            PIPEWIRE_CLIENT_NO_RT.as_bytes(),
+            0o644,
+        )
+        .expect("Failed to install PipeWire client realtime policy");
     }
     // Keep the QPainter overlay present and the default loader path free of
     // shadows on every launch (idempotent; see sync_kwin_overlay).
@@ -1650,9 +1650,12 @@ fn sync_portal_runtime_assets(fs_root: &Path, ui_scale: i32) {
         &fs_root.join("usr/local/bin/portal-run"),
         include_str!("../../../assets/portal-run.py"),
     );
-    let _ = fs::write(
-        fs_root.join("usr/share/applications/portal-run.desktop"),
-        include_str!("../../../assets/portal-run.desktop"),
+    // A newer entry makes the system-services launcher rebuild mimeinfo.cache.
+    // Preserve its timestamp once the installed handler is current.
+    let _ = sync_guest_asset(
+        &fs_root.join("usr/share/applications/portal-run.desktop"),
+        include_bytes!("../../../assets/portal-run.desktop"),
+        0o644,
     );
     super::optional_apps::sync_steam_integration(fs_root);
     browser::sync_default_applications(fs_root);
@@ -2351,35 +2354,45 @@ fn normalize_guest_text(contents: &str) -> String {
     contents.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn write_executable(path: &Path, contents: &str) {
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+/// Keep current Portal-owned assets in place across restarts. A mode mismatch,
+/// incomplete write or change in the APK still restages the file atomically.
+fn sync_guest_asset(path: &Path, contents: &[u8], mode: u32) -> anyhow::Result<bool> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.is_file()
+            && metadata.len() == contents.len() as u64
+            && metadata.permissions().mode() & 0o7777 == mode
+    }) && fs::read(path).is_ok_and(|current| current == contents)
+    {
+        return Ok(false);
     }
-    // This source tree is checked out on Windows, where Git may materialize
-    // text assets with CRLF. A guest kernel interprets the shebang literally,
-    // so `#!/bin/bash\r` fails with ENOENT. Normalize at the Android/guest
-    // boundary rather than relying on a developer's Git attributes.
-    // Stage through a temporary file and rename into place: sync runs on
-    // every session launch while kwin_wayland_wrapper resolves
-    // /usr/local/bin/kwin_wayland via PATH concurrently. A direct truncate
-    // + write (+ chmod after) exposes incomplete/non-executable windows in
-    // which resolution silently falls through to stock /usr/bin/kwin_wayland,
-    // which then crashes without Anland and wedges the boot. Rename is
-    // atomic: concurrent execs always see the old or the new complete script.
-    let temporary = path.with_extension("portal-tmp");
-    fs::write(&temporary, normalize_guest_text(contents))
-        .expect("Failed to write executable script");
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
-        .expect("Failed to mark executable script");
-    fs::File::open(&temporary)
-        .and_then(|file| file.sync_all())
-        .expect("Failed to sync executable script");
-    fs::rename(&temporary, path).expect("Failed to install executable script");
+
+    let parent = path.parent().context("Guest asset has no parent directory")?;
+    fs::create_dir_all(parent)?;
+    // Concurrent readers must always see a complete file. In particular,
+    // PATH lookup must never skip kwin_wayland while it is being refreshed.
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".portal-asset-")
+        .tempfile_in(parent)?;
+    temporary.write_all(contents)?;
+    temporary
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(mode))?;
+    temporary.as_file().sync_all()?;
+    // Close the writable descriptor before publishing the executable.
+    temporary.into_temp_path().persist(path)?;
+    Ok(true)
+}
+
+fn write_executable(path: &Path, contents: &str) {
+    // A guest kernel interprets the shebang literally: normalize Windows
+    // line endings before comparing or installing the script.
+    let contents = normalize_guest_text(contents);
+    sync_guest_asset(path, contents.as_bytes(), 0o755)
+        .expect("Failed to install executable script");
     // PRoot's fake-root extension gives a `.proot-meta-file.<name>.meta`
     // sidecar precedence over the host mode for access()/exec. A stale
-    // non-executable record can send PATH lookup past this wrapper. These
-    // Portal-owned scripts are restaged before a new guest session starts, so
-    // remove exactly the destination sidecar after installing the replacement.
+    // non-executable record can send PATH lookup past this wrapper, so remove
+    // the destination sidecar even when the host file is current.
     if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
         let sidecar = parent.join(format!(".proot-meta-file.{}.meta", name.to_string_lossy()));
         let _ = fs::remove_file(sidecar);
@@ -2436,7 +2449,11 @@ fn install_camera_bridge(fs_root: &Path) {
 }
 
 fn write_guest_binary(path: &Path, contents: &[u8]) {
-    write_guest_binary_result(path, contents).expect("Failed to install guest binary");
+    if sync_guest_asset(path, contents, 0o755).expect("Failed to install guest binary") {
+        if let Some(parent) = path.parent() {
+            crate::core::mesa_layer::sync_dir_best_effort(parent);
+        }
+    }
 }
 
 fn sync_screen_inhibition(fs_root: &Path) {
@@ -3250,26 +3267,20 @@ pub fn prepare_desktop_login(migrate_legacy: bool) -> anyhow::Result<()> {
     sync_firefox_esr_diversion(&rootfs());
     // Mozilla's Firefox and the everyday extras are downloads the desktop
     // does not need to start: see `spawn_background_installs`.
-    let caches = PRootRuntime::active().execute(
-        ProcessSpec::new("/usr/local/bin/localdesktop-system-caches"),
-        None,
-        None,
-    );
-    anyhow::ensure!(
-        caches.status.success(),
-        "privileged Debian desktop cache preparation failed: {}",
-        String::from_utf8_lossy(&caches.stderr)
-    );
     let mode = if migrate_legacy {
         "--migrate"
     } else {
         "--prepare"
     };
-    let command = format!("/usr/local/bin/localdesktop-prepare-login {mode}");
+    // The cache script owns its versioned marker. Check it in the same guest
+    // invocation as account preparation so warm logins avoid a second engine start.
+    let command = format!(
+        "/usr/local/bin/localdesktop-system-caches && exec /usr/local/bin/localdesktop-prepare-login {mode}"
+    );
     let output = PRootRuntime::active().execute(ProcessSpec::new(command), None, None);
     anyhow::ensure!(
         output.status.success(),
-        "desktop account preparation failed: {}",
+        "Debian desktop cache or account preparation failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let validation = PRootRuntime::active().execute(

@@ -17,11 +17,10 @@ use crate::android::diagnostics;
 use crate::android::utils::application_context::get_application_context;
 use crate::android::utils::thread::spawn_named;
 use crate::core::config;
+use crate::core::runtime::output::GuestOutput;
 use crate::core::runtime::{LinuxRuntime, LogCallback, ProcessSpec};
 use winit::platform::android::activity::AndroidApp;
 
-const MAX_CAPTURED_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_DIAGNOSTIC_LINE_BYTES: usize = 64 * 1024;
 const SUPPORT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const SUPPORT_CHECK_BINARY: &str = "ld-linux-aarch64.so.1";
 /// How long PRoot polls for the next tracee stop before it sleeps, in
@@ -275,8 +274,8 @@ fn open_pidfd(_pid: u32) -> Option<OwnedFd> {
 
 /// Sleep until the child may have exited: on its pidfd, which the exit
 /// wakes, or else on a poll that slows down once the command has run a
-/// while. Either way cancellation is seen within 250 ms.
-fn wait_for_exit(pidfd: Option<&OwnedFd>, running: Duration) {
+/// while. Use a timeout on the pidfd only when cancellation needs polling.
+fn wait_for_exit(pidfd: Option<&OwnedFd>, running: Duration, cancelable: bool) {
     match pidfd {
         Some(pidfd) => {
             let mut fd = libc::pollfd {
@@ -284,7 +283,8 @@ fn wait_for_exit(pidfd: Option<&OwnedFd>, running: Duration) {
                 events: libc::POLLIN,
                 revents: 0,
             };
-            unsafe { libc::poll(&mut fd, 1, 250) };
+            let timeout = if cancelable { 250 } else { -1 };
+            unsafe { libc::poll(&mut fd, 1, timeout) };
         }
         None if running < Duration::from_secs(2) => thread::sleep(Duration::from_millis(20)),
         None => thread::sleep(Duration::from_millis(250)),
@@ -304,64 +304,52 @@ where
 {
     let fd = reader.as_raw_fd();
     let mut reader = BufReader::new(reader);
-    let mut output = Vec::new();
-    let mut line = Vec::new();
+    let file_transfer = command.contains("portal-file-transfer");
+    let mut output = GuestOutput::new(file_transfer && stream == "stderr");
 
-    loop {
-        if stop.is_raised() {
-            break;
-        }
-        // A WouldBlock keeps the partial line read so far; it is completed
-        // by the next read, not discarded.
-        match reader.read_until(b'\n', &mut line) {
-            // EOF; a partial line left by an earlier WouldBlock is emitted
-            // first.
-            Ok(0) if line.is_empty() => break,
-            Ok(_) => {
-                let is_transfer_progress = command.contains("portal-file-transfer")
-                    && stream == "stderr"
-                    && serde_json::from_slice::<serde_json::Value>(&line)
-                        .ok()
-                        .is_some_and(|value| value.get("bytes").is_some());
-                if !is_transfer_progress && output.len() < MAX_CAPTURED_OUTPUT_BYTES {
-                    let remaining = MAX_CAPTURED_OUTPUT_BYTES - output.len();
-                    output.extend_from_slice(&line[..line.len().min(remaining)]);
+    while !stop.is_raised() {
+        let at_eof = match reader.fill_buf() {
+            Ok([]) => true,
+            Ok(buffer) => {
+                let newline = buffer.iter().position(|&byte| byte == b'\n');
+                let count = newline.map_or(buffer.len(), |index| index + 1);
+                output.push_chunk(&buffer[..count]);
+                reader.consume(count);
+                if newline.is_none() {
+                    continue;
                 }
-
-                let mut text = String::from_utf8_lossy(&line)
-                    .trim_end_matches(['\r', '\n'])
-                    .to_string();
-                if text.len() > MAX_DIAGNOSTIC_LINE_BYTES {
-                    let mut end = MAX_DIAGNOSTIC_LINE_BYTES;
-                    while end > 0 && !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    text.truncate(end);
-                    text.push_str("…<line truncated>");
-                }
-                if !command.contains("portal-file-transfer") {
-                    diagnostics::guest_process_line(&command, &user, stream, &text);
-                }
-                if let Some(callback) = callback.as_ref() {
-                    callback(text.clone());
-                }
-
-                if stream == "stderr" && !text.is_empty() {
-                    log::debug!("guest-stderr: {text}");
-                }
-                line.clear();
+                false
             }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => stop.wait_readable(fd),
+            // An incomplete line stays buffered until the next successful read.
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                stop.wait_readable(fd);
+                continue;
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
             Err(error) => {
                 let text = format!("stream-read-error={error}");
                 diagnostics::guest_process_line(&command, &user, stream, &text);
                 log::warn!("Failed to drain guest {stream}: {error}");
                 break;
             }
+        };
+        if let Some(text) = output.finish_line() {
+            if !file_transfer {
+                diagnostics::guest_process_line(&command, &user, stream, &text);
+            }
+            if stream == "stderr" && !text.is_empty() {
+                log::debug!("guest-stderr: {text}");
+            }
+            if let Some(callback) = &callback {
+                callback(text);
+            }
+        }
+        if at_eof {
+            break;
         }
     }
 
-    output
+    output.into_bytes()
 }
 
 #[cfg(target_os = "android")]
@@ -896,7 +884,7 @@ impl PRootRuntime {
                         );
                         terminate_deadline = None;
                     }
-                    wait_for_exit(exit_fd.as_ref(), started.elapsed());
+                    wait_for_exit(exit_fd.as_ref(), started.elapsed(), cancel.is_some());
                 }
                 Err(error) => {
                     log::error!("Failed to poll guest command {command}: {error}");

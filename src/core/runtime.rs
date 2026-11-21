@@ -4,6 +4,10 @@ use std::process::Output;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+#[cfg(any(target_os = "android", test))]
+#[path = "runtime/output.rs"]
+pub(crate) mod output;
+
 /// Callback for streaming lines of process stdout/stderr.
 pub type LogCallback = Arc<dyn Fn(String) + Send + Sync>;
 

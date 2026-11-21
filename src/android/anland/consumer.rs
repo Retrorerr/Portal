@@ -11,7 +11,7 @@
 //! (see `third_party/anland/ATTRIBUTION.md`).
 
 use std::ffi::c_void;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
@@ -216,7 +216,7 @@ unsafe impl Send for SlotInfo {}
 struct ActiveGen {
     id: u64,
     buf_ready: OwnedFd,
-    fence_read: OwnedFd,
+    fence_read: Arc<OwnedFd>,
     data: OwnedFd,
     _shm_fd: OwnedFd,
     /// Shared selected-index mapping; written only under `io_lock`.
@@ -240,8 +240,8 @@ struct Inner {
     /// Current connection generation (None = fallback, no producer fds).
     gen: Mutex<Option<ActiveGen>>,
     /// Serializes all quick fd ops on the masters (select writes, input
-    /// sends, BUFS_READY, teardown close/munmap). Blocking ops use per-thread
-    /// dups and never hold this lock.
+    /// sends, BUFS_READY, teardown close/munmap). Blocking ops retain their
+    /// own socket reference and never hold this lock.
     io_lock: Mutex<()>,
     next_gen: Mutex<u64>,
     buffers: Mutex<Vec<SlotInfo>>,
@@ -1704,7 +1704,7 @@ fn deposit_generation(inner: &Arc<Inner>) -> Result<(), String> {
         *gen = Some(ActiveGen {
             id,
             buf_ready,
-            fence_read,
+            fence_read: Arc::new(fence_read),
             data: data_ours,
             _shm_fd: shm_fd,
             shm_ptr: shm_ptr as usize,
@@ -1748,8 +1748,8 @@ fn teardown_generation(inner: &Arc<Inner>) {
     let _guard = inner.io_lock.lock().unwrap();
     let mut gen = inner.gen.lock().unwrap();
     if let Some(g) = gen.take() {
-        // close() is insufficient while polling threads retain dup()s. Shutdown
-        // reaches every duplicate and wakes the producer even on an idle desktop.
+        // Polling threads can still hold socket references. Shutdown wakes
+        // them and the producer even on an idle desktop.
         unsafe {
             libc::shutdown(g.data.as_raw_fd(), libc::SHUT_RDWR);
             libc::shutdown(g.fence_read.as_raw_fd(), libc::SHUT_RDWR);
@@ -2107,11 +2107,12 @@ fn damage_listener(inner: Arc<Inner>, socket: std::os::unix::net::UnixDatagram) 
 fn render_loop(inner: Arc<Inner>) {
     crate::android::utils::frame_pacing::prioritize_current_render_thread();
     log::info!("anland.render thread started");
-    // Per-generation dups owned by this thread (immune to teardown close).
+    // Retain the fence socket for the life of the generation. Teardown can
+    // still shut it down while the render thread is waiting on it.
     let mut cur_gen: u64 = 0;
-    let mut cur_fence: Option<OwnedFd> = None;
+    let mut cur_fence: Option<Arc<OwnedFd>> = None;
     let mut idle_logged = false;
-    // Thread-local dups of the pacing fds (same immunity rationale).
+    // Thread-local dups keep the pacing fds valid outside the vsync lock.
     let (tick, wake, vsync_gate) = {
         let vsync = inner.vsync.lock().unwrap();
         let Some(pump) = vsync.as_ref() else {
@@ -2203,18 +2204,15 @@ fn render_loop(inner: Arc<Inner>) {
             }
             continue;
         }
-        // Snapshot generation.
-        let (gen_id, fence_dup) = {
+        // Snapshot the socket only when the producer generation changes.
+        {
             let gen = inner.gen.lock().unwrap();
-            match gen.as_ref() {
-                Some(g) => (g.id, dup_owned(&g.fence_read).ok()),
-                None => (0, None),
+            let gen_id = gen.as_ref().map_or(0, |g| g.id);
+            if gen_id != cur_gen {
+                cur_gen = gen_id;
+                cur_fence = gen.as_ref().map(|g| Arc::clone(&g.fence_read));
+                idle_logged = false;
             }
-        };
-        if gen_id != cur_gen {
-            cur_gen = gen_id;
-            cur_fence = fence_dup;
-            idle_logged = false;
         }
         // Demand gate: select on every display-vsync tick while the user is
         // active (input bursts, connect/start bursts, self-sustaining busy
@@ -2393,7 +2391,11 @@ fn render_loop(inner: Arc<Inner>) {
         // a buffer produced for the old dimensions.
         let frame_sgen = *inner.surface_gen.lock().unwrap();
         let t_acquire_ns = sys::now_ns();
-        let acquire_ready = acquire < 0 || sys::fence_signaled(acquire);
+        // SAFETY: dequeue transfers ownership of any nonnegative fence fd.
+        let acquire = (acquire >= 0).then(|| unsafe { OwnedFd::from_raw_fd(acquire) });
+        let acquire_ready = acquire
+            .as_ref()
+            .is_none_or(|fence| matches!(sys::poll_readable(fence, 0), Ok(true)));
         // SurfaceFlinger holding a frame more than it shows: skip this start
         // so it catches up (see `sys::backlogged`). Only at a tick, where the
         // buffer ages are known; only while frames are expected to make
@@ -2407,15 +2409,17 @@ fn render_loop(inner: Arc<Inner>) {
             && inner.buffers.lock().unwrap().len() >= FREE_RUNNING_SLOTS
             && pacer.expects_on_time(t_acquire_ns, vsync_gate.deadline_ns(), period_ns)
         {
-            let release_age_ns = if acquire < 0 {
-                None
-            } else if !acquire_ready {
-                Some(0)
-            } else {
-                sys::fence_signal_ns(acquire).map(|at| t_acquire_ns.saturating_sub(at))
-            };
+            let release_age_ns = acquire.as_ref().and_then(|fence| {
+                if acquire_ready {
+                    sys::fence_signal_ns(fence.as_raw_fd())
+                        .map(|at| t_acquire_ns.saturating_sub(at))
+                } else {
+                    Some(0)
+                }
+            });
             if sys::backlogged(release_age_ns, period_ns) {
-                unsafe { inner.anw.cancel(window, anb, acquire) };
+                let fence = acquire.map_or(-1, IntoRawFd::into_raw_fd);
+                unsafe { inner.anw.cancel(window, anb, fence) };
                 deferred = true;
                 drains += 1;
                 frames_since_drain = 0;
@@ -2429,24 +2433,25 @@ fn render_loop(inner: Arc<Inner>) {
                 continue;
             }
         }
-        if acquire >= 0 {
+        if let Some(fence) = acquire {
             // Blocking acquire wait (see ACQUIRE_WAIT_MS). Never queue-back:
             // presenting a buffer SF hasn't released invites KWin to render
             // into scanout-active memory (GPU hang, proven). Cancel instead.
-            let fence = unsafe { OwnedFd::from_raw_fd(acquire) };
-            if sys::wait_fence(fence, ACQUIRE_WAIT_MS).is_err() {
+            if !acquire_ready && sys::wait_fence(&fence, ACQUIRE_WAIT_MS).is_err() {
                 win_stalls += 1;
                 let now = sys::now_ns();
                 if now.wrapping_sub(log_stall_ns) >= 1_000_000_000 {
                     log::warn!("anland.sink acquire-stall (SF release pending >1s); cancelling");
                     log_stall_ns = now;
                 }
-                unsafe { inner.anw.cancel(window, anb, -1) };
+                // SurfaceFlinger must still wait on the fence when it reuses
+                // the cancelled slot.
+                unsafe { inner.anw.cancel(window, anb, fence.into_raw_fd()) };
                 continue;
             }
         }
         let t_acq_done_ns = sys::now_ns();
-        let acq_us = sys::now_ns().wrapping_sub(t_acquire_ns) / 1000;
+        let acq_us = t_acq_done_ns.wrapping_sub(t_acquire_ns) / 1000;
         if !inner.window_live.load(Ordering::Acquire) {
             unsafe { inner.anw.cancel(window, anb, -1) };
             break;
@@ -2470,7 +2475,7 @@ fn render_loop(inner: Arc<Inner>) {
             unsafe { inner.anw.cancel(window, anb, -1) };
             continue;
         };
-        if cur_gen == 0 {
+        let Some(fence) = cur_fence.as_deref() else {
             // Fallback: keep the window alive with unrendered frames.
             unsafe { inner.anw.queue(window, anb, -1) };
             if !idle_logged {
@@ -2487,7 +2492,7 @@ fn render_loop(inner: Arc<Inner>) {
             }
             thread::sleep(Duration::from_millis(16));
             continue;
-        }
+        };
         {
             let _section = sys::trace::section(c"anland.waitInput");
             wait_for_input_batch(&inner, &input_flush, vsync_gate.vsync_ns(), input_wait_ns);
@@ -2529,8 +2534,8 @@ fn render_loop(inner: Arc<Inner>) {
                 }
             }
         }
-        // refresh_done: 5s poll on our fence dup, then non-blocking recvmsg.
-        let rfence = refresh_done(&inner, cur_fence.as_ref(), cur_gen);
+        // refresh_done: poll the retained socket, then non-blocking recvmsg.
+        let rfence = refresh_done(&inner, fence, cur_gen);
         drop(composite);
         if rfence == FRAME_SKIPPED {
             // KWin had nothing to repaint, so the slot still holds an older
@@ -2795,8 +2800,7 @@ const FENCE_LOST: i32 = -2;
 /// Wait for the producer's render-done message; return its fence fd (>=0),
 /// -1 for ready-now, FRAME_SKIPPED when KWin rendered nothing, or
 /// FENCE_LOST when the generation died.
-fn refresh_done(inner: &Arc<Inner>, fence: Option<&OwnedFd>, generation: u64) -> i32 {
-    let Some(fence) = fence else { return -1 };
+fn refresh_done(inner: &Arc<Inner>, fence: &OwnedFd, generation: u64) -> i32 {
     // Emergency software fallback only: cold sessions (nothing ever queued)
     // get a long interruptible budget, because tearing down the generation
     // mid-render rips the producer connection while llvmpipe is still

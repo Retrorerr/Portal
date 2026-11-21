@@ -988,17 +988,6 @@ pub fn poll_readable(fd: &OwnedFd, timeout_ms: i32) -> io::Result<bool> {
     Ok(pfd.revents & libc::POLLIN != 0)
 }
 
-/// Non-blocking probe: whether a sync-file fence fd has already signalled.
-/// Does not take ownership of `fence_fd`.
-pub fn fence_signaled(fence_fd: libc::c_int) -> bool {
-    let mut pfd = libc::pollfd {
-        fd: fence_fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    unsafe { libc::poll(&mut pfd, 1, 0) == 1 && pfd.revents & libc::POLLIN != 0 }
-}
-
 /// When a sync-file fence signalled (`CLOCK_MONOTONIC` ns), or `None` while
 /// it is pending or when the kernel does not say. Does not take ownership.
 pub fn fence_signal_ns(fence_fd: libc::c_int) -> Option<u64> {
@@ -1143,10 +1132,10 @@ impl LatchPacer {
     }
 }
 
-/// Wait (up to `timeout_ms`) for a sync-file fence fd to signal, then close it.
+/// Wait (up to `timeout_ms`) for a sync-file fence fd to signal.
 /// A sync file signals POLLIN when the GPU work completes.
-pub fn wait_fence(fence_fd: OwnedFd, timeout_ms: i32) -> io::Result<()> {
-    let readable = poll_readable(&fence_fd, timeout_ms)?;
+pub fn wait_fence(fence_fd: &OwnedFd, timeout_ms: i32) -> io::Result<()> {
+    let readable = poll_readable(fence_fd, timeout_ms)?;
     if !readable {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
