@@ -1,0 +1,99 @@
+From b035914ee22156885c9cb73de3bde7fe5504a5b1 Mon Sep 17 00:00:00 2001
+From: Retrorerr <116828772+Retrorerr@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 21:30:53 +0000
+Subject: [PATCH] freedreno/a8xx: clear on the 3D pipe instead of fast-clearing
+ GMEM
+
+On A8XX the kernel owns RB_CCU_CNTL and enables GMEM fast clear, which
+freedreno keeps disabled on A7XX. A fast-cleared GMEM block only gets its
+clear value written when the tile is stored. When the context is preempted
+while a bin is rendered, which happens all the time while SurfaceFlinger
+composites a display on the GPU (an external monitor on OnePlus phones),
+the blocks that were cleared but not drawn are never stored and keep their
+old contents: Steam's UI showed pieces of earlier frames.
+
+Clear on the 3D pipe on A8XX, as for multisample clears, keeping the LRZ
+fast clear. With the GPU compositing the display, 549 of 21,745 GMEM
+fast-cleared passes lost blocks, against 2 of 82,257 cleared on the 3D pipe.
+---
+ .../drivers/freedreno/a6xx/fd6_draw.cc        | 35 ++++++++++++++-----
+ 1 file changed, 27 insertions(+), 8 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a6xx/fd6_draw.cc b/src/gallium/drivers/freedreno/a6xx/fd6_draw.cc
+index f835f06..4cdf511 100644
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_draw.cc
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_draw.cc
+@@ -619,6 +619,24 @@ do_lrz_clear(struct fd_context *ctx, enum fd_buffer_mask buffers)
+    return (buffers & FD_BUFFER_DEPTH) && zsbuf->lrz;
+ }
+ 
++/* Whether a clear has to be drawn on the 3d pipe rather than fast-cleared.
++ *
++ * Multisample clears always need it.  On A8XX the kernel owns RB_CCU_CNTL
++ * and enables GMEM fast clear, which freedreno keeps disabled on A7XX.  A
++ * fast-cleared GMEM block only gets its clear value written when the tile is
++ * stored, and when the context is preempted while a bin is rendered (which
++ * happens all the time while SurfaceFlinger composites a display on the GPU)
++ * the blocks that were cleared but not drawn are never stored and keep their
++ * old contents.  A 3d clear writes the values into GMEM like any draw.
++ */
++template <chip CHIP>
++static bool
++clear_on_3d_pipe(struct fd_context *ctx)
++{
++   return ctx->batch->framebuffer.samples > 1 || CHIP >= A8XX;
++}
++
++template <chip CHIP>
+ static bool
+ fd6_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
+           const union pipe_color_union *color, double depth,
+@@ -627,12 +645,13 @@ fd6_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
+    struct pipe_framebuffer_state *pfb = &ctx->batch->framebuffer;
+    struct fd_batch_subpass *subpass = ctx->batch->subpass;
+    unsigned color_buffers = buffers >> 2;
++   const bool clear_3d = clear_on_3d_pipe<CHIP>(ctx);
+ 
+-   if (pfb->samples > 1) {
+-      /* we need to do multisample clear on 3d pipe, so fallback to u_blitter.
+-       * But we do this ourselves so that we can still benefit from LRZ, as
+-       * normally zfunc==ALWAYS would invalidate LRZ.  So we want to mark the
+-       * LRZ state as valid *after* the fallback clear.
++   if (clear_3d) {
++      /* Clear on the 3d pipe with u_blitter.  But we do this ourselves so
++       * that we can still benefit from LRZ, as normally zfunc==ALWAYS would
++       * invalidate LRZ.  So we want to mark the LRZ state as valid *after*
++       * the fallback clear.
+        */
+       fd_blitter_clear(&ctx->base, (unsigned)buffers, color, depth, stencil);
+    }
+@@ -643,7 +662,7 @@ fd6_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
+       /* If we won't be able to do any fast-clears, avoid pointlessly
+        * splitting out a new subpass:
+        */
+-      if (pfb->samples > 1 && !do_lrz_clear(ctx, buffers))
++      if (clear_3d && !do_lrz_clear(ctx, buffers))
+          return true;
+ 
+       subpass = fd_batch_create_subpass(ctx->batch);
+@@ -676,7 +695,7 @@ fd6_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
+    }
+ 
+    /* We've already done the fallback 3d clear: */
+-   if (pfb->samples > 1)
++   if (clear_3d)
+       return true;
+ 
+    u_foreach_bit (i, color_buffers)
+@@ -697,7 +716,7 @@ fd6_draw_init(struct pipe_context *pctx)
+    disable_thread_safety_analysis
+ {
+    struct fd_context *ctx = fd_context(pctx);
+-   ctx->clear = fd6_clear;
++   ctx->clear = fd6_clear<CHIP>;
+    ctx->update_draw = fd6_update_draw<CHIP>;
+    fd6_update_draw<CHIP>(ctx);
+ }
+-- 
+2.54.0.windows.1
+
