@@ -1,16 +1,17 @@
 package app.polarbear.setup.components
 
-// The stage before Configure: one Android setting Portal cannot change itself,
-// asked for up front because without it Android ends the desktop's processes
-// (an install can die at 99%, a finished desktop closes at random). Portal
-// notices the setting the moment the user returns from Settings. Skipping stays
-// possible, but only behind a plain warning.
+// One Android setting Portal cannot change itself, asked for before anything
+// else because without it Android ends the desktop's processes (an install
+// can die at 99%, a finished desktop closes at random). Portal notices the
+// setting the moment the user returns from Settings. Skipping stays possible,
+// but only behind a plain warning.
+//
+// The state and the pieces live here; the stage that arranges them is
+// PrepareStage in SetupStages.kt, which the launch gate shows too.
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -21,17 +22,11 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
@@ -42,16 +37,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.wrapContentSize
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -74,23 +64,16 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp as lerpColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import app.polarbear.setup.BeginInstallButton
-import app.polarbear.setup.PortalDimens
 import app.polarbear.setup.PortalPalette
-import kotlinx.coroutines.delay
-import kotlin.math.PI
-import kotlin.math.cos
-import kotlin.math.sin
+import androidx.compose.runtime.Stable
 
 /** Debug builds only: pretend the setting is off so the stage can be reviewed. */
 private const val PREF_FORCE_PREPARE = "force_prepare"
@@ -109,23 +92,28 @@ fun setupPrepareNeeded(context: Context): Boolean =
 
 private enum class StepPhase { Waiting, Active, Done }
 
-@OptIn(ExperimentalFoundationApi::class)
+/** Where the setting stands, re-read each time Portal comes back from Settings. */
+@Stable
+internal class PrepareState(
+    val done: Boolean,
+    val developerDone: Boolean,
+    /**
+     * Some ROMs never report the flag. Once the user has been to Settings and
+     * Portal still cannot see it, their word has to be enough.
+     */
+    val offerManual: Boolean,
+    val openAbout: () -> Unit,
+    val openDeveloper: () -> Unit,
+    val confirmManually: () -> Unit,
+)
+
 @Composable
-fun PortalPrepareStage(
-    palette: PortalPalette,
-    onContinue: () -> Unit,
-    modifier: Modifier = Modifier,
-    // Carries the Continue button into the Begin Install button.
-    actionModifier: Modifier = Modifier,
+internal fun rememberPrepareState(
     // Debug preview: behaves as if the setting were off and unreadable.
     preview: Boolean = false,
-    // An installed desktop is opening rather than a first install: the copy
-    // talks about the desktop closing, not the install stopping.
-    returning: Boolean = false,
-) {
+): PrepareState {
     val context = LocalContext.current
     val forced = remember { preview || prepareForcedForTesting(context) }
-    // Re-read Android's state whenever Portal comes back from Settings.
     var resumes by remember { mutableIntStateOf(0) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -139,180 +127,40 @@ fun PortalPrepareStage(
     val developerOn = remember(resumes) { developerOptionsEnabled(context) }
     var visitedSettings by rememberSaveable { mutableStateOf(false) }
     var manualDone by rememberSaveable { mutableStateOf(false) }
-    var skipWarning by rememberSaveable { mutableStateOf(false) }
     val done = restrictionsOff == true || manualDone
-    val developerDone = developerOn || done
-    // Some ROMs never report the flag. Once the user has been to Settings and
-    // Portal still cannot see it, their word has to be enough.
-    val offerManual = (visitedSettings || preview) && !done && restrictionsOff != false
-    // On a phone the warning opens below the fold: scroll its buttons into view.
-    val warningInView = remember { BringIntoViewRequester() }
-    LaunchedEffect(skipWarning) {
-        if (skipWarning) {
-            delay(480)
-            warningInView.bringIntoView()
-        }
-    }
-
-    Column(modifier = modifier.fillMaxWidth()) {
-        // One layout on every screen: a tablet gets the phone's proportions in a
-        // card of matching width rather than a stretched two-column page.
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            PrepareHero(
-                done = done,
-                returning = returning,
-                palette = palette,
-                ringSize = 112,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(22.dp))
-            PrepareSteps(
-                palette = palette,
-                developerDone = developerDone,
-                done = done,
-                offerManual = offerManual,
-                onOpenAbout = {
-                    visitedSettings = true
-                    openAboutDevice(context)
-                },
-                onOpenDeveloper = {
-                    visitedSettings = true
-                    openChildProcessSetting(context)
-                },
-                onManualDone = {
-                    manualDone = true
-                    if (!forced) rememberPrepareConfirmed(context)
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-        Spacer(Modifier.height(28.dp))
-        val unlock by animateFloatAsState(
-            targetValue = if (done) 1f else 0f,
-            animationSpec = tween(700, easing = PortalEmphasizedDecelerate),
-            label = "continue unlock",
-        )
-        Box(
-            modifier = Modifier
-                .align(Alignment.CenterHorizontally)
-                .widthIn(max = PortalDimens.BeginMaxWidth)
-                .fillMaxWidth()
-                .height(PortalDimens.BeginHeight)
-                .wrapContentSize(unbounded = true),
-            contentAlignment = Alignment.Center,
-        ) {
-            // The button waits, dimmed, until the setting is on; then it lights.
-            BeginInstallButton(
-                palette = palette,
-                centered = false,
-                onBeginInstall = onContinue,
-                enabled = done,
-                label = "Continue",
-                glowBoundsModifier = actionModifier,
-                modifier = Modifier.graphicsLayer { alpha = lerp(0.36f, 1f, unlock) },
-            )
-        }
-        AnimatedVisibility(
-            visible = !done,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
-            enter = fadeIn(tween(300)),
-            exit = fadeOut(tween(200)) + shrinkVertically(tween(320, easing = PortalEmphasized)),
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Spacer(Modifier.height(14.dp))
-                Text(
-                    text = "Skip for now",
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .clickable(role = Role.Button) { skipWarning = !skipWarning }
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.textMuted,
-                )
-                AnimatedVisibility(
-                    visible = skipWarning,
-                    enter = fadeIn(tween(260, delayMillis = 60)) +
-                        expandVertically(tween(420, easing = PortalEmphasized)),
-                    exit = fadeOut(tween(160)) + shrinkVertically(tween(280, easing = PortalEmphasized)),
-                ) {
-                    SkipWarning(
-                        palette = palette,
-                        returning = returning,
-                        modifier = Modifier.bringIntoViewRequester(warningInView),
-                        onBack = { skipWarning = false },
-                        onSkip = onContinue,
-                    )
-                }
-            }
-        }
-        Spacer(Modifier.height(6.dp))
-    }
+    return PrepareState(
+        done = done,
+        developerDone = developerOn || done,
+        offerManual = (visitedSettings || preview) && !done && restrictionsOff != false,
+        openAbout = {
+            visitedSettings = true
+            openAboutDevice(context)
+        },
+        openDeveloper = {
+            visitedSettings = true
+            openChildProcessSetting(context)
+        },
+        confirmManually = {
+            manualDone = true
+            if (!forced) rememberPrepareConfirmed(context)
+        },
+    )
 }
 
-/** The ring, and a line or two about what it shows. */
-@Composable
-private fun PrepareHero(
-    done: Boolean,
-    returning: Boolean,
-    palette: PortalPalette,
-    ringSize: Int,
-    modifier: Modifier = Modifier,
-) {
-    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        ProcessRing(
-            done = done,
-            palette = palette,
-            modifier = Modifier.size(ringSize.dp),
-        )
-        Spacer(Modifier.height(16.dp))
-        AnimatedContent(
-            targetState = done,
-            transitionSpec = {
-                (fadeIn(tween(380, delayMillis = 90, easing = PortalEmphasizedDecelerate)) +
-                    slideInVertically(tween(480, easing = PortalEmphasized)) { it / 4 })
-                    .togetherWith(
-                        fadeOut(tween(160, easing = PortalEmphasizedAccelerate)) +
-                            slideOutVertically(tween(220, easing = PortalEmphasizedAccelerate)) { -it / 5 },
-                    )
-                    .using(SizeTransform(clip = false))
-            },
-            contentAlignment = Alignment.TopCenter,
-            label = "prepare copy",
-        ) { isDone ->
-            Column(
-                modifier = Modifier.dissolveBlur(this, radius = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text(
-                    text = if (isDone) "You’re all set" else "One switch keeps your desktop alive",
-                    fontSize = 17.sp,
-                    lineHeight = 22.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.textPrimary,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = if (isDone) {
-                        if (returning) {
-                            "Portal can keep the whole desktop running. Head back in whenever you’re ready."
-                        } else {
-                            "Portal can keep the whole desktop running. Next, choose how it looks and what’s included."
-                        }
-                    } else {
-                        "Android quietly ends apps that run lots of background processes, and a Linux " +
-                            "desktop runs dozens. Turn on one Developer setting and Portal stays up. " +
-                            "It takes about a minute, and Portal notices when you’re back."
-                    },
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
-                    color = palette.textMuted,
-                    textAlign = TextAlign.Center,
-                )
-            }
-        }
-    }
+internal fun prepareTitle(done: Boolean): String =
+    if (done) "You’re all set" else "One switch keeps your desktop alive"
+
+/**
+ * [returning]: an installed desktop is opening rather than a first install;
+ * [installing]: the install is already under way.
+ */
+internal fun prepareBody(done: Boolean, returning: Boolean, installing: Boolean = false): String = when {
+    done && returning -> "Portal can keep the whole desktop running. Head back in whenever you’re ready."
+    done && installing -> "Portal can keep the whole desktop running. The install carries on from here."
+    done -> "Portal can keep the whole desktop running. Next, choose how it looks and what’s included."
+    else -> "Android quietly ends apps that run lots of background processes, and a Linux " +
+        "desktop runs dozens. Turn on one Developer setting and Portal stays up. " +
+        "It takes about a minute, and Portal notices when you’re back."
 }
 
 private const val RING_SEGMENTS = 12
@@ -331,7 +179,7 @@ private fun cullLife(f: Float): Float = when {
  * draws itself in the middle.
  */
 @Composable
-private fun ProcessRing(
+internal fun ProcessRing(
     done: Boolean,
     palette: PortalPalette,
     modifier: Modifier = Modifier,
@@ -427,17 +275,15 @@ private fun ProcessRing(
     }
 }
 
+/** The two steps, each opening the Settings page it needs. */
 @Composable
-private fun PrepareSteps(
+internal fun PrepareSteps(
+    state: PrepareState,
     palette: PortalPalette,
-    developerDone: Boolean,
-    done: Boolean,
-    offerManual: Boolean,
-    onOpenAbout: () -> Unit,
-    onOpenDeveloper: () -> Unit,
-    onManualDone: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val developerDone = state.developerDone
+    val done = state.done
     Column(modifier = modifier) {
         PrepareStep(
             number = 1,
@@ -447,7 +293,7 @@ private fun PrepareSteps(
             isLast = false,
             palette = palette,
         ) {
-            ChecklistButton("Open About device", emphasized = true, onClick = onOpenAbout, palette = palette)
+            ChecklistButton("Open About device", emphasized = true, onClick = state.openAbout, palette = palette)
         }
         PrepareStep(
             number = 2,
@@ -465,9 +311,9 @@ private fun PrepareSteps(
             // Stacked, not a wrapping row: the stepper sizes itself by intrinsic
             // height, which a wrapping row cannot report.
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                ChecklistButton("Open Developer options", emphasized = true, onClick = onOpenDeveloper, palette = palette)
-                if (offerManual) {
-                    ChecklistButton("I’ve turned it on", emphasized = false, onClick = onManualDone, palette = palette)
+                ChecklistButton("Open Developer options", emphasized = true, onClick = state.openDeveloper, palette = palette)
+                if (state.offerManual) {
+                    ChecklistButton("I’ve turned it on", emphasized = false, onClick = state.confirmManually, palette = palette)
                 }
             }
         }
@@ -629,8 +475,9 @@ private fun StepBadge(number: Int, phase: StepPhase, palette: PortalPalette) {
     }
 }
 
+/** What skipping costs, with the way back first. */
 @Composable
-private fun SkipWarning(
+internal fun PrepareSkipWarning(
     palette: PortalPalette,
     returning: Boolean,
     modifier: Modifier = Modifier,
@@ -640,7 +487,6 @@ private fun SkipWarning(
     val shape = RoundedCornerShape(20.dp)
     Column(
         modifier = modifier
-            .padding(top = 6.dp)
             .fillMaxWidth()
             .clip(shape)
             .background(palette.accent.copy(alpha = 0.08f))

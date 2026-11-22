@@ -2,8 +2,8 @@ package app.polarbear.setup.components
 
 // What the setup card shows once Begin Install is tapped: the four steps, one
 // honest progress bar, a plain sentence about what is happening, and, only
-// when setup truly needs the user, a clear Try again. The configuration
-// controls are gone by now rather than left greyed out behind it.
+// when setup truly needs the user, why it stopped. Try again is the stage's
+// primary button, in the place Begin Install was.
 //
 // Motion is reserved for meaning: the phrase changes only when Portal moves
 // on to something else, and while it keeps doing the same thing only the
@@ -32,7 +32,6 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -43,7 +42,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -81,12 +79,11 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.polarbear.setup.BeginInstallButton
 import app.polarbear.setup.INSTALL_STEP_TITLES
 import app.polarbear.setup.PortalColors
-import app.polarbear.setup.PortalDimens
 import app.polarbear.setup.PortalPalette
 import app.polarbear.setup.SetupPhase
 import app.polarbear.setup.installStep
@@ -96,9 +93,6 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
-
-/** Wide enough for the failure message and Try again to sit side by side. */
-private val SideBySideFooter = 560.dp
 
 @Composable
 internal fun InstallStatusPanel(
@@ -114,7 +108,6 @@ internal fun InstallStatusPanel(
     startedAt: Long,
     desktopReady: Boolean,
     palette: PortalPalette,
-    onTryAgain: () -> Unit,
     modifier: Modifier = Modifier,
     /** Export diagnostics from a paused setup; null where nothing can be exported (previews). */
     onExportDiagnostics: (() -> Unit)? = null,
@@ -159,105 +152,116 @@ internal fun InstallStatusPanel(
         else -> palette.textSecondary
     }
 
-    Column(modifier = modifier.fillMaxWidth()) {
-        StepTrack(activeIndex = activeIndex, failed = failed, moving = working && !step.waiting, palette = palette)
-        Spacer(Modifier.height(26.dp))
-        Row(
-            verticalAlignment = Alignment.Bottom,
-            modifier = Modifier.semantics(mergeDescendants = true) {
-                liveRegion = LiveRegionMode.Polite
-            },
-        ) {
-            val percent = (progressState.value.coerceIn(0f, 1f) * 100f).roundToInt()
-            RollingText(
-                text = "$percent%",
-                style = TextStyle(
-                    fontSize = 34.sp,
-                    lineHeight = 36.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.textPrimary,
-                    fontFeatureSettings = "tnum",
-                ),
-                modifier = Modifier.clearAndSetSemantics { contentDescription = "$percent percent" },
+    // A narrow card (a phone held upright) names only the step under way and
+    // puts the phrase under the percentage instead of beside it.
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        val narrow = maxWidth < NarrowPanelWidth
+        Column(Modifier.fillMaxWidth()) {
+            StepTrack(
+                activeIndex = activeIndex,
+                failed = failed,
+                moving = working && !step.waiting,
+                narrow = narrow,
+                palette = palette,
             )
-            Spacer(Modifier.width(14.dp))
-            // Keyed on the phrase alone: a new figure never replays this.
-            AnimatedContent(
-                targetState = label,
-                transitionSpec = {
-                    (fadeIn(tween(280, delayMillis = 80, easing = PortalEmphasizedDecelerate)) +
-                        slideInVertically(tween(360, easing = PortalEmphasized)) { it / 2 })
-                        .togetherWith(
-                            fadeOut(tween(160, easing = PortalEmphasizedAccelerate)) +
-                                slideOutVertically(tween(220, easing = PortalEmphasizedAccelerate)) { -it / 2 },
+            Spacer(Modifier.height(if (narrow) 22.dp else 26.dp))
+            val percent = (progressState.value.coerceIn(0f, 1f) * 100f).roundToInt()
+            val percentText: @Composable () -> Unit = {
+                RollingText(
+                    text = "$percent%",
+                    style = TextStyle(
+                        fontSize = 34.sp,
+                        lineHeight = 36.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.textPrimary,
+                        fontFeatureSettings = "tnum",
+                    ),
+                    modifier = Modifier.clearAndSetSemantics { contentDescription = "$percent percent" },
+                )
+            }
+            val phraseText: @Composable (Modifier) -> Unit = { phraseModifier ->
+                // Keyed on the phrase alone: a new figure never replays this.
+                AnimatedContent(
+                    targetState = label,
+                    transitionSpec = {
+                        (fadeIn(tween(280, delayMillis = 80, easing = PortalEmphasizedDecelerate)) +
+                            slideInVertically(tween(360, easing = PortalEmphasized)) { it / 2 })
+                            .togetherWith(
+                                fadeOut(tween(160, easing = PortalEmphasizedAccelerate)) +
+                                    slideOutVertically(tween(220, easing = PortalEmphasizedAccelerate)) { -it / 2 },
+                            )
+                            .using(SizeTransform(clip = false))
+                    },
+                    contentAlignment = Alignment.BottomStart,
+                    label = "install phrase",
+                    modifier = phraseModifier,
+                ) { phrase ->
+                    if (phrase != null) {
+                        DetailLine(
+                            label = phrase,
+                            figure = if (phrase == label) figure else figures[phrase],
+                            // A phrase that is still going on trails off.
+                            ellipsis = working || (ready && !desktopReady),
+                            color = labelColor,
                         )
-                        .using(SizeTransform(clip = false))
-                },
-                contentAlignment = Alignment.BottomStart,
-                label = "install phrase",
-                modifier = Modifier.padding(bottom = 5.dp),
-            ) { phrase ->
-                if (phrase != null) {
-                    DetailLine(
-                        label = phrase,
-                        figure = if (phrase == label) figure else figures[phrase],
-                        // A phrase that is still going on trails off.
-                        ellipsis = working || (ready && !desktopReady),
-                        color = labelColor,
-                    )
+                    }
                 }
             }
-        }
-        Spacer(Modifier.height(12.dp))
-        ProgressTrack(
-            progressState = progressState,
-            moving = working && !step.waiting,
-            failed = failed,
-            palette = palette,
-        )
-        // The footer brings its own top gap, so a finished card with nothing
-        // under the bar keeps even margins.
-        AnimatedContent(
-            targetState = failed,
-            transitionSpec = {
-                (fadeIn(tween(320, delayMillis = 140)) + expandVertically(tween(420, easing = PortalEmphasized), clip = false))
-                    .togetherWith(fadeOut(tween(160)) + shrinkVertically(tween(320, easing = PortalEmphasized), clip = false))
-                    .using(SizeTransform(clip = false))
-            },
-            label = "install footer",
-        ) { showFailure ->
-            if (showFailure) {
-                Box(Modifier.padding(top = 16.dp)) {
-                    FailureFooter(
-                        errorMessage = errorMessage,
-                        palette = palette,
-                        onTryAgain = onTryAgain,
-                        onExportDiagnostics = onExportDiagnostics,
-                        exportStatus = exportStatus,
-                        exportRunning = exportRunning,
-                    )
+            val announce = Modifier.semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }
+            if (narrow) {
+                Column(announce) {
+                    percentText()
+                    phraseText(Modifier.padding(top = 4.dp))
                 }
             } else {
-                Column(Modifier.fillMaxWidth()) {
-                    if (summary != null) {
-                        FooterText(summary, palette.textMuted, Modifier.padding(top = 16.dp))
-                    }
-                    AnimatedVisibility(
-                        visible = !ready,
-                        enter = fadeIn() + expandVertically(),
-                        exit = fadeOut(tween(200)) + shrinkVertically(tween(320, easing = PortalEmphasized)),
-                    ) {
-                        FooterText(
-                            "You can use other apps meanwhile. Setup keeps going in the background.",
-                            palette.textMuted,
-                            Modifier.padding(top = if (summary != null) 2.dp else 16.dp),
+                Row(verticalAlignment = Alignment.Bottom, modifier = announce) {
+                    percentText()
+                    Spacer(Modifier.width(14.dp))
+                    phraseText(Modifier.padding(bottom = 5.dp))
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            ProgressTrack(
+                progressState = progressState,
+                moving = working && !step.waiting,
+                failed = failed,
+                palette = palette,
+            )
+            // The footer brings its own top gap, so a finished card with nothing
+            // under the bar keeps even margins.
+            AnimatedContent(
+                targetState = failed,
+                transitionSpec = {
+                    (fadeIn(tween(320, delayMillis = 140)) + expandVertically(tween(420, easing = PortalEmphasized), clip = false))
+                        .togetherWith(fadeOut(tween(160)) + shrinkVertically(tween(320, easing = PortalEmphasized), clip = false))
+                        .using(SizeTransform(clip = false))
+                },
+                label = "install footer",
+            ) { showFailure ->
+                if (showFailure) {
+                    Box(Modifier.padding(top = 16.dp)) {
+                        FailureFooter(
+                            errorMessage = errorMessage,
+                            palette = palette,
+                            onExportDiagnostics = onExportDiagnostics,
+                            exportStatus = exportStatus,
+                            exportRunning = exportRunning,
                         )
+                    }
+                } else {
+                    Column(Modifier.fillMaxWidth()) {
+                        if (summary != null) {
+                            FooterText(summary, palette.textMuted, Modifier.padding(top = 16.dp))
+                        }
                     }
                 }
             }
         }
     }
 }
+
+/** Below this the step track cannot name every step. */
+private val NarrowPanelWidth = 400.dp
 
 /** "Downloading Debian · 58 of 964 MB": the phrase holds still, the figure rolls. */
 @Composable
@@ -270,7 +274,14 @@ private fun DetailLine(label: String, figure: String?, ellipsis: Boolean, color:
         fontFeatureSettings = "tnum",
     )
     Row(verticalAlignment = Alignment.Bottom) {
-        Text(text = label, style = style, maxLines = 1)
+        // Too long for the room, the phrase gives way and the figure stays.
+        Text(
+            text = label,
+            style = style,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
         // The figure slides out of the phrase rather than popping in, and
         // the trailing dots step aside for it.
         AnimatedContent(
@@ -383,103 +394,64 @@ private fun FooterText(text: String, color: Color, modifier: Modifier = Modifier
 }
 
 /**
- * Why setup stopped and the one way on, side by side like Begin Install
- * beside the storage bar, stacked when the card is narrow. The button keeps
- * only its own 52dp in the layout; its glow spills into the card padding
- * instead of reserving a tall empty block around it.
+ * Why setup stopped, that nothing is lost, and where to take it from here
+ * when Try again doesn't help.
  */
 @Composable
 private fun FailureFooter(
     errorMessage: String?,
     palette: PortalPalette,
-    onTryAgain: () -> Unit,
     onExportDiagnostics: (() -> Unit)?,
     exportStatus: String?,
     exportRunning: Boolean,
 ) {
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val sideBySide = maxWidth >= SideBySideFooter
-        val explanation: @Composable (Modifier) -> Unit = { textModifier ->
-            Column(textModifier) {
-                Text(
-                    text = errorMessage ?: "Portal couldn’t finish setting up. Tap Try again.",
-                    fontSize = 14.sp,
-                    lineHeight = 19.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.textPrimary,
-                )
-                Spacer(Modifier.height(3.dp))
-                FooterText("Your choices and everything already downloaded are kept.", palette.textMuted)
-                if (onExportDiagnostics != null) {
-                    // For a bug report: the same archive the recovery screen exports.
-                    Text(
-                        text = "Export diagnostics →",
-                        modifier = Modifier
-                            .padding(top = 8.dp)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                enabled = !exportRunning,
-                                role = Role.Button,
-                                onClick = onExportDiagnostics,
-                            ),
-                        fontSize = 12.sp,
-                        lineHeight = 16.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.textMuted.copy(alpha = if (exportRunning) 0.45f else 0.9f),
-                    )
-                    if (exportStatus != null) {
-                        FooterText(exportStatus, palette.textMuted, Modifier.padding(top = 2.dp))
-                    }
-                    val context = androidx.compose.ui.platform.LocalContext.current
-                    Text(
-                        text = "Report this on GitHub →",
-                        modifier = Modifier
-                            .padding(top = 8.dp)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                role = Role.Button,
-                                onClick = { app.polarbear.PortalReport.reportFailure(context, errorMessage) },
-                            ),
-                        fontSize = 12.sp,
-                        lineHeight = 16.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.textMuted.copy(alpha = 0.9f),
-                    )
-                }
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            text = errorMessage ?: "Portal couldn’t finish setting up. Tap Try again.",
+            fontSize = 14.sp,
+            lineHeight = 19.sp,
+            fontWeight = FontWeight.Medium,
+            color = palette.textPrimary,
+        )
+        Spacer(Modifier.height(3.dp))
+        FooterText("Your choices and everything already downloaded are kept.", palette.textMuted)
+        if (onExportDiagnostics != null) {
+            // For a bug report: the same archive the recovery screen exports.
+            Text(
+                text = "Export diagnostics →",
+                modifier = Modifier
+                    .padding(top = 8.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        enabled = !exportRunning,
+                        role = Role.Button,
+                        onClick = onExportDiagnostics,
+                    ),
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.textMuted.copy(alpha = if (exportRunning) 0.45f else 0.9f),
+            )
+            if (exportStatus != null) {
+                FooterText(exportStatus, palette.textMuted, Modifier.padding(top = 2.dp))
             }
-        }
-        val button: @Composable () -> Unit = {
-            Box(
-                Modifier
-                    .size(PortalDimens.BeginMaxWidth, PortalDimens.BeginHeight)
-                    .wrapContentSize(unbounded = true),
-                contentAlignment = Alignment.Center,
-            ) {
-                BeginInstallButton(
-                    palette = palette,
-                    centered = false,
-                    onBeginInstall = onTryAgain,
-                    label = "Try again",
-                )
-            }
-        }
-        if (sideBySide) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(PortalDimens.SurfacePaddingH + 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                explanation(Modifier.weight(1f))
-                button()
-            }
-        } else {
-            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                explanation(Modifier.fillMaxWidth())
-                Spacer(Modifier.height(22.dp))
-                button()
-            }
+            val context = androidx.compose.ui.platform.LocalContext.current
+            Text(
+                text = "Report this on GitHub →",
+                modifier = Modifier
+                    .padding(top = 8.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        role = Role.Button,
+                        onClick = { app.polarbear.PortalReport.reportFailure(context, errorMessage) },
+                    ),
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.textMuted.copy(alpha = 0.9f),
+            )
         }
     }
 }
@@ -489,7 +461,13 @@ private fun FailureFooter(
  * acting out what it does; it holds still while Portal waits on the network.
  */
 @Composable
-private fun StepTrack(activeIndex: Int, failed: Boolean, moving: Boolean, palette: PortalPalette) {
+private fun StepTrack(
+    activeIndex: Int,
+    failed: Boolean,
+    moving: Boolean,
+    narrow: Boolean,
+    palette: PortalPalette,
+) {
     val cycle = rememberInfiniteTransition(label = "step glyph").animateFloat(
         initialValue = 0f,
         targetValue = 1f,
@@ -505,6 +483,7 @@ private fun StepTrack(activeIndex: Int, failed: Boolean, moving: Boolean, palett
             },
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        val named = minOf(activeIndex, INSTALL_STEP_TITLES.lastIndex)
         INSTALL_STEP_TITLES.forEachIndexed { index, title ->
             val done = index < activeIndex
             val current = index == activeIndex
@@ -539,14 +518,23 @@ private fun StepTrack(activeIndex: Int, failed: Boolean, moving: Boolean, palett
                         )
                     }
                 }
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = title,
-                    modifier = Modifier.graphicsLayer { alpha = strength },
-                    fontSize = 13.sp,
-                    fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
-                    color = palette.textPrimary,
-                )
+                // Narrow, only the step under way (or the last, once done) keeps its name.
+                AnimatedVisibility(
+                    visible = !narrow || index == named,
+                    enter = fadeIn(tween(260, delayMillis = 160)) +
+                        expandHorizontally(tween(460, easing = PortalEmphasized), clip = false),
+                    exit = fadeOut(tween(140)) +
+                        shrinkHorizontally(tween(420, easing = PortalEmphasized), clip = false),
+                ) {
+                    Text(
+                        text = title,
+                        modifier = Modifier.padding(start = 8.dp).graphicsLayer { alpha = strength },
+                        fontSize = 13.sp,
+                        fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
+                        color = palette.textPrimary,
+                        maxLines = 1,
+                    )
+                }
             }
             if (index < INSTALL_STEP_TITLES.lastIndex) {
                 // The connector fills as its step completes.

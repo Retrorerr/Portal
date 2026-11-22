@@ -35,6 +35,10 @@ object PortalPreview {
     const val EXTRA_GATE = "portal_preview_gate"
     // Begin Install plays a scripted install: "ok", or "fail" to pause once.
     const val EXTRA_INSTALL = "portal_preview_install"
+    // Open on a stage: welcome, prepare, look or apps.
+    const val EXTRA_STAGE = "portal_preview_stage"
+    // Present setup as that of a new workspace with this name.
+    const val EXTRA_WORKSPACE = "portal_preview_workspace"
     private const val TAG = "PortalPreview"
 
     private var frame: FrameLayout? = null
@@ -43,6 +47,8 @@ object PortalPreview {
 
     fun show(activity: PortalActivity, slow: Float = 1f, gate: Boolean = false, install: String? = null) {
         hide()
+        val stage = activity.intent.getStringExtra(EXTRA_STAGE)
+        val workspace = activity.intent.getStringExtra(EXTRA_WORKSPACE)
         val root = FrameLayout(activity).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -62,7 +68,12 @@ object PortalPreview {
                     if (gate) {
                         PortalPrepareGate(launchMarkModifier = Modifier, onCleared = { hide() }, preview = true)
                     } else {
-                        PortalSetupScreen(previewOnly = true, previewInstall = install)
+                        PortalSetupScreen(
+                            previewOnly = true,
+                            previewInstall = install,
+                            previewStage = stage,
+                            previewWorkspace = workspace,
+                        )
                     }
                 }
             }

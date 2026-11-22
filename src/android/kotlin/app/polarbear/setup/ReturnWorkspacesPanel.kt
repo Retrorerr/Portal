@@ -258,7 +258,7 @@ private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, o
 
 /** Two offset panes; they breathe while a workspace opens. */
 @Composable
-private fun StackGlyph(palette: PortalPalette, busy: Boolean) {
+internal fun StackGlyph(palette: PortalPalette, busy: Boolean) {
     val breathe = rememberInfiniteTransition(label = "workspace glyph")
     val phase by breathe.animateFloat(
         initialValue = 0f,
@@ -770,76 +770,6 @@ private fun NameField(
                     fontWeight = FontWeight.SemiBold,
                     color = palette.accent,
                     maxLines = 1,
-                )
-            }
-        }
-    }
-}
-
-/**
- * Under the installer of a workspace that isn't set up yet: give it up and
- * go back to one that works. It takes two taps, since its files are deleted.
- * Shown only while the install hasn't started or has stopped on a failure.
- */
-@Composable
-internal fun WorkspaceSetupExit(palette: PortalPalette, enabled: Boolean, modifier: Modifier = Modifier) {
-    val state by Workspaces.state
-    val context = LocalContext.current
-    // The registry is final once the native side has chosen this workspace.
-    LaunchedEffect(Unit) { Workspaces.refresh() }
-    val back = state.setupReturn
-    val name = state.name(state.active)
-    var confirming by remember { mutableStateOf(false) }
-    var leaving by remember { mutableStateOf(false) }
-    var refusal by remember { mutableStateOf<String?>(null) }
-    AnimatedVisibility(
-        visible = back != null && name != null && (enabled || leaving),
-        modifier = modifier,
-        enter = fadeIn(tween(420, delayMillis = 300, easing = PortalEmphasizedDecelerate)),
-        exit = fadeOut(tween(200, easing = PortalEmphasizedAccelerate)),
-    ) {
-        val backName = back?.name ?: return@AnimatedVisibility
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = when {
-                    leaving -> "Deleting “$name” and going back to $backName…"
-                    confirming -> "Delete “$name” and go back to $backName?"
-                    else -> "This is the new workspace “$name”: a separate Debian of its own."
-                },
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                color = palette.textMuted,
-            )
-            if (!leaving) {
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (confirming) {
-                        PanelButton(text = "Keep setting up", primary = false, palette = palette) {
-                            confirming = false
-                        }
-                        PanelButton(text = "Delete and go back", primary = true, palette = palette) {
-                            leaving = true
-                            refusal = null
-                            Workspaces.abandonSetup(context) {
-                                refusal = it
-                                leaving = false
-                                confirming = false
-                            }
-                        }
-                    } else {
-                        PanelButton(text = "Back to $backName", primary = false, palette = palette) {
-                            confirming = true
-                        }
-                    }
-                }
-            }
-            refusal?.let {
-                Text(
-                    text = it,
-                    modifier = Modifier.padding(top = 8.dp),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.accent,
                 )
             }
         }
