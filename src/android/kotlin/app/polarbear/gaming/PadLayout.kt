@@ -78,6 +78,12 @@ internal class PadLayout(
      */
     val s: Float
 
+    /**
+     * The largest Size that still grows the pad on this screen. A phone's
+     * pad fills it at 100% already; a tablet's has room to grow.
+     */
+    val room: Float
+
     /** The line between the left thumb's half and the right thumb's. */
     val middle: Float
 
@@ -94,6 +100,7 @@ internal class PadLayout(
         // Turned upright (Android refused landscape) it only has to fit.
         k = fit.coerceIn(if (usableWidth >= usableHeight) MIN_SCALE else MIN_UPRIGHT_SCALE, MAX_SCALE)
         s = min(k * userScale, max(k, fit))
+        room = max(1f, fit / k)
         middle = (left + right) / 2f
         // A taller screen keeps the clusters low, where thumbs rest.
         val region = REF_HEIGHT_MM * s * mm

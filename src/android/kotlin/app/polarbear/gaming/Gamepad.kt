@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -107,13 +108,7 @@ internal class Gamepad(
 ) {
     private val dp = context.resources.displayMetrics.density
 
-    /** Physical px per millimetre: thumbs are the same size on every screen. */
-    private val mm: Float = context.resources.displayMetrics.let { metrics ->
-        val physical = (metrics.xdpi + metrics.ydpi) / 2f
-        val nominal = metrics.densityDpi.toFloat()
-        // Some panels report a placeholder; Android's own density is the better guess then.
-        (if (physical > nominal * 0.6f && physical < nominal * 1.6f) physical else nominal) / MM_PER_INCH
-    }
+    private val mm = mmOf(context.resources.displayMetrics)
     // Only the layout editor needs it (and a bare process has no window manager to ask).
     private val slop by lazy { ViewConfiguration.get(context).scaledTouchSlop.toFloat() }
     private val main = Handler(Looper.getMainLooper())
@@ -1229,6 +1224,14 @@ internal class Gamepad(
         private val ACCELERATE = PathInterpolator(0.3f, 0f, 0.8f, 0.15f)
 
         /** The system bars as they are now: hidden, the controls may use their room. */
+        /** Physical px per millimetre: thumbs are the same size on every screen. */
+        fun mmOf(metrics: DisplayMetrics): Float {
+            val physical = (metrics.xdpi + metrics.ydpi) / 2f
+            val nominal = metrics.densityDpi.toFloat()
+            // Some panels report a placeholder; Android's own density is the better guess then.
+            return (if (physical > nominal * 0.6f && physical < nominal * 1.6f) physical else nominal) / MM_PER_INCH
+        }
+
         fun barInsets(windowInsets: WindowInsets?): Rect {
             windowInsets ?: return Rect()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

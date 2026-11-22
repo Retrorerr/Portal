@@ -480,6 +480,23 @@ object TouchControls {
         if (persist) activity?.let { prefs(it).edit().putFloat(PREF_SCREEN_SCALE, value).apply() }
     }
 
+    /**
+     * How far Size can grow the controller on this screen before its controls
+     * would run into each other: the touchpad page's ([wholeScreen], turned
+     * sideways) or the floating one over the desktop.
+     */
+    fun sizeRoom(context: Context, wholeScreen: Boolean): Float {
+        val metrics = context.resources.displayMetrics
+        val desktop = root?.takeIf { !wholeScreen && it.width > 0 && it.height > 0 }
+        val insets = Gamepad.barInsets(desktop?.rootWindowInsets)
+        val long = maxOf(metrics.widthPixels, metrics.heightPixels).toFloat()
+        val short = minOf(metrics.widthPixels, metrics.heightPixels).toFloat()
+        val width = desktop?.width?.toFloat() ?: if (wholeScreen) long else metrics.widthPixels.toFloat()
+        val height = desktop?.height?.toFloat() ?: if (wholeScreen) short else metrics.heightPixels.toFloat()
+        return PadLayout(width, height, insets.left.toFloat(), insets.top.toFloat(), insets.right.toFloat(), insets.bottom.toFloat(),
+            Gamepad.mmOf(metrics), 1f, wholeScreen).room
+    }
+
     /** The whole-screen controller's state, buttons in xpad order. False when dropped: Portal is in the background. */
     fun screenPad(buttons: Int, axes: FloatArray): Boolean {
         if (!presenting.value || activity == null) return false

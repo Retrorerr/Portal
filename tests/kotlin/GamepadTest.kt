@@ -64,6 +64,17 @@ private fun checkLayouts() {
             }
         }
     }
+    // Size grows the pad up to the room the screen has, and no further: a phone's is full at 100%.
+    for (screen in screens) for (whole in listOf(true, false)) {
+        val base = layout(screen, whole)
+        val room = base.room
+        val where = "${screen.name}, ${if (whole) "whole screen" else "floating"}"
+        check(room >= 1f) { where }
+        check(abs(layout(screen, whole, room).s - base.s * room) < 1e-3f) { "$where: Size grows to its room" }
+        check(abs(layout(screen, whole, room + 0.3f).s - layout(screen, whole, room).s) < 1e-3f) { "$where: past its room Size does nothing" }
+    }
+    for (screen in screens.take(2)) check(layout(screen, false).room == 1f) { "${screen.name}: a phone's pad fills it at 100%" }
+    check(layout(screens[2], false).room > 1.4f) { "a tablet held sideways has room to grow" }
     // A thumb's controls are the same size on a phone and a tablet held sideways, within the fit.
     val phone = layout(screens[0], wholeScreen = false).spot(Control.LEFT_STICK)!!
     val tablet = layout(screens[2], wholeScreen = false).spot(Control.LEFT_STICK)!!

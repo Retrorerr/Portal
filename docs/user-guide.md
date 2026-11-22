@@ -120,7 +120,7 @@ screen. Each stick moves to wherever your thumb lands on its half of the screen
 and follows it; tap and then hold a stick to click it (L3 or R3). A thumb
 between two face buttons presses both. **Touchpad** at the top, or Back, brings
 the touchpad back, and the button beside it opens Game settings, where **Size**
-makes the controls bigger or smaller.
+makes the controls smaller, or bigger where the screen has room for them.
 
 Leave Portal and the desktop stays on the monitor while the tablet or phone
 runs Android. A round **Use mouse** button slides in from the edge facing the
@@ -272,7 +272,7 @@ Open **Game settings** from the Portal pill. The pill expands into the settings
 screen; **Done** or **Back** returns to its menu. Settings are available before
 launching a game, and the controller toggle appears in the menu while a game runs:
 
-- **On-screen controller**: show it, set its opacity and size, and edit the layout. It works like the controller the touchpad shows with the desktop on a monitor: its controls are sized for your thumbs and fit any phone or tablet held either way, and **Size** grows or shrinks all of them. A stick's base follows your thumb a little, and tapping and then holding a stick clicks it (L3 or R3). A touch beside the controls goes to the desktop. In the layout editor, drag a control to move it, or tap it to resize or hide it. A layout can be shared by every game or kept for one game. The controller steps aside while a physical controller is connected unless you ask for it. With the desktop on a monitor, the controller is the tablet's or phone's whole screen instead (see above), and only its size can be changed.
+- **On-screen controller**: show it, set its opacity and size, and edit the layout. It works like the controller the touchpad shows with the desktop on a monitor: its controls are sized for your thumbs and fit any phone or tablet held either way, and **Size** shrinks all of them, or grows them as far as the screen has room (a phone's controller fills it at 100%). A stick's base follows your thumb a little, and tapping and then holding a stick clicks it (L3 or R3). A touch beside the controls goes to the desktop. In the layout editor, drag a control to move it, or tap it to resize or hide it. A layout can be shared by every game or kept for one game. The controller steps aside while a physical controller is connected unless you ask for it. With the desktop on a monitor, the controller is the tablet's or phone's whole screen instead (see above), and only its size can be changed.
 - **Game settings**: the video memory Windows games are told the GPU has and a **Frame-rate cap** for steadier pacing and less heat. These can also be kept per game, and apply the next time the game starts.
 
 Games and browser pages that lock the mouse pointer get Android pointer capture, so mouse look works with a physical mouse.

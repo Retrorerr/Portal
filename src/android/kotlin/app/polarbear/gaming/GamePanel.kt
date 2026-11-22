@@ -69,6 +69,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -100,6 +101,7 @@ import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
 import app.polarbear.setup.components.SlidingSegmentedControl
 import kotlinx.coroutines.delay
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 private val EditBarWidth = 540.dp
@@ -230,11 +232,13 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
             )
             SettingsDivider(GamePalette)
             if (presenting) {
+                val room = rememberSizeRoom(wholeScreen = true)
+                val size = min(screenScale, room)
                 SliderRow(
                     title = "Size",
-                    value = screenScale,
-                    range = PadLayout.MIN_USER_SCALE..PadLayout.MAX_USER_SCALE,
-                    valueText = "${(screenScale * 100).roundToInt()}%",
+                    value = size,
+                    range = PadLayout.MIN_USER_SCALE..min(PadLayout.MAX_USER_SCALE, room),
+                    valueText = "${(size * 100).roundToInt()}%",
                     palette = palette,
                     onChange = { TouchControls.setScreenScale(it, persist = false) },
                     onFinished = { TouchControls.setScreenScale(TouchControls.screenScale.value, persist = true) },
@@ -249,15 +253,7 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                     onChange = { TouchControls.updateLayout(layout.copy(opacity = it), persist = false) },
                     onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
                 )
-                SliderRow(
-                    title = "Size",
-                    value = layout.scale,
-                    range = ControllerLayout.MIN_SCALE..ControllerLayout.MAX_SCALE,
-                    valueText = "${(layout.scale * 100).roundToInt()}%",
-                    palette = palette,
-                    onChange = { TouchControls.updateLayout(layout.copy(scale = it), persist = false) },
-                    onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
-                )
+                FloatingSizeRow("Size", layout, palette)
                 SettingsDivider(GamePalette)
                 NavRow(
                     title = "Edit layout",
@@ -452,15 +448,7 @@ fun EditBar() {
                 )
             }
             Box(Modifier.weight(1f)) {
-                SliderRow(
-                    title = "Overall size",
-                    value = layout.scale,
-                    range = ControllerLayout.MIN_SCALE..ControllerLayout.MAX_SCALE,
-                    valueText = "${(layout.scale * 100).roundToInt()}%",
-                    palette = palette,
-                    onChange = { TouchControls.updateLayout(layout.copy(scale = it), persist = false) },
-                    onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
-                )
+                FloatingSizeRow("Overall size", layout, palette)
             }
         }
         AnimatedVisibility(appId != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
@@ -472,6 +460,35 @@ fun EditBar() {
             ) { TouchControls.setAppLayout(it) }
         }
     }
+}
+
+/**
+ * How far Size can grow the controller on this screen ([TouchControls.sizeRoom]):
+ * a phone's fills it at 100%, a tablet's has room.
+ */
+@Composable
+private fun rememberSizeRoom(wholeScreen: Boolean): Float {
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    return remember(wholeScreen, configuration.screenWidthDp, configuration.screenHeightDp) {
+        TouchControls.sizeRoom(context, wholeScreen)
+    }
+}
+
+/** The floating controller's Size, up to what this screen holds. */
+@Composable
+private fun FloatingSizeRow(title: String, layout: ControllerLayout, palette: PortalPalette) {
+    val room = rememberSizeRoom(wholeScreen = false)
+    val size = min(layout.scale, room)
+    SliderRow(
+        title = title,
+        value = size,
+        range = ControllerLayout.MIN_SCALE..min(ControllerLayout.MAX_SCALE, room),
+        valueText = "${(size * 100).roundToInt()}%",
+        palette = palette,
+        onChange = { TouchControls.updateLayout(layout.copy(scale = it), persist = false) },
+        onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
+    )
 }
 
 @Composable
