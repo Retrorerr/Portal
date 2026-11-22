@@ -42,7 +42,10 @@ private val KeyboardShortcuts = listOf(
 internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onClose: () -> Unit,
     onMinimize: () -> Unit, grip: Modifier = Modifier,
 ) {
-    val active = LocalUtilityContentActive.current
+    // Keys read this in their handlers, so they don't recompose as the page
+    // turns on at the end of its morph; only the header and scrollers do.
+    val activeState = LocalUtilityContentActiveState.current
+    val active = activeState.value
     var expanded by remember { mutableStateOf(false) }
     var page by remember { mutableStateOf(KeyboardPage.Letters) }
     val keyboard = SessionControls.desktopKeyboard
@@ -55,8 +58,8 @@ internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onCl
     val keyHeight = minOf(48.dp * fontScale.coerceAtMost(1.4f), (height - 88.dp) / 5).coerceAtLeast(32.dp)
     val keyText = (if (width < 440.dp) 12f else 14f).sp
     val shortWindow = height < 264.dp
-    DisposableEffect(active) { onDispose { if (active) keyboard.reset() } }
-    LaunchedEffect(active) { if (!active) keyboard.reset() }
+    DisposableEffect(Unit) { onDispose { if (activeState.value) keyboard.reset() } }
+    LaunchedEffect(activeState) { snapshotFlow { activeState.value }.collect { if (!it) keyboard.reset() } }
     fun select(next: KeyboardPage) { keyboard.reset(); page = if (page == next) KeyboardPage.Letters else next }
     Column(Modifier.widthIn(max = 760.dp).width(width).heightIn(max = height)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 8.dp),
@@ -85,7 +88,7 @@ internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onCl
                     .togetherWith(fadeOut(tween(100)))
                     .using(SizeTransform { _, _ -> spring(dampingRatio = 1f, stiffness = 380f) })
             }, label = "keyboard layout") { shown ->
-                val acceptsKeys = active && shown == page
+                val acceptsKeys = { activeState.value && shown == page }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (shown == KeyboardPage.Numpad) {
                         KeyboardRow(listOf(DesktopKey("Tab",15), DesktopKey("Shift",42), DesktopKey("⌫",14)),
@@ -102,23 +105,25 @@ internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onCl
                     }
                 }
             }
-            KeyboardRow(DesktopKeyboardLayout.bottom, palette, keyboard, shift, caps, active, keyHeight, keyText, deferPress = shortWindow)
+            val typing = { activeState.value }
+            KeyboardRow(DesktopKeyboardLayout.bottom, palette, keyboard, shift, caps, typing, keyHeight, keyText, deferPress = shortWindow)
             AnimatedVisibility(expanded,
                 enter = expandVertically(spring(dampingRatio = 1f, stiffness = 380f), expandFrom = Alignment.Top) + fadeIn(tween(240, delayMillis = 80)),
                 exit = shrinkVertically(spring(dampingRatio = 1f, stiffness = 380f), shrinkTowards = Alignment.Top) + fadeOut(tween(120))) {
                 Column(Modifier.heightIn(max = (height - keyHeight * 5 - 92.dp).coerceAtLeast(80.dp))
                     .verticalScroll(rememberScrollState(), enabled = active && expanded).padding(top = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    val trayKeys = { activeState.value && expanded }
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState(), enabled = active && expanded), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         KeyboardShortcuts.forEach { (label,codes) ->
                             KeyboardAction(label, label, palette, active && expanded) { keyboard.shortcut(*codes) }
                         }
                     }
                     DesktopKeyboardLayout.functions.chunked(if (width < 500.dp) 6 else 12).forEach { row ->
-                        KeyboardRow(row, palette, keyboard, shift, caps, active && expanded, keyHeight, keyText, deferPress = true)
+                        KeyboardRow(row, palette, keyboard, shift, caps, trayKeys, keyHeight, keyText, deferPress = true)
                     }
-                    KeyboardRow(DesktopKeyboardLayout.navigation, palette, keyboard, shift, caps, active && expanded, keyHeight, keyText, deferPress = true)
-                    KeyboardRow(DesktopKeyboardLayout.system, palette, keyboard, shift, caps, active && expanded, keyHeight, keyText, deferPress = true)
+                    KeyboardRow(DesktopKeyboardLayout.navigation, palette, keyboard, shift, caps, trayKeys, keyHeight, keyText, deferPress = true)
+                    KeyboardRow(DesktopKeyboardLayout.system, palette, keyboard, shift, caps, trayKeys, keyHeight, keyText, deferPress = true)
                     Text("Modifiers: tap for the next key · tap twice to lock · tap again to release. Hold for chords. Layout follows desktop XKB.",
                         Modifier.padding(horizontal = 5.dp, vertical = 4.dp), color = palette.textMuted, fontSize = 11.sp)
                 }
@@ -146,9 +151,12 @@ internal fun UtilityKeyboardChip(palette: PortalPalette, grip: Modifier, onResto
 
 @Composable
 private fun KeyboardRow(keys: List<DesktopKey>, palette: PortalPalette, state: DesktopKeyboardState, shift: Boolean,
-    caps: Boolean, active: Boolean, height: Dp, textSize: TextUnit, prefix: String = "", deferPress: Boolean = false,
+    caps: Boolean, active: () -> Boolean, height: Dp, textSize: TextUnit, prefix: String = "", deferPress: Boolean = false,
 ) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+    // Each row records its own display list: a keystroke redraws its row, and
+    // the page's other changes (its header, its fade, being set aside while
+    // hidden) never make every key redraw on the frame it reappears.
+    Row(Modifier.fillMaxWidth().graphicsLayer(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
         keys.forEach { key -> key(key.code) {
             DesktopKeyboardKey(key, palette, state, shift, caps, active, Modifier.weight(key.weight).height(height), textSize, prefix, deferPress)
         } }
@@ -157,7 +165,7 @@ private fun KeyboardRow(keys: List<DesktopKey>, palette: PortalPalette, state: D
 
 @Composable
 private fun DesktopKeyboardKey(key: DesktopKey, palette: PortalPalette, state: DesktopKeyboardState, shift: Boolean,
-    caps: Boolean, active: Boolean, modifier: Modifier, textSize: TextUnit, prefix: String, deferPress: Boolean,
+    caps: Boolean, active: () -> Boolean, modifier: Modifier, textSize: TextUnit, prefix: String, deferPress: Boolean,
 ) {
     // Ordinary strokes invalidate just their own key, rather than every key on the surface.
     val level by remember(state, key.code) { derivedStateOf { SessionControls.desktopKeyboardRevision; state.level(key.code) } }
@@ -174,7 +182,7 @@ private fun DesktopKeyboardKey(key: DesktopKey, palette: PortalPalette, state: D
 
 @Composable
 private fun KeyboardKey(label: String, description: String, palette: PortalPalette, pressed: Boolean, level: Int,
-    modifier: Modifier, textSize: TextUnit, active: Boolean, modifierKey: Boolean, deferPress: Boolean,
+    modifier: Modifier, textSize: TextUnit, active: () -> Boolean, modifierKey: Boolean, deferPress: Boolean,
     onDown: () -> Unit, onUp: (Boolean) -> Unit, onTap: () -> Unit,
 ) {
     var touching by remember { mutableStateOf(false) }
@@ -185,18 +193,21 @@ private fun KeyboardKey(label: String, description: String, palette: PortalPalet
         tween(100, easing = PortalEmphasized), label = "key fill")
     val latestDown by rememberUpdatedState(onDown)
     val latestUp by rememberUpdatedState(onUp)
+    val accepts by rememberUpdatedState(active)
     val shape = RoundedCornerShape(10.dp)
     BoxWithConstraints(modifier.graphicsLayer { scaleX = 1f - 0.045f * travel; scaleY = scaleX; translationY = travel * 1.dp.toPx() }
         .clip(shape).background(fill).border(1.dp, if (level > 0) palette.accent else palette.surfaceBorder, shape)
         .semantics {
             contentDescription = description; role = Role.Button
-            if (!active) disabled()
+            // Published only while the page takes input (UtilitySurfaceContent).
             if (level > 0) stateDescription = if (level == 2) "Locked" else "Armed"
-            onClick { if (active) onTap(); active }
+            onClick { val taken = accepts(); if (taken) onTap(); taken }
         }
-        .pointerInput(active, modifierKey, deferPress, holdDelay) {
-            if (active) detectTapGestures(onPress = {
-                coroutineScope {
+        .pointerInput(modifierKey, deferPress, holdDelay) {
+            detectTapGestures(onPress = {
+                // A key pressed while the page is still arriving or already
+                // leaving does nothing; the page's reset lets go of held keys.
+                if (accepts()) coroutineScope {
                     touching = true
                     var sent = false
                     var released = false

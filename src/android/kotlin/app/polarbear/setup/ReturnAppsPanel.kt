@@ -37,6 +37,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -50,6 +51,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -72,13 +74,18 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.constrainWidth
 import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.coerceIn
 import androidx.compose.ui.unit.sp
 import app.polarbear.ComposeOverlay
 import app.polarbear.setup.components.CategoryLabel
@@ -98,6 +105,11 @@ private const val APPS_ENTRANCE_DELAY_MS = 800L
 /** A pending removal reverts to "Remove" if not confirmed in time. */
 private const val CONFIRM_WINDOW_MS = 3500L
 private val AppsCardWidth = 360.dp
+/** The tallest the Apps card grows, on a screen with room to spare. */
+private val AppsCardMaxHeight = 520.dp
+/** A capsule's glyph, gaps, chevron and padding around its label. */
+private val CapsuleChrome = 14.dp + 16.dp + 8.dp + 8.dp + 8.dp + 14.dp
+private val CapsuleGap = 10.dp
 private val AppsCapsuleCorner = 18.dp
 private val AppsCardCorner = 24.dp
 
@@ -135,7 +147,22 @@ internal fun ReturnAppsPanel(
         exit = fadeOut(tween(220, easing = PortalEmphasizedAccelerate)) +
             shrinkVertically(tween(420, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top),
     ) {
-        Box(Modifier.dissolveBlur(this, radius = 10.dp).widthIn(max = WorkspacesCardWidth).padding(top = 14.dp)) {
+        BoxWithConstraints(Modifier.dissolveBlur(this, radius = 10.dp).widthIn(max = WorkspacesCardWidth).padding(top = 14.dp)) {
+            // The workspace pill's name ends early rather than push the row past
+            // the screen. Worked out from the labels, never from the other pills'
+            // animated widths, which would restart its size spring every frame.
+            val labels = rememberTextMeasurer()
+            val labelStyle = LocalTextStyle.current.merge(TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium))
+            val density = LocalDensity.current
+            val peers = with(density) {
+                listOfNotNull(
+                    "Apps".takeIf { catalog.isNotEmpty() && !switching },
+                    "Files".takeIf { !switching },
+                ).sumOf { labels.measure(it, labelStyle).size.width }.toDp()
+            }
+            val peerCount = (if (catalog.isNotEmpty() && !switching) 1 else 0) + (if (!switching) 1 else 0)
+            val workspaceName = (maxWidth - peers - (CapsuleChrome + CapsuleGap) * peerCount - CapsuleChrome)
+                .coerceIn(40.dp, WorkspacesCapsuleNameMaxWidth)
             // The gap between pills closes while one of them is open as a card.
             val gap by animateDpAsState(if (panel == null) 10.dp else 0.dp,
                 spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness), label = "controls capsule spacing")
@@ -161,7 +188,7 @@ internal fun ReturnAppsPanel(
                 // Always offered once the list is read: the card is where a
                 // second workspace is made.
                 SessionActionSlot(visible = (panel == null || panel == "workspaces") && workspaces.workspaces.isNotEmpty()) {
-                    WorkspacesSurface(palette)
+                    WorkspacesSurface(palette, workspaceName)
                 }
                 // Opened only from the pill's menu, so it never competes with the pills.
                 SessionActionSlot(visible = panel == "report", fromEdge = false) {
@@ -228,7 +255,14 @@ internal fun SessionActionSurface(expanded: Boolean, palette: PortalPalette, lab
                 scaleIn(tween(420, easing = PortalEmphasized), initialScale = 0.985f))
                 .togetherWith(fadeOut(tween(140, easing = PortalEmphasizedAccelerate)))
                 .using(SizeTransform(clip = true) { _, _ -> PortalPanelSizeSpring })
-        }, contentAlignment = Alignment.TopCenter, label = label, content = content)
+        }, contentAlignment = Alignment.TopCenter, label = label) { target ->
+        // Kept from accessibility services until the morph settles. While any
+        // service is connected (Portal's own keyboard service included) Compose
+        // walks the whole tree on layout changes, and a card's worth of moving
+        // rows cost the main thread the morph's last frames.
+        val scope = this
+        Box(if (transition.isRunning) Modifier.clearAndSetSemantics {} else Modifier) { scope.content(target) }
+    }
 }
 
 @Composable
@@ -295,6 +329,7 @@ private fun AppsCard(
         modifier = Modifier
             .widthIn(max = AppsCardWidth)
             .fillMaxWidth()
+            .heightIn(max = veilPanelRoom(AppsCardMaxHeight))
             .onGloballyPositioned {
                 val bounds = it.boundsInRoot()
                 veil.gestureExclusions[exclusionKey] = bounds
@@ -308,6 +343,7 @@ private fun AppsCard(
                 Text(
                     "Add or remove apps any time; the desktop keeps running.",
                     fontSize = 11.sp,
+                    lineHeight = 15.sp,
                     fontWeight = FontWeight.Medium,
                     color = palette.textMuted,
                 )
@@ -315,10 +351,13 @@ private fun AppsCard(
             PanelButton(text = "Done", primary = false, palette = palette, onClick = onClose)
         }
         Spacer(Modifier.height(4.dp))
+        val listScroll = rememberScrollState()
         Column(
             Modifier
-                .heightIn(max = (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp - 300).coerceIn(100, 420).dp)
-                .verticalScroll(rememberScrollState()),
+                // Whatever the card has left under its header.
+                .weight(1f, fill = false)
+                .veilScrollRegion(listScroll)
+                .verticalScroll(listScroll),
         ) {
             groupedOptionalApps(catalog).forEach { (label, apps) ->
                 CategoryLabel(label, palette)

@@ -555,8 +555,12 @@ internal fun PortalAmbientBackground(
     readyPrelude: Boolean,
 ) {
     val finalLayerAlpha = remember { Animatable(1f) }
-    LaunchedEffect(readyPrelude) {
-        val target = if (readyPrelude) READY_BACKGROUND_ALPHA else 1f
+    // While the desktop is on a monitor, nothing of it is under the veil on this
+    // screen, only the touchpad page: the veil stays solid over its chip and
+    // buttons, and lifting it still uncovers the touchpad.
+    val presenting = app.polarbear.TouchControls.presenting.value
+    LaunchedEffect(readyPrelude, presenting) {
+        val target = if (readyPrelude && !presenting) READY_BACKGROUND_ALPHA else 1f
         if (ValueAnimator.areAnimatorsEnabled()) {
             finalLayerAlpha.animateTo(target, tween(720))
         } else {
@@ -569,7 +573,7 @@ internal fun PortalAmbientBackground(
     // Live desktop frost: once the veil may be lifted, the desktop's own
     // colours glow through a blurred pane instead of a flat translucent dim.
     val veil = LocalPortalVeil.current
-    val snapshot = rememberPlasmaSnapshot(active = readyPrelude && veil.eligible)
+    val snapshot = rememberPlasmaSnapshot(active = readyPrelude && veil.eligible && !presenting)
     val hasFrost by remember { derivedStateOf { snapshot.value != null } }
     val frost = remember { Animatable(0f) }
     LaunchedEffect(hasFrost) {

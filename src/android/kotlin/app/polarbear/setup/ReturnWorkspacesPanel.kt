@@ -55,6 +55,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -84,6 +85,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -104,6 +106,9 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.coerceAtLeast
 import androidx.compose.ui.unit.coerceIn
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -124,15 +129,19 @@ internal val WorkspacesCardWidth = 560.dp
 /** Tiles share the card's width, within these bounds; more than fit scroll. */
 private val TileMinWidth = 128.dp
 private val TileMaxWidth = 248.dp
+/** Where the card is short (a phone on its side), tiles shrink to fit its height, down to this. */
+private val TileMinHeight = 64.dp
 private val TileGap = 12.dp
+/** Below this much height for its contents, the list tightens its spacing and puts the launch choice on one line. */
+private val CompactListHeight = 340.dp
 /** Name and status, or the rename field and its note: the same height, so renaming never moves the card. */
 private val TileFooterHeight = 46.dp
 /** Over the frozen old desktop, so the chosen one is what is seen. */
 private const val BACKDROP_ALPHA = 0.88f
 /** Over the preview, enough for white text on a bright wallpaper. */
 private const val BACKDROP_SHADE = 0.38f
-/** Long names end early so the pill stays beside Apps and Files. */
-private val CapsuleNameMaxWidth = 132.dp
+/** Long names end early so the pill stays beside Apps and Files; narrower where the row is short. */
+internal val WorkspacesCapsuleNameMaxWidth = 132.dp
 private val TileCorner = 14.dp
 
 /**
@@ -140,14 +149,14 @@ private val TileCorner = 14.dp
  * every workspace as it was left; one tap opens another.
  */
 @Composable
-internal fun WorkspacesSurface(palette: PortalPalette) {
+internal fun WorkspacesSurface(palette: PortalPalette, nameMaxWidth: Dp = WorkspacesCapsuleNameMaxWidth) {
     val state by Workspaces.state
     val panel = ComposeOverlay.activePanel
     SessionActionSurface(panel == "workspaces", palette, "workspaces surface") { expanded ->
         if (expanded) {
             WorkspacesCard(state, palette) { ComposeOverlay.activePanel = null }
         } else {
-            WorkspacesCapsule(state, palette) {
+            WorkspacesCapsule(state, palette, nameMaxWidth) {
                 if (ComposeOverlay.activePanel == null && state.switching == null &&
                     Workspaces.opening.value == null
                 ) {
@@ -209,7 +218,7 @@ internal fun WorkspaceSwitchBackdrop() {
  * opens, the veil's subtitle says so and the capsule names the one arriving.
  */
 @Composable
-private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, onClick: () -> Unit) {
+private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, nameMaxWidth: Dp, onClick: () -> Unit) {
     val openingId by Workspaces.opening
     val opening = openingId ?: state.switching
     val tap = remember { MutableInteractionSource() }
@@ -246,7 +255,7 @@ private fun WorkspacesCapsule(state: Workspaces.State, palette: PortalPalette, o
         ) { text ->
             Text(
                 text = text,
-                modifier = Modifier.widthIn(max = CapsuleNameMaxWidth),
+                modifier = Modifier.widthIn(max = nameMaxWidth),
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
                 color = palette.textPrimary,
@@ -337,6 +346,7 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
         modifier = Modifier
             .widthIn(max = WorkspacesCardWidth)
             .fillMaxWidth()
+            .veilPanelHeight()
             .onGloballyPositioned {
                 val bounds = it.boundsInRoot()
                 veil.gestureExclusions[exclusionKey] = bounds
@@ -406,11 +416,44 @@ private fun WorkspacesList(
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = palette.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             NewWorkspaceButton(palette = palette, enabled = !restarting, onClick = onNew)
             Spacer(Modifier.width(4.dp))
             PanelButton(text = "Done", primary = false, palette = palette, onClick = onClose)
         }
+        // Under the header, the rest fits the height the veil gives the card:
+        // the tiles shrink first, then it scrolls.
+        BoxWithConstraints(Modifier.weight(1f, fill = false).fillMaxWidth()) {
+            val budget = maxHeight
+            val compact = budget < CompactListHeight
+            val scroll = rememberScrollState()
+            Column(Modifier.fillMaxWidth().veilScrollRegion(scroll).verticalScroll(scroll)) {
+                WorkspacesBody(state, palette, chosen, renaming, restarting, onChoose, onRenaming, budget, compact)
+            }
+        }
+    }
+}
+
+/**
+ * The description, the tiles, any error and the launch choice. The tiles get
+ * whatever height [budget] leaves once the rest is measured.
+ */
+@Composable
+private fun WorkspacesBody(
+    state: Workspaces.State,
+    palette: PortalPalette,
+    chosen: String?,
+    renaming: String?,
+    restarting: Boolean,
+    onChoose: (String) -> Unit,
+    onRenaming: (String?) -> Unit,
+    budget: Dp,
+    compact: Boolean,
+) {
+    val gap = if (compact) 10.dp else 14.dp
+    Layout(content = {
         Text(
             "Each has its own apps, files and settings. Tap one to open it, or its name to rename it.",
             modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp),
@@ -419,10 +462,16 @@ private fun WorkspacesList(
             fontWeight = FontWeight.Medium,
             color = palette.textMuted,
         )
-        Spacer(Modifier.height(14.dp))
         BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
             val count = state.workspaces.size.coerceAtLeast(1)
-            val tileWidth = ((maxWidth - TileGap * (count - 1)) / count).coerceIn(TileMinWidth, TileMaxWidth)
+            val byWidth = ((maxWidth - TileGap * (count - 1)) / count).coerceIn(TileMinWidth, TileMaxWidth)
+            // A tile is 16:10 over its name; where height is short, that sets its width.
+            val byHeight = if (constraints.hasBoundedHeight) {
+                ((maxHeight - 8.dp - TileFooterHeight) * 1.6f).coerceAtLeast(TileMinHeight * 1.6f)
+            } else {
+                TileMaxWidth
+            }
+            val tileWidth = minOf(byWidth, byHeight)
             Row(
                 // At least the card's width, so a few tiles sit centred and
                 // more than fit scroll.
@@ -452,21 +501,45 @@ private fun WorkspacesList(
                 }
             }
         }
-        AnimatedVisibility(
-            visible = state.error != null,
-            enter = expandVertically(tween(300)) + fadeIn(tween(300, delayMillis = 60)),
-            exit = shrinkVertically(tween(260)) + fadeOut(tween(140)),
-        ) {
-            Text(
-                text = state.error ?: "",
-                modifier = Modifier.padding(start = 4.dp, top = 10.dp),
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                color = palette.accent,
-            )
+        // A Box, so the layout keeps a child here while the error is gone.
+        Box {
+            AnimatedVisibility(
+                visible = state.error != null,
+                enter = expandVertically(tween(300)) + fadeIn(tween(300, delayMillis = 60)),
+                exit = shrinkVertically(tween(260)) + fadeOut(tween(140)),
+            ) {
+                // Keeps its last words while it folds away.
+                var shown by remember { mutableStateOf("") }
+                state.error?.let { shown = it }
+                Text(
+                    text = shown,
+                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 10.dp),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.accent,
+                )
+            }
         }
-        Spacer(Modifier.height(14.dp))
-        OpenAtLaunchRow(state, palette)
+        OpenAtLaunchRow(state, palette, inline = compact)
+    }) { measurables, constraints ->
+        val loose = Constraints(maxWidth = constraints.maxWidth)
+        val description = measurables[0].measure(loose)
+        val error = measurables[2].measure(loose)
+        val launch = measurables[3].measure(loose)
+        val gapPx = gap.roundToPx()
+        val others = description.height + error.height + launch.height + gapPx * 2
+        val leastTiles = (TileMinHeight + 8.dp + TileFooterHeight).roundToPx()
+        val tilesMax = if (budget == Dp.Infinity) Constraints.Infinity
+            else (budget.roundToPx() - others).coerceAtLeast(leastTiles)
+        val tiles = measurables[1].measure(loose.copy(maxHeight = tilesMax))
+        val width = maxOf(description.width, tiles.width, error.width, launch.width).coerceAtMost(constraints.maxWidth)
+        layout(width, others + tiles.height) {
+            var y = 0
+            description.placeRelative(0, y); y += description.height + gapPx
+            tiles.placeRelative(0, y); y += tiles.height
+            error.placeRelative(0, y); y += error.height + gapPx
+            launch.placeRelative(0, y)
+        }
     }
 }
 
@@ -713,12 +786,23 @@ private fun NameField(
     }
 }
 
-/** Which workspace Portal opens at launch: the last one used, or a fixed one. */
+/**
+ * Which workspace Portal opens at launch: the last one used, or a fixed one.
+ * [inline] puts the label beside the choices, for a short card.
+ */
 @Composable
-private fun OpenAtLaunchRow(state: Workspaces.State, palette: PortalPalette) {
-    Column(Modifier.padding(horizontal = 4.dp)) {
-        Text("When Portal starts", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = palette.textMuted)
-        Spacer(Modifier.height(6.dp))
+private fun OpenAtLaunchRow(state: Workspaces.State, palette: PortalPalette, inline: Boolean = false) {
+    val label = @Composable {
+        Text(
+            "When Portal starts",
+            modifier = if (inline) Modifier.padding(end = 10.dp) else Modifier,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            color = palette.textMuted,
+            maxLines = 1,
+        )
+    }
+    val choices = @Composable {
         Row(
             Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -733,6 +817,18 @@ private fun OpenAtLaunchRow(state: Workspaces.State, palette: PortalPalette) {
                     Workspaces.setOpenAtLaunch(workspace.id)
                 }
             }
+        }
+    }
+    if (inline) {
+        Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            label()
+            choices()
+        }
+    } else {
+        Column(Modifier.padding(horizontal = 4.dp)) {
+            label()
+            Spacer(Modifier.height(6.dp))
+            choices()
         }
     }
 }
@@ -756,10 +852,12 @@ private fun LaunchChoice(label: String, selected: Boolean, palette: PortalPalett
     ) {
         Text(
             label,
+            modifier = Modifier.widthIn(max = 180.dp),
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
             color = if (selected) PortalColors.Charcoal else palette.textMuted,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

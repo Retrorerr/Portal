@@ -166,6 +166,9 @@ internal class PortalCapsuleView(
         presentationId++
         settledPage = null
         page = next
+        // The touchpad page's buttons come back while this one closes into
+        // them, not once it has finished and let go of input.
+        SessionControls.utilityPageChanged(next != UtilityPage.Dock)
     }
     private fun onPresentationSettled(settled: UtilityPage, request: Int) {
         // An old Dock completion can arrive after a new Menu request, even
@@ -173,6 +176,8 @@ internal class PortalCapsuleView(
         if (!isAttachedToWindow || request != presentationId || settled != page || dragging || freeMotion) return
         settledPage = settled
         if (settled == UtilityPage.Dock) {
+            // The touchpad's Portal button may have moved while a page closed into its own button.
+            if (dockHidden) snapToPadAnchor()
             val action = pendingAction.also { pendingAction = null }
             try { action?.invoke() } finally { releaseInput() }
         }
@@ -181,7 +186,10 @@ internal class PortalCapsuleView(
     fun hideDockAt(x: Float, y: Float) {
         padAnchor = Offset(x, y)
         dockHidden = true
-        if (page == UtilityPage.Dock && width > 0 && height > 0) snapToPadAnchor()
+        // A page still closing keeps heading for the button it came from; the
+        // touchpad's buttons move as they come back around it, and following
+        // them sent it to the wrong one. It moves over once it has closed.
+        if (page == UtilityPage.Dock && settledPage == UtilityPage.Dock && width > 0 && height > 0) snapToPadAnchor()
     }
 
     /** The touchpad page left: the tab returns to its edge. */
@@ -356,7 +364,17 @@ internal class PortalCapsuleView(
         super.onWindowFocusChanged(hasWindowFocus)
         if (!hasWindowFocus) SessionControls.resetDesktopKeyboard()
     }
+    /** Gives the refresh rate back once the controls have stayed still for [REFRESH_HOLD_MS]. */
+    private val refreshRelease = Runnable { applyFrameRate(false) }
     private fun updateFrameRate(active: Boolean) {
+        removeCallbacks(refreshRelease)
+        // Held a moment past the motion: the tweens that outlast its springs
+        // finish at the full rate, and the window relayout and refresh switch
+        // that releasing it causes land on still frames, not the last moving ones.
+        if (active || !isAttachedToWindow) applyFrameRate(active)
+        else if (highRefresh != false) postDelayed(refreshRelease, REFRESH_HOLD_MS)
+    }
+    private fun applyFrameRate(active: Boolean) {
         if (highRefresh == active) return
         highRefresh = active
         (context as? PortalActivity)?.setUtilityHighRefresh(active)
@@ -366,6 +384,7 @@ internal class PortalCapsuleView(
         }
     }
     override fun onDetachedFromWindow() {
+        removeCallbacks(refreshRelease)
         settle?.cancel(); settle = null; settleHeld = false
         recycleTracker(); scope.cancel()
         pendingAction = null
@@ -374,6 +393,11 @@ internal class PortalCapsuleView(
         dragEligible = false; chord = false
         hubBounds.setEmpty(); actionBounds.clear()
         releaseInput()
+        applyFrameRate(false)
         super.onDetachedFromWindow()
+    }
+
+    private companion object {
+        const val REFRESH_HOLD_MS = 600L
     }
 }

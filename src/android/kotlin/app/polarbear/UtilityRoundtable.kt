@@ -30,7 +30,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.*
 import app.polarbear.setup.*
 import app.polarbear.setup.components.*
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlin.math.roundToInt
@@ -91,10 +93,12 @@ internal fun UtilityRoundtable(
         keyboardMotion.onFlickDown = if (page == UtilityPage.Keyboard && !keyboardMinimized) ({ onKeyboardMinimized(true) }) else null
     }
     LaunchedEffect(page) { keyboardMotion.stop() }
-    val transition = updateTransition(page, label = "utility presentation")
+    val travel = remember { UtilityTravel(page) }
+    val pageNow = rememberUpdatedState(page)
+    LaunchedEffect(page) { travel.travelTo(page) }
     val dockCaptureBounds = remember { android.graphics.RectF() }
     val keyboardCaptureBounds = remember { android.graphics.RectF() }
-    val moving = { dragging() || directPosition() || transition.isRunning || surfaceResizing || keyboardMotion.isMoving }
+    val moving = { dragging() || directPosition() || travel.running || surfaceResizing || keyboardMotion.isMoving }
     var resting by remember { mutableStateOf(false) }
     val parked = { resting && page == UtilityPage.Dock }
     // Nothing of the desktop shows behind the touchpad page to frost.
@@ -108,18 +112,10 @@ internal fun UtilityRoundtable(
     val hasFrost by remember(frost) { derivedStateOf { frost.current != null } }
     val surfaceBase by animateColorAsState(palette.background.copy(alpha = if (hasFrost) PortalFrostStyle.tint(palette.isDark) else 0.96f),
         tween(320,easing = PortalEmphasized),label = "utility glass tint")
-    val centering by transition.animateFloat(transitionSpec = { spring(dampingRatio = 1f, stiffness = 230f) }, label = "utility travel") {
-        if (it == UtilityPage.Dock) 0f else 1f
-    }
-    val keyboardTravel by transition.animateFloat(transitionSpec = { spring(dampingRatio = 1f, stiffness = 230f) }, label = "keyboard travel") {
-        if (it == UtilityPage.Keyboard) 1f else 0f
-    }
-    val settingsTravel by transition.animateFloat(transitionSpec = { spring(dampingRatio = 1f, stiffness = 230f) }, label = "settings travel") {
-        if (it.isSettings) 1f else 0f
-    }
-    val menuReveal by transition.animateFloat(transitionSpec = { spring(dampingRatio = 0.88f, stiffness = 300f) }, label = "bubble orbit") {
-        if (it == UtilityPage.Menu) 1f else 0f
-    }
+    val centering by travel.centering.asState()
+    val keyboardTravel by travel.keyboard.asState()
+    val settingsTravel by travel.settings.asState()
+    val menuReveal by travel.menu.asState()
     val targetCenter = Offset(geometry.center.x,geometry.center.y)
     val menuCenter by animateOffsetAsState(targetCenter, spring(dampingRatio = 0.88f, stiffness = 230f), label = "utility viewport")
     // Read motion in placement/layer blocks. Rebuilding the controls on every
@@ -156,16 +152,21 @@ internal fun UtilityRoundtable(
         snapshotFlow { if (draggingNow()) 1.045f else if (keyboardMotion.dragging) 1.006f else 1f }
             .collectLatest { lift.animateTo(it, spring(dampingRatio = 0.86f, stiffness = 400f)) }
     }
+    // Whether anything moves, and when it has settled, are read only in these
+    // effects. Read in composition, the end of every morph rebuilt the whole
+    // roundtable on its last frames, which then missed their deadline.
     val currentAnimating by rememberUpdatedState(onAnimating)
-    LaunchedEffect(transition, radialTarget, surfaceResizing) {
-        snapshotFlow { transition.isRunning || arrival.isRunning || opacity.isRunning || radial != radialTarget || draggingNow() || directNow() || surfaceResizing || keyboardMotion.isMoving }
+    LaunchedEffect(travel, radialTarget) {
+        snapshotFlow { travel.running || arrival.isRunning || opacity.isRunning || radial != radialTarget || draggingNow() || directNow() || surfaceResizing || keyboardMotion.isMoving }
             .distinctUntilChanged().collect { currentAnimating(it) }
     }
     val currentSettled by rememberUpdatedState(onSettled)
-    LaunchedEffect(presentationId, transition.currentState, transition.targetState, transition.isRunning, arrival.isRunning, surfaceResizing) {
-        if (transition.isRunning || transition.currentState != transition.targetState || arrival.isRunning || arrival.value != 1f || surfaceResizing) return@LaunchedEffect
-        snapshotFlow { !draggingNow() && !directNow() }.distinctUntilChanged()
-            .collect { if (it) currentSettled(transition.currentState,presentationId) }
+    LaunchedEffect(presentationId) {
+        snapshotFlow {
+            val still = !travel.running && travel.current == pageNow.value &&
+                !arrival.isRunning && arrival.value == 1f && !surfaceResizing
+            travel.current.takeIf { still && !draggingNow() && !directNow() }
+        }.distinctUntilChanged().collect { settled -> if (settled != null) currentSettled(settled,presentationId) }
     }
     Box(Modifier.fillMaxSize().recordUtilityFrost(frost).pointerInput(page) {
         detectTapGestures {
@@ -222,8 +223,13 @@ internal fun UtilityRoundtable(
         }
         Layout(content = {
             UtilitySurfaceContent(page to (page == UtilityPage.Menu && geometry.compact || page == UtilityPage.Keyboard && keyboardMinimized),
-                prepareKeyboard = page == UtilityPage.Menu && !transition.isRunning && !surfaceResizing,
+                // A new page is asked for a frame before its travel starts running.
+                // Preparing the keys in that gap blocks the first menu animation.
+                prepareKeyboard = { pageNow.value == UtilityPage.Menu && travel.current == UtilityPage.Menu &&
+                    !travel.running && !surfaceResizing },
                 onResizing = { surfaceResizing = it },
+                // Read inside the surface, so the roundtable never recomposes for it.
+                settled = { !travel.running && travel.current == pageNow.value && !keyboardMotion.isMoving },
                 onTargetSize = { shown, size -> if (shown == UtilityPage.Keyboard) keyboardMotion.resize(size, keyboardMinimized) },
                 modifier = Modifier.graphicsLayer {
                     alpha = arrival.value * opacity.value * presence.value
@@ -311,6 +317,37 @@ internal fun UtilityRoundtable(
                 child.place((position.x-child.width/2+arrivalShift).roundToInt(),(position.y-child.height/2).roundToInt())
             }
         }
+    }
+}
+
+/**
+ * The roundtable's travel between pages. It runs on Animatables, never on
+ * updateTransition: a Transition's state is read in composition, so coming to
+ * rest rebuilt the whole roundtable on the last frame of every morph.
+ * Read [running] and [current] only in effects, layout, drawing and handlers.
+ */
+@Stable
+private class UtilityTravel(page: UtilityPage) {
+    val centering = Animatable(if (page == UtilityPage.Dock) 0f else 1f)
+    val keyboard = Animatable(if (page == UtilityPage.Keyboard) 1f else 0f)
+    val settings = Animatable(if (page.isSettings) 1f else 0f)
+    val menu = Animatable(if (page == UtilityPage.Menu) 1f else 0f)
+    /** The page the travel last came to rest on. */
+    var current by mutableStateOf(page)
+    var running by mutableStateOf(false)
+
+    suspend fun travelTo(page: UtilityPage) {
+        if (page == current && !running) return
+        // A page asked for mid-travel picks up from where, and how fast, the last one was going.
+        running = true
+        coroutineScope {
+            launch { centering.animateTo(if (page == UtilityPage.Dock) 0f else 1f, spring(dampingRatio = 1f, stiffness = 230f)) }
+            launch { keyboard.animateTo(if (page == UtilityPage.Keyboard) 1f else 0f, spring(dampingRatio = 1f, stiffness = 230f)) }
+            launch { settings.animateTo(if (page.isSettings) 1f else 0f, spring(dampingRatio = 1f, stiffness = 230f)) }
+            launch { menu.animateTo(if (page == UtilityPage.Menu) 1f else 0f, spring(dampingRatio = 0.88f, stiffness = 300f)) }
+        }
+        current = page
+        running = false
     }
 }
 

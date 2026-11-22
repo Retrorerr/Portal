@@ -40,7 +40,6 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
@@ -84,13 +83,16 @@ internal fun FilesCapsule(palette: PortalPalette, onClick: () -> Unit) {
     }
 }
 
+/** The tallest the Files card grows, on a screen with room to spare. */
+private val FilesCardMaxHeight = 480.dp
+
 @Composable
 internal fun ReturnFilesPanel(palette: PortalPalette, onClose: () -> Unit) {
     val veil = LocalPortalVeil.current
     val key = remember { Any() }
     val dropFill by animateColorAsState(if (FileTransfers.dragInside && !FileTransfers.savingFiles) palette.accent.copy(alpha = 0.09f) else Color.Transparent, tween(220,easing = PortalEmphasized),label = "file drop highlight")
     val choosing = FileTransfers.savingFiles
-    val height = (LocalConfiguration.current.screenHeightDp - 300).coerceIn(140, 420).dp
+    val height = veilPanelRoom(FilesCardMaxHeight)
     DisposableEffect(veil) { onDispose {
         veil.gestureExclusions.remove(key)
         veil.removePanel(key)
@@ -128,7 +130,7 @@ internal fun ReturnFilesPanel(palette: PortalPalette, onClose: () -> Unit) {
                     .using(SizeTransform(clip = true) { _, _ -> spring(
                         dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f) })
             }, label = "files chooser") { selection ->
-            if (selection) SaveFileChooser(palette, (height - 90.dp).coerceAtLeast(180.dp))
+            if (selection) SaveFileChooser(palette, (height - 90.dp).coerceAtLeast(120.dp))
             else Column {
                 FileAction("Add files", "Copy from Android into ${FileTransfers.importLabel}", palette, PortalGlyph.Import,
                     enabled = FileTransfers.importDirectory.isNotEmpty(), onClick = FileTransfers::chooseFiles)

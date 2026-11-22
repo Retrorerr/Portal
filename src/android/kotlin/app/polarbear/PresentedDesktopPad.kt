@@ -287,11 +287,14 @@ internal class PresentedDesktopPad(
                     left?.let { done -> left = null; post { done() } }
                 }
                 // A capsule page (menu, keyboard, settings) grows out of a button
-                // here: the buttons and the guide step aside until it closes back.
+                // here: the buttons and the guide step aside while it shows, and
+                // come back as it closes, so it shrinks into its button rather
+                // than into a gap.
+                val utilityShown = SessionControls.utilityShown.value
                 val chrome = animateFloatAsState(
-                    if (SessionControls.utilityOpen.value) 0f else 1f,
-                    if (SessionControls.utilityOpen.value) tween(160, easing = PortalEmphasizedAccelerate)
-                    else tween(260, easing = PortalEmphasizedDecelerate),
+                    if (utilityShown) 0f else 1f,
+                    if (utilityShown) tween(160, easing = PortalEmphasizedAccelerate)
+                    else tween(280, delayMillis = 60, easing = PortalEmphasizedDecelerate),
                     label = "touchpad chrome",
                 )
                 // Read in draw only: a touch redraws the pad without recomposing it.

@@ -33,7 +33,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -68,7 +67,7 @@ internal fun ReturnReportPanel(palette: PortalPalette, onClose: () -> Unit) {
             notice = "No browser found. The device details are copied."
         }
     }
-    val height = (LocalConfiguration.current.screenHeightDp - 200).coerceIn(240, 560).dp
+    val height = veilPanelRoom(560.dp)
     Column(
         Modifier
             .widthIn(max = 360.dp)

@@ -26,6 +26,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,6 +40,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -80,6 +82,12 @@ import app.polarbear.setup.components.rememberStorageCapacity
 /** Names a tap away; any already in use are left out. */
 private val NAME_IDEAS = listOf("Gaming", "Work", "School", "Sandbox")
 
+/** Below this much height the page tightens its spacing. */
+private val CompactSheetHeight = 380.dp
+
+/** Below this much height the buttons give way to Create beside the title. */
+private val TightSheetHeight = 180.dp
+
 /** The longest name the native side takes (workspaces.rs, MAX_NAME_CHARS). */
 private const val MAX_NAME_CHARS = 40
 
@@ -113,141 +121,178 @@ internal fun NewWorkspaceSheet(
     val capacity = rememberStorageCapacity()
     val freeGb = capacity?.availableBytes?.let { it / 1_000_000_000f }
 
-    Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SheetBack(palette = palette, enabled = created == null, onClick = onBack)
-            Text(
-                text = "New workspace",
-                modifier = Modifier.padding(start = 4.dp),
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = palette.textPrimary,
-            )
-        }
-        Text(
-            text = "Its own Debian, with its own apps, files and settings, kept apart from the rest.",
-            modifier = Modifier.padding(start = 4.dp, top = 4.dp),
-            fontSize = 12.sp,
-            lineHeight = 17.sp,
-            fontWeight = FontWeight.Medium,
-            color = palette.textMuted,
-        )
-        Spacer(Modifier.height(16.dp))
-        // Settled once the workspace is made.
-        val settled by animateFloatAsState(if (created == null) 1f else 0.5f, tween(320), label = "name settled")
-        Column(Modifier.padding(horizontal = 4.dp).graphicsLayer { alpha = settled }) {
-            NameInput(
-                value = value,
-                onValueChange = {
-                    if (it.text != value.text) refusal = null
-                    value = it
-                },
-                enabled = created == null,
-                palette = palette,
-                onDone = create,
-            )
-            val ideas = NAME_IDEAS.filter { idea -> names.none { it.equals(idea, ignoreCase = true) } }
-            if (ideas.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .padding(top = 10.dp)
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+    // The header and the buttons stay put; on a short card (a phone on its
+    // side, or with the keyboard up) what is between them scrolls.
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val compact = maxHeight < CompactSheetHeight
+        // With the keyboard up on a phone on its side there is room for the
+        // field and little else: Create moves up beside the title, and Back
+        // stands in for Cancel.
+        val tight = maxHeight < TightSheetHeight && created == null
+        val gap = if (compact) 10.dp else 16.dp
+        Column(Modifier.fillMaxWidth()) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                SheetBack(palette = palette, enabled = created == null, onClick = onBack)
+                Text(
+                    text = "New workspace",
+                    modifier = Modifier.weight(1f).padding(start = 4.dp),
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.textPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                AnimatedVisibility(
+                    visible = tight,
+                    enter = fadeIn(tween(220, delayMillis = 60, easing = PortalEmphasizedDecelerate)),
+                    exit = fadeOut(tween(120, easing = PortalEmphasizedAccelerate)),
                 ) {
-                    ideas.forEach { idea ->
-                        IdeaChip(
-                            label = idea,
-                            selected = name.equals(idea, ignoreCase = true),
-                            enabled = created == null,
-                            palette = palette,
+                    Box(Modifier.padding(end = 4.dp)) {
+                        PanelButton(text = "Create", primary = true, palette = palette, enabled = ready, onClick = create)
+                    }
+                }
+            }
+            val scroll = rememberScrollState()
+            Column(Modifier.weight(1f, fill = false).veilScrollRegion(scroll).verticalScroll(scroll)) {
+                Text(
+                    text = "Its own Debian, with its own apps, files and settings, kept apart from the rest.",
+                    modifier = Modifier.padding(start = 4.dp, top = 4.dp, end = 4.dp),
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = palette.textMuted,
+                )
+                Spacer(Modifier.height(gap))
+                // Settled once the workspace is made.
+                val settled by animateFloatAsState(if (created == null) 1f else 0.5f, tween(320), label = "name settled")
+                Column(Modifier.padding(horizontal = 4.dp).graphicsLayer { alpha = settled }) {
+                    NameInput(
+                        value = value,
+                        onValueChange = {
+                            if (it.text != value.text) refusal = null
+                            value = it
+                        },
+                        enabled = created == null,
+                        palette = palette,
+                        onDone = create,
+                    )
+                    val ideas = NAME_IDEAS.filter { idea -> names.none { it.equals(idea, ignoreCase = true) } }
+                    if (ideas.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .padding(top = 10.dp)
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            value = TextFieldValue(idea, selection = TextRange(idea.length))
-                            refusal = null
+                            ideas.forEach { idea ->
+                                IdeaChip(
+                                    label = idea,
+                                    selected = name.equals(idea, ignoreCase = true),
+                                    enabled = created == null,
+                                    palette = palette,
+                                ) {
+                                    value = TextFieldValue(idea, selection = TextRange(idea.length))
+                                    refusal = null
+                                }
+                            }
+                        }
+                    }
+                }
+                // What it takes, and whether there is room for it; it goes once the workspace is made.
+                AnimatedVisibility(
+                    visible = created == null,
+                    enter = fadeIn(tween(240, delayMillis = 60)) + expandVertically(tween(320, easing = PortalEmphasized)),
+                    exit = fadeOut(tween(140)) + shrinkVertically(tween(320, easing = PortalEmphasized)),
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(top = gap)) {
+                        val short = freeGb != null && freeGb < SETUP_GB
+                        Text(
+                            text = when {
+                                short -> "It needs %.1f GB of space, and %.1f GB is free.".format(SETUP_GB, freeGb)
+                                freeGb != null -> "Needs %.1f GB of space (%.0f GB free) and about a 1 GB download.".format(SETUP_GB, freeGb)
+                                else -> "Needs %.1f GB of space and about a 1 GB download.".format(SETUP_GB)
+                            },
+                            modifier = Modifier.padding(start = 4.dp, end = 4.dp),
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (short) palette.accent else palette.textSecondary,
+                        )
+                        Text(
+                            text = "Portal restarts to set it up. Your other workspaces stay just as they are.",
+                            modifier = Modifier.padding(start = 4.dp, top = 2.dp, end = 4.dp),
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            color = palette.textMuted,
+                        )
+                        val message = problem ?: refusal
+                        AnimatedVisibility(
+                            visible = message != null,
+                            enter = fadeIn(tween(240, delayMillis = 60)) + expandVertically(tween(320, easing = PortalEmphasized)),
+                            exit = fadeOut(tween(140)) + shrinkVertically(tween(280, easing = PortalEmphasized)),
+                        ) {
+                            // Keeps its last words while it folds away.
+                            var shown by remember { mutableStateOf("") }
+                            if (message != null) shown = message
+                            Text(
+                                text = shown,
+                                modifier = Modifier.padding(start = 4.dp, top = 10.dp, end = 4.dp),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = palette.accent,
+                            )
                         }
                     }
                 }
             }
-        }
-        Spacer(Modifier.height(16.dp))
-        AnimatedContent(
-            targetState = created,
-            transitionSpec = {
-                fadeIn(tween(320, delayMillis = 120, easing = PortalEmphasizedDecelerate))
-                    .togetherWith(fadeOut(tween(160, easing = PortalEmphasizedAccelerate)))
-                    .using(SizeTransform(clip = false) { _, _ -> PortalPanelSizeSpring })
-            },
-            label = "new workspace footer",
-        ) { made ->
-            if (made == null) {
-                Column(Modifier.fillMaxWidth()) {
-                    // What it takes, and whether there is room for it.
-                    val short = freeGb != null && freeGb < SETUP_GB
-                    Text(
-                        text = when {
-                            short -> "It needs %.1f GB of space, and %.1f GB is free.".format(SETUP_GB, freeGb)
-                            freeGb != null -> "Needs %.1f GB of space (%.0f GB free) and about a 1 GB download.".format(SETUP_GB, freeGb)
-                            else -> "Needs %.1f GB of space and about a 1 GB download.".format(SETUP_GB)
-                        },
-                        modifier = Modifier.padding(start = 4.dp),
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = if (short) palette.accent else palette.textSecondary,
-                    )
-                    Text(
-                        text = "Portal restarts to set it up. Your other workspaces stay just as they are.",
-                        modifier = Modifier.padding(start = 4.dp, top = 2.dp),
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                        color = palette.textMuted,
-                    )
-                    val message = problem ?: refusal
-                    AnimatedVisibility(
-                        visible = message != null,
-                        enter = fadeIn(tween(240, delayMillis = 60)) + expandVertically(tween(320, easing = PortalEmphasized)),
-                        exit = fadeOut(tween(140)) + shrinkVertically(tween(280, easing = PortalEmphasized)),
-                    ) {
-                        // Keeps its last words while it folds away.
-                        var shown by remember { mutableStateOf("") }
-                        if (message != null) shown = message
-                        Text(
-                            text = shown,
-                            modifier = Modifier.padding(start = 4.dp, top = 10.dp),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = palette.accent,
-                        )
-                    }
+            AnimatedVisibility(
+                visible = !tight,
+                enter = fadeIn(tween(220, delayMillis = 60, easing = PortalEmphasizedDecelerate)) +
+                    expandVertically(tween(280, easing = PortalEmphasized)),
+                exit = fadeOut(tween(120, easing = PortalEmphasizedAccelerate)) +
+                    shrinkVertically(tween(280, easing = PortalEmphasized)),
+            ) {
+            AnimatedContent(
+                targetState = created,
+                transitionSpec = {
+                    fadeIn(tween(320, delayMillis = 120, easing = PortalEmphasizedDecelerate))
+                        .togetherWith(fadeOut(tween(160, easing = PortalEmphasizedAccelerate)))
+                        .using(SizeTransform(clip = false) { _, _ -> PortalPanelSizeSpring })
+                },
+                label = "new workspace footer",
+            ) { made ->
+                if (made == null) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 16.dp, end = 4.dp),
+                        modifier = Modifier.fillMaxWidth().padding(top = gap, end = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         PanelButton(text = "Cancel", primary = false, palette = palette, onClick = onBack)
                         PanelButton(text = "Create workspace", primary = true, palette = palette, enabled = ready, onClick = create)
                     }
-                }
-            } else {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 2.dp, bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    StackGlyph(palette, busy = true)
-                    Column(Modifier.padding(start = 12.dp)) {
-                        Text(
-                            text = "Restarting Portal…",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.textPrimary,
-                        )
-                        Text(
-                            text = "“$made” opens in setup next: the same few steps as the first time.",
-                            fontSize = 11.sp,
-                            lineHeight = 15.sp,
-                            color = palette.textMuted,
-                        )
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = gap, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        StackGlyph(palette, busy = true)
+                        Column(Modifier.padding(start = 12.dp)) {
+                            Text(
+                                text = "Restarting Portal…",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.textPrimary,
+                            )
+                            Text(
+                                text = "“$made” opens in setup next: the same few steps as the first time.",
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp,
+                                color = palette.textMuted,
+                            )
+                        }
                     }
                 }
+            }
             }
         }
     }

@@ -47,7 +47,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -71,9 +71,21 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.coerceAtLeast
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import app.polarbear.setup.components.PortalPanelStiffness
+import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -123,6 +135,48 @@ private val SIDE_BY_SIDE_MAX_HEIGHT = 960.dp
 private val SIDE_BY_SIDE_GUTTER = 36.dp
 // An open panel scrolls inside what the screen has left, down to this much.
 private val PANEL_HEADER_MIN_HEIGHT = 240.dp
+// The gap between the header and the row of pills (ReturnAppsPanel).
+private val PILL_ROW_GAP = 14.dp
+// The least an open panel is given, however little the screen has.
+private val PANEL_MIN_ROOM = 160.dp
+// The least a card keeps with the keyboard up; below this the page scrolls.
+private val PANEL_MIN_ROOM_WITH_KEYBOARD = 96.dp
+
+/**
+ * The height an open Apps, Files, Workspaces or report card may take: what the
+ * screen has left under the header, or all of it where the header folds away.
+ * A card taller than this scrolls inside it.
+ */
+internal val LocalVeilPanelRoom = compositionLocalOf { Dp.Unspecified }
+
+/** [LocalVeilPanelRoom], up to [most]; [most] where there is none. */
+@Composable
+internal fun veilPanelRoom(most: Dp): Dp {
+    val room = LocalVeilPanelRoom.current
+    return if (room == Dp.Unspecified) most else minOf(room, most)
+}
+
+/** How much of [LocalVeilPanelRoom] the keyboard takes, in pixels; read while measuring. */
+internal val LocalVeilKeyboardLift = staticCompositionLocalOf<Density.() -> Int> { { 0 } }
+
+/**
+ * At most [LocalVeilPanelRoom] tall, less whatever the keyboard covers, so a
+ * card with a text field ends above the keyboard as it slides.
+ */
+@Composable
+internal fun Modifier.veilPanelHeight(): Modifier {
+    val room = LocalVeilPanelRoom.current
+    if (room == Dp.Unspecified) return this
+    val lift = LocalVeilKeyboardLift.current
+    return layout { measurable, constraints ->
+        val most = (room.roundToPx() - lift()).coerceAtLeast(PANEL_MIN_ROOM_WITH_KEYBOARD.roundToPx())
+        val maxHeight = minOf(constraints.maxHeight, most)
+        val placeable = measurable.measure(
+            constraints.copy(minHeight = minOf(constraints.minHeight, maxHeight), maxHeight = maxHeight),
+        )
+        layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
+    }
+}
 
 private enum class ReturnRepairPhase {
     Hidden,
@@ -380,7 +434,7 @@ private fun ReturnRepairProgress(
  * can scroll it keeps upward swipes, which would otherwise lift the veil.
  */
 @Composable
-private fun Modifier.veilScrollRegion(state: ScrollState): Modifier {
+internal fun Modifier.veilScrollRegion(state: ScrollState): Modifier {
     val veil = LocalPortalVeil.current
     val key = remember { Any() }
     val bounds = remember { arrayOfNulls<Rect>(1) }
@@ -482,11 +536,45 @@ internal fun PortalReturnScreen(
             val cardScroll = rememberScrollState()
             val panelOpen = ComposeOverlay.activePanel != null
             val viewportHeight = constraints.maxHeight
+            val density = LocalDensity.current
+            // How far the keyboard reaches above the band kept for the swipe
+            // hint, which it covers. Read while measuring, so its slide only
+            // re-measures the page.
+            val keyboardInsets = WindowInsets.ime
+            val barInsets = WindowInsets.systemBars.union(WindowInsets.displayCutout)
+            val keyboardLift: Density.() -> Int = remember(keyboardInsets, barInsets) {
+                {
+                    (keyboardInsets.getBottom(this) - barInsets.getBottom(this) - VEIL_HINT_RESERVE.roundToPx())
+                        .coerceAtLeast(0)
+                }
+            }
+            val keyboardUp by remember(keyboardLift, density) { derivedStateOf { density.keyboardLift() > 0 } }
+            // A short screen (a phone on its side), or the keyboard, gives an
+            // open card the whole height: the mark, title and status fold away
+            // above it and come back as it closes.
+            val foldHeader = panelOpen && (shortScreen || keyboardUp)
+            val headerShown by animateFloatAsState(
+                if (foldHeader) 0f else 1f,
+                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness),
+                label = "return header fold",
+            )
+            var brandHeight by remember { mutableIntStateOf(0) }
+            val panelRoom = (maxHeight - verticalPadding * 2 - PILL_ROW_GAP -
+                (if (foldHeader) 0.dp else with(density) { brandHeight.toDp() })).coerceAtLeast(PANEL_MIN_ROOM)
             Layout(
                 modifier = Modifier
                     .fillMaxSize()
-                    // A workspace name field scrolls above the keyboard.
-                    .imePadding()
+                    // A workspace name field stays above the keyboard.
+                    .layout { measurable, constraints ->
+                        val lift = keyboardLift()
+                        val placeable = measurable.measure(
+                            constraints.copy(
+                                minHeight = (constraints.minHeight - lift).coerceAtLeast(0),
+                                maxHeight = (constraints.maxHeight - lift).coerceAtLeast(0),
+                            ),
+                        )
+                        layout(placeable.width, placeable.height + lift) { placeable.placeRelative(0, 0) }
+                    }
                     .veilScrollRegion(pageScroll)
                     .verticalScroll(pageScroll)
                     .padding(
@@ -500,89 +588,115 @@ internal fun PortalReturnScreen(
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Image(
-                    painter = portalMarkPainter(
-                        main = palette.logoMain,
-                        threshold = palette.logoThreshold,
-                    ),
-                    contentDescription = "Portal logo",
+                Column(
                     modifier = Modifier
-                        .size(if (shortScreen) 56.dp else PortalDimens.LogoSize)
-                        .then(launchMarkModifier),
-                )
-                Spacer(modifier = Modifier.height(if (shortScreen) 10.dp else 20.dp))
-                Text(
-                    text = if (sessionControls) "Portal" else "Returning to Plasma",
-                    fontSize = if (shortScreen) 24.sp else PortalDimens.TitleSize,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.textPrimary,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(modifier = Modifier.height(if (shortScreen) 4.dp else 8.dp))
-                // The line settles from "restoring" to "ready" the moment the
-                // veil may be lifted, dissolving through a soft blur.
-                val workspaces by app.polarbear.Workspaces.state
-                val openingId by app.polarbear.Workspaces.opening
-                val opening = (openingId ?: workspaces.switching)?.let { workspaces.name(it) }
-                AnimatedContent(
-                    targetState = veil.eligible to opening,
-                    transitionSpec = {
-                        (fadeIn(tween(420, delayMillis = 90, easing = PortalEmphasizedDecelerate)) +
-                            slideInVertically(tween(560, easing = PortalEmphasized)) { it / 2 })
-                            .togetherWith(
-                                fadeOut(tween(200, easing = PortalEmphasizedAccelerate)) +
-                                    slideOutVertically(tween(260, easing = PortalEmphasizedAccelerate)) { -it / 3 },
-                            )
-                            .using(SizeTransform(clip = false))
-                    },
-                    contentAlignment = Alignment.Center,
-                    label = "return subtitle",
-                ) { (desktopReady, openingName) ->
+                        .layout { measurable, constraints ->
+                            // Folds from the top down to the pills, which stay put.
+                            val placeable = measurable.measure(constraints)
+                            val shown = headerShown
+                            val height = (placeable.height * shown).roundToInt()
+                            layout(placeable.width, height) {
+                                if (shown > 0.001f) placeable.placeRelativeWithLayer(0, height - placeable.height) {
+                                    alpha = shown * shown
+                                    val scale = 0.94f + 0.06f * shown
+                                    scaleX = scale
+                                    scaleY = scale
+                                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 1f)
+                                }
+                            }
+                        }
+                        .onSizeChanged { brandHeight = it.height },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Image(
+                        painter = portalMarkPainter(
+                            main = palette.logoMain,
+                            threshold = palette.logoThreshold,
+                        ),
+                        contentDescription = "Portal logo",
+                        modifier = Modifier
+                            .size(if (shortScreen) 56.dp else PortalDimens.LogoSize)
+                            .then(launchMarkModifier),
+                    )
+                    Spacer(modifier = Modifier.height(if (shortScreen) 10.dp else 20.dp))
                     Text(
-                        text = when {
-                            openingName != null -> "Opening $openingName…"
-                            sessionControls -> "Your desktop is running"
-                            desktopReady -> "Your desktop is ready"
-                            else -> "Restoring your desktop"
-                        },
-                        modifier = Modifier.dissolveBlur(this, radius = 8.dp),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.textMuted,
+                        text = if (sessionControls) "Portal" else "Returning to Plasma",
+                        fontSize = if (shortScreen) 24.sp else PortalDimens.TitleSize,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.textPrimary,
                         textAlign = TextAlign.Center,
                     )
+                    Spacer(modifier = Modifier.height(if (shortScreen) 4.dp else 8.dp))
+                    // The line settles from "restoring" to "ready" the moment the
+                    // veil may be lifted, dissolving through a soft blur.
+                    val workspaces by app.polarbear.Workspaces.state
+                    val openingId by app.polarbear.Workspaces.opening
+                    val opening = (openingId ?: workspaces.switching)?.let { workspaces.name(it) }
+                    AnimatedContent(
+                        targetState = veil.eligible to opening,
+                        transitionSpec = {
+                            (fadeIn(tween(420, delayMillis = 90, easing = PortalEmphasizedDecelerate)) +
+                                slideInVertically(tween(560, easing = PortalEmphasized)) { it / 2 })
+                                .togetherWith(
+                                    fadeOut(tween(200, easing = PortalEmphasizedAccelerate)) +
+                                        slideOutVertically(tween(260, easing = PortalEmphasizedAccelerate)) { -it / 3 },
+                                )
+                                .using(SizeTransform(clip = false))
+                        },
+                        contentAlignment = Alignment.Center,
+                        label = "return subtitle",
+                    ) { (desktopReady, openingName) ->
+                        Text(
+                            text = when {
+                                openingName != null -> "Opening $openingName…"
+                                sessionControls -> "Your desktop is running"
+                                desktopReady -> "Your desktop is ready"
+                                else -> "Restoring your desktop"
+                            },
+                            modifier = Modifier.dissolveBlur(this, radius = 8.dp),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = palette.textMuted,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                    ReturnAnlandAffordance(
+                        phase = repairPhase,
+                        progress = repairState.progress,
+                        palette = palette,
+                        onEnable = {
+                            if (ComposeOverlay.repairEnableAnland()) {
+                                repairRequested = true
+                            }
+                        },
+                        onRecovery = {
+                            if (ComposeOverlay.requestAnlandRepairRecovery()) {
+                                recoveryRequested = true
+                            }
+                        },
+                    )
+                    // Debian updates share this slot; the graphics repair wins.
+                    ReturnUpdatePanel(
+                        palette = palette,
+                        desktopReady = veil.eligible,
+                        suppressed = repairPhase != ReturnRepairPhase.Hidden,
+                        onBlockedChanged = { updateBlocked = it },
+                        immediate = sessionControls,
+                    )
                 }
-                ReturnAnlandAffordance(
-                    phase = repairPhase,
-                    progress = repairState.progress,
-                    palette = palette,
-                    onEnable = {
-                        if (ComposeOverlay.repairEnableAnland()) {
-                            repairRequested = true
-                        }
-                    },
-                    onRecovery = {
-                        if (ComposeOverlay.requestAnlandRepairRecovery()) {
-                            recoveryRequested = true
-                        }
-                    },
-                )
-                // Debian updates share this slot; the graphics repair wins.
-                ReturnUpdatePanel(
-                    palette = palette,
-                    desktopReady = veil.eligible,
-                    suppressed = repairPhase != ReturnRepairPhase.Hidden,
-                    onBlockedChanged = { updateBlocked = it },
-                    immediate = sessionControls,
-                )
                 // Apps, Files and Workspaces, one row of pills. Hidden while a
                 // repair or Debian upgrade owns the runtime; while a workspace
                 // opens, only its pill stays.
-                ReturnAppsPanel(
-                    palette = palette,
-                    suppressed = repairPhase != ReturnRepairPhase.Hidden || updateBlocked,
-                    immediate = sessionControls,
-                )
+                CompositionLocalProvider(
+                    LocalVeilPanelRoom provides panelRoom,
+                    LocalVeilKeyboardLift provides keyboardLift,
+                ) {
+                    ReturnAppsPanel(
+                        palette = palette,
+                        suppressed = repairPhase != ReturnRepairPhase.Hidden || updateBlocked,
+                        immediate = sessionControls,
+                    )
+                }
             }
             // Installs from before the checklist existed, or that skipped a
             // step, see their card here until every step is done. Optional
@@ -620,7 +734,7 @@ internal fun PortalReturnScreen(
                 },
             ) { measurables, outer ->
                 val width = outer.maxWidth
-                val available = (viewportHeight - 2 * verticalPadding.roundToPx()).coerceAtLeast(0)
+                val available = (viewportHeight - keyboardLift() - 2 * verticalPadding.roundToPx()).coerceAtLeast(0)
                 val gutter = SIDE_BY_SIDE_GUTTER.roundToPx()
                 val cardWidth = if (sideBySide) minOf(width * 56 / 100, PortalDimens.PickerMaxWidth.roundToPx()) + gutter else width
                 // A panel scrolls inside the space left instead of overflowing the
@@ -637,8 +751,9 @@ internal fun PortalReturnScreen(
                     ),
                 )
                 if (sideBySide) {
-                    // An open panel takes the card's place, so it may use the whole width.
-                    val headerWidth = if (panelOpen) width else (width - cardWidth).coerceAtLeast(0)
+                    // An open panel takes the card's place, so it may use the whole
+                    // width, and so does the header when there is no card beside it.
+                    val headerWidth = if (panelOpen) width else (width - card.width).coerceAtLeast(0)
                     val header = measurables[0].measure(Constraints(maxWidth = headerWidth, maxHeight = headerHeight))
                     val height = maxOf(available, header.height, card.height)
                     layout(width, height) {
