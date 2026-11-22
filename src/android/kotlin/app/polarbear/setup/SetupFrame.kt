@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -53,6 +54,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -95,11 +97,14 @@ internal data class SetupMetrics(
     /** The room a stage's action has: the card's width stacked, its right side split. */
     val actionWidth: Dp
         get() = if (split) {
-            (cardWidth - paddingH * 2 - paneGap) * (1f - SetupDimens.SplitStart)
+            (cardWidth - paddingH * 2 - paneGap) * (1f - SetupDimens.SplitStart) * ActionShare
         } else {
-            cardWidth - paddingH * 2
+            (cardWidth - paddingH * 2) * ActionShare
         }
 }
+
+/** The primary button's share of its room, leaving its glow space to fade out inside the card. */
+private const val ActionShare = 0.8f
 
 /** The card for a screen whose safe area is [width] x [height]. */
 internal fun setupMetrics(width: Dp, height: Dp): SetupMetrics {
@@ -133,7 +138,7 @@ internal object SetupDimens {
     val SplitCardMaxWidth: Dp = 960.dp
     val SplitCardMaxHeight: Dp = 640.dp
     val StackedCardMaxWidth: Dp = 600.dp
-    val StackedCardMaxHeight: Dp = 800.dp
+    val StackedCardMaxHeight: Dp = 880.dp
     /** Share of a split card's width given to the stage's description. */
     const val SplitStart = 0.42f
 }
@@ -323,6 +328,8 @@ internal fun StageTitle(
                 lineHeight = metrics.bodyLineHeight,
                 color = palette.textMuted,
                 textAlign = if (centered) androidx.compose.ui.text.style.TextAlign.Center else null,
+                // Even lines, so a short last word is never left on its own.
+                style = LocalTextStyle.current.copy(lineBreak = LineBreak.Heading),
             )
         }
     }

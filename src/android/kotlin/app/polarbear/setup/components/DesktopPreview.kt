@@ -164,7 +164,7 @@ internal fun WorkspacePair(
                 .graphicsLayer { alpha = 0.5f },
         ) {
             DesktopPreview(dark, interfaceScale, icons, palette, Modifier.fillMaxWidth())
-            NameTag(currentName, accent = null, Modifier.align(Alignment.TopEnd))
+            NameTag(currentName, Modifier.align(Alignment.TopEnd))
         }
         Box(
             Modifier
@@ -178,14 +178,14 @@ internal fun WorkspacePair(
                     .matchParentSize()
                     .border(1.5.dp, palette.accent.copy(alpha = 0.85f), DesktopPreviewShape),
             )
-            NameTag(newName, accent = palette.accent, Modifier.align(Alignment.TopStart))
+            NameTag(newName, Modifier.align(Alignment.TopStart))
         }
     }
 }
 
 /** A workspace's name on its desktop, like the Open chip on the veil's tiles. */
 @Composable
-private fun NameTag(name: String, accent: Color?, modifier: Modifier = Modifier) {
+private fun NameTag(name: String, modifier: Modifier = Modifier) {
     Row(
         modifier
             .padding(8.dp)
@@ -194,10 +194,6 @@ private fun NameTag(name: String, accent: Color?, modifier: Modifier = Modifier)
             .padding(horizontal = 9.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (accent != null) {
-            Box(Modifier.size(6.dp).clip(RoundedCornerShape(50)).background(accent))
-            Spacer(Modifier.width(6.dp))
-        }
         Text(
             text = name,
             modifier = Modifier.widthIn(max = 160.dp),

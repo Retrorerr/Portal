@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
@@ -756,7 +757,15 @@ internal fun BeginInstallButton(
         // Explicit visual stack, bottom to top: faint static bloom, animated
         // upstream shader, opaque button. The static layer never paints over
         // the animation.
-        Box(modifier = glowBoundsModifier, contentAlignment = Alignment.Center) {
+        // The glow always gets its full canvas, even where the layout only
+        // leaves room for the pill: a clamped canvas cuts the halo off at the
+        // pill's round ends. It is centred on the pill and spills past it.
+        Box(
+            modifier = Modifier
+                .requiredSize(buttonWidth + glowMargin * 2, buttonHeight + glowMargin * 2)
+                .then(glowBoundsModifier),
+            contentAlignment = Alignment.Center,
+        ) {
             Box(
                 modifier = Modifier
                     .size(buttonWidth, buttonHeight)

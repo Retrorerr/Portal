@@ -557,8 +557,6 @@ private fun WorkspaceTile(
                         .padding(horizontal = 8.dp, vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(Modifier.size(6.dp).clip(RoundedCornerShape(50)).background(palette.accent))
-                    Spacer(Modifier.width(5.dp))
                     Text("Open", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
                 }
             }

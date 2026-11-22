@@ -762,7 +762,11 @@ private fun StageScope.StageActions(content: @Composable ColumnScope.() -> Unit)
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = if (metrics.short) 10.dp else 16.dp),
+            // Air above and below for the button's glow, which fades out inside the card.
+            .padding(
+                top = if (metrics.short) 12.dp else 24.dp,
+                bottom = if (metrics.short) 0.dp else if (metrics.compact) 8.dp else 4.dp,
+            ),
         horizontalAlignment = Alignment.CenterHorizontally,
         content = content,
     )
