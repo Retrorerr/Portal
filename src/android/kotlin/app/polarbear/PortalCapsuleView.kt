@@ -71,6 +71,12 @@ internal class PortalCapsuleView(
     // hides, and each page comes from and goes back to the button that opened it.
     private var dockHidden by mutableStateOf(false)
     private var padAnchor: Offset? = null
+    // The button a page grows out of and closes back into, whose face the
+    // capsule wears in its place; null for one that looks like no button.
+    private var padFace by mutableStateOf<PadFace?>(null)
+    // The touchpad's Portal button: where the capsule waits between pages.
+    private var homeAnchor: Offset? = null
+    private var homeFace: PadFace? = null
     // A settings page opened straight from one of those buttons (the
     // controller's) closes back into it rather than into the menu.
     private var closesToPad = false
@@ -83,6 +89,7 @@ internal class PortalCapsuleView(
             app.polarbear.setup.components.PortalUiDensity {
             UtilityRoundtable(host, ready, page, presentationId, { if (dragging) dragPoint else anchor.value }, area,
                 dockRight, { dragging }, directPosition = { freeMotion }, dockHidden = dockHidden,
+                padFace = padFace, standingIn = { TouchControls.padStandIn.value != null },
                 onHub = { if (page == UtilityPage.Dock) reveal() else dismiss() },
                 onAction = { action -> when (action) {
                     "settings" -> changePage(UtilityPage.Settings)
@@ -166,6 +173,10 @@ internal class PortalCapsuleView(
         presentationId++
         settledPage = null
         page = next
+        // A page growing out of a touchpad button: the capsule is that button,
+        // wearing its face, until the page has closed back into it.
+        if (dockHidden && next != UtilityPage.Dock && TouchControls.padStandIn.value == null)
+            TouchControls.padStandIn.value = padFace?.glyph
         // The touchpad page's buttons come back while this one closes into
         // them, not once it has finished and let go of input.
         SessionControls.utilityPageChanged(next != UtilityPage.Dock)
@@ -176,19 +187,33 @@ internal class PortalCapsuleView(
         if (!isAttachedToWindow || request != presentationId || settled != page || dragging || freeMotion) return
         settledPage = settled
         if (settled == UtilityPage.Dock) {
-            // The touchpad's Portal button may have moved while a page closed into its own button.
-            if (dockHidden) snapToPadAnchor()
+            if (dockHidden) {
+                // Closed back into its button, which takes over in the same frame
+                // the capsule goes. Out of sight, it then waits at the Portal button.
+                TouchControls.padStandIn.value = null
+                homeAnchor?.let { padAnchor = it }
+                padFace = homeFace
+                snapToPadAnchor()
+            }
             val action = pendingAction.also { pendingAction = null }
             try { action?.invoke() } finally { releaseInput() }
         }
     }
-    /** Hides the edge tab; its pages open from the touchpad's buttons, starting at ([x], [y]). */
-    fun hideDockAt(x: Float, y: Float) {
-        padAnchor = Offset(x, y)
+    /**
+     * Hides the edge tab; its pages open from the touchpad's buttons. Between
+     * them it waits at the Portal button ([face]) at ([x], [y]).
+     */
+    fun hideDockAt(x: Float, y: Float, face: PadFace?) {
+        homeAnchor = Offset(x, y)
+        homeFace = face
         dockHidden = true
-        // A page still closing keeps heading for the button it came from; the
-        // touchpad's buttons move as they come back around it, and following
-        // them sent it to the wrong one. It moves over once it has closed.
+        // A page out, or still closing, keeps heading for the button it came
+        // from and keeps its face; the touchpad's buttons move as they come back
+        // around it, and following them sent it to the wrong one. It moves over
+        // once it has closed.
+        if (TouchControls.padStandIn.value != null) return
+        padAnchor = homeAnchor
+        if (page == UtilityPage.Dock) padFace = face
         if (page == UtilityPage.Dock && settledPage == UtilityPage.Dock && width > 0 && height > 0) snapToPadAnchor()
     }
 
@@ -197,13 +222,22 @@ internal class PortalCapsuleView(
         if (!dockHidden) return
         dockHidden = false
         padAnchor = null
+        homeAnchor = null
+        homeFace = null
+        padFace = null
+        TouchControls.padStandIn.value = null
         if (width > 0 && height > 0) onSizeChanged()
     }
 
-    /** Opens [next] out of the touchpad button at ([x], [y]); it closes back into it. */
-    fun openFrom(next: UtilityPage, x: Float, y: Float) {
+    /**
+     * Opens [next] out of the touchpad button at ([x], [y]), which looks like
+     * [face]; it closes back into it.
+     */
+    fun openFrom(next: UtilityPage, x: Float, y: Float, face: PadFace?) {
         if (dockHidden && page == UtilityPage.Dock && !dragging) {
+            if (TouchControls.padStandIn.value != face?.glyph) TouchControls.padStandIn.value = null
             padAnchor = Offset(x, y)
+            padFace = face
             snapToPadAnchor()
         }
         if (next == UtilityPage.Keyboard) keyboardForText = false
@@ -389,6 +423,8 @@ internal class PortalCapsuleView(
         recycleTracker(); scope.cancel()
         pendingAction = null
         requestPage(UtilityPage.Dock)
+        // Gone before a page closed back into its button: the button shows again.
+        TouchControls.padStandIn.value = null
         ready = false; dragging = false; freeMotion = false; touchOwned = false
         dragEligible = false; chord = false
         hubBounds.setEmpty(); actionBounds.clear()

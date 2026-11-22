@@ -51,6 +51,13 @@ val PortalPanelSizeSpring = spring(
     visibilityThreshold = IntSize.VisibilityThreshold,
 )
 
+/**
+ * Where a spring over a 0..1 progress comes to rest. The default (0.01) ends
+ * it by jumping the last 1% of the way, and across a move as long as the screen
+ * that is a visible hitch into place on the final frame.
+ */
+const val PortalProgressRest = 0.0005f
+
 /** Apply a Gaussian blur of [radiusPx] to this layer; clears the effect at ~0. */
 fun GraphicsLayerScope.portalBlur(radiusPx: Float) {
     renderEffect = if (Build.VERSION.SDK_INT >= 31 && radiusPx > 0.4f) {

@@ -94,6 +94,7 @@ import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
 import app.polarbear.setup.components.PortalPanelSizeSpring
 import app.polarbear.setup.components.PortalPanelStiffness
+import app.polarbear.setup.components.PortalProgressRest
 import app.polarbear.setup.components.dissolveBlur
 import app.polarbear.setup.components.formatInstalledSize
 import app.polarbear.setup.components.rememberAppIcons
@@ -169,7 +170,8 @@ internal fun ReturnAppsPanel(
             // The report card takes the capsules' place, and the stack's height
             // has to travel with it or the logo snaps when either one settles.
             val capsuleRow by animateFloatAsState(if (panel == "report") 0f else 1f,
-                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness), label = "controls capsule row")
+                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness,
+                    visibilityThreshold = PortalProgressRest), label = "controls capsule row")
             androidx.compose.ui.layout.Layout(content = {
                 SessionActionSlot(visible = (panel == null || panel == "apps") && !switching && catalog.isNotEmpty()) {
                     SessionActionSurface(panel == "apps", palette, "apps surface") { expanded ->

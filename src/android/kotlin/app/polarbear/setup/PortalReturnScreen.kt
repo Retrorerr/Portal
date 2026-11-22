@@ -85,6 +85,7 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import app.polarbear.setup.components.PortalPanelStiffness
+import app.polarbear.setup.components.PortalProgressRest
 import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.ScrollState
@@ -555,7 +556,8 @@ internal fun PortalReturnScreen(
             val foldHeader = panelOpen && (shortScreen || keyboardUp)
             val headerShown by animateFloatAsState(
                 if (foldHeader) 0f else 1f,
-                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness),
+                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = PortalPanelStiffness,
+                    visibilityThreshold = PortalProgressRest),
                 label = "return header fold",
             )
             var brandHeight by remember { mutableIntStateOf(0) }

@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.Offset
@@ -49,8 +50,10 @@ internal fun UtilityRoundtable(
     // stalling the UI thread for a frame or two each time.
     dockRight: Boolean, dragging: () -> Boolean, directPosition: () -> Boolean = dragging,
     // The phone's touchpad page opens these pages from its own buttons: no tab
-    // shows, and a closing page fades as it reaches the button it came from.
-    dockHidden: Boolean = false,
+    // shows. While [standingIn], the capsule is the button a page came from,
+    // wearing [padFace]: it grows out of that button and closes back into it,
+    // and the button itself shows again only once the capsule has gone.
+    dockHidden: Boolean = false, padFace: PadFace? = null, standingIn: () -> Boolean = { false },
     onHub: () -> Unit, onAction: (String) -> Unit, onBack: () -> Unit, onOutside: () -> Unit,
     onHubBounds: (android.graphics.RectF) -> Unit, onActionBounds: (String, android.graphics.RectF) -> Unit = { _, _ -> },
     onAnimating: (Boolean) -> Unit = {}, onSettled: (UtilityPage,Int) -> Unit,
@@ -84,7 +87,7 @@ internal fun UtilityRoundtable(
     val geometryAnchor = remember(page,area,dockRight,density.density,density.fontScale) { anchor() }
     val geometry = UtilityMenuGeometry.menu(area, UtilityMenuGeometry.Point(geometryAnchor.x,geometryAnchor.y), available.size, density.density, density.fontScale)
     val radialTarget = if (geometry.compact) 0f else 1f
-    val radial by animateFloatAsState(radialTarget,spring(dampingRatio = 1f,stiffness = 380f),label = "responsive roundtable")
+    val radial by animateFloatAsState(radialTarget,spring(dampingRatio = 1f,stiffness = 380f,visibilityThreshold = PortalProgressRest),label = "responsive roundtable")
     var surfaceResizing by remember { mutableStateOf(false) }
     val keyboardScope = rememberCoroutineScope()
     val keyboardMotion = remember { UtilityKeyboardMotion(keyboardScope) }
@@ -100,7 +103,9 @@ internal fun UtilityRoundtable(
     val keyboardCaptureBounds = remember { android.graphics.RectF() }
     val moving = { dragging() || directPosition() || travel.running || surfaceResizing || keyboardMotion.isMoving }
     var resting by remember { mutableStateOf(false) }
-    val parked = { resting && page == UtilityPage.Dock }
+    // Out of sight on the touchpad page it never parks, or a page would grow
+    // out of a button at half strength.
+    val parked = { resting && page == UtilityPage.Dock && !dockHidden }
     // Nothing of the desktop shows behind the touchpad page to frost.
     val frost = rememberUtilityFrost(ready && !dockHidden,
         crop = {
@@ -181,7 +186,7 @@ internal fun UtilityRoundtable(
                 val index = available.indexOfFirst { it.id == action.id }
                 val target = geometry.offsets.getOrNull(index)?.let { Offset(it.x,it.y) } ?: Offset.Zero
                 val orbit by animateOffsetAsState(target,spring(dampingRatio = 0.88f,stiffness = 300f),label = "${action.id} orbit")
-                val present by animateFloatAsState(if (action.available) 1f else 0f,spring(dampingRatio = 1f,stiffness = 380f),label = "${action.id} availability")
+                val present by animateFloatAsState(if (action.available) 1f else 0f,spring(dampingRatio = 1f,stiffness = 380f,visibilityThreshold = PortalProgressRest),label = "${action.id} availability")
                 UtilityBubble(action, palette, frost, page == UtilityPage.Menu && action.available && !geometry.compact,
                     Modifier.offset {
                         // A closed menu's bubbles are invisible; leaving them
@@ -203,14 +208,20 @@ internal fun UtilityRoundtable(
                     onClick = { onAction(action.id) })
             }
         }
+        // Standing in for a touchpad button, the docked capsule takes its round
+        // shape, shadow and flat fill, so the hand-over shows no change.
+        val face = padFace?.takeIf { dockHidden }
         val corner = animateDpAsState(when (page) {
-            UtilityPage.Dock -> (24+8*(density.fontScale-1f).coerceAtLeast(0f)).dp
+            UtilityPage.Dock -> face?.let { it.size / 2 } ?: (24+8*(density.fontScale-1f).coerceAtLeast(0f)).dp
             UtilityPage.Menu -> if (geometry.compact) 26.dp else (32+6*(density.fontScale-1f).coerceAtLeast(0f)).dp
             UtilityPage.Keyboard -> if (keyboardMinimized) 28.dp else 18.dp
             UtilityPage.Gaming, UtilityPage.Settings -> 24.dp
         },
             tween(420, easing = PortalEmphasized), label = "utility surface corner")
-        val elevation = animateDpAsState(if (page == UtilityPage.Dock) 3.dp else 12.dp, tween(420, easing = PortalEmphasized), label = "utility lift")
+        val elevation = animateDpAsState(if (page != UtilityPage.Dock) 12.dp else if (face != null) PadButtonElevation else 3.dp,
+            tween(420, easing = PortalEmphasized), label = "utility lift")
+        val floor = animateColorAsState(if (page == UtilityPage.Dock && face != null) palette.surfaceTop else palette.surfaceBottom,
+            tween(420, easing = PortalEmphasized), label = "utility surface floor")
         val tabHidden = page == UtilityPage.Dock && dockHidden
         val presence = animateFloatAsState(if (tabHidden) 0f else 1f,
             if (tabHidden) tween(200, delayMillis = 140, easing = PortalEmphasizedAccelerate) else tween(120, easing = PortalEmphasizedDecelerate),
@@ -232,13 +243,15 @@ internal fun UtilityRoundtable(
                 settled = { !travel.running && travel.current == pageNow.value && !keyboardMotion.isMoving },
                 onTargetSize = { shown, size -> if (shown == UtilityPage.Keyboard) keyboardMotion.resize(size, keyboardMinimized) },
                 modifier = Modifier.graphicsLayer {
-                    alpha = arrival.value * opacity.value * presence.value
+                    // Read in draw, as the touchpad reads it, so the button and
+                    // the capsule standing in for it swap in the same frame.
+                    alpha = arrival.value * opacity.value * (if (standingIn()) 1f else presence.value)
                     scaleX = lift.value; scaleY = lift.value
                     shadowElevation = elevation.value.toPx()
                     this.shape = RoundedCornerShape(corner.value); clip = true
                     ambientShadowColor = palette.pillShadow; spotShadowColor = palette.pillShadow
                 }.utilityFrost(frost).background(surfaceBase)
-                    .background(Brush.verticalGradient(listOf(palette.surfaceTop,palette.surfaceBottom)))
+                    .drawBehind { drawRect(Brush.verticalGradient(listOf(palette.surfaceTop,floor.value))) }
                     .border(1.dp,palette.surfaceBorder,shape)
                     .onGloballyPositioned {
                         val bounds = it.unclippedRect()
@@ -278,7 +291,8 @@ internal fun UtilityRoundtable(
                         val labelInset by animateDpAsState(
                             if (!docked || dragging()) 0.dp else if (dockRight) -hiddenEdge/2 else hiddenEdge/2,
                             spring(dampingRatio = 0.9f,stiffness = 420f),label = "tab label docking")
-                        Box(Modifier.size(width = if (docked) dockWidth else hub, height = if (docked) dockHeight else hub)
+                        if (docked && face != null) PadButtonFace(face.glyph, face.label, palette.textPrimary, Modifier.size(face.size))
+                        else Box(Modifier.size(width = if (docked) dockWidth else hub, height = if (docked) dockHeight else hub)
                             .graphicsLayer { scaleX = press; scaleY = press }
                             .hoverable(interaction)
                             .clickable(interactionSource = interaction, indication = null,
@@ -321,6 +335,14 @@ internal fun UtilityRoundtable(
 }
 
 /**
+ * The travel's springs. Their values are fractions of moves that can cross the
+ * whole screen, so they rest at [PortalProgressRest]: the default (0.01) ended
+ * each one by jumping its last 1%, up to a dozen pixels on the final frame.
+ */
+private val TravelSpring = spring(dampingRatio = 1f, stiffness = 230f, visibilityThreshold = PortalProgressRest)
+private val OrbitSpring = spring(dampingRatio = 0.88f, stiffness = 300f, visibilityThreshold = PortalProgressRest)
+
+/**
  * The roundtable's travel between pages. It runs on Animatables, never on
  * updateTransition: a Transition's state is read in composition, so coming to
  * rest rebuilt the whole roundtable on the last frame of every morph.
@@ -341,10 +363,10 @@ private class UtilityTravel(page: UtilityPage) {
         // A page asked for mid-travel picks up from where, and how fast, the last one was going.
         running = true
         coroutineScope {
-            launch { centering.animateTo(if (page == UtilityPage.Dock) 0f else 1f, spring(dampingRatio = 1f, stiffness = 230f)) }
-            launch { keyboard.animateTo(if (page == UtilityPage.Keyboard) 1f else 0f, spring(dampingRatio = 1f, stiffness = 230f)) }
-            launch { settings.animateTo(if (page.isSettings) 1f else 0f, spring(dampingRatio = 1f, stiffness = 230f)) }
-            launch { menu.animateTo(if (page == UtilityPage.Menu) 1f else 0f, spring(dampingRatio = 0.88f, stiffness = 300f)) }
+            launch { centering.animateTo(if (page == UtilityPage.Dock) 0f else 1f, TravelSpring) }
+            launch { keyboard.animateTo(if (page == UtilityPage.Keyboard) 1f else 0f, TravelSpring) }
+            launch { settings.animateTo(if (page.isSettings) 1f else 0f, TravelSpring) }
+            launch { menu.animateTo(if (page == UtilityPage.Menu) 1f else 0f, OrbitSpring) }
         }
         current = page
         running = false

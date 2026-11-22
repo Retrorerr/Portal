@@ -287,14 +287,15 @@ internal class PresentedDesktopPad(
                     left?.let { done -> left = null; post { done() } }
                 }
                 // A capsule page (menu, keyboard, settings) grows out of a button
-                // here: the buttons and the guide step aside while it shows, and
-                // come back as it closes, so it shrinks into its button rather
-                // than into a gap.
+                // here, and that button is the capsule until the page has closed
+                // back into it (PadButtons). The others and the guide step aside
+                // while the page shows and come back as it closes, as the veil's
+                // other pills do.
                 val utilityShown = SessionControls.utilityShown.value
                 val chrome = animateFloatAsState(
                     if (utilityShown) 0f else 1f,
-                    if (utilityShown) tween(160, easing = PortalEmphasizedAccelerate)
-                    else tween(280, delayMillis = 60, easing = PortalEmphasizedDecelerate),
+                    if (utilityShown) tween(140, easing = PortalEmphasizedAccelerate)
+                    else tween(300, delayMillis = 110, easing = PortalEmphasizedDecelerate),
                     label = "touchpad chrome",
                 )
                 // Read in draw only: a touch redraws the pad without recomposing it.
@@ -444,6 +445,14 @@ internal class PresentedDesktopPad(
         }
     }
 
+    /**
+     * Out of sight while the capsule wears this button's face: from the moment
+     * a page grows out of it until that page has closed back into it. Read in
+     * draw, the same frame the capsule hands over, so neither shows twice.
+     */
+    private fun Modifier.standingIn(glyph: PortalGlyph) =
+        graphicsLayer { alpha = if (TouchControls.padStandIn.value == glyph) 0f else 1f }
+
     @Composable
     private fun PadButtons(palette: PortalPalette) {
         // Read when pressed, so each page starts from where its button is now.
@@ -468,19 +477,21 @@ internal class PresentedDesktopPad(
                         onClick = grab::toggle,
                     )
                 }
-                PadButton(PortalGlyph.Keyboard, "Keyboard", palette, size, onPlaced = { placed[0] = it }) {
-                    center(0)?.let { TouchControls.openFromPad(UtilityPage.Keyboard, it.x, it.y) }
+                PadButton(PortalGlyph.Keyboard, "Keyboard", palette, size, onPlaced = { placed[0] = it },
+                    modifier = Modifier.standingIn(PortalGlyph.Keyboard)) {
+                    center(0)?.let { TouchControls.openFromPad(UtilityPage.Keyboard, it.x, it.y, PadFace(PortalGlyph.Keyboard, "Keyboard", size)) }
                 }
                 PadButton(PortalGlyph.Controller, "Controller", palette, size,
                     description = "Use this ${deviceNoun(host)} as a game controller") {
                     TouchControls.setScreenController(true)
                 }
+                val portalFace = PadFace(PortalGlyph.Portal, "Portal", size)
                 PadButton(PortalGlyph.Portal, "Portal", palette, size, description = "Portal menu",
                     onPlaced = { coordinates ->
                         placed[1] = coordinates
-                        center(1)?.let { TouchControls.hideCapsuleForPad(it.x, it.y) }
-                    }) {
-                    center(1)?.let { TouchControls.openFromPad(UtilityPage.Menu, it.x, it.y) }
+                        center(1)?.let { TouchControls.hideCapsuleForPad(it.x, it.y, portalFace) }
+                    }, modifier = Modifier.standingIn(PortalGlyph.Portal)) {
+                    center(1)?.let { TouchControls.openFromPad(UtilityPage.Menu, it.x, it.y, portalFace) }
                 }
                 PadButton(PortalGlyph.Return, "Return", palette, size,
                     description = "Show the desktop on this ${deviceNoun(host)}") {
@@ -766,6 +777,7 @@ internal fun PadButton(
     accent: Boolean = false,
     description: String = label,
     onPlaced: (LayoutCoordinates) -> Unit = {},
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -780,24 +792,19 @@ internal fun PadButton(
         tween(180, easing = PortalEmphasized), label = "pad button fill",
     )
     val ink = if (accent) PortalColors.Charcoal else palette.textPrimary
-    Column(
-        Modifier.size(size)
+    PadButtonFace(glyph, label, ink,
+        modifier.size(size)
             .onGloballyPositioned(onPlaced)
             .graphicsLayer { scaleX = scale; scaleY = scale }
-            .shadow(6.dp, CircleShape, ambientColor = palette.pillShadow, spotColor = palette.pillShadow)
+            .shadow(PadButtonElevation, CircleShape, ambientColor = palette.pillShadow, spotColor = palette.pillShadow)
             .clip(CircleShape).background(palette.background).background(fill)
             .border(1.dp, palette.surfaceBorder, CircleShape)
             .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClickLabel = description, onClick = onClick)
-            .semantics(mergeDescendants = true) { contentDescription = description }
-            .padding(6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
-    ) {
-        PortalIcon(glyph, ink, size = 20.dp)
-        Text(label, color = ink, fontSize = 11.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center,
-            lineHeight = 13.sp, maxLines = 2)
-    }
+            .semantics(mergeDescendants = true) { contentDescription = description })
 }
+
+/** A touchpad button's shadow; the capsule standing in for one casts the same. */
+internal val PadButtonElevation = 6.dp
 
 /** Ctrl + Alt as key caps: the keys that give the mouse back to Android. */
 @Composable

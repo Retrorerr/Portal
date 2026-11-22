@@ -25,6 +25,7 @@ import app.polarbear.gaming.PadFeel
 import app.polarbear.gaming.PadHaptics
 import app.polarbear.gaming.PadLayout
 import app.polarbear.gaming.PadSink
+import app.polarbear.setup.components.PortalGlyph
 import java.util.concurrent.Executors
 
 /**
@@ -643,23 +644,35 @@ object TouchControls {
     // The phone's touchpad page stands in for the capsule's tab: where its
     // Portal button is, or null when no touchpad page is up.
     private var padButton: Offset? = null
+    private var padButtonFace: PadFace? = null
 
-    /** The touchpad page is up, with its Portal button at ([x], [y]) in the overlay host. */
-    fun hideCapsuleForPad(x: Float, y: Float) {
+    /**
+     * The touchpad button the capsule stands in for, wearing its face, while a
+     * page it opened is out and until that page has closed back into it.
+     */
+    internal val padStandIn = mutableStateOf<PortalGlyph?>(null)
+
+    /** The touchpad page is up, with its Portal button ([face]) at ([x], [y]) in the overlay host. */
+    internal fun hideCapsuleForPad(x: Float, y: Float, face: PadFace) {
         padButton = Offset(x, y)
-        handle?.hideDockAt(x, y)
+        padButtonFace = face
+        handle?.hideDockAt(x, y, face)
     }
 
     /** The touchpad page left; the capsule's tab returns to its edge. */
     fun restoreCapsule() {
         padButton = null
+        padButtonFace = null
         handle?.showDock()
     }
 
-    /** Opens a capsule page from a touchpad button at ([x], [y]); false while no capsule is up. */
-    internal fun openFromPad(page: UtilityPage, x: Float, y: Float): Boolean {
+    /**
+     * Opens a capsule page from a touchpad button at ([x], [y]) that looks like
+     * [face], or like none of them when null; false while no capsule is up.
+     */
+    internal fun openFromPad(page: UtilityPage, x: Float, y: Float, face: PadFace? = null): Boolean {
         val view = handle ?: return false
-        view.openFrom(page, x, y)
+        view.openFrom(page, x, y, face)
         return true
     }
 
@@ -702,7 +715,7 @@ object TouchControls {
             onEditController = { later { startEditing() } },
             onToggleController = { later { toggleController() } },
         )
-        padButton?.let { view.hideDockAt(it.x, it.y) }
+        padButton?.let { view.hideDockAt(it.x, it.y, padButtonFace) }
         val index = gamepad?.topIndex()?.takeIf { it >= 0 }?.plus(1) ?: host.desktopLayerTop()
         handle = view
         overlay.addView(view, index.coerceIn(0, overlay.childCount), FrameLayout.LayoutParams(
