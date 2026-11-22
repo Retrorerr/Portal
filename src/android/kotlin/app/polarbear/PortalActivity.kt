@@ -204,7 +204,9 @@ open class PortalActivity : GameActivity() {
         }
         // Debug builds only: open the first-run stages on demand.
         //   adb shell am start -n app.polarbear/.PortalActivity --activity-single-top --ez portal_preview_setup true
-        //   (add --es portal_preview_install ok|fail to play a scripted install)
+        //   (add --es portal_preview_install ok|fail to play a scripted install,
+        //   --es portal_preview_stage welcome|prepare|look|apps to open on a stage,
+        //   --es portal_preview_workspace <name> to set up a new workspace by that name)
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
             intent.getBooleanExtra(PortalPreview.EXTRA, false)
         ) {
@@ -213,6 +215,8 @@ open class PortalActivity : GameActivity() {
                 intent.getFloatExtra(PortalPreview.EXTRA_SLOW, 1f),
                 intent.getBooleanExtra(PortalPreview.EXTRA_GATE, false),
                 intent.getStringExtra(PortalPreview.EXTRA_INSTALL),
+                intent.getStringExtra(PortalPreview.EXTRA_STAGE),
+                intent.getStringExtra(PortalPreview.EXTRA_WORKSPACE),
             )
         }
         //   adb shell am start -n app.polarbear/.PortalActivity --activity-single-top --es portal_preview_updates full

@@ -45,10 +45,15 @@ object PortalPreview {
     private var stopSlowClock: (() -> Unit)? = null
     private var backCallback: OnBackPressedCallback? = null
 
-    fun show(activity: PortalActivity, slow: Float = 1f, gate: Boolean = false, install: String? = null) {
+    fun show(
+        activity: PortalActivity,
+        slow: Float = 1f,
+        gate: Boolean = false,
+        install: String? = null,
+        stage: String? = null,
+        workspace: String? = null,
+    ) {
         hide()
-        val stage = activity.intent.getStringExtra(EXTRA_STAGE)
-        val workspace = activity.intent.getStringExtra(EXTRA_WORKSPACE)
         val root = FrameLayout(activity).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
