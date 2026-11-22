@@ -304,6 +304,9 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
     /** A new workspace was made; Portal is restarting into its installer. */
     var created by remember { mutableStateOf<String?>(null) }
     val restarting = chosen != null || created != null
+    // Android's Back leaves the new-workspace page for the list, like the page's
+    // own Back; once Portal is restarting into the new workspace it waits.
+    SetupBackHandler(enabled = naming) { if (created == null) naming = false }
     DisposableEffect(veil) {
         onDispose {
             veil.gestureExclusions.remove(exclusionKey)
