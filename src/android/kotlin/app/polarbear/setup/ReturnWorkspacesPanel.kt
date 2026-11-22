@@ -9,9 +9,10 @@ package app.polarbear.setup
 // workspace Portal opens at launch. Native state (Workspaces.state) is the
 // only source of truth.
 //
-// The last tile makes a new workspace: a separate Debian with its own apps,
-// files and settings. Portal restarts into the first-run installer for it,
-// as it does for a workspace whose install never finished.
+// New, beside Done, turns the card to a page for a new workspace: a separate
+// Debian with its own apps, files and settings (NewWorkspaceSheet.kt). Portal
+// restarts into the first-run setup for it, as it does for a workspace whose
+// install never finished.
 
 import android.text.format.DateUtils
 import androidx.compose.animation.AnimatedContent
@@ -109,6 +110,7 @@ import androidx.compose.ui.unit.sp
 import app.polarbear.ComposeOverlay
 import app.polarbear.Workspaces
 import app.polarbear.setup.components.LocalPortalVeil
+import app.polarbear.setup.components.PortalPanelSizeSpring
 import app.polarbear.setup.components.PortalEmphasized
 import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
@@ -297,7 +299,7 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
     val exclusionKey = remember { Any() }
     var renaming by remember { mutableStateOf<String?>(null) }
     var chosen by remember { mutableStateOf<String?>(null) }
-    /** The New workspace tile shows its name field. */
+    /** The card shows the new-workspace page. */
     var naming by remember { mutableStateOf(false) }
     /** A new workspace was made; Portal is restarting into its installer. */
     var created by remember { mutableStateOf<String?>(null) }
@@ -339,23 +341,84 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
             }
             .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 14.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).padding(start = 4.dp)) {
-                Text("Workspaces", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = palette.textPrimary)
-                Text(
-                    "Each one is its own Debian, with its own apps, files and settings. " +
-                        "Tap one to open it; tap a name to rename it.",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.textMuted,
+        // The list, or the page for a new workspace; the card resizes between them.
+        AnimatedContent(
+            targetState = naming,
+            transitionSpec = {
+                stageTransition(forward = targetState).using(SizeTransform(clip = false) { _, _ -> PortalPanelSizeSpring })
+            },
+            contentAlignment = Alignment.TopStart,
+            label = "workspaces card page",
+        ) { newPage ->
+            if (newPage) {
+                NewWorkspaceSheet(
+                    names = state.workspaces.map { it.name },
+                    created = created,
+                    palette = palette,
+                    onBack = { naming = false },
+                    onCreate = { name ->
+                        val refusal = Workspaces.create(context, name, findDesktopSurface(view.rootView))
+                        if (refusal == null) created = name
+                        refusal
+                    },
+                )
+            } else {
+                WorkspacesList(
+                    state = state,
+                    palette = palette,
+                    chosen = chosen,
+                    renaming = renaming,
+                    restarting = restarting,
+                    onNew = {
+                        renaming = null
+                        naming = true
+                    },
+                    onClose = onClose,
+                    onChoose = { chosen = it },
+                    onRenaming = { renaming = it },
                 )
             }
+        }
+    }
+}
+
+/** Every workspace as it was left, New and Done, and which one opens at launch. */
+@Composable
+private fun WorkspacesList(
+    state: Workspaces.State,
+    palette: PortalPalette,
+    chosen: String?,
+    renaming: String?,
+    restarting: Boolean,
+    onNew: () -> Unit,
+    onClose: () -> Unit,
+    onChoose: (String) -> Unit,
+    onRenaming: (String?) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Workspaces",
+                modifier = Modifier.weight(1f).padding(start = 4.dp),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = palette.textPrimary,
+            )
+            NewWorkspaceButton(palette = palette, enabled = !restarting, onClick = onNew)
+            Spacer(Modifier.width(4.dp))
             PanelButton(text = "Done", primary = false, palette = palette, onClick = onClose)
         }
+        Text(
+            "Each has its own apps, files and settings. Tap one to open it, or its name to rename it.",
+            modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp),
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            fontWeight = FontWeight.Medium,
+            color = palette.textMuted,
+        )
         Spacer(Modifier.height(14.dp))
         BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
-            // The New workspace tile shares the row.
-            val count = state.workspaces.size + 1
+            val count = state.workspaces.size.coerceAtLeast(1)
             val tileWidth = ((maxWidth - TileGap * (count - 1)) / count).coerceIn(TileMinWidth, TileMaxWidth)
             Row(
                 // At least the card's width, so a few tiles sit centred and
@@ -363,44 +426,27 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
                 modifier = Modifier.horizontalScroll(rememberScrollState()).widthIn(min = maxWidth),
                 horizontalArrangement = Arrangement.spacedBy(TileGap, Alignment.CenterHorizontally),
             ) {
-            state.workspaces.forEach { workspace ->
-                WorkspaceTile(
-                    workspace = workspace,
-                    width = tileWidth,
-                    preview = Workspaces.previews[workspace.id],
-                    running = workspace.id == state.active,
-                    chosen = chosen == workspace.id,
-                    renaming = renaming == workspace.id,
-                    renamingAny = renaming != null || naming,
-                    palette = palette,
-                    onOpen = {
-                        when {
-                            // A tap away from a field ends it, unsaved.
-                            renaming != null -> renaming = null
-                            naming -> naming = false
-                            !restarting && workspace.id != state.active -> chosen = workspace.id
-                        }
-                    },
-                    onRename = { if (!restarting) renaming = workspace.id },
-                    onRenameDone = { renaming = null },
-                )
-            }
-            NewWorkspaceTile(
-                width = tileWidth,
-                naming = naming,
-                created = created,
-                palette = palette,
-                onStart = {
-                    renaming = null
-                    if (!restarting) naming = true
-                },
-                onCreate = { name ->
-                    val refusal = Workspaces.create(context, name, findDesktopSurface(view.rootView))
-                    if (refusal == null) created = name.trim()
-                    refusal
-                },
-                onDone = { naming = false },
-            )
+                state.workspaces.forEach { workspace ->
+                    WorkspaceTile(
+                        workspace = workspace,
+                        width = tileWidth,
+                        preview = Workspaces.previews[workspace.id],
+                        running = workspace.id == state.active,
+                        chosen = chosen == workspace.id,
+                        renaming = renaming == workspace.id,
+                        renamingAny = renaming != null,
+                        palette = palette,
+                        onOpen = {
+                            when {
+                                // A tap away from a field ends it, unsaved.
+                                renaming != null -> onRenaming(null)
+                                !restarting && workspace.id != state.active -> onChoose(workspace.id)
+                            }
+                        },
+                        onRename = { if (!restarting) onRenaming(workspace.id) },
+                        onRenameDone = { onRenaming(null) },
+                    )
+                }
             }
         }
         AnimatedVisibility(
@@ -563,116 +609,6 @@ private fun WorkspaceTile(
                 maxLines = 1,
             )
         }
-        }
-    }
-}
-
-/**
- * The last tile: a new workspace. Tapping it asks for a name; Enter makes
- * the workspace and Portal restarts into its installer.
- */
-@Composable
-private fun NewWorkspaceTile(
-    width: androidx.compose.ui.unit.Dp,
-    naming: Boolean,
-    /** The name of the workspace just made, while Portal restarts into it. */
-    created: String?,
-    palette: PortalPalette,
-    onStart: () -> Unit,
-    onCreate: (String) -> String?,
-    onDone: () -> Unit,
-) {
-    val tap = remember { MutableInteractionSource() }
-    val pressed by tap.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.97f else 1f,
-        animationSpec = tween(110, easing = PortalEmphasized),
-        label = "new workspace tile press",
-    )
-    val active = naming || created != null
-    val ring by animateColorAsState(
-        if (active) palette.accent else palette.surfaceBorder,
-        tween(220),
-        label = "new workspace tile ring",
-    )
-    val shape = RoundedCornerShape(TileCorner)
-    Column(Modifier.width(width).semantics { contentDescription = "New workspace" }) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 10f)
-                .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                }
-                .clip(shape)
-                .background(palette.surfaceTop.copy(alpha = 0.35f))
-                .border(if (active) 2.dp else 1.dp, ring, shape)
-                .clickable(
-                    interactionSource = tap,
-                    indication = null,
-                    role = Role.Button,
-                    enabled = created == null,
-                    onClickLabel = "Make a new workspace",
-                    onClick = onStart,
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "+",
-                fontSize = 34.sp,
-                fontWeight = FontWeight.Light,
-                color = if (active) palette.accent else palette.textMuted.copy(alpha = 0.75f),
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        Column(Modifier.height(TileFooterHeight)) {
-            when {
-                created != null -> {
-                    Text(
-                        text = created,
-                        modifier = Modifier.padding(start = 2.dp),
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.textPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = "Restarting Portal to set it up…",
-                        modifier = Modifier.padding(start = 2.dp),
-                        fontSize = 11.sp,
-                        color = palette.accent,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                naming -> NameField(
-                    initial = "",
-                    note = "Enter sets it up · Portal restarts",
-                    palette = palette,
-                    submit = onCreate,
-                    onDone = onDone,
-                )
-                else -> {
-                    Text(
-                        text = "New workspace",
-                        modifier = Modifier.padding(start = 2.dp),
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.textPrimary,
-                        maxLines = 1,
-                    )
-                    Text(
-                        text = "A fresh Debian of its own",
-                        modifier = Modifier.padding(start = 2.dp),
-                        fontSize = 11.sp,
-                        color = palette.textSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
         }
     }
 }
