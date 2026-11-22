@@ -243,7 +243,7 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                 SliderRow(
                     title = "Opacity",
                     value = layout.opacity,
-                    range = 0.15f..1f,
+                    range = ControllerLayout.MIN_OPACITY..1f,
                     valueText = "${(layout.opacity * 100).roundToInt()}%",
                     palette = palette,
                     onChange = { TouchControls.updateLayout(layout.copy(opacity = it), persist = false) },
@@ -444,7 +444,7 @@ fun EditBar() {
                 SliderRow(
                     title = "Opacity",
                     value = layout.opacity,
-                    range = 0.15f..1f,
+                    range = ControllerLayout.MIN_OPACITY..1f,
                     valueText = "${(layout.opacity * 100).roundToInt()}%",
                     palette = palette,
                     onChange = { TouchControls.updateLayout(layout.copy(opacity = it), persist = false) },

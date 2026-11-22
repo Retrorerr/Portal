@@ -6,10 +6,11 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * One control of the presented controller, in px: its home centre, drawn
+ * One control of the on-screen controller, in px: its home centre, drawn
  * size and how far past its edge a landing finger still counts. [a] and [b]
  * hold the rest of its shape: a stick's knob radius and travel, the face
- * buttons' radius and spread, the d-pad's arm width.
+ * buttons' radius and spread, the d-pad's arm width. A [hidden] control is
+ * one the player took out of play; only the layout editor shows it.
  */
 internal class PadSpot(
     val control: Control,
@@ -20,12 +21,13 @@ internal class PadSpot(
     val reach: Float,
     val a: Float = 0f,
     val b: Float = 0f,
+    val hidden: Boolean = false,
 ) {
     val r: Float get() = min(w, h) / 2f
 }
 
 /**
- * Where the presented controller's controls sit on a screen of any size.
+ * Where the on-screen controller's controls sit on a screen of any size.
  *
  * Thumbs are the same size on every screen, so the controls are measured in
  * millimetres from the screen's physical density and shrink together ([k])
@@ -38,6 +40,12 @@ internal class PadSpot(
  * Guide and Menu between them. The d-pad and right stick sit low and close
  * to the outer pair rather than out toward the middle, where a thumb
  * holding a phone would have to stretch.
+ *
+ * Over the desktop ([wholeScreen] false) the same arrangement floats over
+ * the game: a finger that misses every control belongs to the desktop, so
+ * each control only reaches a little past its edge and a stick keeps its
+ * base near home, and the player's moves, sizes and hidden controls
+ * ([ElementState]) apply on top of these defaults.
  *
  * Plain Kotlin, so the layout can be checked off the device.
  */
@@ -52,14 +60,22 @@ internal class PadLayout(
     /** Physical px per millimetre. */
     val mm: Float,
     /** The player's Size setting. */
-    userScale: Float = 1f,
+    userScale: Float,
+    /** The controller is the whole screen (the touchpad page's), not controls floating over the desktop. */
+    val wholeScreen: Boolean,
     /** Lowest edge of the Touchpad chip at the top centre, px; the middle row stays below it. */
     chipBottom: Float = 0f,
+    /** Floating: where the player moved, resized or hid each control. */
+    elements: Map<Control, ElementState> = emptyMap(),
 ) {
-    /** Scale from the reference phone, for positions. */
+    /** Scale from the reference phone that fits this screen. */
     val k: Float
 
-    /** Scale for sizes: [k] with the Size setting. */
+    /**
+     * Scale of the whole pad: [k] with the Size setting. The pad grows and
+     * shrinks from the screen's edges, where the thumbs are, and no further
+     * than the screen holds it, so the controls never run into each other.
+     */
     val s: Float
 
     /** The line between the left thumb's half and the right thumb's. */
@@ -77,46 +93,54 @@ internal class PadLayout(
         val fit = min(usableWidth / (REF_WIDTH_MM * mm), usableHeight / (REF_HEIGHT_MM * mm))
         // Turned upright (Android refused landscape) it only has to fit.
         k = fit.coerceIn(if (usableWidth >= usableHeight) MIN_SCALE else MIN_UPRIGHT_SCALE, MAX_SCALE)
-        s = k * userScale.coerceIn(MIN_USER_SCALE, MAX_USER_SCALE)
+        s = min(k * userScale, max(k, fit))
         middle = (left + right) / 2f
         // A taller screen keeps the clusters low, where thumbs rest.
-        val region = REF_HEIGHT_MM * k * mm
+        val region = REF_HEIGHT_MM * s * mm
         val squeeze = min(1f, usableHeight / region)
         val regionTop = top + max(0f, usableHeight - region) * LOW_BIAS
 
-        fun at(value: Float) = value * k * mm
-        fun size(value: Float) = value * s * mm
-        fun y(value: Float) = regionTop + value * k * mm * squeeze
+        fun at(value: Float) = value * s * mm
+        // Floating, a landing near a control but on none of them is the desktop's.
+        fun reach(value: Float) = at(if (wholeScreen) value else min(value, FLOAT_REACH_MM))
+        val stickReach = at(if (wholeScreen) STICK_REACH_MM else FLOAT_REACH_MM)
+        fun y(value: Float) = regionTop + at(value) * squeeze
         fun fromLeft(value: Float) = left + at(value)
         fun fromRight(value: Float) = right - at(value)
 
-        val row = max(y(ROW_Y), chipBottom + size(SMALL_MM / 2f) + 2.5f * mm)
+        val row = max(y(ROW_Y), chipBottom + at(SMALL_MM / 2f) + 2.5f * mm)
         val placed = listOf(
-            PadSpot(Control.LT, fromLeft(14f), y(8f), size(24f), size(12f), size(6f)),
-            PadSpot(Control.LB, fromLeft(40f), y(7.5f), size(22f), size(10f), size(6f)),
-            PadSpot(Control.RB, fromRight(40f), y(7.5f), size(22f), size(10f), size(6f)),
-            PadSpot(Control.RT, fromRight(14f), y(8f), size(24f), size(12f), size(6f)),
-            PadSpot(Control.LEFT_STICK, fromLeft(24f), y(30f), size(STICK_MM), size(STICK_MM), at(STICK_REACH_MM),
-                a = size(KNOB_MM), b = size(TRAVEL_MM)),
-            PadSpot(Control.DPAD, fromLeft(44f), y(50f), size(27f), size(27f), size(8f), a = size(9.4f)),
-            PadSpot(Control.RIGHT_STICK, fromRight(51f), y(50f), size(STICK_MM), size(STICK_MM), at(STICK_REACH_MM),
-                a = size(KNOB_MM), b = size(TRAVEL_MM)),
-            PadSpot(Control.FACE, fromRight(26f), y(32.5f), size(2f * (FACE_SPREAD_MM + FACE_BUTTON_MM)),
-                size(2f * (FACE_SPREAD_MM + FACE_BUTTON_MM)), size(8f), a = size(FACE_BUTTON_MM), b = size(FACE_SPREAD_MM)),
-            PadSpot(Control.BACK, middle - at(15f), row, size(SMALL_MM), size(SMALL_MM), size(4f)),
-            PadSpot(Control.GUIDE, middle, row, size(SMALL_MM), size(SMALL_MM), size(4f)),
-            PadSpot(Control.START, middle + at(15f), row, size(SMALL_MM), size(SMALL_MM), size(4f)),
-            PadSpot(Control.L3, fromLeft(9.5f), y(57.5f), size(8.4f), size(8.4f), size(2.5f)),
-            PadSpot(Control.R3, fromRight(9.5f), y(57.5f), size(8.4f), size(8.4f), size(2.5f)),
+            PadSpot(Control.LT, fromLeft(14f), y(8f), at(24f), at(12f), reach(6f)),
+            PadSpot(Control.LB, fromLeft(40f), y(7.5f), at(22f), at(10f), reach(6f)),
+            PadSpot(Control.RB, fromRight(40f), y(7.5f), at(22f), at(10f), reach(6f)),
+            PadSpot(Control.RT, fromRight(14f), y(8f), at(24f), at(12f), reach(6f)),
+            PadSpot(Control.LEFT_STICK, fromLeft(24f), y(30f), at(STICK_MM), at(STICK_MM), stickReach,
+                a = at(KNOB_MM), b = at(TRAVEL_MM)),
+            PadSpot(Control.DPAD, fromLeft(44f), y(50f), at(27f), at(27f), reach(8f), a = at(9.4f)),
+            PadSpot(Control.RIGHT_STICK, fromRight(51f), y(50f), at(STICK_MM), at(STICK_MM), stickReach,
+                a = at(KNOB_MM), b = at(TRAVEL_MM)),
+            PadSpot(Control.FACE, fromRight(26f), y(32.5f), at(2f * (FACE_SPREAD_MM + FACE_BUTTON_MM)),
+                at(2f * (FACE_SPREAD_MM + FACE_BUTTON_MM)), reach(8f), a = at(FACE_BUTTON_MM), b = at(FACE_SPREAD_MM)),
+            PadSpot(Control.BACK, middle - at(15f), row, at(SMALL_MM), at(SMALL_MM), reach(4f)),
+            PadSpot(Control.GUIDE, middle, row, at(SMALL_MM), at(SMALL_MM), reach(4f)),
+            PadSpot(Control.START, middle + at(15f), row, at(SMALL_MM), at(SMALL_MM), reach(4f)),
+            PadSpot(Control.L3, fromLeft(9.5f), y(57.5f), at(8.4f), at(8.4f), reach(2.5f)),
+            PadSpot(Control.R3, fromRight(9.5f), y(57.5f), at(8.4f), at(8.4f), reach(2.5f)),
         )
-        // Whatever the Size setting, every control stays whole on screen.
-        spots = placed.map { spot ->
-            val halfW = spot.w / 2f
-            val halfH = spot.h / 2f
-            val x = spot.x.coerceIn(insetLeft + halfW, max(insetLeft + halfW, width - insetRight - halfW))
-            val y = spot.y.coerceIn(insetTop + halfH, max(insetTop + halfH, height - insetBottom - halfH))
-            if (x == spot.x && y == spot.y) spot
-            else PadSpot(spot.control, x, y, spot.w, spot.h, spot.reach, spot.a, spot.b)
+        spots = placed.map { home ->
+            val element = elements[home.control]
+            val grow = element?.scale ?: 1f
+            val w = home.w * grow
+            val h = home.h * grow
+            // Whatever the sizes, every control stays whole on screen.
+            val halfW = w / 2f
+            val halfH = h / 2f
+            val x = (if (element?.placed == true) element.x * width else home.x)
+                .coerceIn(insetLeft + halfW, max(insetLeft + halfW, width - insetRight - halfW))
+            val y = (if (element?.placed == true) element.y * height else home.y)
+                .coerceIn(insetTop + halfH, max(insetTop + halfH, height - insetBottom - halfH))
+            if (element == null && x == home.x && y == home.y) home
+            else PadSpot(home.control, x, y, w, h, home.reach * grow, home.a * grow, home.b * grow, hidden = element?.visible == false)
         }
     }
 
@@ -128,7 +152,8 @@ internal class PadLayout(
 
     /** How far ([x], [y]) is outside [spot]'s shape, px; 0 inside it. */
     fun distance(spot: PadSpot, x: Float, y: Float): Float = when (spot.control.kind) {
-        ControlKind.FACE -> {
+        // The diamond's middle is the cluster's too: a thumb there slides onto a button.
+        ControlKind.FACE -> if (hypot(x - spot.x, y - spot.y) <= spot.b) 0f else {
             var nearest = Float.MAX_VALUE
             for (index in 0 until 4) {
                 nearest = min(nearest, hypot(x - faceButtonX(spot, index), y - faceButtonY(spot, index)))
@@ -146,15 +171,17 @@ internal class PadLayout(
 
     /**
      * The control a finger landing at ([x], [y]) is for: the nearest within
-     * its reach. A stick takes any landing on its thumb's half of the screen
-     * that nothing else claims, and starts from wherever that is.
+     * its reach, or none. On the whole screen a stick takes any landing on
+     * its thumb's half that nothing else claims, and starts from wherever
+     * that is. The layout editor also picks [hidden] controls.
      */
-    fun pick(x: Float, y: Float): PadSpot? {
+    fun pick(x: Float, y: Float, hidden: Boolean = false): PadSpot? {
         var best: PadSpot? = null
         var bestDistance = Float.MAX_VALUE
         for (spot in spots) {
-            if (spot.control == Control.LEFT_STICK && x >= middle) continue
-            if (spot.control == Control.RIGHT_STICK && x < middle) continue
+            if (spot.hidden && !hidden) continue
+            if (wholeScreen && spot.control == Control.LEFT_STICK && x >= middle) continue
+            if (wholeScreen && spot.control == Control.RIGHT_STICK && x < middle) continue
             val distance = distance(spot, x, y)
             if (distance <= spot.reach && distance < bestDistance) {
                 best = spot
@@ -163,6 +190,12 @@ internal class PadLayout(
         }
         return best
     }
+
+    /**
+     * How far a stick's base may drift from home after the thumb: anywhere
+     * on the whole screen; floating, a little, so it stays by its place.
+     */
+    fun drift(spot: PadSpot): Float = if (wholeScreen) Float.POSITIVE_INFINITY else spot.r * FLOAT_DRIFT
 
     companion object {
         /** The reference phone's room for the controls, turned sideways. */
@@ -183,6 +216,10 @@ internal class PadLayout(
         private const val STICK_REACH_MM = 34f
         private const val FACE_BUTTON_MM = 5.5f
         private const val FACE_SPREAD_MM = 11.2f
+        /** Floating: how far past its edge a control takes a landing finger. */
+        private const val FLOAT_REACH_MM = 4f
+        /** Floating: how far a stick's base may follow the thumb, in stick radii. */
+        private const val FLOAT_DRIFT = 0.6f
 
         /** A, B, X, Y around the face cluster's centre (screen y grows down). */
         val FACE_DX = floatArrayOf(0f, 1f, -1f, 0f)

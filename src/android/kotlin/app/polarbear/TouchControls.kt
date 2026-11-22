@@ -2,12 +2,8 @@ package app.polarbear
 
 import android.content.Context
 import android.hardware.input.InputManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
 import android.util.Log
 import android.view.Gravity
 import android.view.InputDevice
@@ -19,14 +15,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.ComposeView
 import app.polarbear.gaming.Control
-import app.polarbear.gaming.ControlHost
-import app.polarbear.gaming.ControlKind
-import app.polarbear.gaming.ControlView
 import app.polarbear.gaming.ControllerLayout
 import app.polarbear.gaming.EditBar
 import app.polarbear.gaming.GamePanel
+import app.polarbear.gaming.Gamepad
 import app.polarbear.gaming.LayoutStore
+import app.polarbear.gaming.PadColors
+import app.polarbear.gaming.PadFeel
+import app.polarbear.gaming.PadHaptics
 import app.polarbear.gaming.PadLayout
+import app.polarbear.gaming.PadSink
 import java.util.concurrent.Executors
 
 /**
@@ -35,19 +33,19 @@ import java.util.concurrent.Executors
  * A small Portal capsule recalls the session controls. It remembers where
  * it is dragged and adds controller and game options only when relevant.
  *
- * The controller feeds the "touch pad" through the same evdev path as
- * physical controllers ([GamepadBridge.touchPad]) and steps aside while a
- * physical controller is connected, unless the user asks for it anyway.
- * Each control is its own view above the native surface, so Android splits
- * multitouch between them and a finger outside every control still
- * reaches the desktop.
+ * The controller ([Gamepad]) feeds the "touch pad" through the same evdev
+ * path as physical controllers ([GamepadBridge.touchPad]) and steps aside
+ * while a physical controller is connected, unless the user asks for it
+ * anyway. Over the desktop it floats: each control is its own view above
+ * the native surface, so Android splits multitouch between them and a
+ * finger outside every control still reaches the desktop.
  *
  * While the desktop is on a monitor, this screen is its touchpad page
- * ([PresentedDesktopPad]) and these floating controls stay away: that page
- * turns the whole screen into a controller of its own instead, which feeds
- * the same touch pad ([screenPad]).
+ * ([PresentedDesktopPad]) and the floating controls stay away: that page
+ * turns the whole screen into the same controller ([PresentedController]),
+ * which feeds the same touch pad ([screenPad]).
  */
-object TouchControls : ControlHost {
+object TouchControls {
     private const val TAG = "PortalTouchControls"
     private const val PREFS = "portal_touch_controls"
     private const val PREF_ON = "on"
@@ -92,11 +90,12 @@ object TouchControls : ControlHost {
     private var editBar: ComposeView? = null
     private var panel: ComposeView? = null
     private val retiringViews = mutableSetOf<View>()
-    private val views = LinkedHashMap<Control, ControlView>()
+    /** The floating controller, while it has been needed. */
+    private var gamepad: Gamepad? = null
+    private var sharedHaptics: PadHaptics? = null
     private var padPlugged = false
     private var scanning = false
     private var layoutKey: String? = "\u0000"
-    private var vibrator: Vibrator? = null
     private val axes = FloatArray(10)
     private var presentingOwner: Any? = null
     private var screenRelease: (() -> Unit)? = null
@@ -107,7 +106,7 @@ object TouchControls : ControlHost {
     private val rootLayoutListener = View.OnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
         if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
             cancelInput()
-            placeAll()
+            fitGamepad()
             placeHandle()
         }
     }
@@ -117,10 +116,6 @@ object TouchControls : ControlHost {
         override fun onInputDeviceRemoved(deviceId: Int) = devicesChanged()
         override fun onInputDeviceChanged(deviceId: Int) = devicesChanged()
     }
-
-    override val editing: Boolean get() = editingState.value
-    override val selected: Control? get() = selectedState.value
-    override val analogTriggers: Boolean get() = analog.value
 
     /** The controller is wanted on screen right now (a game may still be needed). */
     val controllerVisible: Boolean
@@ -139,7 +134,7 @@ object TouchControls : ControlHost {
         rumble.value = prefs.getBoolean(PREF_RUMBLE, true)
         analog.value = prefs.getBoolean(PREF_ANALOG, false)
         screenScale.value = prefs.getFloat(PREF_SCREEN_SCALE, 1f).coerceIn(PadLayout.MIN_USER_SCALE, PadLayout.MAX_USER_SCALE)
-        vibrator = ownVibrator(host)
+        padHaptics(host).enabled = haptics.value
         try {
             host.getSystemService(InputManager::class.java)?.registerInputDeviceListener(deviceListener, main)
         } catch (e: Exception) {
@@ -244,7 +239,7 @@ object TouchControls : ControlHost {
         layout.value = LayoutStore.load(host, key)
         appLayout.value = LayoutStore.hasAppLayout(host, key)
         selectedState.value = null
-        if (views.isNotEmpty()) syncControls(place = true)
+        gamepad?.let(::arrange)
     }
 
     // ---- View management -------------------------------------------------
@@ -287,114 +282,58 @@ object TouchControls : ControlHost {
         if (!editingState.value && editBar != null) retireView(editBar).also { editBar = null }
     }
 
-    /** Add and remove control views for the current mode; place them when anything changed. */
-    private fun syncControls(place: Boolean = false) {
+    /** The floating controller for the current mode, and the guest's touch pad with it. */
+    private fun syncControls() {
         val overlay = root ?: return
         val host = activity ?: return
         val mode = mode()
         val modeChanged = mode != lastMode
         lastMode = mode
-        var changed = false
-        val arriving = mutableListOf<ControlView>()
-        val wanted: Set<Control> = when (mode) {
-            Mode.NONE -> emptySet()
-            Mode.EDIT -> Control.values().toSet()
-            Mode.PLAY -> Control.values().filter { layout.value.element(it).visible }.toSet()
-        }
-        val iterator = views.entries.iterator()
-        while (iterator.hasNext()) {
-            val (control, view) = iterator.next()
-            if (control !in wanted) {
-                view.release()
-                retireView(view)
-                iterator.remove()
-                changed = true
+        if (mode == Mode.NONE) {
+            gamepad?.hide()
+        } else {
+            val pad = gamepad ?: Gamepad(host, PadSink { buttons, axes -> lastMode == Mode.PLAY && sendPad(buttons, axes) },
+                padHaptics(host), wholeScreen = false).also {
+                it.colors = PadColors.OverGame
+                it.onSelect = ::select
+                it.onMoved = ::moved
+                gamepad = it
             }
-        }
-        for (control in Control.values()) {
-            if (control in wanted && control !in views) {
-                val view = ControlView(host, control, this)
-                // Above the desktop (and its touchpad), below the handle and Portal's own screens.
-                overlay.addView(view, host.desktopLayerTop(), FrameLayout.LayoutParams(1, 1, Gravity.TOP or Gravity.START))
-                views[control] = view
-                arriving += view
-                changed = true
-            }
-        }
-        // Touches held in one mode mean nothing in the other.
-        if (modeChanged) views.values.forEach { it.release() }
-        if (changed || modeChanged || place) placeAll()
-        arriving.forEach { view ->
-            view.alpha = 0f; view.scaleX = 0.96f; view.scaleY = 0.96f
-            view.animate().alpha(layout.value.opacity).scaleX(1f).scaleY(1f).setDuration(240).start()
+            // Above the desktop (and its touchpad), below the handle and Portal's own screens.
+            pad.floatIn(overlay) { host.desktopLayerTop() }
+            fitGamepad()
+            arrange(pad)
+            pad.editing = mode == Mode.EDIT
+            pad.show()
         }
         when (mode) {
-            Mode.PLAY -> {
-                // Plug the pad in now, so games and Steam see it before a touch.
-                if (!padPlugged) {
-                    padPlugged = true
-                    padChanged()
-                }
-            }
+            // Plug the pad in now, so games and Steam see it before a touch.
+            Mode.PLAY -> if (!padPlugged) plugNeutral()
             Mode.EDIT -> if (padPlugged && modeChanged) sendNeutral()
             Mode.NONE -> when {
                 !presenting.value || !screenPadUsed -> unplug()
                 // Back in front: the screen controller's pad comes back at rest.
-                !padPlugged -> {
-                    padPlugged = true
-                    sendNeutral()
-                }
+                !padPlugged -> plugNeutral()
             }
         }
     }
 
-    private fun placeAll() {
+    /** The floating controller fills the desktop, clear of the system bars. */
+    private fun fitGamepad() {
         val overlay = root ?: return
-        val width = overlay.width
-        val height = overlay.height
-        if (width <= 0 || height <= 0) {
-            overlay.post { if (root === overlay && overlay.width > 0) placeAll() }
-            return
-        }
-        val density = overlay.resources.displayMetrics.density
+        val pad = gamepad ?: return
+        pad.setInsets(Gamepad.barInsets(overlay.rootWindowInsets))
+        pad.resize(overlay.width, overlay.height)
+    }
+
+    /** The floating controller as the player arranged it. */
+    private fun arrange(pad: Gamepad) {
         val current = layout.value
-        for ((control, view) in views) {
-            // A control being dragged keeps its offset until it is dropped.
-            if (view.isDragging) continue
-            val state = current.element(control)
-            val scale = current.scale * state.scale
-            val drawnWidth = control.width * scale * density
-            val drawnHeight = control.height * scale * density
-            val margin = if (control.kind == ControlKind.STICK) drawnWidth * 0.16f else 12f * density * scale
-            val viewWidth = drawnWidth + margin * 2f
-            val viewHeight = drawnHeight + margin * 2f
-            var cx: Float
-            var cy: Float
-            if (state.placed) {
-                cx = state.x * width
-                cy = state.y * height
-            } else {
-                val (dx, dy) = ControllerLayout.defaultCenter(control, width / density, height / density)
-                cx = dx * density
-                cy = dy * density
-            }
-            // Keep the drawn control on screen.
-            cx = cx.coerceIn(drawnWidth / 2f, (width - drawnWidth / 2f).coerceAtLeast(drawnWidth / 2f))
-            cy = cy.coerceIn(drawnHeight / 2f, (height - drawnHeight / 2f).coerceAtLeast(drawnHeight / 2f))
-            val params = (view.layoutParams as? FrameLayout.LayoutParams)
-                ?: FrameLayout.LayoutParams(1, 1, Gravity.TOP or Gravity.START)
-            params.width = viewWidth.toInt()
-            params.height = viewHeight.toInt()
-            params.gravity = Gravity.TOP or Gravity.START
-            params.leftMargin = (cx - viewWidth / 2f).toInt()
-            params.topMargin = (cy - viewHeight / 2f).toInt()
-            view.layoutParams = params
-            view.translationX = 0f
-            view.translationY = 0f
-            view.setGeometry(drawnWidth, drawnHeight, margin)
-            view.alpha = current.opacity
-            view.ghost = editingState.value && !state.visible
-        }
+        pad.opacity = current.opacity
+        pad.userScale = current.scale
+        pad.elements = current.elements
+        pad.analogTriggers = analog.value
+        pad.selected = selectedState.value
     }
 
     private fun removeView(view: View?) {
@@ -415,11 +354,8 @@ object TouchControls : ControlHost {
 
     private fun removeAll() {
         retiringViews.toList().forEach(::removeView)
-        for (view in views.values) {
-            view.release()
-            removeView(view)
-        }
-        views.clear()
+        gamepad?.detach()
+        gamepad = null
         unplug()
         removeView(handle)
         handle = null
@@ -444,68 +380,44 @@ object TouchControls : ControlHost {
         GamepadBridge.touchPad(0, axes)
     }
 
+    private fun plugNeutral() {
+        padPlugged = true
+        sendNeutral()
+    }
+
+    /** The guest's touch pad gets [buttons] and [axes], plugged in first if it was not. */
+    private fun sendPad(buttons: Int, axes: FloatArray): Boolean {
+        if (activity == null) return false
+        padPlugged = true
+        GamepadBridge.touchPad(buttons, axes)
+        return true
+    }
+
+    /** The controller's touch feel, one for the app, following the Button vibration setting. */
+    internal fun padHaptics(context: Context): PadHaptics =
+        sharedHaptics ?: PadHaptics(context.applicationContext) { GamepadBridge.touchRumbling() }
+            .also { it.enabled = haptics.value; sharedHaptics = it }
+
     /** A modal control or lost focus ends every held gesture immediately. */
     fun cancelInput() {
         screenRelease?.invoke()
-        views.values.forEach { it.release() }
+        gamepad?.release()
         if (padPlugged) sendNeutral()
     }
 
-    // ---- ControlHost -----------------------------------------------------
+    // ---- The layout editor -----------------------------------------------
 
-    override fun padChanged() {
-        if (editingState.value || !padPlugged) return
-        var buttons = 0
-        axes.fill(0f)
-        for (view in views.values) {
-            buttons = buttons or view.buttons
-            view.writeAxes(axes)
-        }
-        GamepadBridge.touchPad(buttons, axes)
-    }
-
-    override fun feedback(strong: Boolean) {
-        if (!haptics.value) return
-        val vibrator = vibrator ?: return
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                vibrator.vibrate(
-                    VibrationEffect.createPredefined(
-                        if (strong) VibrationEffect.EFFECT_CLICK else VibrationEffect.EFFECT_TICK,
-                    ),
-                )
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator.vibrate(VibrationEffect.createOneShot(if (strong) 14L else 8L, VibrationEffect.DEFAULT_AMPLITUDE))
-            } else {
-                @Suppress("DEPRECATION")
-                vibrator.vibrate(if (strong) 14L else 8L)
-            }
-        } catch (_: Exception) {
-        }
-    }
-
-    override fun select(control: Control) {
+    private fun select(control: Control) {
         selectedState.value = control
-        views.values.forEach { it.invalidate() }
+        gamepad?.selected = control
     }
 
-    override fun moved(control: Control, x: Float, y: Float) {
+    /** [control] was dropped with its centre at ([x], [y]) px in the overlay. */
+    private fun moved(control: Control, x: Float, y: Float) {
         val overlay = root ?: return
         if (overlay.width <= 0 || overlay.height <= 0) return
         val state = layout.value.element(control)
         updateLayout(layout.value.with(control, state.copy(x = x / overlay.width, y = y / overlay.height)), persist = true)
-    }
-
-    override fun clampDrag(view: View, dx: Float, dy: Float): Pair<Float, Float> {
-        val overlay = root ?: return dx to dy
-        val control = view as? ControlView ?: return dx to dy
-        val minX = -control.pad
-        val maxX = overlay.width - view.width + control.pad
-        val minY = -control.pad
-        val maxY = overlay.height - view.height + control.pad
-        val x = (view.x + dx).coerceIn(minX, maxOf(minX, maxX))
-        val y = (view.y + dy).coerceIn(minY, maxOf(minY, maxY))
-        return (x - view.x) to (y - view.y)
     }
 
     // ---- Actions from the handle, the panel and the edit bar ------------
@@ -572,9 +484,7 @@ object TouchControls : ControlHost {
     fun screenPad(buttons: Int, axes: FloatArray): Boolean {
         if (!presenting.value || activity == null) return false
         screenPadUsed = true
-        padPlugged = true
-        GamepadBridge.touchPad(buttons, axes)
-        return true
+        return sendPad(buttons, axes)
     }
 
     fun setControllerOn(on: Boolean) {
@@ -595,7 +505,8 @@ object TouchControls : ControlHost {
         val host = activity ?: return
         haptics.value = on
         prefs(host).edit().putBoolean(PREF_HAPTICS, on).apply()
-        if (on) feedback(strong = true)
+        padHaptics(host).enabled = on
+        if (on) padHaptics(host).play(PadFeel.Press)
     }
 
     fun setRumble(on: Boolean) {
@@ -608,12 +519,13 @@ object TouchControls : ControlHost {
         val host = activity ?: return
         analog.value = on
         prefs(host).edit().putBoolean(PREF_ANALOG, on).apply()
+        gamepad?.analogTriggers = on
     }
 
     /** Apply [next] to the controls now; save it when the gesture ends. */
     fun updateLayout(next: ControllerLayout, persist: Boolean) {
         layout.value = next
-        placeAll()
+        gamepad?.let(::arrange)
         if (persist) activity?.let { LayoutStore.save(it, appId.value, next) }
     }
 
@@ -765,17 +677,6 @@ object TouchControls : ControlHost {
         return true
     }
 
-    private fun ownVibrator(context: Context): Vibrator? = try {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            context.getSystemService(VibratorManager::class.java)?.defaultVibrator
-        } else {
-            @Suppress("DEPRECATION")
-            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-        }
-    } catch (_: Exception) {
-        null
-    }?.takeIf { it.hasVibrator() }
-
     private fun addHandle(host: PortalActivity, overlay: FrameLayout) {
         val view = PortalCapsuleView(host,
             onPositionChanged = { x, y -> saveHandle(x,y) },
@@ -785,7 +686,7 @@ object TouchControls : ControlHost {
             onToggleController = { later { toggleController() } },
         )
         padButton?.let { view.hideDockAt(it.x, it.y) }
-        val index = views.values.maxOfOrNull { overlay.indexOfChild(it) }?.plus(1) ?: host.desktopLayerTop()
+        val index = gamepad?.topIndex()?.takeIf { it >= 0 }?.plus(1) ?: host.desktopLayerTop()
         handle = view
         overlay.addView(view, index.coerceIn(0, overlay.childCount), FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.TOP or Gravity.START))

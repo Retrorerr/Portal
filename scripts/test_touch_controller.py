@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test virtual controller pointer ownership with the cached Android Kotlin compiler."""
+"""Test the on-screen controller's layout and touch feel with the cached Android Kotlin compiler."""
 from pathlib import Path
 import argparse
 import os
@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--serial", help="Also test the installed Portal Debug controller views on this adb target")
+parser.add_argument("--serial", help="Also test the installed Portal Debug controller on this adb target")
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 cache = Path.home() / ".gradle/caches/modules-2/files-2.1"
@@ -35,25 +35,27 @@ with tempfile.TemporaryDirectory(prefix="portal-controller-") as output:
     subprocess.run([
         "java", "-cp", classpath, "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
         "-no-stdlib", "-no-reflect", "-classpath", stdlib, "-d", output,
-        str(root / "src/android/kotlin/app/polarbear/gaming/ControllerPointers.kt"),
-        str(root / "tests/kotlin/ControllerPointersTest.kt"),
+        *(str(root / "src/android/kotlin/app/polarbear/gaming" / name) for name in ("Control.kt", "PadLayout.kt", "PadInput.kt")),
+        str(root / "tests/kotlin/GamepadTest.kt"),
     ], check=True)
     subprocess.run([
         "java", "-cp", output + os.pathsep + stdlib,
-        "app.polarbear.gaming.ControllerPointersTestKt",
+        "app.polarbear.gaming.GamepadTestKt",
     ], check=True)
 
-# Optional Android regression: the actual ControlView must publish neutral state,
-# not merely redraw its knob at the centre. This uses a recording ControlHost.
+# Optional Android regression: the installed Gamepad, floating and whole-screen,
+# must publish neutral state on every way a touch ends and pass a finger off
+# every control to the desktop. This uses a recording PadSink.
 if args.serial:
-    sdk = Path(os.environ.get("ANDROID_HOME", os.environ.get("ANDROID_SDK_ROOT", Path.home() / "Android/Sdk")))
+    home_sdk = Path(os.environ["LOCALAPPDATA"]) / "Android/Sdk" if os.name == "nt" else Path.home() / "Android/Sdk"
+    sdk = Path(os.environ.get("ANDROID_HOME", os.environ.get("ANDROID_SDK_ROOT", home_sdk)))
     platform = sdk / "platforms/android-35/android.jar"
     javac = shutil.which("javac")
     if not javac and os.environ.get("JAVA_HOME"):
         javac = str(Path(os.environ["JAVA_HOME"]) / "bin/javac")
     if not javac or not Path(javac).is_file():
         raise SystemExit("Set JAVA_HOME to a JDK or put javac on PATH for the Android view regression")
-    versions = sorted((sdk / "build-tools").glob("*/d8"), key=lambda p: tuple(int(v) for v in p.parent.name.split(".") if v.isdigit()))
+    versions = sorted((sdk / "build-tools").glob("*/d8.bat" if os.name == "nt" else "*/d8"), key=lambda p: tuple(int(v) for v in p.parent.name.split(".") if v.isdigit()))
     if not versions or not platform.is_file():
         raise SystemExit("Android SDK platform 35 and build-tools with d8 are required")
     adb = ["adb", "-s", args.serial]

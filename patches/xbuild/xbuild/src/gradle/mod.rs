@@ -101,8 +101,14 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
     let res = main.join("res");
     let assets = main.join("assets");
 
-    std::fs::create_dir_all(&java)?;
-    std::fs::create_dir_all(&kotlin)?;
+    // Mirror the sources: a file deleted or renamed in the tree must not
+    // linger here and keep compiling into the app.
+    for sources in [&java, &kotlin] {
+        if sources.exists() {
+            std::fs::remove_dir_all(sources)?;
+        }
+        std::fs::create_dir_all(sources)?;
+    }
     if assets.exists() {
         std::fs::remove_dir_all(&assets)?;
     }

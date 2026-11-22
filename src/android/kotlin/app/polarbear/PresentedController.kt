@@ -47,10 +47,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.polarbear.gaming.Gamepad
+import app.polarbear.gaming.GamepadView
 import app.polarbear.gaming.PadColors
-import app.polarbear.gaming.PadHaptics
 import app.polarbear.gaming.PadSink
-import app.polarbear.gaming.PresentedGamepad
 import app.polarbear.setup.AppearanceMode
 import app.polarbear.setup.PortalColors
 import app.polarbear.setup.PortalPalette
@@ -65,10 +65,11 @@ import app.polarbear.setup.resolvePalette
 
 /**
  * The touchpad page's Controller ([PresentedDesktopPad]): the whole screen as
- * a game controller for the desktop ([PresentedGamepad]), under a chip at the
- * top that brings the touchpad back or opens Game settings. The screen turns
- * sideways while it shows, and back after. Its views join [page], above the
- * page's own, the first time it shows. UI thread.
+ * Portal's game controller for the desktop ([Gamepad], the same one that
+ * floats over the desktop on this screen), under a chip at the top that
+ * brings the touchpad back or opens Game settings. The screen turns sideways
+ * while it shows, and back after. Its views join [page], above the page's
+ * own, the first time it shows. UI thread.
  */
 internal class PresentedController(
     private val host: PortalActivity,
@@ -76,8 +77,8 @@ internal class PresentedController(
     /** The page's top inset, px. Compose-observable. */
     private val safeTop: () -> Int,
 ) {
-    private val haptics = PadHaptics(host) { GamepadBridge.touchRumbling() }
-    private var gamepad: PresentedGamepad? = null
+    private var gamepad: Gamepad? = null
+    private var screen: GamepadView? = null
     private var chip: ComposeView? = null
     /** Where the chip's settings button is; Game settings opens out of it. */
     private var settingsAt: LayoutCoordinates? = null
@@ -90,23 +91,23 @@ internal class PresentedController(
 
     /** Comes in over the page; the screen turns sideways first. */
     fun show() {
-        val view = gamepad ?: create()
+        val pad = gamepad ?: create()
         wanted = true
-        sync(view)
-        view.visibility = View.VISIBLE
+        sync(pad)
+        screen?.visibility = View.VISIBLE
         chip?.visibility = View.VISIBLE
-        view.show(waitForTurn = turnSideways())
+        pad.show(waitForTurn = turnSideways())
     }
 
     /** Goes, and the screen may turn back. */
     fun hide() {
         wanted = false
         restoreOrientation()
-        val view = gamepad ?: return
-        view.hide {
+        val pad = gamepad ?: return
+        pad.hide {
             // Shown again meanwhile.
             if (wanted) return@hide
-            view.visibility = View.GONE
+            screen?.visibility = View.GONE
             chip?.visibility = View.GONE
         }
     }
@@ -123,11 +124,14 @@ internal class PresentedController(
         gamepad?.release()
     }
 
-    private fun create(): PresentedGamepad {
-        val view = PresentedGamepad(host, PadSink { buttons, axes -> TouchControls.screenPad(buttons, axes) }, haptics)
-        view.colors = systemPalette().padColors()
+    private fun create(): Gamepad {
+        val pad = Gamepad(host, PadSink { buttons, axes -> TouchControls.screenPad(buttons, axes) },
+            TouchControls.padHaptics(host), wholeScreen = true)
+        pad.colors = systemPalette().padColors()
+        val view = pad.screenView()
         page.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        gamepad = view
+        gamepad = pad
+        screen = view
         // Its own window-sized view would take every touch: wrapped to the
         // chip, a touch beside it falls through to the controller.
         val layer = ComposeView(host).apply { setContent { Layer() } }
@@ -136,16 +140,15 @@ internal class PresentedController(
             Gravity.TOP or Gravity.CENTER_HORIZONTAL,
         ))
         chip = layer
-        return view
+        return pad
     }
 
     /** Game settings as they are now. */
-    private fun sync(view: PresentedGamepad) {
-        view.userScale = TouchControls.screenScale.value
-        view.analogTriggers = TouchControls.analog.value
+    private fun sync(pad: Gamepad) {
+        pad.userScale = TouchControls.screenScale.value
+        pad.analogTriggers = TouchControls.analog.value
         // A Portal page over it (the menu, Game settings) ends every touch and dims it.
-        view.suspended = SessionControls.utilityOpen.value
-        haptics.enabled = TouchControls.haptics.value
+        pad.suspended = SessionControls.utilityOpen.value
     }
 
     /** Before Compose has a palette: the one it will resolve. */
@@ -175,9 +178,9 @@ internal class PresentedController(
 
     /** The controller keeps the middle of its top row clear of the chip. */
     private fun placeChip(coordinates: LayoutCoordinates) {
-        val view = gamepad ?: return
+        val view = screen ?: return
         view.getLocationInWindow(origin)
-        view.chipBottom = coordinates.boundsInWindow().bottom - origin[1]
+        gamepad?.chipBottom = coordinates.boundsInWindow().bottom - origin[1]
     }
 
     @Composable
@@ -190,8 +193,7 @@ internal class PresentedController(
                 // Game settings can change while it shows, from the page that opens over it.
                 LaunchedEffect(Unit) {
                     snapshotFlow {
-                        listOf(TouchControls.screenScale.value, TouchControls.analog.value,
-                            TouchControls.haptics.value, SessionControls.utilityOpen.value)
+                        listOf(TouchControls.screenScale.value, TouchControls.analog.value, SessionControls.utilityOpen.value)
                     }.collect { gamepad?.let(::sync) }
                 }
                 Chip(palette)
@@ -277,7 +279,8 @@ private fun ChipAction(
 /** Portal's palette as the controller paints it: the touchpad page's own buttons. */
 private fun PortalPalette.padColors() = PadColors(
     surface = surfaceTop.toArgb(),
-    edge = surfaceBorder.toArgb(),
+    // The outline the touchpad page's controls had: its muted ink, faint.
+    edge = textMuted.copy(alpha = (if (isDark) 58f else 64f) / 255f).toArgb(),
     ink = textPrimary.toArgb(),
     muted = textMuted.toArgb(),
     accent = accent.toArgb(),
