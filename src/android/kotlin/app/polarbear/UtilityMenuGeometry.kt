@@ -25,18 +25,32 @@ internal object UtilityMenuGeometry {
     fun menu(area: Area, anchor: Point, count: Int, density: Float, fontScale: Float): Menu {
         val tileWidth = (88f + 48f*(fontScale-1f).coerceAtLeast(0f))*density
         val tileHeight = tileWidth
+        val margin = 8f*density
         val spacingRadius = if (count > 1) (tileWidth + 8f*density) / (2 * sin(Math.PI / count)).toFloat() else 0f
-        val radius = maxOf(120f*density, tileWidth + 16f*density, spacingRadius)
-        val halfW = radius + tileWidth/2 + 8*density
-        val halfH = radius + tileHeight/2 + 8*density
-        val compact = area.width < halfW*2 || area.height < halfH*2
-        val center = if (compact) Point((area.left+area.right)/2, (area.top+area.bottom)/2) else Point(
-            anchor.x.coerceIn(area.left+halfW, area.right-halfW),
-            anchor.y.coerceIn(area.top+halfH, area.bottom-halfH))
-        val offsets = (0 until count).map { index ->
+        // The least ring that keeps the tiles apart and clear of the close button.
+        val leastRadius = maxOf(tileWidth + 16f*density, spacingRadius)
+        // The ring on a unit circle, from the top. An odd count reaches further
+        // up than down, so it is fitted by its own bounds, not a full circle's.
+        val unit = (0 until count).map { index ->
             val angle = Math.toRadians((-90.0 + index*360.0/count))
-            Point(cos(angle).toFloat()*radius, sin(angle).toFloat()*radius)
+            Point(cos(angle).toFloat(), sin(angle).toFloat())
         }
+        val up = -(unit.minOfOrNull { it.y } ?: 0f).coerceAtMost(0f)
+        val down = (unit.maxOfOrNull { it.y } ?: 0f).coerceAtLeast(0f)
+        val left = -(unit.minOfOrNull { it.x } ?: 0f).coerceAtMost(0f)
+        val right = (unit.maxOfOrNull { it.x } ?: 0f).coerceAtLeast(0f)
+        // Where the screen is short (a phone on its side), the ring draws in
+        // before the menu gives way to the compact card.
+        fun fits(room: Float, reach: Float) = if (reach > 0f) (room - tileWidth - margin*2) / reach else Float.MAX_VALUE
+        val ringRadius = maxOf(120f*density, leastRadius)
+        val radius = minOf(ringRadius, fits(area.height, up + down), fits(area.width, left + right))
+        val compact = radius < leastRadius
+        // Not coerceIn: a ring that just fits can leave the bounds a rounding error apart.
+        val center = if (compact) Point((area.left+area.right)/2, (area.top+area.bottom)/2) else Point(
+            anchor.x.coerceAtLeast(area.left + left*radius + tileWidth/2 + margin).coerceAtMost(area.right - right*radius - tileWidth/2 - margin),
+            anchor.y.coerceAtLeast(area.top + up*radius + tileHeight/2 + margin).coerceAtMost(area.bottom - down*radius - tileHeight/2 - margin))
+        val ring = if (compact) ringRadius else radius
+        val offsets = unit.map { Point(it.x*ring, it.y*ring) }
         return Menu(center, offsets, compact, tileWidth, tileHeight)
     }
 }

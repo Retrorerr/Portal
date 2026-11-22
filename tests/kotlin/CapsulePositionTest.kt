@@ -29,6 +29,23 @@ fun main() {
             check(hypot(a.x-b.x,a.y-b.y) + 0.01f >= menu.tileWidth + 8f)
         }
     }
+    // A phone on its side (2772x1272 at 3.5, status bar and cutout reserved)
+    // keeps the ring, drawn in to fit the height, rather than the compact card.
+    val side = UtilityMenuGeometry.Area(141f,141f,2772f,1272f)
+    for (count in 5..6) {
+        val menu = UtilityMenuGeometry.menu(side,UtilityMenuGeometry.Point(2700f,300f),count,3.5f,1f)
+        check(!menu.compact)
+        menu.offsets.forEach { p ->
+            check(menu.center.x+p.x-menu.tileWidth/2 >= side.left && menu.center.x+p.x+menu.tileWidth/2 <= side.right)
+            check(menu.center.y+p.y-menu.tileHeight/2 >= side.top-0.01f && menu.center.y+p.y+menu.tileHeight/2 <= side.bottom+0.01f)
+            check(hypot(p.x,p.y) + 0.01f >= menu.tileWidth + 16f*3.5f)
+        }
+        for (i in menu.offsets.indices) for (j in 0 until i) {
+            val a=menu.offsets[i]; val b=menu.offsets[j]
+            check(hypot(a.x-b.x,a.y-b.y) + 0.01f >= menu.tileWidth + 8f*3.5f)
+        }
+    }
+    check(UtilityMenuGeometry.menu(side,UtilityMenuGeometry.Point(2700f,300f),6,3.5f,1.5f).compact)
     for (narrow in listOf(UtilityMenuGeometry.Area(0f,20f,300f,200f),UtilityMenuGeometry.Area(0f,0f,180f,500f))) {
         check(UtilityMenuGeometry.menu(narrow,UtilityMenuGeometry.Point(20f,30f),6,1f,1.5f).compact)
     }
