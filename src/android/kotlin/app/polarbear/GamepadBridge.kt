@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.CombinedVibration
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -49,6 +50,12 @@ object GamepadBridge {
     )
 
     private var appContext: Context? = null
+
+    /** Until when the touch pad's rumble plays, uptime ms. */
+    @Volatile private var touchRumbleUntil = 0L
+
+    /** The touch pad is rumbling now: a press tick would cut the rumble short. */
+    fun touchRumbling(): Boolean = SystemClock.uptimeMillis() < touchRumbleUntil
     private val known = HashSet<Int>()
     private val axisValues = FloatArray(AXES.size)
 
@@ -150,7 +157,10 @@ object GamepadBridge {
             if (deviceId == TOUCH_PAD_ID) {
                 // The game panel's Rumble switch; a stop always goes through.
                 val wanted = TouchControls.rumbleEnabled() || amplitudes.max() == 0
-                if (wanted) rumbleVibrator(ownVibrator(), amplitudes.max(), length)
+                if (wanted) {
+                    touchRumbleUntil = if (amplitudes.max() > 0) SystemClock.uptimeMillis() + length else 0L
+                    rumbleVibrator(ownVibrator(), amplitudes.max(), length)
+                }
                 return
             }
             val device = InputDevice.getDevice(deviceId) ?: return

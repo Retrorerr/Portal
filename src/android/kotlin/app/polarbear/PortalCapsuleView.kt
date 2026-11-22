@@ -71,6 +71,9 @@ internal class PortalCapsuleView(
     // hides, and each page comes from and goes back to the button that opened it.
     private var dockHidden by mutableStateOf(false)
     private var padAnchor: Offset? = null
+    // A settings page opened straight from one of those buttons (the
+    // controller's) closes back into it rather than into the menu.
+    private var closesToPad = false
     // Opened in place of Android's keyboard, so it also leaves with the text focus.
     private var keyboardForText = false
     // The user minimised that keyboard: it returns as the chip until they tap it or close it.
@@ -89,7 +92,7 @@ internal class PortalCapsuleView(
                     "report" -> handoff { onOpen(action) }
                     else -> handoff { onOpen(null) }
                 } },
-                onBack = { changePage(UtilityPage.Menu) }, onOutside = { dismiss() },
+                onBack = { if (closesToPad) dismiss() else changePage(UtilityPage.Menu) }, onOutside = { dismiss() },
                 onAnimating = { if (isAttachedToWindow) updateFrameRate(it || SessionControls.isUtilityVisible()) },
                 onHubBounds = { hubBounds = it }, onActionBounds = { id, rect -> actionBounds[id] = rect },
                 onKeyboardBounds = { keyboardBounds = it },
@@ -154,6 +157,7 @@ internal class PortalCapsuleView(
         if (next == UtilityPage.Menu || next == UtilityPage.Settings) composition.requestFocus() else composition.clearFocus()
     }
     private fun requestPage(next: UtilityPage) {
+        if (!next.isSettings) closesToPad = false
         if (next != page) {
             TouchControls.cancelInput()
             SessionControls.setDesktopKeyboard(next == UtilityPage.Keyboard)
@@ -196,6 +200,7 @@ internal class PortalCapsuleView(
         }
         if (next == UtilityPage.Keyboard) keyboardForText = false
         changePage(next)
+        if (page == next) closesToPad = dockHidden && next.isSettings
     }
 
     private fun snapToPadAnchor() {
@@ -213,7 +218,7 @@ internal class PortalCapsuleView(
     fun dismiss(): Boolean {
         if (page == UtilityPage.Dock) return false
         pendingAction = null
-        requestPage(if (page == UtilityPage.Keyboard && keyboardForText) UtilityPage.Dock
+        requestPage(if (page == UtilityPage.Keyboard && keyboardForText || closesToPad) UtilityPage.Dock
             else if (page == UtilityPage.Keyboard || page.isSettings) UtilityPage.Menu else UtilityPage.Dock)
         return true
     }

@@ -92,6 +92,7 @@ import app.polarbear.SettingsToggle
 import app.polarbear.UtilitySettingsCard
 import app.polarbear.UtilitySettingsWidth
 import app.polarbear.TouchControls
+import app.polarbear.deviceNoun
 import app.polarbear.setup.PortalColors
 import app.polarbear.setup.PortalPalette
 import app.polarbear.setup.components.PortalEmphasized
@@ -177,6 +178,10 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
     val rumble by TouchControls.rumble
     val analog by TouchControls.analog
     val visible = TouchControls.controllerVisible
+    // With the desktop on a monitor, the whole screen is the controller.
+    val presenting by TouchControls.presenting
+    val screenScale by TouchControls.screenScale
+    val noun = deviceNoun(context)
 
     var ownSettings by remember(appId) { mutableStateOf(GameSettings.hasAppConfig(context, appId)) }
     var config by remember(appId, ownSettings) { mutableStateOf(GameSettings.load(context, appId)) }
@@ -213,6 +218,7 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
             SettingsToggle(
                 title = "Show controller",
                 subtitle = when {
+                    presenting -> if (visible) null else "Turns this $noun into a game controller"
                     physicalPad && !visible -> "Hidden while a controller is connected"
                     physicalPad -> "Shown alongside your controller"
                     !gameRunning -> "Appears when a game starts"
@@ -223,30 +229,42 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                 onChange = { TouchControls.toggleController() },
             )
             SettingsDivider(GamePalette)
-            SliderRow(
-                title = "Opacity",
-                value = layout.opacity,
-                range = 0.15f..1f,
-                valueText = "${(layout.opacity * 100).roundToInt()}%",
-                palette = palette,
-                onChange = { TouchControls.updateLayout(layout.copy(opacity = it), persist = false) },
-                onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
-            )
-            SliderRow(
-                title = "Size",
-                value = layout.scale,
-                range = ControllerLayout.MIN_SCALE..ControllerLayout.MAX_SCALE,
-                valueText = "${(layout.scale * 100).roundToInt()}%",
-                palette = palette,
-                onChange = { TouchControls.updateLayout(layout.copy(scale = it), persist = false) },
-                onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
-            )
-            SettingsDivider(GamePalette)
-            NavRow(
-                title = "Edit layout",
-                subtitle = if (TouchControls.appLayout.value) "Using this game's own layout" else "Move, resize and hide controls",
-                palette = palette,
-            ) { onEditController() }
+            if (presenting) {
+                SliderRow(
+                    title = "Size",
+                    value = screenScale,
+                    range = PadLayout.MIN_USER_SCALE..PadLayout.MAX_USER_SCALE,
+                    valueText = "${(screenScale * 100).roundToInt()}%",
+                    palette = palette,
+                    onChange = { TouchControls.setScreenScale(it, persist = false) },
+                    onFinished = { TouchControls.setScreenScale(TouchControls.screenScale.value, persist = true) },
+                )
+            } else {
+                SliderRow(
+                    title = "Opacity",
+                    value = layout.opacity,
+                    range = 0.15f..1f,
+                    valueText = "${(layout.opacity * 100).roundToInt()}%",
+                    palette = palette,
+                    onChange = { TouchControls.updateLayout(layout.copy(opacity = it), persist = false) },
+                    onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
+                )
+                SliderRow(
+                    title = "Size",
+                    value = layout.scale,
+                    range = ControllerLayout.MIN_SCALE..ControllerLayout.MAX_SCALE,
+                    valueText = "${(layout.scale * 100).roundToInt()}%",
+                    palette = palette,
+                    onChange = { TouchControls.updateLayout(layout.copy(scale = it), persist = false) },
+                    onFinished = { TouchControls.updateLayout(TouchControls.layout.value, persist = true) },
+                )
+                SettingsDivider(GamePalette)
+                NavRow(
+                    title = "Edit layout",
+                    subtitle = if (TouchControls.appLayout.value) "Using this game's own layout" else "Move, resize and hide controls",
+                    palette = palette,
+                ) { onEditController() }
+            }
         }
 
         SectionHeading("Feel", palette)
@@ -255,7 +273,7 @@ internal fun GameSettingsContent(palette: PortalPalette, width: Dp, maxHeight: D
                 TouchControls.setHaptics(it)
             }
             SettingsDivider(GamePalette)
-            SettingsToggle("Rumble", "The tablet vibrates when a game rumbles", rumble, palette) {
+            SettingsToggle("Rumble", "The $noun vibrates when a game rumbles", rumble, palette) {
                 TouchControls.setRumble(it)
             }
             SettingsDivider(GamePalette)

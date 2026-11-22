@@ -17,7 +17,7 @@ import androidx.compose.ui.unit.dp
 
 internal enum class PortalGlyph {
     Veil, Report, Files, Apps, Keyboard, Controller, Options, Settings, Close, Import, Export, Parent, Home,
-    Monitor, Phone, Tablet, Return, Mouse, Portal, Accessibility, Layers,
+    Monitor, Phone, Tablet, Return, Mouse, Portal, Accessibility, Layers, Touchpad,
 }
 
 /** The same small stroke, corner and proportions across Portal's utility actions. */
@@ -106,6 +106,8 @@ internal fun PortalIcon(glyph: PortalGlyph, color: Color, modifier: Modifier = M
                     drawCircle(color, radius = 1.4f, center = Offset(12f,6.6f))
                     line(7f,9.6f,17f,9.6f); line(12f,9.6f,12f,14f); line(12f,14f,9.2f,18.2f); line(12f,14f,14.8f,18.2f)
                 }
+                // A laptop's touchpad: the pad and its two buttons.
+                PortalGlyph.Touchpad -> { box(3f,4f,18f,16f,3f); line(3.75f,15f,20.25f,15f); line(12f,15f,12f,19.25f) }
                 // A window floating over another: controls kept above other apps.
                 PortalGlyph.Layers -> {
                     box(2.5f,7.5f,14f,13.5f)

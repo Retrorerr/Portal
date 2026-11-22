@@ -123,7 +123,8 @@ import kotlinx.coroutines.withTimeoutOrNull
  * cursor (one finger moves it, a tap clicks, two fingers scroll or pinch, as
  * on a laptop). A chip at the top names the monitor; the buttons below open
  * Portal's keyboard and menu, which grow out of them and close back into them,
- * and bring the desktop back. With a mouse connected, one more hands it and the
+ * turn the screen into a game controller ([PresentedController]), and bring
+ * the desktop back. With a mouse connected, one more hands it and the
  * keyboard to the desktop.
  *
  * The desktop leaves this screen by shrinking into the monitor chip ([snapshot]
@@ -177,6 +178,9 @@ internal class PresentedDesktopPad(
     private var left: (() -> Unit)? = null
     private var leaveBase = 0L
 
+    /** The Controller button's whole-screen game controller. */
+    private val controller = PresentedController(host, this) { safe.top }
+
     private val inputManager = host.getSystemService(InputManager::class.java)
     private val devices = object : InputManager.InputDeviceListener {
         override fun onInputDeviceAdded(deviceId: Int) = devicesChanged()
@@ -207,6 +211,7 @@ internal class PresentedDesktopPad(
         ViewCompat.getRootWindowInsets(this)?.let {
             safe = it.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
         }
+        TouchControls.presentingStarted(this, controller::release)
     }
 
     private fun devicesChanged() {
@@ -295,6 +300,16 @@ internal class PresentedDesktopPad(
                     if (fingers.down) tween(90) else tween(320, easing = PortalEmphasizedAccelerate),
                     label = "touchpad finger glow",
                 )
+                // Controller, from its button below or Game settings: the whole screen
+                // becomes a game controller, and the touchpad steps back until it goes.
+                val controllerShown = TouchControls.screenController.value && !leaving
+                LaunchedEffect(controllerShown) { if (controllerShown) controller.show() else controller.hide() }
+                val touchpad = animateFloatAsState(
+                    if (controllerShown) 0f else 1f,
+                    if (controllerShown) tween(160, easing = PortalEmphasizedAccelerate)
+                    else tween(320, delayMillis = 120, easing = PortalEmphasizedDecelerate),
+                    label = "touchpad under the controller",
+                )
                 val hole = remember { Path() }
                 val frame = remember { Path() }
                 Box(
@@ -331,12 +346,12 @@ internal class PresentedDesktopPad(
                             .graphicsLayer {
                                 // Carried in, its name shows once the picture has become the chip.
                                 val shown = if (carried) ease(0.9f, 1f, enter.value) else rise.value
-                                alpha = shown * (1f - ease(0f, 0.12f, reveal.value))
+                                alpha = shown * (1f - ease(0f, 0.12f, reveal.value)) * touchpad.value
                                 translationY = if (carried) 0f else (1f - rise.value) * -14.dp.toPx()
                             },
                     )
                     AnimatedVisibility(
-                        guide && !touched && settled && !leaving,
+                        guide && !touched && settled && !leaving && !controllerShown,
                         Modifier.align(Alignment.Center).padding(horizontal = 24.dp)
                             .graphicsLayer { alpha = chrome.value },
                         enter = fadeIn(tween(scaled(420), delayMillis = scaled(if (carried) 520 else 240), easing = PortalEmphasizedDecelerate)) +
@@ -353,8 +368,9 @@ internal class PresentedDesktopPad(
                         Modifier.align(Alignment.BottomCenter).padding(bottom = bottom + 28.dp)
                             .graphicsLayer {
                                 val gone = out.value
-                                alpha = rise.value * chrome.value * (1f - gone)
-                                translationY = (1f - rise.value) * 22.dp.toPx() + gone * 18.dp.toPx()
+                                alpha = rise.value * chrome.value * (1f - gone) * touchpad.value
+                                translationY = (1f - rise.value) * 22.dp.toPx() + gone * 18.dp.toPx() +
+                                    (1f - touchpad.value) * 18.dp.toPx()
                                 val settle = 0.94f + 0.06f * chrome.value
                                 scaleX = settle; scaleY = settle
                             },
@@ -431,7 +447,7 @@ internal class PresentedDesktopPad(
         val placed = remember { arrayOfNulls<LayoutCoordinates>(2) }
         fun center(index: Int): Offset? = placed[index]?.takeIf { it.isAttached }?.boundsInRoot()?.center
         BoxWithConstraints {
-            val count = if (pointerConnected) 4 else 3
+            val count = if (pointerConnected) 5 else 4
             val gap = 14.dp
             val size = ((maxWidth - 32.dp - gap * (count - 1)) / count).coerceIn(56.dp, 74.dp)
             Row(horizontalArrangement = Arrangement.spacedBy(gap), verticalAlignment = Alignment.CenterVertically) {
@@ -451,6 +467,10 @@ internal class PresentedDesktopPad(
                 }
                 PadButton(PortalGlyph.Keyboard, "Keyboard", palette, size, onPlaced = { placed[0] = it }) {
                     center(0)?.let { TouchControls.openFromPad(UtilityPage.Keyboard, it.x, it.y) }
+                }
+                PadButton(PortalGlyph.Controller, "Controller", palette, size,
+                    description = "Use this ${deviceNoun(host)} as a game controller") {
+                    TouchControls.setScreenController(true)
                 }
                 PadButton(PortalGlyph.Portal, "Portal", palette, size, description = "Portal menu",
                     onPlaced = { coordinates ->
@@ -482,6 +502,8 @@ internal class PresentedDesktopPad(
         fingers.lift()
         // A held mouse and keyboard go back to Android at once.
         removeView(grab)
+        // The controller goes with the buttons; the floating controls may come back.
+        TouchControls.presentingEnded(this)
     }
 
     // While it leaves, the pad still covers the desktop: it keeps every touch
@@ -550,6 +572,8 @@ internal class PresentedDesktopPad(
         gestures.reset()
         releaseButtons()
         snapshot?.drop()
+        controller.detach()
+        TouchControls.presentingEnded(this)
         TouchControls.restoreCapsule()
         super.onDetachedFromWindow()
     }

@@ -26,6 +26,7 @@ import app.polarbear.gaming.ControllerLayout
 import app.polarbear.gaming.EditBar
 import app.polarbear.gaming.GamePanel
 import app.polarbear.gaming.LayoutStore
+import app.polarbear.gaming.PadLayout
 import java.util.concurrent.Executors
 
 /**
@@ -40,6 +41,11 @@ import java.util.concurrent.Executors
  * Each control is its own view above the native surface, so Android splits
  * multitouch between them and a finger outside every control still
  * reaches the desktop.
+ *
+ * While the desktop is on a monitor, this screen is its touchpad page
+ * ([PresentedDesktopPad]) and these floating controls stay away: that page
+ * turns the whole screen into a controller of its own instead, which feeds
+ * the same touch pad ([screenPad]).
  */
 object TouchControls : ControlHost {
     private const val TAG = "PortalTouchControls"
@@ -49,6 +55,7 @@ object TouchControls : ControlHost {
     private const val PREF_HAPTICS = "haptics"
     private const val PREF_RUMBLE = "rumble"
     private const val PREF_ANALOG = "analog_triggers"
+    private const val PREF_SCREEN_SCALE = "screen_scale"
     private const val PREF_HANDLE_X = "handle_x"
     private const val PREF_HANDLE_Y = "handle_y"
     private const val POLL_MS = 2500L
@@ -70,6 +77,13 @@ object TouchControls : ControlHost {
     val appLayout = mutableStateOf(false)
     val panelClosing = mutableStateOf(false)
 
+    /** The desktop is on a monitor and this screen is its touchpad page. */
+    val presenting = mutableStateOf(false)
+    /** That page shows the whole-screen controller instead of the touchpad. */
+    val screenController = mutableStateOf(false)
+    /** The whole-screen controller's Size setting. */
+    val screenScale = mutableStateOf(1f)
+
     private val main = Handler(Looper.getMainLooper())
     private val scanner = Executors.newSingleThreadExecutor { Thread(it, "touch-controls-scan").apply { isDaemon = true } }
     private var activity: PortalActivity? = null
@@ -84,6 +98,11 @@ object TouchControls : ControlHost {
     private var layoutKey: String? = "\u0000"
     private var vibrator: Vibrator? = null
     private val axes = FloatArray(10)
+    private var presentingOwner: Any? = null
+    private var screenRelease: (() -> Unit)? = null
+    // The whole-screen controller took the pad: it stays plugged in until the
+    // desktop leaves the monitor, so a game never sees it go while the touchpad is out.
+    private var screenPadUsed = false
 
     private val rootLayoutListener = View.OnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
         if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
@@ -105,7 +124,8 @@ object TouchControls : ControlHost {
 
     /** The controller is wanted on screen right now (a game may still be needed). */
     val controllerVisible: Boolean
-        get() = controllerOn.value && (!physicalPad.value || showWithPad.value)
+        get() = if (presenting.value) screenController.value
+            else controllerOn.value && (!physicalPad.value || showWithPad.value)
 
     /** Read by [GamepadBridge.rumble]: vibrate the tablet for the touch pad's rumble. */
     @JvmStatic fun rumbleEnabled(): Boolean = rumble.value
@@ -118,6 +138,7 @@ object TouchControls : ControlHost {
         haptics.value = prefs.getBoolean(PREF_HAPTICS, true)
         rumble.value = prefs.getBoolean(PREF_RUMBLE, true)
         analog.value = prefs.getBoolean(PREF_ANALOG, false)
+        screenScale.value = prefs.getFloat(PREF_SCREEN_SCALE, 1f).coerceIn(PadLayout.MIN_USER_SCALE, PadLayout.MAX_USER_SCALE)
         vibrator = ownVibrator(host)
         try {
             host.getSystemService(InputManager::class.java)?.registerInputDeviceListener(deviceListener, main)
@@ -233,6 +254,8 @@ object TouchControls : ControlHost {
     private var lastMode = Mode.NONE
 
     private fun mode(): Mode = when {
+        // The touchpad page fills the screen and brings its own controller.
+        presenting.value -> Mode.NONE
         editingState.value -> Mode.EDIT
         gameRunning.value && controllerVisible -> Mode.PLAY
         else -> Mode.NONE
@@ -314,7 +337,14 @@ object TouchControls : ControlHost {
                 }
             }
             Mode.EDIT -> if (padPlugged && modeChanged) sendNeutral()
-            Mode.NONE -> unplug()
+            Mode.NONE -> when {
+                !presenting.value || !screenPadUsed -> unplug()
+                // Back in front: the screen controller's pad comes back at rest.
+                !padPlugged -> {
+                    padPlugged = true
+                    sendNeutral()
+                }
+            }
         }
     }
 
@@ -404,6 +434,8 @@ object TouchControls : ControlHost {
     private fun unplug() {
         if (!padPlugged) return
         padPlugged = false
+        // At rest first: a program that misses the removal must not keep a held direction.
+        sendNeutral()
         GamepadBridge.removeTouchPad()
     }
 
@@ -414,6 +446,7 @@ object TouchControls : ControlHost {
 
     /** A modal control or lost focus ends every held gesture immediately. */
     fun cancelInput() {
+        screenRelease?.invoke()
         views.values.forEach { it.release() }
         if (padPlugged) sendNeutral()
     }
@@ -479,6 +512,10 @@ object TouchControls : ControlHost {
 
     fun toggleController() {
         val host = activity ?: return
+        if (presenting.value) {
+            setScreenController(!screenController.value)
+            return
+        }
         if (controllerVisible) {
             if (physicalPad.value) setShowWithPad(false) else setControllerOn(false)
         } else {
@@ -486,6 +523,58 @@ object TouchControls : ControlHost {
             if (physicalPad.value) setShowWithPad(true)
         }
         refresh(host)
+    }
+
+    // ---- The touchpad page's whole-screen controller ---------------------
+
+    /** The touchpad page is up; [release] ends every touch on its controller. */
+    fun presentingStarted(owner: Any, release: () -> Unit) {
+        presentingOwner = owner
+        screenRelease = release
+        if (!presenting.value) {
+            presenting.value = true
+            screenController.value = false
+            screenPadUsed = false
+        }
+        if (editingState.value) stopEditing()
+        closePanel(immediately = true)
+        activity?.let(::refresh)
+    }
+
+    /** That page left: the floating controls may return, and the next page starts as a touchpad. */
+    fun presentingEnded(owner: Any) {
+        if (presentingOwner !== owner) return
+        // Let go while the pad still reaches the guest, or it keeps the last push.
+        screenRelease?.invoke()
+        presentingOwner = null
+        screenRelease = null
+        presenting.value = false
+        screenController.value = false
+        screenPadUsed = false
+        activity?.let(::refresh)
+    }
+
+    /** Shows the whole-screen controller on the touchpad page, or brings the touchpad back. */
+    fun setScreenController(on: Boolean) {
+        if (on && !presenting.value) return
+        if (screenController.value == on) return
+        if (!on) screenRelease?.invoke()
+        screenController.value = on
+    }
+
+    fun setScreenScale(scale: Float, persist: Boolean) {
+        val value = scale.coerceIn(PadLayout.MIN_USER_SCALE, PadLayout.MAX_USER_SCALE)
+        screenScale.value = value
+        if (persist) activity?.let { prefs(it).edit().putFloat(PREF_SCREEN_SCALE, value).apply() }
+    }
+
+    /** The whole-screen controller's state, buttons in xpad order. False when dropped: Portal is in the background. */
+    fun screenPad(buttons: Int, axes: FloatArray): Boolean {
+        if (!presenting.value || activity == null) return false
+        screenPadUsed = true
+        padPlugged = true
+        GamepadBridge.touchPad(buttons, axes)
+        return true
     }
 
     fun setControllerOn(on: Boolean) {
@@ -660,13 +749,18 @@ object TouchControls : ControlHost {
         return true
     }
 
-    /** Back closes the panel or finishes editing before reaching the guest. */
+    /** Back closes the panel, finishes editing or brings the touchpad back before reaching the guest. */
     fun onBackKey(event: KeyEvent): Boolean {
         if (dispatchUtilityKey(event)) return true
         if (event.keyCode != KeyEvent.KEYCODE_BACK) return false
-        if (panel == null && !editingState.value) return false
+        val screen = presenting.value && screenController.value
+        if (panel == null && !editingState.value && !screen) return false
         if (event.action == KeyEvent.ACTION_UP) {
-            if (panel != null) closePanel() else stopEditing()
+            when {
+                panel != null -> closePanel()
+                editingState.value -> stopEditing()
+                else -> setScreenController(false)
+            }
         }
         return true
     }
