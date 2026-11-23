@@ -8,6 +8,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
 import java.io.File;
 import java.io.FileNotFoundException;
 
@@ -37,7 +38,14 @@ public final class SaveFixtureProvider extends ContentProvider {
         return super.call(method, arg, extras);
     }
     @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sortOrder) {
-        return new MatrixCursor(new String[] { DocumentsContract.Document.COLUMN_DOCUMENT_ID });
+        MatrixCursor cursor = new MatrixCursor(new String[] { OpenableColumns.SIZE });
+        try {
+            File file = document(DocumentsContract.getDocumentId(uri));
+            if (file.isFile()) cursor.addRow(new Object[] {
+                file.getName().endsWith("-unknown-size.bin") ? null : file.length()
+            });
+        } catch (FileNotFoundException ignored) { }
+        return cursor;
     }
     @Override public String getType(Uri uri) { return "application/octet-stream"; }
     @Override public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {

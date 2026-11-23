@@ -3,10 +3,17 @@ package app.polarbear.files.tests;
 import android.app.Activity;
 import android.app.Instrumentation;
 import android.content.Intent;
+import android.graphics.PixelFormat;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.ImageReader;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.view.InputDevice;
+import android.view.Display;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -32,11 +39,19 @@ public final class PortalFilesInstrumentation extends Instrumentation {
     private boolean dragInProgress;
     private boolean motionOnly;
     private boolean uiOnly;
+    private boolean transferRecoveryOnly;
+    private boolean displayOnly;
+    private boolean pillTiming;
+    private String workspace;
+    private long workspaceCreated;
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         motionOnly = arguments != null && Boolean.parseBoolean(arguments.getString("motionOnly", "false"));
         uiOnly = arguments != null && Boolean.parseBoolean(arguments.getString("uiOnly", "false"));
+        transferRecoveryOnly = arguments != null && Boolean.parseBoolean(arguments.getString("transferRecoveryOnly", "false"));
+        displayOnly = arguments != null && Boolean.parseBoolean(arguments.getString("displayOnly", "false"));
+        pillTiming = arguments != null && Boolean.parseBoolean(arguments.getString("pillTiming", "false"));
         start();
     }
 
@@ -71,8 +86,12 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         while (showing() != expected && SystemClock.uptimeMillis() < deadline) SystemClock.sleep(50);
         check(showing() == expected, "Veil visibility did not settle to " + expected);
     }
+    private JSONObject runOperation(JSONObject request, int input, int output, String job) throws Exception {
+        if (!request.has("workspace")) request.put("workspace", workspace);
+        return new JSONObject((String) run.invoke(null, request.toString(), input, output, job));
+    }
     private JSONObject operation(JSONObject request, int input, int output, String job) throws Exception {
-        JSONObject response = new JSONObject((String) run.invoke(null, request.toString(), input, output, job));
+        JSONObject response = runOperation(request, input, output, job);
         check(response.optBoolean("ok"), response.toString());
         return response;
     }
@@ -192,6 +211,17 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             SystemClock.sleep(50);
         }
         throw new AssertionError("Missing visible semantics: " + java.util.Arrays.toString(needles));
+    }
+    private android.graphics.Rect stableSemanticBounds(String... needles) throws Exception {
+        android.graphics.Rect previous = semanticBounds(needles);
+        long deadline = SystemClock.uptimeMillis() + 5000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            SystemClock.sleep(100);
+            android.graphics.Rect bounds = semanticBounds(needles);
+            if (bounds.equals(previous)) return bounds;
+            previous = bounds;
+        }
+        throw new AssertionError("Tap target did not settle: " + java.util.Arrays.toString(needles));
     }
     private void setState(Class<?> owner, String getter, boolean value) throws Exception {
         Object state = invoke(owner, getter);
@@ -404,7 +434,23 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         } finally { bitmap.recycle(); }
     }
     private void openMenu() throws Exception { tap(capsuleBounds()); waitUtility("Menu"); }
-    private void openCapsule() throws Exception { openMenu(); tap(utilityBounds("files")); }
+    private void openVeil() throws Exception {
+        openMenu();
+        tap(utilityBounds("veil"));
+        waitShowing(true);
+    }
+    private void openFiles() throws Exception {
+        openVeil();
+        // A semantics node can be visible while the recalled veil is still sliding.
+        // Wait for a stationary tap target and observe the panel after dispatch.
+        tap(stableSemanticBounds("Transfer files"));
+        long deadline = SystemClock.uptimeMillis() + 5000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            if ("files".equals(invoke(overlay, "getActivePanel"))) return;
+            SystemClock.sleep(50);
+        }
+        throw new AssertionError("Files did not open from the veil");
+    }
     private void testRoundtable() throws Exception {
         openMenu();
         for (String action : new String[] { "report","veil","keyboard","settings" }) {
@@ -467,7 +513,20 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             setUtilityArea(compactArea(360)); SystemClock.sleep(1400); capture("-compact");
             for (String action:new String[]{"report","veil","keyboard","settings"}) check(!utilityBounds(action).isEmpty(),"Compact action missing");
             shellText("settings put system font_scale 1.6"); SystemClock.sleep(1300);
+            check(Math.abs(activity.getResources().getConfiguration().fontScale - 1.6f) < 0.01f,
+                "Portal did not receive the large-text configuration");
             setUtilityArea(compactArea(700)); SystemClock.sleep(1400); capture("-large-text");
+            tap(utilityBounds("keyboard")); waitUtility("Keyboard");
+            android.graphics.Rect shift = stableSemanticBounds("Shift");
+            semanticBounds("Enter");
+            semanticBounds("Super");
+            capture("-compact-keyboard-large-text");
+            Class<?> controls = getTargetContext().getClassLoader().loadClass("app.polarbear.SessionControls");
+            Object keyboard = callOnMain(controls.getField("INSTANCE").get(null), "getDesktopKeyboard", new Class<?>[0]);
+            tap(shift);
+            check((Integer) callOnMain(keyboard, "level", new Class<?>[] { int.class }, 42) == 1,
+                "Tapping Shift on the compact keyboard did not arm the modifier");
+            sendKeyDownUpSync(KeyEvent.KEYCODE_BACK); waitUtility("Menu");
             shellText("cmd uimode night no"); SystemClock.sleep(1300);
             setUtilityArea(compactArea(700)); SystemClock.sleep(1400); capture("-light-large-text");
             check(!showing(),"Responsive utility checks restarted or opened the veil");
@@ -489,6 +548,62 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             output.write(shellText("dumpsys gfxinfo app.polarbear").getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
         status("Recorded warm roundtable and keyboard motion frame data");
+    }
+
+    private void profilePillExpansion() throws Exception {
+        check(android.os.Build.VERSION.SDK_INT >= 31, "Pill frame timing requires Android 12 or later");
+        waitRenderedSurface();
+        android.os.HandlerThread metricsThread = new android.os.HandlerThread("portal-pill-metrics");
+        metricsThread.start();
+        java.util.concurrent.ConcurrentLinkedQueue<long[]> frames = new java.util.concurrent.ConcurrentLinkedQueue<>();
+        android.view.Window.OnFrameMetricsAvailableListener listener = (window, metrics, dropped) -> frames.add(new long[] {
+            metrics.getMetric(android.view.FrameMetrics.INTENDED_VSYNC_TIMESTAMP),
+            metrics.getMetric(android.view.FrameMetrics.TOTAL_DURATION),
+            metrics.getMetric(android.view.FrameMetrics.LAYOUT_MEASURE_DURATION),
+            metrics.getMetric(android.view.FrameMetrics.DRAW_DURATION),
+            metrics.getMetric(android.view.FrameMetrics.COMMAND_ISSUE_DURATION),
+            metrics.getMetric(android.view.FrameMetrics.SYNC_DURATION),
+            metrics.getMetric(android.view.FrameMetrics.DEADLINE),
+            dropped,
+        });
+        android.view.Window window = activity.getWindow();
+        onMain(() -> window.addOnFrameMetricsAvailableListener(listener, new Handler(metricsThread.getLooper())));
+        try {
+            for (int pass = 0; pass < 3; pass++) {
+                android.graphics.Rect bounds = capsuleBounds();
+                long start = System.nanoTime();
+                tap(bounds);
+                waitUtility("Menu");
+                long end = System.nanoTime();
+                SystemClock.sleep(200);
+                StringBuilder csv = new StringBuilder("offset_ns,total_ns,layout_ns,draw_ns,command_ns,sync_ns,deadline_ns,dropped\n");
+                int count = 0, slow = 0, dropped = 0;
+                long slowest = 0;
+                for (long[] frame : frames) {
+                    if (frame[0] < start || frame[0] >= end) continue;
+                    count++;
+                    if (frame[6] > 0 && frame[1] > frame[6]) slow++;
+                    slowest = Math.max(slowest, frame[1]);
+                    dropped += frame[7];
+                    csv.append(frame[0] - start);
+                    for (int metric = 1; metric < frame.length; metric++) csv.append(',').append(frame[metric]);
+                    csv.append('\n');
+                }
+                String phase = pass == 0 ? "first" : "repeat-" + pass;
+                check(count > 0, "No frame data for " + phase + " pill expansion");
+                try (FileOutputStream output = new FileOutputStream(new File(getTargetContext().getCacheDir(), prefix + "-pill-" + phase + ".csv"))) {
+                    output.write(csv.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+                status("Pill expansion " + phase + " pid=" + android.os.Process.myPid() + " frames=" + count
+                    + " missed=" + slow + " slowest_ms=" + slowest / 1000000.0 + " dropped_reports=" + dropped);
+                escapeUtility();
+                waitUtility("Dock");
+                frames.clear();
+            }
+        } finally {
+            onMain(() -> window.removeOnFrameMetricsAvailableListener(listener));
+            metricsThread.quitSafely();
+        }
     }
     private Object waitFolderReady() throws Exception {
         long deadline = SystemClock.uptimeMillis() + 15000;
@@ -543,7 +658,7 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         check(!showing(), "Dragging accidentally opened the veil");
         android.graphics.Rect moved = capsuleBounds();
         check(moved.centerY() > original.centerY() + 30 * density, "Capsule did not coast with the drag");
-        openCapsule(); waitShowing(true);
+        openVeil();
         onMain(() -> { try { invoke(overlay, "requestReturnToDesktop"); } catch (Exception e) { throw new RuntimeException(e); } });
         waitShowing(false);
         android.graphics.Rect restored = capsuleBounds();
@@ -575,13 +690,21 @@ public final class PortalFilesInstrumentation extends Instrumentation {
     }
 
     private Object awaitTransfer(String source, String phase) throws Exception {
+        return awaitTransfer(source, phase, "");
+    }
+
+    private Object awaitTransfer(String source, String phase, String previousId) throws Exception {
         long deadline = SystemClock.uptimeMillis() + 20000;
         while (SystemClock.uptimeMillis() < deadline) {
-            for (Object item : (java.util.List<?>) invoke(transfers, "getItems")) {
+            java.util.List<?> items = (java.util.List<?>) invoke(transfers, "getItems");
+            for (int index = items.size() - 1; index >= 0; index--) {
+                Object item = items.get(index);
                 if (!item.getClass().getMethod("getSource").invoke(item).equals(source)) continue;
+                if (previousId.equals(item.getClass().getMethod("getId").invoke(item))) continue;
                 String actual = item.getClass().getMethod("getPhase").invoke(item).toString();
                 if (actual.equals(phase)) return item;
                 check(!actual.equals("Failed"), "Coordinator failed: " + item.getClass().getMethod("getError").invoke(item));
+                break;
             }
             SystemClock.sleep(100);
         }
@@ -754,52 +877,338 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             "application/octet-stream", prefix + "-interrupted.bin");
         android.net.Uri complete = android.provider.DocumentsContract.createDocument(getTargetContext().getContentResolver(), parent,
             "application/octet-stream", prefix + "-completed.bin");
+        android.net.Uri unknown = android.provider.DocumentsContract.createDocument(getTargetContext().getContentResolver(), parent,
+            "application/octet-stream", prefix + "-unknown-size.bin");
+        android.net.Uri queued = android.provider.DocumentsContract.createDocument(getTargetContext().getContentResolver(), parent,
+            "application/octet-stream", prefix + "-canceled-save.bin");
+        android.util.AtomicFile journal = new android.util.AtomicFile(new File(getTargetContext().getFilesDir(), "file-transfers.json"));
+        byte[] original = null;
+        String canceledImport = UUID.randomUUID().toString();
+        File stagedFile = new File(getTargetContext().getCacheDir(), prefix + "-staged");
         try {
-            for (android.net.Uri uri : new android.net.Uri[] { partial, complete }) {
+            for (android.net.Uri uri : new android.net.Uri[] { partial, complete, unknown }) {
                 try (java.io.OutputStream output = getTargetContext().getContentResolver().openOutputStream(uri)) { output.write(42); }
             }
-            java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<?>> durable = new java.util.concurrent.atomic.AtomicReference<>();
-            onMain(() -> { try {
-                Method persist = transfers.getDeclaredMethod("persist"); persist.setAccessible(true);
-                durable.set((java.util.concurrent.Future<?>) persist.invoke(transfers.getField("INSTANCE").get(null)));
-            } catch (Exception e) { throw new RuntimeException(e); } });
-            durable.get().get(5, TimeUnit.SECONDS);
-            android.util.AtomicFile journal = new android.util.AtomicFile(new File(getTargetContext().getFilesDir(), "file-transfers.json"));
-            org.json.JSONArray records = new org.json.JSONArray(new String(journal.readFully(), java.nio.charset.StandardCharsets.UTF_8));
-            String source = find(downloads, prefix + "-日本語.bin");
-            String interruptedId = UUID.randomUUID().toString();
-            for (boolean done : new boolean[] { false, true }) records.put(new JSONObject()
-                .put("id", done ? UUID.randomUUID().toString() : interruptedId)
-                .put("name", prefix + (done ? "-completed.bin" : "-interrupted.bin"))
-                .put("kind", "Save").put("phase", done ? "Done" : "Running").put("total", 1)
-                .put("source", source).put("destination", "tree:" + tree).put("output", (done ? complete : partial).toString()));
-            java.io.FileOutputStream output = journal.startWrite();
-            output.write(records.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)); journal.finishWrite(output);
-            onMain(() -> { try {
-                Method restore = transfers.getDeclaredMethod("restore"); restore.setAccessible(true);
-                restore.invoke(transfers.getField("INSTANCE").get(null));
-            } catch (Exception e) { throw new RuntimeException(e); } });
+            try (FileOutputStream output = new FileOutputStream(stagedFile)) { output.write(42); }
+            try (ParcelFileDescriptor input = ParcelFileDescriptor.open(stagedFile, ParcelFileDescriptor.MODE_READ_ONLY)) {
+                JSONObject staged = operation(new JSONObject().put("action", "import").put("directory", downloads)
+                    .put("name", prefix + "-canceled.bin").put("defer_publish", true).put("job", canceledImport),
+                    input.getFd(), -1, canceledImport);
+                check(staged.optBoolean("staged"), "Import fixture was not staged");
+            }
+
+            flushTransferJournal();
+            original = journal.readFully();
+            org.json.JSONArray records = new org.json.JSONArray(new String(original, java.nio.charset.StandardCharsets.UTF_8));
+            String partialId = UUID.randomUUID().toString();
+            String completeId = UUID.randomUUID().toString();
+            String unknownId = UUID.randomUUID().toString();
+            records.put(interruptedSave(partialId, tree, partial, 2));
+            records.put(interruptedSave(completeId, tree, complete, 1));
+            records.put(interruptedSave(unknownId, tree, unknown, 2));
+            records.put(interruptedSave(UUID.randomUUID().toString(), tree, queued, 2).put("phase", "Canceling"));
+            records.put(new JSONObject().put("id", canceledImport).put("name", prefix + "-canceled.bin")
+                .put("kind", "Import").put("phase", "Canceled").put("source", "content://fixture/canceled")
+                .put("workspace", workspace).put("workspaceCreated", workspaceCreated)
+                .put("destination", downloads).put("importCleanupPending", true));
+            writeJournal(journal, records.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            restoreTransfers();
             long deadline = SystemClock.uptimeMillis() + 10000;
-            boolean deleted = false;
-            while (!deleted && SystemClock.uptimeMillis() < deadline) {
-                try (java.io.InputStream input = getTargetContext().getContentResolver().openInputStream(partial)) { }
-                catch (java.io.FileNotFoundException expected) { deleted = true; }
-                if (!deleted) SystemClock.sleep(50);
+            boolean cleanedImport = false;
+            while (SystemClock.uptimeMillis() < deadline) {
+                byte[] committed;
+                try (FileInputStream input = new FileInputStream(journal.getBaseFile());
+                     java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream()) {
+                    byte[] buffer = new byte[4096];
+                    int count;
+                    while ((count = input.read(buffer)) != -1) bytes.write(buffer, 0, count);
+                    committed = bytes.toByteArray();
+                }
+                org.json.JSONArray saved = new org.json.JSONArray(new String(committed, java.nio.charset.StandardCharsets.UTF_8));
+                for (int index = 0; index < saved.length(); index++) {
+                    JSONObject item = saved.getJSONObject(index);
+                    if (canceledImport.equals(item.optString("id"))) cleanedImport = !item.optBoolean("importCleanupPending");
+                }
+                if (cleanedImport && "Done".equals(transferPhase(completeId))) break;
+                SystemClock.sleep(50);
             }
-            check(deleted, "Interrupted export left its partial Android document");
-            try (java.io.InputStream input = getTargetContext().getContentResolver().openInputStream(complete)) {
-                check(input.read() == 42, "Recovery deleted a completed export");
+            check(cleanedImport, "Recovery lost cleanup for a dismissed import");
+            check("Done".equals(transferPhase(completeId)), "Recovery did not recognize a complete save");
+            check("Interrupted".equals(transferPhase(partialId)), "Partial save did not require retry");
+            check("Interrupted".equals(transferPhase(unknownId)), "Unknown-size save did not require review");
+            for (android.net.Uri uri : new android.net.Uri[] { partial, queued }) {
+                try (java.io.InputStream input = getTargetContext().getContentResolver().openInputStream(uri)) {
+                    throw new AssertionError("An interrupted or canceled save left its partial Android document");
+                } catch (java.io.FileNotFoundException expected) { }
             }
-            boolean marked = false;
-            for (Object item : (java.util.List<?>) invoke(transfers, "getItems")) {
-                if (interruptedId.equals(item.getClass().getMethod("getId").invoke(item)))
-                    marked = item.getClass().getMethod("getPhase").invoke(item).toString().equals("Interrupted");
+            for (android.net.Uri uri : new android.net.Uri[] { complete, unknown }) {
+                try (java.io.InputStream input = getTargetContext().getContentResolver().openInputStream(uri)) {
+                    check(input.read() == 42, "Recovery deleted the contents of a complete or unknown-size export");
+                }
             }
-            check(marked, "Interrupted export was retried automatically or lost");
-            status("Interrupted Android save cleanup preserved completed files and requires explicit retry");
+            JSONObject commit = runOperation(new JSONObject().put("action", "commit").put("directory", downloads)
+                .put("name", prefix + "-canceled.bin").put("job", canceledImport), -1, -1, canceledImport);
+            check(!commit.optBoolean("ok"), "Recovered import still had a staged file");
+            status("Recovery kept complete and unknown-size saves, removed verified partials, and cleaned a dismissed import");
         } finally {
-            try { android.provider.DocumentsContract.deleteDocument(getTargetContext().getContentResolver(), partial); } catch (Exception ignored) {}
-            android.provider.DocumentsContract.deleteDocument(getTargetContext().getContentResolver(), complete);
+            for (android.net.Uri uri : new android.net.Uri[] { partial, complete, unknown, queued }) {
+                try { android.provider.DocumentsContract.deleteDocument(getTargetContext().getContentResolver(), uri); }
+                catch (Exception ignored) { }
+            }
+            stagedFile.delete();
+            operation(new JSONObject().put("action", "cleanup").put("directory", downloads).put("job", canceledImport));
+            if (original != null) {
+                flushTransferJournal();
+                writeJournal(journal, original);
+                restoreTransfers();
+            }
+        }
+    }
+
+    private JSONObject interruptedSave(String id, android.net.Uri tree, android.net.Uri output, long expected) throws Exception {
+        return new JSONObject().put("id", id).put("name", output.getLastPathSegment())
+            .put("kind", "Save").put("phase", "Running").put("total", expected).put("expectedSaveSize", expected)
+            .put("workspace", workspace).put("workspaceCreated", workspaceCreated)
+            .put("source", "fixture").put("destination", "tree:" + tree).put("output", output.toString());
+    }
+
+    private android.net.Uri newSaveFixture(String suffix) throws Exception {
+        android.net.Uri tree = android.provider.DocumentsContract.buildTreeDocumentUri("app.polarbear.files.tests.documents", "root");
+        android.net.Uri parent = android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, "root");
+        return android.provider.DocumentsContract.createDocument(getTargetContext().getContentResolver(), parent,
+            "application/octet-stream", prefix + suffix);
+    }
+
+    private void enqueueSaveFixture(String source, String name, long size, android.net.Uri output) throws Exception {
+        Class<?> fileType = getTargetContext().getClassLoader().loadClass("app.polarbear.GuestFile");
+        Object file = fileType.getConstructor(String.class, String.class, boolean.class, long.class, long.class)
+            .newInstance(source, name, false, size, 0L);
+        Method enqueue = transfers.getDeclaredMethod("enqueueSave", fileType, android.net.Uri.class, boolean.class, String.class);
+        enqueue.setAccessible(true);
+        onMain(() -> { try {
+            enqueue.invoke(transfers.getField("INSTANCE").get(null), file, output, false, null);
+        } catch (Exception error) { throw new RuntimeException(error); } });
+    }
+
+    private void testQueuedSaveCancellation() throws Exception {
+        android.net.Uri output = newSaveFixture("-queued-save.bin");
+        java.lang.reflect.Field work = transfers.getDeclaredField("work");
+        work.setAccessible(true);
+        java.util.concurrent.ExecutorService executor = (java.util.concurrent.ExecutorService) work.get(transfers.getField("INSTANCE").get(null));
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        executor.submit(() -> { release.await(10, TimeUnit.SECONDS); return null; });
+        String source = prefix + "-queued-source";
+        try {
+            enqueueSaveFixture(source, prefix + "-queued-save.bin", 2L, output);
+            Object queued = awaitTransfer(source, "Queued");
+            callOnMain(transfers.getField("INSTANCE").get(null), "cancel", new Class<?>[] { queued.getClass() }, queued);
+            awaitTransfer(source, "Canceling");
+            flushTransferJournal();
+        } finally {
+            release.countDown();
+        }
+        awaitTransfer(source, "Canceled");
+        try (java.io.InputStream input = getTargetContext().getContentResolver().openInputStream(output)) {
+            throw new AssertionError("Canceling a queued save left its Android document");
+        } catch (java.io.FileNotFoundException expected) { }
+        status("Queued save stayed recoverable until its Android document was removed");
+    }
+
+    private void testSaveRetryRefreshesSize() throws Exception {
+        File files = getTargetContext().getFilesDir();
+        File owner = workspace.equals("main") ? files : new File(files, "workspaces/" + workspace);
+        String name = prefix + "-resize.bin";
+        File guest = new File(owner, "runtime-B/home/desktop/" + name);
+        check(guest.createNewFile(), "The save retry fixture already exists");
+        android.net.Uri staleOutput = newSaveFixture("-stale-output.bin");
+        android.net.Uri retryOutput = newSaveFixture("-retry-output.bin");
+        try {
+            try (FileOutputStream output = new FileOutputStream(guest)) { output.write(42); }
+            String source = android.util.Base64.encodeToString(name.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                android.util.Base64.URL_SAFE | android.util.Base64.NO_WRAP);
+            enqueueSaveFixture(source, name, 2L, staleOutput);
+            Object failed = awaitTransfer(source, "Failed");
+            String error = (String) failed.getClass().getMethod("getError").invoke(failed);
+            check(error != null && error.contains("changed since you selected"), "Unexpected stale save failure: " + error);
+            ActivityMonitor picker = addMonitor(documentFilter(Intent.ACTION_CREATE_DOCUMENT),
+                new ActivityResult(Activity.RESULT_OK, new Intent().setData(retryOutput)), true);
+            try {
+                callOnMain(transfers.getField("INSTANCE").get(null), "retry", new Class<?>[] { failed.getClass() }, failed);
+                long deadline = SystemClock.uptimeMillis() + 5000;
+                while (picker.getHits() == 0 && SystemClock.uptimeMillis() < deadline) SystemClock.sleep(50);
+                check(picker.getHits() == 1, "Save retry did not reopen Android's document picker");
+                awaitTransfer(source, "Done", (String) failed.getClass().getMethod("getId").invoke(failed));
+                try (java.io.InputStream input = getTargetContext().getContentResolver().openInputStream(retryOutput)) {
+                    check(input.read() == 42 && input.read() == -1, "Retry did not save the current one-byte source");
+                }
+            } finally { removeMonitor(picker); }
+        } finally {
+            guest.delete();
+            for (android.net.Uri uri : new android.net.Uri[] { staleOutput, retryOutput }) {
+                try { android.provider.DocumentsContract.deleteDocument(getTargetContext().getContentResolver(), uri); }
+                catch (Exception ignored) { }
+            }
+        }
+        status("Retry refreshed a resized source and saved the current bytes through the Android picker");
+    }
+
+    private String transferPhase(String id) throws Exception {
+        for (Object item : (java.util.List<?>) invoke(transfers, "getItems")) {
+            if (id.equals(item.getClass().getMethod("getId").invoke(item)))
+                return item.getClass().getMethod("getPhase").invoke(item).toString();
+        }
+        return "";
+    }
+
+    private void flushTransferJournal() throws Exception {
+        java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<?>> durable = new java.util.concurrent.atomic.AtomicReference<>();
+        onMain(() -> { try {
+            Method persist = transfers.getDeclaredMethod("persist"); persist.setAccessible(true);
+            durable.set((java.util.concurrent.Future<?>) persist.invoke(transfers.getField("INSTANCE").get(null)));
+        } catch (Exception e) { throw new RuntimeException(e); } });
+        durable.get().get(5, TimeUnit.SECONDS);
+    }
+
+    private void restoreTransfers() {
+        onMain(() -> { try {
+            Method restore = transfers.getDeclaredMethod("restore"); restore.setAccessible(true);
+            restore.invoke(transfers.getField("INSTANCE").get(null));
+        } catch (Exception e) { throw new RuntimeException(e); } });
+    }
+
+    private void writeJournal(android.util.AtomicFile journal, byte[] contents) throws Exception {
+        FileOutputStream output = journal.startWrite();
+        try {
+            output.write(contents);
+            journal.finishWrite(output);
+        } catch (Exception error) {
+            journal.failWrite(output);
+            throw error;
+        }
+    }
+
+    private void testWorkspaceBoundary() throws Exception {
+        String other = "qa-" + UUID.randomUUID().toString().substring(0, 8);
+        JSONObject response = runOperation(new JSONObject().put("action", "defaults").put("workspace", other),
+            -1, -1, UUID.randomUUID().toString());
+        check(!response.optBoolean("ok") && response.optString("error").contains("different workspace"),
+            "A request for another workspace reached the active guest: " + response);
+        status("Native file operations enforce their workspace owner");
+    }
+
+    private Object callOnMain(Object target, String name, Class<?>[] parameters, Object... arguments) {
+        java.util.concurrent.atomic.AtomicReference<Object> result = new java.util.concurrent.atomic.AtomicReference<>();
+        onMain(() -> { try {
+            for (Method method : target.getClass().getMethods()) {
+                if ((method.getName().equals(name) || method.getName().startsWith(name + "$")) &&
+                    Arrays.equals(method.getParameterTypes(), parameters)) {
+                    result.set(method.invoke(target, arguments));
+                    return;
+                }
+            }
+            throw new NoSuchMethodException(name);
+        } catch (Exception error) { throw new RuntimeException(error); } });
+        return result.get();
+    }
+
+    private void waitRenderedSurface() throws Exception {
+        Class<?> controls = getTargetContext().getClassLoader().loadClass("app.polarbear.SessionControls");
+        Method renderedOn = controls.getDeclaredMethod("nativeDesktopRenderedOn", android.view.Surface.class);
+        renderedOn.setAccessible(true);
+        long deadline = SystemClock.uptimeMillis() + 8000;
+        do {
+            android.view.SurfaceView view = (android.view.SurfaceView) callOnMain(activity, "desktopSurface", new Class<?>[0]);
+            android.view.Surface surface = view.getHolder().getSurface();
+            if (surface.isValid() && (Boolean) renderedOn.invoke(null, surface)) return;
+            SystemClock.sleep(50);
+        } while (SystemClock.uptimeMillis() < deadline);
+        throw new AssertionError("The desktop never drew a frame on the destination surface");
+    }
+
+    private VirtualDisplay testDisplay(DisplayManager manager, String name, ImageReader reader) {
+        // The test display owns its content and never mirrors the tablet.
+        reader.setOnImageAvailableListener(source -> {
+            try (android.media.Image image = source.acquireLatestImage()) { }
+        }, new Handler(Looper.getMainLooper()));
+        return manager.createVirtualDisplay(name, reader.getWidth(), reader.getHeight(), 160, reader.getSurface(),
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY);
+    }
+
+    private void testDisplaySetupBack(Object displays, int displayId) throws Exception {
+        Class<?>[] noArgs = new Class<?>[0];
+        Object target = null;
+        for (Object candidate : (java.util.List<?>) callOnMain(displays, "targets", noArgs)) {
+            if ((Integer) candidate.getClass().getMethod("getId").invoke(candidate) == displayId) target = candidate;
+        }
+        check(target != null, "The live presentation was missing from the display settings");
+        ClassLoader loader = getTargetContext().getClassLoader();
+        Class<?> setupClass = loader.loadClass("app.polarbear.DisplaySetup");
+        Object setup = setupClass.getField("INSTANCE").get(null);
+        Class<?> permission = loader.loadClass("app.polarbear.DisplayPermission");
+        Object overlayPermission = permission.getField("Overlay").get(null);
+        Class<?>[] showArgs = { activity.getClass(), target.getClass(), java.util.List.class,
+            loader.loadClass("androidx.compose.ui.geometry.Rect"), loader.loadClass("kotlin.jvm.functions.Function0"),
+            boolean.class };
+        check((Boolean) callOnMain(setup, "show", showArgs, activity, target,
+            java.util.Collections.singletonList(overlayPermission), null, null, true), "Display setup did not open");
+        check((Boolean) callOnMain(setup, "blocksInput", noArgs), "Visible display setup did not own desktop input");
+        Object back = callOnMain(activity, "getOnBackPressedDispatcher", noArgs);
+        callOnMain(back, "onBackPressed", noArgs);
+        long deadline = SystemClock.uptimeMillis() + 5000;
+        while ((Boolean) callOnMain(setup, "isShowing", noArgs) && SystemClock.uptimeMillis() < deadline) {
+            SystemClock.sleep(50);
+        }
+        check(!(Boolean) callOnMain(setup, "isShowing", noArgs), "System Back did not close display setup");
+    }
+
+    private void testDisplayHandoff() throws Exception {
+        DisplayManager manager = activity.getSystemService(DisplayManager.class);
+        Class<?>[] noArgs = new Class<?>[0];
+        Class<?>[] displayArg = { Display.class };
+        Object displays = callOnMain(activity, "getPortalDisplays", noArgs);
+        try (ImageReader first = ImageReader.newInstance(1280, 720, PixelFormat.RGBA_8888, 3);
+             ImageReader second = ImageReader.newInstance(1024, 768, PixelFormat.RGBA_8888, 3)) {
+            VirtualDisplay a = testDisplay(manager, "Portal QA A", first);
+            VirtualDisplay b = testDisplay(manager, "Portal QA B", second);
+            try {
+                check(a != null && b != null, "Could not create the test monitors");
+                check((Boolean) callOnMain(activity, "presentDesktop", displayArg, a.getDisplay()), "First presentation failed");
+                waitRenderedSurface();
+                check(!(Boolean) callOnMain(displays, "moveTo", new Class<?>[] { int.class }, Integer.MAX_VALUE),
+                    "Display move reported a nonexistent display as accepted");
+                check(a.getDisplay().equals(callOnMain(activity, "getPresentedDisplay", noArgs)),
+                    "Refusing an unavailable target interrupted the working presentation");
+                check((Boolean) callOnMain(activity, "presentDesktop", displayArg, b.getDisplay()), "Monitor-to-monitor move failed");
+                waitRenderedSurface();
+                check(b.getDisplay().equals(callOnMain(activity, "getPresentedDisplay", noArgs)),
+                    "Dismissing the old monitor tore down the new presentation");
+                testDisplaySetupBack(displays, b.getDisplay().getDisplayId());
+
+                String phoneReturn = "Show the desktop on this phone";
+                String tabletReturn = "Show the desktop on this tablet";
+                android.graphics.Rect returnButton = stableSemanticBounds(phoneReturn, tabletReturn);
+                tap(stableSemanticBounds("Keyboard"));
+                waitUtility("Keyboard");
+                java.util.List<android.graphics.Rect> hidden = new java.util.ArrayList<>();
+                onMain(() -> { try {
+                    collectSemantics(activity.getWindow().getDecorView(), phoneReturn, hidden);
+                    collectSemantics(activity.getWindow().getDecorView(), tabletReturn, hidden);
+                } catch (Exception error) { throw new RuntimeException(error); } });
+                check(hidden.isEmpty(), "Hidden touchpad Return button is still exposed by the keyboard");
+                tap(returnButton);
+                check(b.getDisplay().equals(callOnMain(activity, "getPresentedDisplay", noArgs)),
+                    "Tapping a hidden Return button closed the presentation");
+                tap(stableSemanticBounds("Close keyboard"));
+                waitUtility("Dock");
+                tap(stableSemanticBounds(phoneReturn, tabletReturn));
+                waitRenderedSurface();
+                check(callOnMain(activity, "getPresentedDisplay", noArgs) == null, "Return left the presentation open");
+                status("Display frames, rejected moves, monitor-to-monitor moves, hidden controls and Return passed");
+            } finally {
+                callOnMain(activity, "endPresentation", noArgs);
+                if (a != null) a.release();
+                if (b != null) b.release();
+            }
         }
     }
 
@@ -855,6 +1264,9 @@ public final class PortalFilesInstrumentation extends Instrumentation {
         Bundle result = new Bundle();
         try {
             check(getTargetContext().getPackageName().equals("app.polarbear"), "Tests require Portal Debug");
+            android.app.KeyguardManager keyguard = getTargetContext().getSystemService(android.app.KeyguardManager.class);
+            android.os.PowerManager power = getTargetContext().getSystemService(android.os.PowerManager.class);
+            check(power.isInteractive() && !keyguard.isKeyguardLocked(), "The tablet must be awake and unlocked for UI testing");
             prefix = "portal-transfer-qa-" + UUID.randomUUID();
             status("Starting capsule regression " + prefix);
             Intent intent = new Intent().setClassName("app.polarbear", "app.polarbear.PortalActivity")
@@ -867,9 +1279,37 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             long deadline = SystemClock.uptimeMillis() + 90000;
             while (!((java.util.concurrent.atomic.AtomicBoolean) readiness.get(overlay.getField("INSTANCE").get(null))).get() && SystemClock.uptimeMillis() < deadline) SystemClock.sleep(200);
             check(((java.util.concurrent.atomic.AtomicBoolean) readiness.get(overlay.getField("INSTANCE").get(null))).get(), "Desktop never presented a ready frame");
+            JSONObject listing = new JSONObject((String) overlay.getMethod("nativeWorkspaces").invoke(null));
+            workspace = listing.getString("active");
+            org.json.JSONArray workspaces = listing.getJSONArray("workspaces");
+            for (int index = 0; index < workspaces.length(); index++) {
+                JSONObject entry = workspaces.getJSONObject(index);
+                if (workspace.equals(entry.getString("id"))) workspaceCreated = entry.optLong("created");
+            }
             waitShowing(true);
             onMain(() -> { try { invoke(overlay, "requestReturnToDesktop"); } catch (Exception e) { throw new RuntimeException(e); } });
             waitShowing(false);
+            if (pillTiming) {
+                profilePillExpansion();
+                result.putString("stream", "Portal pill timing recorded\nFixture prefix: " + prefix + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
+            if (displayOnly) {
+                testDisplayHandoff();
+                result.putString("stream", "Portal display handoff checks passed\nFixture prefix: " + prefix + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
+            if (transferRecoveryOnly) {
+                testWorkspaceBoundary();
+                testInterruptedSaveRecovery(operation(new JSONObject().put("action", "defaults")).getString("downloads"));
+                testQueuedSaveCancellation();
+                testSaveRetryRefreshesSize();
+                result.putString("stream", "Portal Files recovery and workspace checks passed\nFixture prefix: " + prefix + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (motionOnly) {
                 status("Motion profile ready");
                 SystemClock.sleep(2000);
@@ -878,10 +1318,9 @@ public final class PortalFilesInstrumentation extends Instrumentation {
                 finish(Activity.RESULT_OK, result);
                 return;
             }
-            openCapsule(); waitShowing(true);
+            openFiles();
             check((Boolean) invoke(overlay, "getSessionMode"), "Files did not open session controls");
-            check("files".equals(invoke(overlay, "getActivePanel")), "Files did not open from the utility roundtable");
-            status("Utility roundtable opened Files in the session controls");
+            status("Utility roundtable opened the veil and its Files pill");
             onMain(() -> { try { invoke(overlay, "requestReturnToDesktop"); } catch (Exception e) { throw new RuntimeException(e); } });
             waitShowing(false);
             testCapsuleDrag();
@@ -890,7 +1329,7 @@ public final class PortalFilesInstrumentation extends Instrumentation {
             testUtilityInputOwnership();
             testRoundtable();
             if (uiOnly) {
-                openCapsule(); waitShowing(true); SystemClock.sleep(700);
+                openVeil(); SystemClock.sleep(700);
                 testOutsideDismissal();
                 testFileBrowserMotion();
                 result.putString("stream", "Portal contextual controls and outside-tap checks passed\nFixture prefix: " + prefix + "\n");
@@ -960,18 +1399,19 @@ public final class PortalFilesInstrumentation extends Instrumentation {
                 String job = UUID.randomUUID().toString();
                 java.util.concurrent.ExecutorService worker = Executors.newSingleThreadExecutor();
                 try {
-                    java.util.concurrent.Future<String> pending = worker.submit(() -> (String) run.invoke(null,
-                        new JSONObject().put("action", "import").put("directory", downloads).put("name", prefix + "-canceled.bin").put("job", job).toString(),
+                    java.util.concurrent.Future<JSONObject> pending = worker.submit(() -> runOperation(
+                        new JSONObject().put("action", "import").put("directory", downloads).put("name", prefix + "-canceled.bin").put("job", job),
                         pipe[0].getFd(), -1, job));
                     SystemClock.sleep(800);
                     Method cancel = transfers.getDeclaredMethod("nativeCancel", String.class); cancel.setAccessible(true); cancel.invoke(null, job);
-                    check(!new JSONObject(pending.get(8, TimeUnit.SECONDS)).optBoolean("ok"), "Canceled transfer reported success");
+                    check(!pending.get(8, TimeUnit.SECONDS).optBoolean("ok"), "Canceled transfer reported success");
                     operation(new JSONObject().put("action", "cleanup").put("directory", downloads).put("job", job));
                     status("Blocked-stream cancellation passed");
                 } finally { pipe[0].close(); pipe[1].close(); worker.shutdownNow(); }
 
                 testPickerTransfers(downloads);
                 testBatchSave(downloads);
+                testWorkspaceBoundary();
                 testInterruptedSaveRecovery(downloads);
                 testCrossAppDragging();
 

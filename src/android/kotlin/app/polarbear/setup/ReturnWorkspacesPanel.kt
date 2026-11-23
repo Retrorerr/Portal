@@ -118,7 +118,6 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -138,13 +137,14 @@ import androidx.compose.ui.unit.coerceIn
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.polarbear.ComposeOverlay
+import app.polarbear.PortalActivity
 import app.polarbear.Workspaces
+import app.polarbear.Workspaces.findActivity
 import app.polarbear.setup.components.LocalPortalVeil
 import app.polarbear.setup.components.PortalPanelSizeSpring
 import app.polarbear.setup.components.PortalEmphasized
 import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
-import app.polarbear.setup.components.findDesktopSurface
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -332,8 +332,8 @@ internal fun StackGlyph(palette: PortalPalette, busy: Boolean) {
 
 @Composable
 private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onClose: () -> Unit) {
-    val view = LocalView.current
     val context = LocalContext.current
+    val host = context.findActivity() as? PortalActivity
     val veil = LocalPortalVeil.current
     val exclusionKey = remember { Any() }
     var renaming by remember { mutableStateOf<String?>(null) }
@@ -380,11 +380,11 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
     // The running workspace's card shows it as it is right now.
     LaunchedEffect(Unit) {
         Workspaces.refresh()
-        Workspaces.capture(state.active, findDesktopSurface(view.rootView))
+        Workspaces.capture(Workspaces.state.value.active, host?.desktopSurface())
     }
     LaunchedEffect(chosen) {
         val id = chosen ?: return@LaunchedEffect
-        val surface = findDesktopSurface(view.rootView)
+        val surface = host?.desktopSurface()
         if (state.workspaces.firstOrNull { it.id == id }?.needsSetup == true) {
             // Its installer runs after a restart; the card stays to say so,
             // or to show why it can't.
@@ -393,7 +393,10 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
         }
         // The switch starts at once; only the card's fold waits for the
         // chosen tile to answer the tap.
-        Workspaces.switchTo(id, surface)
+        if (!Workspaces.switchTo(id, surface)) {
+            chosen = null
+            return@LaunchedEffect
+        }
         delay(SWITCH_FOLD_DELAY_MS)
         onClose()
     }
@@ -425,8 +428,8 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
                     palette = palette,
                     onBack = { naming = false },
                     onCreate = { name ->
-                        val refusal = Workspaces.create(context, name, findDesktopSurface(view.rootView))
-                        if (refusal == null) created = name
+                        val refusal = Workspaces.create(context, name, host?.desktopSurface())
+                        if (refusal == null) created = name.trim()
                         refusal
                     },
                 )

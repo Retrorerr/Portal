@@ -26,7 +26,7 @@ class TransferService : Service() {
     }
     override fun onDestroy() { if (instance === this) instance = null; super.onDestroy() }
     override fun onTimeout(startId: Int, fgsType: Int) {
-        FileTransfers.items.filter { it.phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling) }.forEach(FileTransfers::cancel)
+        FileTransfers.cancelAll()
         finish()
     }
     private fun finish() {

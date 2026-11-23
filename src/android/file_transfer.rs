@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 use super::runtime::proot::PRootRuntime;
 use crate::core::runtime::{LogCallback, ProcessSpec};
+use crate::core::{config, workspaces};
 
 fn jobs() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
     static JOBS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
@@ -46,7 +47,7 @@ pub extern "system" fn Java_app_polarbear_FileTransfers_nativeRun(
         let value: Value = serde_json::from_str(&request).map_err(|e| e.to_string())?;
         if !matches!(
             value["action"].as_str(),
-            Some("defaults" | "list" | "import" | "commit" | "export" | "cleanup")
+            Some("defaults" | "list" | "file_info" | "import" | "commit" | "export" | "cleanup")
         ) {
             return Err("Unknown file operation".into());
         }
@@ -54,6 +55,21 @@ pub extern "system" fn Java_app_polarbear_FileTransfers_nativeRun(
             || value["action"] == "export" && output_fd < 0
         {
             return Err("Missing file stream".into());
+        }
+        if super::workspace_switch::in_progress() {
+            return Err("Wait for the workspace to finish opening.".into());
+        }
+        // File identifiers are relative to the guest home. Validate their
+        // owner and keep this same root even if the active workspace changes.
+        let workspace = value["workspace"]
+            .as_str()
+            .filter(|id| workspaces::is_valid_id(id))
+            .ok_or("Missing or invalid file workspace")?;
+        let rootfs = config::rootfs();
+        if rootfs
+            != workspaces::workspace_rootfs(std::path::Path::new(config::APP_FILES_ROOT), workspace)
+        {
+            return Err("This file belongs to a different workspace.".into());
         }
         let input = duplicate(input_fd).map_err(|e| e.to_string())?;
         let output = duplicate(output_fd).map_err(|e| e.to_string())?;
@@ -104,7 +120,7 @@ pub extern "system" fn Java_app_polarbear_FileTransfers_nativeRun(
                 }
             }) as LogCallback)
         })();
-        let result = PRootRuntime::active().execute_with_streams(
+        let result = PRootRuntime::new(rootfs).execute_with_streams(
             ProcessSpec::new("exec /usr/bin/python3 /usr/local/lib/portal/portal-file-transfer.py")
                 .with_user("desktop")
                 .with_env("PORTAL_FILE_REQUEST", request),

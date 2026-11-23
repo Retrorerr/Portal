@@ -594,6 +594,7 @@ impl Registry {
                 .map(|workspace| serde_json::json!({
                     "id": workspace.id,
                     "name": workspace.name,
+                    "created": workspace.created_unix,
                     "lastUsed": workspace.last_used_unix,
                     "needsSetup": !is_set_up(app_files, &workspace.id, system_ready),
                 }))

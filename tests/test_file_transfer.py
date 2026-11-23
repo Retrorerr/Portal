@@ -186,6 +186,17 @@ class FileTransferTest(unittest.TestCase):
         files.copy(Source(), sink, length)
         self.assertEqual(sink.count, length)
 
+    def test_export_rejects_a_changed_selected_size_before_writing(self):
+        (self.home / "changing").write_bytes(b"current")
+        output = io.BytesIO()
+        with self.assertRaisesRegex(ValueError, "changed since you selected"):
+            self.files.export({"entry": files.entry_id("changing"), "size": 10}, output)
+        self.assertEqual(output.getvalue(), b"")
+        entry = {"entry": files.entry_id("changing")}
+        refreshed = self.files.file_info(entry)
+        self.files.export({**entry, "size": refreshed["size"]}, output)
+        self.assertEqual(output.getvalue(), b"current")
+
     def test_export_rejects_a_file_that_changes_during_copy(self):
         original = self.home / "changing"
         original.write_bytes(b"a" * 1024 * 1024)

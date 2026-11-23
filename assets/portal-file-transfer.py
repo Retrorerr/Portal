@@ -12,6 +12,7 @@ import stat
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 
 CHUNK = 256 * 1024
 
@@ -102,8 +103,9 @@ class Files:
         finally:
             os.close(fd)
 
-    def export(self, request, target):
-        path = self.resolve(request["entry"])
+    @contextmanager
+    def open_regular(self, identifier):
+        path = self.resolve(identifier)
         parent, _ = self.directory(entry_id(os.path.relpath(os.path.dirname(path), self.home)))
         try:
             fd = os.open(os.path.basename(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
@@ -111,11 +113,7 @@ class Files:
                 info = os.fstat(source.fileno())
                 if not stat.S_ISREG(info.st_mode):
                     raise ValueError("Only regular files can be transferred")
-                count = copy(source, target, info.st_size)
-                after = os.fstat(source.fileno())
-                if count != info.st_size or (after.st_size, after.st_mtime_ns) != (info.st_size, info.st_mtime_ns):
-                    raise ValueError("The Linux file changed while copying. Refresh Files and try again.")
-            return {"ok": True, "size": info.st_size, "modified": info.st_mtime_ns}
+                yield source, info
         finally:
             os.close(parent)
 
@@ -129,6 +127,21 @@ class Files:
             return {"ok": True}
         finally:
             os.close(fd)
+
+    def file_info(self, request):
+        with self.open_regular(request["entry"]) as (_, info):
+            return {"ok": True, "size": info.st_size}
+
+    def export(self, request, target):
+        with self.open_regular(request["entry"]) as (source, info):
+            expected = request.get("size")
+            if expected is not None and info.st_size != expected:
+                raise ValueError("The Linux file changed since you selected it. Refresh Files and try again.")
+            count = copy(source, target, info.st_size)
+            after = os.fstat(source.fileno())
+            if count != info.st_size or (after.st_size, after.st_mtime_ns) != (info.st_size, info.st_mtime_ns):
+                raise ValueError("The Linux file changed while copying. Refresh Files and try again.")
+        return {"ok": True, "size": info.st_size, "modified": info.st_mtime_ns}
 
     def import_file(self, request, source):
         fd, _ = self.directory(request["directory"])
@@ -253,6 +266,8 @@ def main():
         result = {"ok": True, **files.defaults()}
     elif action == "list":
         result = files.listing(request)
+    elif action == "file_info":
+        result = files.file_info(request)
     elif action == "import":
         result = files.import_file(request, sys.stdin.buffer)
     elif action == "commit":

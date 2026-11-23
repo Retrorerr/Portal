@@ -27,6 +27,11 @@ import java.util.concurrent.atomic.AtomicInteger
 
 enum class TransferKind { Import, Save }
 enum class TransferPhase { Queued, Running, Canceling, Done, Failed, Canceled, Interrupted }
+private val TransferPhase.inProgress: Boolean
+    get() = this == TransferPhase.Queued || this == TransferPhase.Running || this == TransferPhase.Canceling
+
+private const val MAIN_WORKSPACE = "main"
+
 data class TransferItem(
     val id: String = UUID.randomUUID().toString(), val name: String,
     val kind: TransferKind, val phase: TransferPhase = TransferPhase.Queued,
@@ -35,6 +40,10 @@ data class TransferItem(
     val output: String? = null, val permission: String? = null,
     /** An interrupted save whose output was already checked after a restart. */
     val cleaned: Boolean = false,
+    val workspace: String = MAIN_WORKSPACE,
+    val workspaceCreated: Long = 0,
+    /** The guest verifies this length before opening the source for copying. */
+    val expectedSaveSize: Long? = null,
 )
 data class GuestFile(val id: String, val name: String, val directory: Boolean, val size: Long, val modified: Long = 0)
 data class GuestFolder(
@@ -49,10 +58,18 @@ object FileTransfers {
     @JvmStatic private external fun nativeCancel(job: String)
     @JvmStatic private external fun nativeForget(job: String)
 
-    var items by mutableStateOf<List<TransferItem>>(emptyList()); private set
+    private var records by mutableStateOf<List<TransferItem>>(emptyList())
+    private val workspaceState get() = Workspaces.state.value
+    private val workspace get() = workspaceState.active.ifEmpty { MAIN_WORKSPACE }
+    private val workspaceCreated get() = workspaceState.workspaces.firstOrNull { it.id == workspace }?.createdUnix ?: 0L
+    val items: List<TransferItem>
+        get() {
+            val owner = workspace
+            val created = workspaceCreated
+            return records.filter { it.workspace.ifEmpty { MAIN_WORKSPACE } == owner && it.workspaceCreated == created }
+        }
     /** Copies queued or running now. */
-    val activeCount: Int
-        get() = items.count { it.phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling) }
+    val activeCount: Int get() = items.count { it.phase.inProgress }
     /** Files whose latest attempt failed or was cut off; a retry that worked clears them. */
     val failedCount: Int
         get() = items.asReversed().filter { it.phase != TransferPhase.Canceled }.distinctBy { it.kind to it.source }
@@ -88,17 +105,22 @@ object FileTransfers {
     private var home = ""
     private var interruptedImports = emptySet<String>()
     private var cleaningImports = false
+    private var pendingImportWorkspace: String? = null
     private var pendingSave = emptyList<GuestFile>()
     private var pick: (() -> Unit)? = null
     private var save: ((Intent) -> Unit)? = null
     private var tree: ((Intent) -> Unit)? = null
-    val busy: Boolean get() = items.any { it.phase == TransferPhase.Queued || it.phase == TransferPhase.Running || it.phase == TransferPhase.Canceling }
+    val busy: Boolean get() = records.any { it.phase.inProgress }
+    internal val blocksWorkspaceSwitch: Boolean
+        get() = busy || pendingImportWorkspace != null || pendingSave.isNotEmpty()
 
     fun attach(host: PortalActivity) {
         app = host.applicationContext
         activity = WeakReference(host)
         val picker = host.registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == Activity.RESULT_OK) {
+            val origin = pendingImportWorkspace
+            pendingImportWorkspace = null
+            if (result.resultCode == Activity.RESULT_OK && origin == workspace) {
                 val data = result.data
                 val uris = data?.clipData?.let { clip -> (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri } }
                     ?: listOfNotNull(data?.data)
@@ -115,7 +137,7 @@ object FileTransfers {
         }
         val directory = host.registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val selection = pendingSave.also { pendingSave = emptyList() }
-            if (result.resultCode == Activity.RESULT_OK) {
+            if (result.resultCode == Activity.RESULT_OK && selection.isNotEmpty()) {
                 result.data?.data?.let { uri ->
                     val permission = retainSavePermission(result.data)
                     selection.forEach { enqueueSave(it, uri, true, permission) }; closeSave()
@@ -138,6 +160,20 @@ object FileTransfers {
         host.overlayHost().setOnDragListener { _, event -> receiveDrag(event) }
     }
 
+    internal fun resetWorkspaceBrowser() {
+        listingGeneration++
+        initializing = false
+        home = ""
+        importDirectory = ""
+        importLabel = "Downloads"
+        folder = GuestFolder()
+        showHidden = false
+        message = null
+        pendingImportWorkspace = null
+        pendingSave = emptyList()
+        closeSave()
+    }
+
     fun open() {
         cleanInterruptedImports()
         if (home.isNotEmpty()) {
@@ -145,11 +181,14 @@ object FileTransfers {
             return
         }
         if (initializing) return
+        val owner = workspace
+        val generation = listingGeneration
         message = null
         initializing = true
         listings.execute {
-            val defaults = runCatching { run(JSONObject().put("action", "defaults")) }
+            val defaults = runCatching { run(JSONObject().put("action", "defaults"), owner) }
             main.post {
+                if (generation != listingGeneration) return@post
                 initializing = false
                 defaults.onSuccess {
                     home = it.getString("home")
@@ -163,6 +202,7 @@ object FileTransfers {
 
     fun browse(id: String, append: Boolean = false, keepSelection: Boolean = false) {
         if (id.isEmpty()) return
+        val owner = workspace
         val generation = ++listingGeneration
         val previous = if (append) folder.entries else emptyList()
         folder = if (id == folder.id) folder.copy(loading = true, error = null)
@@ -171,7 +211,7 @@ object FileTransfers {
         val hidden = showHidden
         listings.execute {
             val result = runCatching { run(JSONObject().put("action", "list").put("directory", id)
-                .put("hidden", hidden).put("offset", previous.size)) }
+                .put("hidden", hidden).put("offset", previous.size), owner) }
             main.post {
                 if (generation != listingGeneration) return@post
                 result.onSuccess { value ->
@@ -204,19 +244,29 @@ object FileTransfers {
     }
     fun chooseFiles() {
         if (importDirectory.isEmpty()) { open(); message = "Linux files are still opening"; return }
+        if (pendingImportWorkspace != null || pendingSave.isNotEmpty() || Workspaces.state.value.switching != null) return
         message = null
-        runCatching { pick?.invoke() }.onFailure { message = "Android's file picker is unavailable" }
+        pendingImportWorkspace = workspace
+        runCatching { checkNotNull(pick).invoke() }.onFailure {
+            pendingImportWorkspace = null
+            message = "Android's file picker is unavailable"
+        }
     }
 
     fun saveSelection() {
         val selection = folder.entries.filter { it.id in selected && !it.directory }
         if (selection.isEmpty()) return
+        chooseSaveDestination(selection)
+    }
+
+    private fun chooseSaveDestination(selection: List<GuestFile>) {
+        if (pendingSave.isNotEmpty() || pendingImportWorkspace != null || Workspaces.state.value.switching != null) return
         pendingSave = selection
         runCatching {
-            if (selection.size == 1) save?.invoke(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            if (selection.size == 1) checkNotNull(save).invoke(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE); type = mime(selection[0].name)
                 putExtra(Intent.EXTRA_TITLE, selection[0].name)
-            }) else tree?.invoke(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE))
+            }) else checkNotNull(tree).invoke(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE))
         }.onFailure { pendingSave = emptyList(); message = "Android's save dialog is unavailable" }
     }
 
@@ -260,12 +310,16 @@ object FileTransfers {
 
     fun importUris(uris: List<Uri>, releasePermission: (() -> Unit)? = null, destination: String = importDirectory) {
         if (destination.isEmpty()) { releasePermission?.invoke(); message = "Open Files before choosing a transfer"; return }
+        if (Workspaces.state.value.switching != null) { releasePermission?.invoke(); return }
+        val owner = workspace
+        val created = workspaceCreated
         val candidates = uris.distinct()
         if (candidates.isEmpty()) { releasePermission?.invoke(); return }
         val remaining = AtomicInteger(candidates.size)
         candidates.forEach { uri ->
             val item = TransferItem(name = uri.lastPathSegment?.substringAfterLast('/') ?: "File",
-                kind = TransferKind.Import, source = uri.toString(), destination = destination)
+                kind = TransferKind.Import, source = uri.toString(), destination = destination,
+                workspace = owner, workspaceCreated = created)
             enqueue(item, completed = { if (remaining.decrementAndGet() == 0) releasePermission?.invoke() }) { current ->
                     require(uri.scheme == "content") { "Choose a file from Android's file picker" }
                     require(app.contentResolver.getType(uri) != DocumentsContract.Document.MIME_TYPE_DIR) {
@@ -290,15 +344,18 @@ object FileTransfers {
                     try {
                         app.contentResolver.openFileDescriptor(uri, "r", signal)?.use { input ->
                             check(current.id !in canceled) { "Transfer canceled" }
-                            run(request, input.fd, job = current.id)
+                            run(request, current.workspace, input = input.fd, job = current.id)
                             try { input.checkError() } catch (error: java.io.IOException) {
                                 throw IllegalStateException("The source app could not finish sending this file. Choose it again.", error)
                             }
                         } ?: error("This document is unavailable. Choose it again.")
                         check(current.id !in canceled) { "Transfer canceled" }
-                        run(request.put("action", "commit"), job = current.id).optString("name", name)
+                        run(request.put("action", "commit"), current.workspace, job = current.id).optString("name", name)
                     } catch (error: Exception) {
-                        runCatching { run(JSONObject().put("action", "cleanup").put("directory", current.destination).put("job", current.id)) }
+                        runCatching {
+                            run(JSONObject().put("action", "cleanup").put("directory", current.destination)
+                                .put("job", current.id), current.workspace)
+                        }
                         throw error
                     }
             }
@@ -308,7 +365,8 @@ object FileTransfers {
     private fun enqueueSave(file: GuestFile, destination: Uri, directory: Boolean, permission: String? = null) {
         val transfer = TransferItem(name = file.name, kind = TransferKind.Save, total = file.size,
             source = file.id, destination = (if (directory) "tree:" else "") + destination,
-            output = if (directory) null else destination.toString(), permission = permission)
+            output = if (directory) null else destination.toString(), permission = permission,
+            workspace = workspace, workspaceCreated = workspaceCreated, expectedSaveSize = file.size.takeIf { it >= 0 })
         var started = false
         enqueue(transfer, completed = {
             if (!started && !directory) runCatching { DocumentsContract.deleteDocument(app.contentResolver, destination) }
@@ -324,7 +382,7 @@ object FileTransfers {
                 // Record the provider's exact new URI (including any collision
                 // rename) before writing bytes. Recovery never guesses a name.
                 val checkpoint = java.util.concurrent.FutureTask {
-                    items = items.map { if (it.id == item.id) it.copy(output = target.toString()) else it }
+                    records = records.map { if (it.id == item.id) it.copy(output = target.toString()) else it }
                     persist()
                 }
                 main.post(checkpoint)
@@ -334,7 +392,9 @@ object FileTransfers {
                 if (item.id in canceled) signal.cancel()
                 app.contentResolver.openFileDescriptor(target, "w", signal)?.use { output ->
                     check(item.id !in canceled) { "Transfer canceled" }
-                    run(JSONObject().put("action", "export").put("entry", file.id), output = output.fd, job = item.id)
+                    val request = JSONObject().put("action", "export").put("entry", file.id)
+                        .put("size", item.expectedSaveSize)
+                    run(request, item.workspace, output = output.fd, job = item.id)
                     output.checkError()
                 } ?: error("This Android destination is unavailable")
                 file.name
@@ -346,15 +406,26 @@ object FileTransfers {
     }
 
     fun retry(item: TransferItem) {
+        if (item.workspace.isEmpty()) {
+            message = "Choose the files again. This transfer predates workspace tracking."
+            return
+        }
+        if (item.workspace != workspace || item.workspaceCreated != workspaceCreated) return
         when (item.kind) {
             TransferKind.Import -> importUris(listOf(Uri.parse(item.source)), destination = item.destination)
-            TransferKind.Save -> {
-                pendingSave = listOf(GuestFile(item.source, item.name, false, item.total))
-                runCatching { save?.invoke(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE); type = mime(item.name); putExtra(Intent.EXTRA_TITLE, item.name)
-                }) }.onFailure { message = "Android's save dialog is unavailable" }
+            TransferKind.Save -> listings.execute {
+                val size = runCatching {
+                    run(JSONObject().put("action", "file_info").put("entry", item.source), item.workspace)
+                        .getLong("size")
+                }
+                main.post {
+                    if (item.workspace != workspace || item.workspaceCreated != workspaceCreated ||
+                        Workspaces.state.value.switching != null
+                    ) return@post
+                    size.onSuccess { chooseSaveDestination(listOf(GuestFile(item.source, item.name, false, it))) }
+                        .onFailure { message = "Could not open this Linux file again. Refresh Files and choose it again." }
+                }
             }
-
         }
     }
 
@@ -366,8 +437,11 @@ object FileTransfers {
      */
     fun dismiss(item: TransferItem) {
         val stale = setOf(TransferPhase.Failed, TransferPhase.Interrupted)
-        val same = { other: TransferItem -> other.kind == item.kind && other.source == item.source && other.phase in stale }
-        items = items.mapNotNull { when {
+        val same = { other: TransferItem ->
+            other.workspace == item.workspace && other.workspaceCreated == item.workspaceCreated && other.kind == item.kind &&
+                other.source == item.source && other.phase in stale
+        }
+        records = records.mapNotNull { when {
             !same(it) -> it
             it.id in interruptedImports -> it.copy(phase = TransferPhase.Canceled, error = null)
             else -> null
@@ -376,16 +450,21 @@ object FileTransfers {
     }
 
     fun cancel(item: TransferItem) {
+        if (records.none { it.id == item.id && it.phase.inProgress }) return
         canceled.add(item.id)
         signals[item.id]?.cancel()
         if (item.id in running) nativeCancel(item.id)
-        items = items.map { if (it.id == item.id) it.copy(phase = if (item.id in running) TransferPhase.Canceling else TransferPhase.Canceled, error = null) else it }
+        // A queued save can already own an Android document from the picker.
+        // Keep its cleanup recoverable until the worker finishes.
+        records = records.map { if (it.id == item.id) it.copy(phase = TransferPhase.Canceling, error = null) else it }
         persist()
         TransferService.sync(app, busy)
     }
+    internal fun cancelAll() = records.filter { it.phase.inProgress }.forEach(::cancel)
+
     private fun enqueue(item: TransferItem, completed: () -> Unit = {}, operation: (TransferItem) -> String) {
         message = null
-        items = items + item
+        records = records + item
         val durable = persist()
         TransferService.sync(app, true)
         work.execute {
@@ -417,7 +496,7 @@ object FileTransfers {
                 item.id in canceled -> TransferPhase.Canceled
                 else -> TransferPhase.Failed
             }
-            items = items.map { if (it.id == item.id) it.copy(name = name ?: it.name, phase = phase, error = when (failure) {
+            records = records.map { if (it.id == item.id) it.copy(name = name ?: it.name, phase = phase, error = when (failure) {
                 is SecurityException -> "Android no longer allows access to this file. Choose it again."
                 is java.io.FileNotFoundException -> "This file is unavailable. Choose it again."
                 else -> failure?.message
@@ -428,32 +507,35 @@ object FileTransfers {
                 runCatching { durable.get() }.onSuccess { main.post { releaseSavePermission(permission) } }
             } }
             TransferService.sync(app, busy)
-            if (item.kind == TransferKind.Import && phase == TransferPhase.Done && folder.id == item.destination) browse(folder.id, keepSelection = true)
+            if (item.workspace == workspace && item.kind == TransferKind.Import &&
+                phase == TransferPhase.Done && folder.id == item.destination
+            ) browse(folder.id, keepSelection = true)
         }
     }
 
     private fun update(id: String, transform: (TransferItem) -> TransferItem) {
-        main.post { items = items.map { if (it.id == id) transform(it) else it } }
+        main.post { records = records.map { if (it.id == id) transform(it) else it } }
     }
     @JvmStatic fun onNativeProgress(id: String, bytes: Long, total: Long) {
         if (id in canceled) nativeCancel(id)
         update(id) { it.copy(bytes = bytes, total = total) }
     }
-    private fun run(request: JSONObject, input: Int = -1, output: Int = -1, job: String = UUID.randomUUID().toString()): JSONObject {
-        val result = JSONObject(nativeRun(request.toString(), input, output, job))
+    private fun run(request: JSONObject, owner: String, input: Int = -1, output: Int = -1, job: String = UUID.randomUUID().toString()): JSONObject {
+        val result = JSONObject(nativeRun(request.put("workspace", owner).toString(), input, output, job))
         check(result.optBoolean("ok")) { result.optString("error", "File transfer failed") }
         return result
     }
 
     private fun persist(): java.util.concurrent.Future<*> {
         val state = JSONArray()
-        val retained = items.filter { it.phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling) }
-            .map { it.id }.toSet() + interruptedImports + items.takeLast(200).map { it.id }
-        items.filter { it.id in retained }.forEach { item -> state.put(JSONObject().put("id", item.id).put("name", item.name)
+        val retained = records.filter { it.phase.inProgress }.map { it.id }.toSet() +
+            interruptedImports + records.takeLast(200).map { it.id }
+        records.filter { it.id in retained }.forEach { item -> state.put(JSONObject().put("id", item.id).put("name", item.name)
             .put("kind", item.kind.name).put("phase", item.phase.name).put("source", item.source)
             .put("destination", item.destination).put("total", item.total)
             .put("output", item.output).put("permission", item.permission).put("cleaned", item.cleaned)
-            .put("importCleanupPending", item.id in interruptedImports)) }
+            .put("workspace", item.workspace).put("workspaceCreated", item.workspaceCreated)
+            .put("expectedSaveSize", item.expectedSaveSize).put("importCleanupPending", item.id in interruptedImports)) }
         val bytes = state.toString().toByteArray()
         return journal.submit {
             val atomic = AtomicFile(File(app.filesDir, "file-transfers.json"))
@@ -467,15 +549,19 @@ object FileTransfers {
         runCatching {
             val state = JSONArray(String(AtomicFile(File(app.filesDir, "file-transfers.json")).readFully()))
             val pendingImports = mutableSetOf<String>()
-            items = (0 until state.length()).mapNotNull { index ->
+            // Before workspaces existed, all journal records belonged to Main.
+            // If a registry already exists, an untagged path has no reliable owner.
+            val legacyOwner = if (File(app.filesDir, "workspaces/registry.json").exists()) "" else MAIN_WORKSPACE
+            records = (0 until state.length()).mapNotNull { index ->
                 val value = state.getJSONObject(index)
                 if (value.getString("kind") == "Prepare") return@mapNotNull null
                 val id = value.getString("id")
                 val kind = TransferKind.valueOf(value.getString("kind"))
                 var phase = TransferPhase.valueOf(value.getString("phase"))
-                val wasActive = phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling)
-                if (kind == TransferKind.Import &&
-                    (wasActive || phase == TransferPhase.Interrupted && value.optBoolean("importCleanupPending", true))) {
+                val wasActive = phase.inProgress
+                val owner = value.optString("workspace", legacyOwner)
+                if (kind == TransferKind.Import && owner.isNotEmpty() &&
+                    (wasActive || value.optBoolean("importCleanupPending", phase == TransferPhase.Interrupted))) {
                     pendingImports.add(id)
                 }
                 if (wasActive) phase = TransferPhase.Interrupted
@@ -484,15 +570,17 @@ object FileTransfers {
                     destination = value.getString("destination"),
                     output = value.optString("output").takeUnless { it.isEmpty() || it == "null" },
                     permission = value.optString("permission").takeUnless { it.isEmpty() || it == "null" },
-                    cleaned = value.optBoolean("cleaned"))
+                    cleaned = value.optBoolean("cleaned"), workspace = owner,
+                    workspaceCreated = value.optLong("workspaceCreated"),
+                    expectedSaveSize = value.optLong("expectedSaveSize", -1).takeIf { it >= 0 })
             }
             interruptedImports = pendingImports
             cleanInterruptedImports()
-            val interruptedSaves = items.filter { it.phase == TransferPhase.Interrupted && it.kind == TransferKind.Save && !it.cleaned }
-            val permissions = items.mapNotNull { it.permission }.toSet()
+            val interruptedSaves = records.filter { it.phase == TransferPhase.Interrupted && it.kind == TransferKind.Save && !it.cleaned }
+            val permissions = records.mapNotNull { it.permission }.toSet()
             work.execute {
                 // The bytes can all land before Done reaches the journal. Keep a
-                // whole file, remove a partial one, and check each save only once.
+                // whole file and remove only a verified partial one.
                 val handled = interruptedSaves.map { it.id }.toSet()
                 val completed = interruptedSaves.filter { item ->
                     val output = (item.output ?: item.destination.takeUnless { it.startsWith("tree:") })
@@ -502,14 +590,17 @@ object FileTransfers {
                             val index = cursor.getColumnIndex(OpenableColumns.SIZE)
                             if (cursor.moveToFirst() && index >= 0 && !cursor.isNull(index)) cursor.getLong(index) else null
                         }
-                    }.getOrNull()
+                    }.getOrNull()?.takeIf { it >= 0 }
                     val whole = item.total >= 0 && size == item.total
-                    if (!whole) runCatching { DocumentsContract.deleteDocument(app.contentResolver, output) }
+                    val expected = item.expectedSaveSize
+                    if (size != null && expected != null && size < expected) {
+                        runCatching { DocumentsContract.deleteDocument(app.contentResolver, output) }
+                    }
                     whole
                 }.map { it.id }.toSet()
                 main.post {
                     if (handled.isNotEmpty()) {
-                        items = items.map {
+                        records = records.map {
                             if (it.id !in handled) it
                             else it.copy(cleaned = true, phase = if (it.id in completed) TransferPhase.Done else it.phase)
                         }
@@ -525,12 +616,15 @@ object FileTransfers {
     /** The Activity can restore the journal before native startup or guest assets are ready. */
     internal fun cleanInterruptedImports() {
         if (!ComposeOverlay.desktopIsReady() || cleaningImports || interruptedImports.isEmpty()) return
+        val owner = workspace
         val pending = items.filter { it.id in interruptedImports }
+        if (pending.isEmpty()) return
         cleaningImports = true
         work.execute {
             val cleaned = pending.filter { item ->
                 runCatching {
-                    run(JSONObject().put("action", "cleanup").put("directory", item.destination).put("job", item.id))
+                    run(JSONObject().put("action", "cleanup").put("directory", item.destination)
+                        .put("job", item.id), item.workspace)
                 }.isSuccess
             }
             main.post {
@@ -539,6 +633,7 @@ object FileTransfers {
                     interruptedImports = interruptedImports - cleaned.map { it.id }.toSet()
                     persist()
                 }
+                if (owner != workspace) cleanInterruptedImports()
             }
         }
     }
@@ -554,7 +649,7 @@ object FileTransfers {
     }
 
     private fun releaseSavePermission(permission: String) {
-        if (items.any { it.permission == permission && it.phase in setOf(TransferPhase.Queued, TransferPhase.Running, TransferPhase.Canceling) }) return
+        if (records.any { it.permission == permission && it.phase.inProgress }) return
         runCatching {
             val uri = Uri.parse(permission)
             val grant = app.contentResolver.persistedUriPermissions.firstOrNull { it.uri == uri } ?: return@runCatching

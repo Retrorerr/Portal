@@ -28,10 +28,12 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
 
 object Workspaces {
     private const val TAG = "PortalWorkspaces"
@@ -47,6 +49,7 @@ object Workspaces {
         val lastUsedUnix: Long,
         /** Its Debian install hasn't finished; opening it resumes the installer. */
         val needsSetup: Boolean = false,
+        val createdUnix: Long = 0,
     )
 
     data class State(
@@ -99,6 +102,7 @@ object Workspaces {
                     item.getString("name"),
                     item.optLong("lastUsed"),
                     item.optBoolean("needsSetup"),
+                    item.optLong("created"),
                 )
             },
             switching = root.optString("switching").takeIf { !root.isNull("switching") && it.isNotEmpty() },
@@ -125,8 +129,14 @@ object Workspaces {
                 returnAfterSwitch.set(false)
                 opening.value = null
             }
-            state.value = next
+            applyState(next)
         }
+    }
+
+    private fun applyState(next: State) {
+        val changed = state.value.active != next.active
+        state.value = next
+        if (changed) FileTransfers.resetWorkspaceBrowser()
     }
 
     /** Read the state now, e.g. when the card opens. Main thread. */
@@ -137,7 +147,7 @@ object Workspaces {
             Log.e(TAG, "nativeWorkspaces unavailable")
             null
         }
-        json?.let(::parse)?.let { state.value = it }
+        json?.let(::parse)?.let(::applyState)
         loadPreviews(state.value.workspaces.map { it.id })
     }
 
@@ -145,13 +155,20 @@ object Workspaces {
      * Open another workspace. The running one's frame is saved first, so its
      * card shows it as it was left. Main thread.
      */
-    fun switchTo(id: String, surface: SurfaceView?) {
+    suspend fun switchTo(id: String, surface: SurfaceView?): Boolean = suspendCancellableCoroutine { result ->
         val current = state.value.active
         capture(current, surface) {
+            if (!result.isActive) return@capture
+            transferRefusal()?.let { reason ->
+                state.value = state.value.copy(error = reason)
+                result.resume(false)
+                return@capture
+            }
             val started = try {
                 ComposeOverlay.nativeSwitchWorkspace(id)
             } catch (_: UnsatisfiedLinkError) {
                 Log.e(TAG, "nativeSwitchWorkspace unavailable")
+                state.value = state.value.copy(error = "Portal couldn't open that workspace.")
                 false
             }
             if (started) {
@@ -159,8 +176,12 @@ object Workspaces {
                 opening.value = id
                 state.value = state.value.copy(switching = id, error = null)
             }
+            result.resume(started)
         }
     }
+
+    private fun transferRefusal(): String? =
+        "Finish choosing or copying files before switching workspaces.".takeIf { FileTransfers.blocksWorkspaceSwitch }
 
     /** A switch started here is waiting for the new desktop. */
     fun switchPending(): Boolean = returnAfterSwitch.get()
@@ -171,6 +192,7 @@ object Workspaces {
      * can't. Main thread.
      */
     fun create(context: Context, name: String, surface: SurfaceView?): String? {
+        transferRefusal()?.let { return it }
         val refusal = try {
             ComposeOverlay.nativeCreateWorkspace(name)
         } catch (_: UnsatisfiedLinkError) {
@@ -186,6 +208,10 @@ object Workspaces {
      * restart has begun. Main thread.
      */
     fun setUp(context: Context, id: String, surface: SurfaceView?): String? {
+        transferRefusal()?.let { reason ->
+            state.value = state.value.copy(error = reason)
+            return reason
+        }
         val refusal = try {
             ComposeOverlay.nativeSetUpWorkspace(id)
         } catch (_: UnsatisfiedLinkError) {
@@ -286,7 +312,7 @@ object Workspaces {
         Process.killProcess(Process.myPid())
     }
 
-    private tailrec fun Context.findActivity(): Activity? = when (this) {
+    internal tailrec fun Context.findActivity(): Activity? = when (this) {
         is Activity -> this
         is ContextWrapper -> baseContext.findActivity()
         else -> null
