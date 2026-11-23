@@ -9,18 +9,15 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
-use jni::objects::JClass;
-use jni::sys::jlong;
+use jni::objects::{JClass, JObject};
+use jni::sys::{jboolean, jlong};
 use jni::JNIEnv;
+use winit::platform::android::activity::ndk::native_window::NativeWindow;
 
 static PRESENTED: AtomicI64 = AtomicI64::new(0);
 
-/// The window the last rendered desktop frame went to, and how often that
-/// changed. When the desktop comes back from a monitor, the phone's touchpad
-/// page opens onto the phone's own window only once the desktop has rendered
-/// a frame into it: until then that window still shows what it held before.
+/// The window that received the most recent desktop frame.
 static RENDERED_WINDOW: AtomicUsize = AtomicUsize::new(0);
-static WINDOW_CHANGES: AtomicI64 = AtomicI64::new(0);
 
 /// Records one buffer queued to the desktop surface by either renderer.
 pub fn presented() {
@@ -30,19 +27,22 @@ pub fn presented() {
 /// Records a frame the desktop rendered, queued to `window`. Buffers queued
 /// only to set a window up hold no desktop and are not recorded.
 pub fn rendered_on(window: *mut c_void) {
-    let window = window as usize;
-    if RENDERED_WINDOW.swap(window, Ordering::AcqRel) != window {
-        WINDOW_CHANGES.fetch_add(1, Ordering::Release);
-    }
+    RENDERED_WINDOW.store(window as usize, Ordering::Release);
 }
 
-/// How often the desktop's rendered frames moved to another window.
+/// Whether the return animation can reveal this surface's desktop.
 #[no_mangle]
-pub extern "system" fn Java_app_polarbear_SessionControls_nativeDesktopWindowChanges(
-    _env: JNIEnv,
+pub extern "system" fn Java_app_polarbear_SessionControls_nativeDesktopRenderedOn(
+    env: JNIEnv,
     _class: JClass,
-) -> jlong {
-    WINDOW_CHANGES.load(Ordering::Acquire)
+    surface: JObject,
+) -> jboolean {
+    // SAFETY: Kotlin passes a live android.view.Surface reference. NativeWindow
+    // acquires and releases its own reference to the underlying window.
+    let window = unsafe { NativeWindow::from_surface(env.get_raw(), surface.as_raw()) };
+    u8::from(window.is_some_and(|window| {
+        RENDERED_WINDOW.load(Ordering::Acquire) == window.ptr().as_ptr() as usize
+    }))
 }
 
 /// Zero until the first frame; callers then sample as if the desktop changed.

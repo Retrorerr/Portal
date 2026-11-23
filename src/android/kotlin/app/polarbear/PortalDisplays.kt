@@ -209,26 +209,31 @@ internal class PortalDisplays(private val host: PortalActivity) {
 
     fun moveTo(displayId: Int): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || movePending) return false
-        val display = displayManager.displays.firstOrNull { it.displayId == displayId }
-        // A presented desktop first comes back to the activity's own screen.
-        host.presentedDisplay?.let { presented ->
-            if (presented.displayId == displayId) return true
-            host.endPresentation()
-            if (displayId == host.currentDisplay()?.displayId) {
-                // From the floating controls Portal may be behind other apps.
-                bringPortalForward()
-                return true
-            }
+        val display = displayManager.getDisplay(displayId)
+        if (display == null || !display.isValid) {
+            showMoveError()
+            return false
         }
+        val presented = host.presentedDisplay
+        val activityId = host.currentDisplay()?.displayId
+        if (presented?.displayId == displayId) return true
+        if (presented != null && displayId == activityId) {
+            host.endPresentation()
+            // From the floating controls Portal may be behind other apps.
+            bringPortalForward()
+            return true
+        }
+
         val intent = launchIntent()
-        if (display != null && presentsOn(display, host.currentDisplay()?.displayId, intent)) {
+        val canMove = canMoveTo(display, intent)
+        if (presentsOn(display, activityId, intent)) {
             if (host.presentDesktop(display)) return true
-            if (!canMoveTo(display, intent)) {
+            if (!canMove) {
                 showMoveError()
                 return false
             }
         }
-        if (!host.isTaskRoot || display == null || !canMoveTo(display, intent)) {
+        if (!host.isTaskRoot || !canMove) {
             showMoveError()
             return false
         }
@@ -249,6 +254,7 @@ internal class PortalDisplays(private val host: PortalActivity) {
             movePending = false
             if (!host.isFinishing && !host.isDestroyed) {
                 if (host.currentDisplay()?.displayId == displayId) {
+                    host.endPresentation()
                     DesktopControlActivity.displayChanged()
                     SessionService.refreshNotification()
                     if (displayId != Display.DEFAULT_DISPLAY) {

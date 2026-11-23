@@ -492,6 +492,7 @@ internal class DesktopControlView(
         releaseHint = if (host.portalDisplays.takeReleaseHint()) "Ctrl+Alt hands control back" else null
         waiting = false
         captured = true
+        onGrabbed?.invoke()
         TabletGrab.active = true
         DesktopCursor.fit(surface.width, surface.height)
         touchpad.startCapture(SystemClock.uptimeMillis())
@@ -540,7 +541,7 @@ internal class DesktopControlView(
     }
 
     private fun readySurface(): SurfaceView? = host.desktopSurface()?.takeIf {
-        ComposeOverlay.desktopIsReady() && !ComposeOverlay.isShowing() && !SessionControls.isUtilityVisible() &&
+        ComposeOverlay.desktopIsReady() && !SessionControls.blocksDesktopInput() &&
             it.width > 1 && it.height > 1 && it.holder.surface?.isValid == true
     }
 
@@ -603,6 +604,7 @@ internal class DesktopControlView(
             return false
         }
         routed = true
+        host.portalDisplays.refreshPermissions()
         message = null
         shield = KeyboardAccessibilityService.overlayContext()?.let { service ->
             AndroidCursorShield(service) { routedMotion(it) }.takeIf { it.show() }
@@ -630,6 +632,7 @@ internal class DesktopControlView(
 
     /** The user handed the mouse back on purpose: Release, or Ctrl+Alt. */
     var handedBack: (() -> Unit)? = null
+    var onGrabbed: (() -> Unit)? = null
 
     private fun handBack(reason: String) {
         release(reason)

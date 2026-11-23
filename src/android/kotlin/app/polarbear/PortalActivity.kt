@@ -173,7 +173,7 @@ open class PortalActivity : GameActivity() {
      * Forward was dropped.
      */
     private fun dispatchMouseSideButton(event: KeyEvent): Boolean {
-        if (!KeyboardAccessibilityService.isMouseSideButton(event)) return false
+        if (presentation != null || !KeyboardAccessibilityService.isMouseSideButton(event)) return false
         if (event.repeatCount == 0 &&
             (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP)
         ) {
@@ -330,7 +330,7 @@ open class PortalActivity : GameActivity() {
             updateDisplayMode()
             // Android drops pointer capture with window focus; take it back
             // if the guest still holds its pointer lock.
-            applyPointerCapture()
+            if (DisplaySetup.blocksInput()) overlayInputChanged() else applyPointerCapture()
             SessionControls.focused()
         } else TouchControls.cancelInput()
     }
@@ -377,6 +377,9 @@ open class PortalActivity : GameActivity() {
 
     /** The view the desktop is drawn in: on a presented monitor, or this activity's own. */
     internal fun desktopSurface(): SurfaceView? = presentation?.desktopView ?: mSurfaceView
+
+    internal fun hasLocalDesktopFrame(): Boolean =
+        mSurfaceView?.holder?.surface?.let(SessionControls::desktopRenderedOn) == true
 
     /**
      * Where [overlayHost] takes views drawn over the desktop (touch controls,
@@ -457,27 +460,33 @@ open class PortalActivity : GameActivity() {
      * its touchpad. False when Android refuses the window.
      */
     internal fun presentDesktop(display: Display): Boolean {
-        if (presentation?.display?.displayId == display.displayId) return true
-        // Between monitors this screen has no desktop on it to carry over.
-        val fromHere = presentation == null
-        endPresentation()
-        finishLeavingPad()
+        val previous = presentation
+        if (previous?.display?.displayId == display.displayId) return true
         val shown = DesktopPresentation(this, display, this) { ended ->
             if (presentation === ended) {
                 Log.i(TAG, "Presentation on display ${ended.display.displayId} ended")
                 endPresentation()
             }
         }
-        presentation = shown
-        holdingPhoneSurface = fromHere
         try {
             shown.show()
         } catch (error: RuntimeException) {
             // InvalidDisplayException included: the monitor went, or Android refused the window.
             Log.w(TAG, "Could not present the desktop on display ${display.displayId}", error)
-            presentation = null
-            holdingPhoneSurface = false
             return false
+        }
+        finishLeavingPad()
+        // Only the touchpad's controller may capture input while presenting.
+        val fromHere = previous == null
+        if (fromHere && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val view = window.decorView
+            if (view.hasPointerCapture()) view.releasePointerCapture()
+        }
+        presentation = shown
+        holdingPhoneSurface = fromHere
+        if (previous != null) {
+            presentedPad?.let { overlayHost().removeView(it) }
+            dismissPresentation(previous)
         }
         Log.i(TAG, "Presenting the desktop on display ${display.displayId} (${display.name})")
         applyScreenTimeout()
@@ -494,9 +503,11 @@ open class PortalActivity : GameActivity() {
         } else null
         attachNativeSurface()
         val pad = PresentedDesktopPad(this, portalDisplays.displayName(display), snapshot)
-        overlayHost().addView(pad, 1.coerceAtMost(overlayHost().childCount),
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        // Attaching the pad can create the capsule. Register it first so the
+        // capsule is placed above it during that callback.
         presentedPad = pad
+        overlayHost().addView(pad, desktopLayerTop(),
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         applyHighRefresh()
         desktopDisplayChanged()
         return true
@@ -519,15 +530,20 @@ open class PortalActivity : GameActivity() {
             }
         }
         presentedPad = null
+        dismissPresentation(ending)
+        attachNativeSurface()
+        applyPointerCapture()
+        applyHighRefresh()
+        desktopDisplayChanged()
+    }
+
+    private fun dismissPresentation(ending: DesktopPresentation) {
         if (nativeHolder === ending.holder) releaseNativeSurface()
         try {
             ending.dismiss()
         } catch (error: RuntimeException) {
             Log.w(TAG, "Presentation was already gone", error)
         }
-        attachNativeSurface()
-        applyHighRefresh()
-        desktopDisplayChanged()
     }
 
     private fun finishLeavingPad() {
@@ -555,9 +571,9 @@ open class PortalActivity : GameActivity() {
         ?: highRefreshTargetMillihz()
 
     private fun applyPointerCapture() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || presentation != null) return
         val view = window.decorView
-        if (pointerCaptureWanted && !ComposeOverlay.isShowing() && !SessionControls.isUtilityVisible()) {
+        if (pointerCaptureWanted && !SessionControls.blocksDesktopInput()) {
             if (hasWindowFocus() && !view.hasPointerCapture()) view.requestPointerCapture()
         } else if (view.hasPointerCapture()) {
             view.releasePointerCapture()
@@ -656,7 +672,8 @@ open class PortalActivity : GameActivity() {
     fun overlayInputChanged() {
         applyDesktopPointerIcon()
         applyPointerCapture()
-        if (ComposeOverlay.isShowing() || SessionControls.isUtilityVisible()) {
+        if (SessionControls.blocksDesktopInput()) {
+            presentedPad?.releaseMouse()
             DesktopControlActivity.releaseTabletInput()
         }
     }
@@ -669,7 +686,8 @@ open class PortalActivity : GameActivity() {
 
     /** Captured mouse/touchpad input goes straight to the Anland session. */
     private fun dispatchCaptured(event: MotionEvent): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && window.decorView.hasPointerCapture() &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && presentation == null &&
+            !DisplaySetup.isShowing() && window.decorView.hasPointerCapture() &&
             capturedPointer.dispatch(event)
 
     /**
@@ -742,6 +760,10 @@ open class PortalActivity : GameActivity() {
         val displayId = currentDisplay()?.displayId ?: return
         if (activityDisplayId == displayId) return
         activityDisplayId = displayId
+        if (presentation != null) {
+            endPresentation()
+            return
+        }
         applyHighRefresh()
         DesktopControlActivity.displayChanged()
         SessionService.refreshNotification()

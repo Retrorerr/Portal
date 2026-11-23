@@ -347,14 +347,17 @@ object ComposeOverlay {
             Log.i(TAG, "native desktop READY latched; Compose overlay remains attached")
         }
         android.os.Handler(android.os.Looper.getMainLooper()).post {
-            if (ready && desktopReadyLatched.get() && !Workspaces.switchPending()) {
+            val isReady = ready && desktopReadyLatched.get()
+            if (isReady) {
+                if (changed) Workspaces.refresh()
                 FileTransfers.cleanInterruptedImports()
+            }
+            if (isReady && !Workspaces.switchPending()) {
                 // At launch the veil turns ready at once, as it always has:
                 // sampling the desktop here held its reveal back by seconds
                 // and made the intro stutter.
                 desktopSettled = true
-            } else if (ready && desktopReadyLatched.get()) {
-                FileTransfers.cleanInterruptedImports()
+            } else if (isReady) {
                 // A workspace switch stays on "Opening …" until the new
                 // desktop shows past Plasma's splash, then lifts onto it.
                 val panels = try {

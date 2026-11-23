@@ -2,13 +2,14 @@ package app.polarbear
 
 import app.polarbear.TouchpadGestures.Point
 
-private class Recorder {
+private class Recorder(motionSlopMm: Float = TouchpadGestures.TAP_SLOP_MM) {
     val log = mutableListOf<String>()
     val gestures = TouchpadGestures(
         move = { _, _ -> if (log.lastOrNull() != "move") log += "move" },
         button = { code, pressed -> log += (if (code == TouchpadGestures.PRIMARY) "L" else "R") + if (pressed) "+" else "-" },
         scroll = { _, _, finished -> log += if (finished) "scroll-end" else "scroll" },
         pinch = { phase, _ -> log += "pinch-$phase" },
+        motionSlopMm = motionSlopMm,
     )
 
     fun tap(at: Long, length: Long = 80) {
@@ -101,6 +102,30 @@ fun main() {
         gestures.up(500 + TouchpadGestures.TAP_TIME_MS + 1)
         expect("move")
         check(gestures.nextDeadline == 0L)
+    }
+
+    // Touchscreen motion starts before the tap threshold, and still filters tiny jitter.
+    Recorder(motionSlopMm = 0.3f).apply {
+        gestures.down(0, Point(10f, 10f), buttonsDown = false)
+        gestures.moveOne(Point(10.1f, 10f))
+        expect()
+        gestures.moveOne(Point(10.5f, 10f))
+        expect("move")
+        gestures.moveOne(Point(12f, 10f))
+        gestures.up(80)
+        expect("move")
+    }
+
+    // A little movement still permits a tap, including the second tap of a double click.
+    Recorder(motionSlopMm = 0.3f).apply {
+        gestures.down(0, Point(10f, 10f), buttonsDown = false)
+        gestures.moveOne(Point(10.5f, 10f))
+        gestures.up(80)
+        expect("move", "L+")
+        gestures.down(150, Point(10f, 10f), buttonsDown = false)
+        gestures.moveOne(Point(10.5f, 10f))
+        gestures.up(230)
+        expect("move", "L+", "L-", "L+")
     }
 
     // A two-finger tap is a right click.

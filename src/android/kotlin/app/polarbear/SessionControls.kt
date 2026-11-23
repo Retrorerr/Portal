@@ -2,6 +2,7 @@ package app.polarbear
 
 import android.os.Handler
 import android.os.Looper
+import android.view.Surface
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.View
@@ -21,11 +22,12 @@ object SessionControls {
     @JvmStatic private external fun nativeKeyboardWanted(): Boolean
     @JvmStatic private external fun nativeDesktopKey(code: Int, down: Boolean)
     @JvmStatic private external fun nativeDesktopFrames(): Long
-    @JvmStatic private external fun nativeDesktopWindowChanges(): Long
+    @JvmStatic private external fun nativeDesktopRenderedOn(surface: Surface): Boolean
     /** Frames Portal presented to the desktop surface; 0 (unknown) means sample anyway. */
     internal fun desktopFrames(): Long = try { nativeDesktopFrames() } catch (_: UnsatisfiedLinkError) { 0L }
-    /** How often the desktop's rendered frames moved to another window; -1 when unknown. */
-    internal fun desktopWindowChanges(): Long = try { nativeDesktopWindowChanges() } catch (_: UnsatisfiedLinkError) { -1L }
+    /** Whether the most recent desktop frame was drawn on this surface. */
+    internal fun desktopRenderedOn(surface: Surface): Boolean =
+        surface.isValid && nativeDesktopRenderedOn(surface)
     var desktopKeyboardVisible by androidx.compose.runtime.mutableStateOf(false)
         private set
     internal var desktopKeyboardRevision by androidx.compose.runtime.mutableIntStateOf(0)
@@ -62,7 +64,13 @@ object SessionControls {
         refreshTextInput()
         host.overlayHost().importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         backCallback = object : androidx.activity.OnBackPressedCallback(false) {
-            override fun handleOnBackPressed() { if (utilityVisible) TouchControls.closeUtilityMenu() else ComposeOverlay.backFromControls() }
+            override fun handleOnBackPressed() {
+                when {
+                    DisplaySetup.isShowing() -> DisplaySetup.cancel()
+                    utilityVisible -> TouchControls.closeUtilityMenu()
+                    else -> ComposeOverlay.backFromControls()
+                }
+            }
         }.also { host.onBackPressedDispatcher.addCallback(host, it) }
         ViewCompat.addAccessibilityAction(host.overlayHost(), "Open Portal controls") { _, _ -> open(host) }
     }
@@ -88,6 +96,9 @@ object SessionControls {
         else if (!ComposeOverlay.isShowing()) open(host)
     }
     @JvmStatic fun isUtilityVisible() = utilityVisible
+
+    internal fun blocksDesktopInput(): Boolean =
+        DisplaySetup.blocksInput() || ComposeOverlay.isShowing() || utilityVisible
 
     /** [isUtilityVisible] for Compose: the phone's touchpad page steps aside while a capsule page is open. */
     internal val utilityOpen = mutableStateOf(false)
@@ -116,7 +127,11 @@ object SessionControls {
         utilityVisible = visible
         utilityOpen.value = visible
         utilityShown.value = visible
-        backCallback?.isEnabled = visible || ComposeOverlay.controlsVisible()
+        displaySetupChanged()
+    }
+
+    internal fun displaySetupChanged() {
+        backCallback?.isEnabled = DisplaySetup.isShowing() || utilityVisible || ComposeOverlay.controlsVisible()
         activity.get()?.overlayInputChanged()
     }
     fun desktopReadyChanged(ready: Boolean) {
@@ -134,8 +149,7 @@ object SessionControls {
 
     fun overlayChanged() {
         if (ComposeOverlay.isShowing() && ComposeOverlay.activePanel == "files") pendingFiles = false
-        backCallback?.isEnabled = utilityVisible || ComposeOverlay.controlsVisible()
-        activity.get()?.overlayInputChanged()
+        displaySetupChanged()
         TouchControls.overlayChanged()
     }
     fun onBackKey(event: KeyEvent): Boolean {

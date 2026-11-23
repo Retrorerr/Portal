@@ -20,6 +20,7 @@ internal class TouchpadGestures(
     private val button: (Int, Boolean) -> Unit,
     private val scroll: (Float, Float, Boolean) -> Unit,
     private val pinch: (PinchPhase, Float) -> Unit,
+    private val motionSlopMm: Float = TAP_SLOP_MM,
 ) {
     enum class PinchPhase { Begin, Update, End, Cancel }
 
@@ -129,14 +130,21 @@ internal class TouchpadGestures(
     fun moveOne(at: Point) {
         when (gesture) {
             Gesture.OneFinger, Gesture.Move -> {
-                if (gesture == Gesture.OneFinger) {
-                    val slop = if (physicalButtons.isEmpty()) TAP_SLOP_MM else 0f
-                    if ((at - origin).distance() <= slop) return
-                    tapButton = null
-                    gesture = Gesture.Move
-                    if (tap == Tap.SecondTouch) {
-                        tap = Tap.Dragging
-                        deadline = 0L
+                if (gesture == Gesture.OneFinger || tapButton != null) {
+                    val travel = at.distance(origin)
+                    if (travel > TAP_SLOP_MM) tapButton = null
+                    if (gesture == Gesture.OneFinger) {
+                        val slop = when {
+                            physicalButtons.isNotEmpty() -> 0f
+                            tap == Tap.SecondTouch -> TAP_SLOP_MM
+                            else -> motionSlopMm
+                        }
+                        if (travel <= slop) return
+                        gesture = Gesture.Move
+                        if (tap == Tap.SecondTouch) {
+                            tap = Tap.Dragging
+                            deadline = 0L
+                        }
                     }
                 }
                 val dx = (at.x - previous.x) * POINTER_PIXELS_PER_MM

@@ -57,11 +57,14 @@ internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onCl
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val keyHeight = minOf(48.dp * fontScale.coerceAtMost(1.4f), (height - 88.dp) / 5).coerceAtLeast(32.dp)
     val keyText = (if (width < 440.dp) 12f else 14f).sp
+    val keyboardWidth = minOf(width, 760.dp)
+    val keyPadding = 6.dp
+    val rowWidth = (keyboardWidth - keyPadding * 2).coerceAtLeast(0.dp)
     val shortWindow = height < 264.dp
     DisposableEffect(Unit) { onDispose { if (activeState.value) keyboard.reset() } }
     LaunchedEffect(activeState) { snapshotFlow { activeState.value }.collect { if (!it) keyboard.reset() } }
     fun select(next: KeyboardPage) { keyboard.reset(); page = if (page == next) KeyboardPage.Letters else next }
-    Column(Modifier.widthIn(max = 760.dp).width(width).heightIn(max = height)) {
+    Column(Modifier.width(keyboardWidth).heightIn(max = height)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(if (width < 440.dp) "Keyboard" else "Desktop keyboard", Modifier.weight(1f), color = palette.textPrimary,
@@ -81,7 +84,7 @@ internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onCl
             KeyboardAction("×", "Close keyboard", palette, active, onClick = onClose)
         }
         Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState(), enabled = active && shortWindow)
-            .padding(horizontal = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            .padding(horizontal = keyPadding), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AnimatedContent(page, transitionSpec = {
                 (fadeIn(tween(240, delayMillis = 80, easing = PortalEmphasizedDecelerate)) +
                     scaleIn(tween(300, easing = PortalEmphasized), initialScale = 0.985f))
@@ -92,21 +95,21 @@ internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onCl
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (shown == KeyboardPage.Numpad) {
                         KeyboardRow(listOf(DesktopKey("Tab",15), DesktopKey("Shift",42), DesktopKey("⌫",14)),
-                            palette, keyboard, shift, caps, acceptsKeys, keyHeight, keyText, deferPress = shortWindow)
+                            palette, keyboard, shift, caps, acceptsKeys, rowWidth, keyHeight, keyText, deferPress = shortWindow)
                         DesktopKeyboardLayout.numpad.forEach { row ->
-                            KeyboardRow(row, palette, keyboard, shift, caps, acceptsKeys, keyHeight, keyText, "Numpad ", shortWindow)
+                            KeyboardRow(row, palette, keyboard, shift, caps, acceptsKeys, rowWidth, keyHeight, keyText, "Numpad ", shortWindow)
                         }
                     } else {
                         KeyboardRow(DesktopKeyboardLayout.numbers + DesktopKey("⌫",14,weight = 1.5f),
-                            palette, keyboard, shift, caps, acceptsKeys, keyHeight, keyText, deferPress = shortWindow)
+                            palette, keyboard, shift, caps, acceptsKeys, rowWidth, keyHeight, keyText, deferPress = shortWindow)
                         (if (shown == KeyboardPage.Symbols) DesktopKeyboardLayout.symbols else DesktopKeyboardLayout.letters).forEach { row ->
-                            KeyboardRow(row, palette, keyboard, shift, caps, acceptsKeys, keyHeight, keyText, deferPress = shortWindow)
+                            KeyboardRow(row, palette, keyboard, shift, caps, acceptsKeys, rowWidth, keyHeight, keyText, deferPress = shortWindow)
                         }
                     }
                 }
             }
             val typing = { activeState.value }
-            KeyboardRow(DesktopKeyboardLayout.bottom, palette, keyboard, shift, caps, typing, keyHeight, keyText, deferPress = shortWindow)
+            KeyboardRow(DesktopKeyboardLayout.bottom, palette, keyboard, shift, caps, typing, rowWidth, keyHeight, keyText, deferPress = shortWindow)
             AnimatedVisibility(expanded,
                 enter = expandVertically(spring(dampingRatio = 1f, stiffness = 380f), expandFrom = Alignment.Top) + fadeIn(tween(240, delayMillis = 80)),
                 exit = shrinkVertically(spring(dampingRatio = 1f, stiffness = 380f), shrinkTowards = Alignment.Top) + fadeOut(tween(120))) {
@@ -120,10 +123,10 @@ internal fun UtilityKeyboard(palette: PortalPalette, width: Dp, height: Dp, onCl
                         }
                     }
                     DesktopKeyboardLayout.functions.chunked(if (width < 500.dp) 6 else 12).forEach { row ->
-                        KeyboardRow(row, palette, keyboard, shift, caps, trayKeys, keyHeight, keyText, deferPress = true)
+                        KeyboardRow(row, palette, keyboard, shift, caps, trayKeys, rowWidth, keyHeight, keyText, deferPress = true)
                     }
-                    KeyboardRow(DesktopKeyboardLayout.navigation, palette, keyboard, shift, caps, trayKeys, keyHeight, keyText, deferPress = true)
-                    KeyboardRow(DesktopKeyboardLayout.system, palette, keyboard, shift, caps, trayKeys, keyHeight, keyText, deferPress = true)
+                    KeyboardRow(DesktopKeyboardLayout.navigation, palette, keyboard, shift, caps, trayKeys, rowWidth, keyHeight, keyText, deferPress = true)
+                    KeyboardRow(DesktopKeyboardLayout.system, palette, keyboard, shift, caps, trayKeys, rowWidth, keyHeight, keyText, deferPress = true)
                     Text("Modifiers: tap for the next key · tap twice to lock · tap again to release. Hold for chords. Layout follows desktop XKB.",
                         Modifier.padding(horizontal = 5.dp, vertical = 4.dp), color = palette.textMuted, fontSize = 11.sp)
                 }
@@ -151,21 +154,27 @@ internal fun UtilityKeyboardChip(palette: PortalPalette, grip: Modifier, onResto
 
 @Composable
 private fun KeyboardRow(keys: List<DesktopKey>, palette: PortalPalette, state: DesktopKeyboardState, shift: Boolean,
-    caps: Boolean, active: () -> Boolean, height: Dp, textSize: TextUnit, prefix: String = "", deferPress: Boolean = false,
+    caps: Boolean, active: () -> Boolean, width: Dp, height: Dp, textSize: TextUnit, prefix: String = "", deferPress: Boolean = false,
 ) {
+    val spacing = 3.dp
+    // Fit labels using the keyboard's known width so layout can measure the
+    // ordinary Row without composing keys on the first opening frame.
+    val totalWeight = keys.sumOf { it.weight.toDouble() }.toFloat()
+    val keySpace = (width - spacing * (keys.size - 1)).coerceAtLeast(0.dp)
     // Each row records its own display list: a keystroke redraws its row, and
     // the page's other changes (its header, its fade, being set aside while
     // hidden) never make every key redraw on the frame it reappears.
-    Row(Modifier.fillMaxWidth().graphicsLayer(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+    Row(Modifier.fillMaxWidth().graphicsLayer(), horizontalArrangement = Arrangement.spacedBy(spacing)) {
         keys.forEach { key -> key(key.code) {
-            DesktopKeyboardKey(key, palette, state, shift, caps, active, Modifier.weight(key.weight).height(height), textSize, prefix, deferPress)
+            DesktopKeyboardKey(key, palette, state, shift, caps, active, Modifier.weight(key.weight).height(height),
+                keySpace * (key.weight / totalWeight), textSize, prefix, deferPress)
         } }
     }
 }
 
 @Composable
 private fun DesktopKeyboardKey(key: DesktopKey, palette: PortalPalette, state: DesktopKeyboardState, shift: Boolean,
-    caps: Boolean, active: () -> Boolean, modifier: Modifier, textSize: TextUnit, prefix: String, deferPress: Boolean,
+    caps: Boolean, active: () -> Boolean, modifier: Modifier, keyWidth: Dp, textSize: TextUnit, prefix: String, deferPress: Boolean,
 ) {
     // Ordinary strokes invalidate just their own key, rather than every key on the surface.
     val level by remember(state, key.code) { derivedStateOf { SessionControls.desktopKeyboardRevision; state.level(key.code) } }
@@ -175,7 +184,9 @@ private fun DesktopKeyboardKey(key: DesktopKey, palette: PortalPalette, state: D
     val description = prefix + when (key.code) {
         14 -> "Backspace"; 58 -> "Caps lock"; 105 -> "Left arrow"; 103 -> "Up arrow"; 108 -> "Down arrow"; 106 -> "Right arrow"; else -> label
     }
-    KeyboardKey(label, description, palette, pressed, level, modifier, textSize, active,
+    val fittingSize = minOf(textSize.value, (keyWidth.value - 4f).coerceAtLeast(1f) /
+        (label.length.coerceAtLeast(1) * 0.6f * LocalDensity.current.fontScale)).sp
+    KeyboardKey(label, description, palette, pressed, level, modifier, fittingSize, active,
         key.code in DesktopKeyboardLayout.modifiers, deferPress,
         { state.press(key.code) }, { state.release(key.code, it) }, { state.tap(key.code) })
 }
@@ -195,7 +206,7 @@ private fun KeyboardKey(label: String, description: String, palette: PortalPalet
     val latestUp by rememberUpdatedState(onUp)
     val accepts by rememberUpdatedState(active)
     val shape = RoundedCornerShape(10.dp)
-    BoxWithConstraints(modifier.graphicsLayer { scaleX = 1f - 0.045f * travel; scaleY = scaleX; translationY = travel * 1.dp.toPx() }
+    Box(modifier.graphicsLayer { scaleX = 1f - 0.045f * travel; scaleY = scaleX; translationY = travel * 1.dp.toPx() }
         .clip(shape).background(fill).border(1.dp, if (level > 0) palette.accent else palette.surfaceBorder, shape)
         .semantics {
             contentDescription = description; role = Role.Button
@@ -224,9 +235,7 @@ private fun KeyboardKey(label: String, description: String, palette: PortalPalet
                 }
             })
         }, contentAlignment = Alignment.Center) {
-        val fittingSize = minOf(textSize.value, (maxWidth.value-4f).coerceAtLeast(1f) /
-            (label.length.coerceAtLeast(1) * 0.6f * LocalDensity.current.fontScale)).sp
-        Text(label, color = palette.textPrimary, fontSize = fittingSize, fontWeight = FontWeight.Medium,
+        Text(label, color = palette.textPrimary, fontSize = textSize, fontWeight = FontWeight.Medium,
             textAlign = TextAlign.Center, maxLines = 1, softWrap = false)
         // Keep the lock marker mounted so unlocking also has an exit animation.
         val marker by animateFloatAsState(if (level == 2) 1f else 0f, tween(140), label = "key lock")

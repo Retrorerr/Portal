@@ -86,6 +86,7 @@ internal fun UtilityRoundtable(
     val available = actions.filter { it.available }
     val geometryAnchor = remember(page,area,dockRight,density.density,density.fontScale) { anchor() }
     val geometry = UtilityMenuGeometry.menu(area, UtilityMenuGeometry.Point(geometryAnchor.x,geometryAnchor.y), available.size, density.density, density.fontScale)
+    val surfaceMaxWidth = (area.width - 24 * density.density).toInt().coerceAtLeast(1)
     val radialTarget = if (geometry.compact) 0f else 1f
     val radial by animateFloatAsState(radialTarget,spring(dampingRatio = 1f,stiffness = 380f,visibilityThreshold = PortalProgressRest),label = "responsive roundtable")
     var surfaceResizing by remember { mutableStateOf(false) }
@@ -264,7 +265,7 @@ internal fun UtilityRoundtable(
                     shown == UtilityPage.Keyboard && compact -> UtilityKeyboardChip(palette,
                         keyboardMotion.grip(page == UtilityPage.Keyboard && LocalUtilityContentActive.current, chip = true)) { onKeyboardMinimized(false) }
                     shown == UtilityPage.Keyboard -> UtilityKeyboard(palette,
-                        with(density) { (area.width-24*density.density).coerceAtLeast(120*density.density).toDp() },
+                        with(density) { surfaceMaxWidth.toDp() },
                         with(density) { (area.height-24*density.density).coerceAtLeast(120*density.density).toDp() }, onClose,
                         onMinimize = { onKeyboardMinimized(true) },
                         grip = keyboardMotion.grip(page == UtilityPage.Keyboard && LocalUtilityContentActive.current))
@@ -323,7 +324,7 @@ internal fun UtilityRoundtable(
                 }
             }
         }, modifier = Modifier.fillMaxSize()) { children, constraints ->
-            val child = children.single().measure(Constraints(maxWidth = (area.width-24*density.density).toInt().coerceAtLeast(1),
+            val child = children.single().measure(Constraints(maxWidth = surfaceMaxWidth,
                 maxHeight = (area.height-24*density.density).toInt().coerceAtLeast(1)))
             layout(constraints.maxWidth,constraints.maxHeight) {
                 val arrivalShift = (1f-arrival.value)*18*density.density*(if (dockRight) 1 else -1)

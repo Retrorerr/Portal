@@ -52,6 +52,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -89,6 +90,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -176,7 +178,6 @@ internal class PresentedDesktopPad(
     private var chipBounds by mutableStateOf<Rect?>(null)
     private var leaving by mutableStateOf(false)
     private var left: (() -> Unit)? = null
-    private var leaveBase = 0L
 
     /** The Controller button's whole-screen game controller. */
     private val controller = PresentedController(host, this) { safe.top }
@@ -195,6 +196,7 @@ internal class PresentedDesktopPad(
         )
         addView(grab, LayoutParams(1, 1))
         grab.handedBack = { mouseWanted = false }
+        grab.onGrabbed = { mouseWanted = true }
         // Until the desktop takes a mouse, it works this screen, with Android's arrow.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) pointerIcon = PointerIcon.getSystemIcon(host, PointerIcon.TYPE_ARROW)
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
@@ -221,6 +223,8 @@ internal class PresentedDesktopPad(
         pointerConnected = connected
     }
 
+    fun releaseMouse() = grab.release("Portal controls opened")
+
     @Composable
     private fun PadContent() {
         PortalTheme {
@@ -235,6 +239,7 @@ internal class PresentedDesktopPad(
                 // rise. Until the copy settles, the pad stays clear over the desktop.
                 val enter = remember { Animatable(0f) }
                 val rise = remember { Animatable(0f) }
+                val buttonsShown by remember { derivedStateOf { rise.value > 0f } }
                 val settled = snapshot?.settled ?: true
                 val carried = remember(settled) { settled && snapshot?.image != null }
                 LaunchedEffect(settled) {
@@ -255,7 +260,8 @@ internal class PresentedDesktopPad(
                 LaunchedEffect(Unit) {
                     snapshotFlow {
                         mouseWanted && pointerConnected && focused && rise.value > 0f && !leaving &&
-                            !SessionControls.utilityOpen.value && !grab.grabbed && !grab.asksAboutTouch
+                            !SessionControls.utilityOpen.value && !DisplaySetup.isShowing() &&
+                            !grab.grabbed && !grab.asksAboutTouch
                     }.collectLatest { take ->
                         if (!take) return@collectLatest
                         // The monitor's surface may still be on its way.
@@ -278,7 +284,7 @@ internal class PresentedDesktopPad(
                     // Plasma goes on redrawing for its new size for a second or two
                     // after this; waiting for that would make every return feel slow.
                     val back = withTimeoutOrNull(REVEAL_WAIT_MS) {
-                        while (SessionControls.desktopWindowChanges() <= leaveBase) withFrameNanos { }
+                        while (!host.hasLocalDesktopFrame()) withFrameNanos { }
                     }
                     Log.i(TAG, if (back != null) "desktop back on this screen after ${SystemClock.uptimeMillis() - started}ms"
                         else "no desktop frame here after ${REVEAL_WAIT_MS}ms; opening anyway")
@@ -290,7 +296,8 @@ internal class PresentedDesktopPad(
                 // here, and that button is the capsule until the page has closed
                 // back into it (PadButtons). The others and the guide step aside
                 // while the page shows and come back as it closes, as the veil's
-                // other pills do.
+                // other pills do. They take touches again once it has let go.
+                val utilityOpen = SessionControls.utilityOpen.value
                 val utilityShown = SessionControls.utilityShown.value
                 val chrome = animateFloatAsState(
                     if (utilityShown) 0f else 1f,
@@ -381,7 +388,7 @@ internal class PresentedDesktopPad(
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
                         GrabNote(palette)
-                        PadButtons(palette)
+                        PadButtons(palette, interactive = buttonsShown && !leaving && !utilityOpen)
                     }
                 }
             }
@@ -454,46 +461,48 @@ internal class PresentedDesktopPad(
         graphicsLayer { alpha = if (TouchControls.padStandIn.value == glyph) 0f else 1f }
 
     @Composable
-    private fun PadButtons(palette: PortalPalette) {
+    private fun PadButtons(palette: PortalPalette, interactive: Boolean) {
         // Read when pressed, so each page starts from where its button is now.
         val placed = remember { arrayOfNulls<LayoutCoordinates>(2) }
         fun center(index: Int): Offset? = placed[index]?.takeIf { it.isAttached }?.boundsInRoot()?.center
         BoxWithConstraints {
-            val count = if (pointerConnected) 5 else 4
+            val showMouse = pointerConnected || grab.grabbed
+            val count = if (showMouse) 5 else 4
             val gap = 14.dp
             val size = ((maxWidth - 32.dp - gap * (count - 1)) / count).coerceIn(56.dp, 74.dp)
             Row(horizontalArrangement = Arrangement.spacedBy(gap), verticalAlignment = Alignment.CenterVertically) {
                 AnimatedVisibility(
-                    pointerConnected,
+                    showMouse,
                     enter = fadeIn(tween(220, delayMillis = 80)) + expandHorizontally(spring(dampingRatio = 1f, stiffness = 380f)),
                     exit = fadeOut(tween(140)) + shrinkHorizontally(spring(dampingRatio = 1f, stiffness = 380f)),
                     label = "use mouse",
                 ) {
                     PadButton(
                         PortalGlyph.Mouse, if (grab.grabbed) "Release" else "Use mouse", palette, size,
+                        interactive = interactive && showMouse,
                         accent = grab.grabbed,
                         description = if (grab.grabbed) "Give the mouse and keyboard back to Android"
                         else "Use the connected mouse and keyboard on the desktop",
                         onClick = grab::toggle,
                     )
                 }
-                PadButton(PortalGlyph.Keyboard, "Keyboard", palette, size, onPlaced = { placed[0] = it },
+                PadButton(PortalGlyph.Keyboard, "Keyboard", palette, size, interactive, onPlaced = { placed[0] = it },
                     modifier = Modifier.standingIn(PortalGlyph.Keyboard)) {
                     center(0)?.let { TouchControls.openFromPad(UtilityPage.Keyboard, it.x, it.y, PadFace(PortalGlyph.Keyboard, "Keyboard", size)) }
                 }
-                PadButton(PortalGlyph.Controller, "Controller", palette, size,
+                PadButton(PortalGlyph.Controller, "Controller", palette, size, interactive,
                     description = "Use this ${deviceNoun(host)} as a game controller") {
                     TouchControls.setScreenController(true)
                 }
                 val portalFace = PadFace(PortalGlyph.Portal, "Portal", size)
-                PadButton(PortalGlyph.Portal, "Portal", palette, size, description = "Portal menu",
+                PadButton(PortalGlyph.Portal, "Portal", palette, size, interactive, description = "Portal menu",
                     onPlaced = { coordinates ->
                         placed[1] = coordinates
                         center(1)?.let { TouchControls.hideCapsuleForPad(it.x, it.y, portalFace) }
                     }, modifier = Modifier.standingIn(PortalGlyph.Portal)) {
                     center(1)?.let { TouchControls.openFromPad(UtilityPage.Menu, it.x, it.y, portalFace) }
                 }
-                PadButton(PortalGlyph.Return, "Return", palette, size,
+                PadButton(PortalGlyph.Return, "Return", palette, size, interactive,
                     description = "Show the desktop on this ${deviceNoun(host)}") {
                     host.portalDisplays.moveTo(Display.DEFAULT_DISPLAY)
                 }
@@ -507,7 +516,6 @@ internal class PresentedDesktopPad(
      */
     fun leave(done: () -> Unit) {
         if (leaving) return
-        leaveBase = SessionControls.desktopWindowChanges()
         left = done
         leaving = true
         removeCallbacks(gestureTimer)
@@ -530,7 +538,10 @@ internal class PresentedDesktopPad(
         if (leaving || !DesktopControlView.isDirectTouch(event)) return true
         timeNs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) event.eventTimeNanos
         else event.eventTime * 1_000_000L
-        if (event.actionMasked == MotionEvent.ACTION_DOWN) touched = true
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            requestUnbufferedDispatch(event)
+            touched = true
+        }
         fingers.track(event)
         gestures.dispatch(event)
         scheduleGestureTimer()
@@ -774,6 +785,7 @@ internal fun PadButton(
     label: String,
     palette: PortalPalette,
     size: Dp,
+    interactive: Boolean = true,
     accent: Boolean = false,
     description: String = label,
     onPlaced: (LayoutCoordinates) -> Unit = {},
@@ -792,6 +804,10 @@ internal fun PadButton(
         tween(180, easing = PortalEmphasized), label = "pad button fill",
     )
     val ink = if (accent) PortalColors.Charcoal else palette.textPrimary
+    val action = if (interactive) {
+        Modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button, onClickLabel = description, onClick = onClick)
+            .semantics(mergeDescendants = true) { contentDescription = description }
+    } else Modifier.clearAndSetSemantics { }
     PadButtonFace(glyph, label, ink,
         modifier.size(size)
             .onGloballyPositioned(onPlaced)
@@ -799,8 +815,7 @@ internal fun PadButton(
             .shadow(PadButtonElevation, CircleShape, ambientColor = palette.pillShadow, spotColor = palette.pillShadow)
             .clip(CircleShape).background(palette.background).background(fill)
             .border(1.dp, palette.surfaceBorder, CircleShape)
-            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClickLabel = description, onClick = onClick)
-            .semantics(mergeDescendants = true) { contentDescription = description })
+            .then(action))
 }
 
 /** A touchpad button's shadow; the capsule standing in for one casts the same. */

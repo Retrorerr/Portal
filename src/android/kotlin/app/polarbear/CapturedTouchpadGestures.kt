@@ -5,6 +5,9 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import app.polarbear.TouchpadGestures.Point
 
+// Let a finger steer the cursor as soon as it moves past touchscreen jitter.
+private const val SCREEN_MOTION_SLOP_MM = 0.3f
+
 /**
  * Android's raw pointer capture bypasses its touchpad gesture recognizer. This
  * feeds those contacts to [TouchpadGestures] in millimetres, so tap slop and
@@ -19,7 +22,10 @@ internal class CapturedTouchpadGestures(
     pinch: (TouchpadGestures.PinchPhase, Float) -> Unit,
     private val screenUnitsPerMm: Float = 0f,
 ) {
-    private val gestures = TouchpadGestures(move, button, scroll, pinch)
+    private val gestures = TouchpadGestures(
+        move, button, scroll, pinch,
+        motionSlopMm = if (screenUnitsPerMm > 0f) SCREEN_MOTION_SLOP_MM else TouchpadGestures.TAP_SLOP_MM,
+    )
     // Null until a contact arrives: injected input (adb, accessibility) has device id -1.
     private var primaryDevice: Int? = null
     private var xUnitsPerMm = 1f
@@ -54,7 +60,7 @@ internal class CapturedTouchpadGestures(
             MotionEvent.ACTION_DOWN -> {
                 if (primaryDevice != event.deviceId) {
                     primaryDevice = event.deviceId
-                    if (screenUnitsPerMm > 0f && event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN)) {
+                    if (screenUnitsPerMm > 0f) {
                         xUnitsPerMm = screenUnitsPerMm
                         yUnitsPerMm = screenUnitsPerMm
                     } else {

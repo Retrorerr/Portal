@@ -5,6 +5,7 @@ import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.PointerIcon
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.RequiresApi
@@ -161,7 +162,10 @@ internal enum class DisplayPermission {
  * the setup was opened only to finish what was put off.
  */
 internal object DisplaySetup {
-    private var shown: DisplaySetupView? = null
+    private var shown by mutableStateOf<DisplaySetupView?>(null)
+
+    @JvmStatic fun isShowing(): Boolean = shown != null
+    @JvmStatic fun blocksInput(): Boolean = shown?.windowVisibility == View.VISIBLE
 
     /**
      * Opens the setup over Portal; false when [steps] is empty, and the caller
@@ -176,12 +180,14 @@ internal object DisplaySetup {
         preview: Boolean = false,
     ): Boolean {
         if (steps.isEmpty()) return false
-        shown?.removeNow()
+        val previous = shown
         val view = DisplaySetupView(host, target, steps, origin, preview, moved)
         // Above everything over the desktop. Android's settings pages close
         // Portal's menu behind them; this stays for when they come back.
-        host.overlayHost().addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         shown = view
+        previous?.removeNow()
+        host.overlayHost().addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        SessionControls.displaySetupChanged()
         return true
     }
 
@@ -197,8 +203,12 @@ internal object DisplaySetup {
     fun everyStep(): List<DisplayPermission> = DisplayPermission.entries.filter { it.applies }
 
     internal fun closed(view: DisplaySetupView) {
-        if (shown === view) shown = null
+        if (shown !== view) return
+        shown = null
+        SessionControls.displaySetupChanged()
     }
+
+    fun cancel() { shown?.cancel() }
 
     /** Back or Escape closes the setup; no other key reaches the desktop while it is up. */
     fun dispatchKey(event: KeyEvent): Boolean {
@@ -309,11 +319,12 @@ internal class DisplaySetupView(
         }
 
         fun advance() {
+            if (exit != null) return
             if (index < steps.lastIndex) {
                 index++
                 asked = false
                 unanswered = false
-            } else if (exit == null) {
+            } else {
                 exit = if (moved != null) Exit.Move else Exit.Back
             }
         }
@@ -388,7 +399,8 @@ internal class DisplaySetupView(
                             steps[shown], first = shown == 0, palette, compact,
                             granted = shown in granted,
                             unanswered = unanswered && shown == index,
-                            onAllow = {
+                            onAllow = allow@{
+                                if (shown != index || exit != null) return@allow
                                 asked = true
                                 unanswered = false
                                 when (steps[shown]) {
@@ -396,9 +408,10 @@ internal class DisplaySetupView(
                                     DisplayPermission.Accessibility -> openAccessibilitySettings(host)
                                 }
                             },
-                            onLater = {
+                            onLater = later@{
+                                if (shown != index || exit != null) return@later
                                 if (!preview) host.portalDisplays.putOff(steps[shown])
-                                if (shown == index) advance()
+                                advance()
                             },
                         )
                     }

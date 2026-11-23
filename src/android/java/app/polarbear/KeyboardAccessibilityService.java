@@ -92,6 +92,7 @@ public class KeyboardAccessibilityService extends AccessibilityService {
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
+        if (DisplaySetup.blocksInput()) return super.onKeyEvent(event);
         // A desktop on another display holding the mouse through this service
         // also holds the keyboard; nothing else is focused for it.
         if (TabletGrab.isRouted()) return TabletGrab.routeKey(event) || super.onKeyEvent(event);
