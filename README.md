@@ -30,11 +30,23 @@ Portal is one app. Install it, tap through a short setup, and a few minutes late
 
 Plug the phone into a monitor and it's a desktop computer, with the phone in your hand as the touchpad.
 
+<p align="center">
+  <img src="docs/screenshots/veil-phone.webp" width="720" alt="Portal's veil on a phone in landscape: the Portal logo, 'Your desktop is running', and Apps, Files and Gaming buttons over the blurred desktop" />
+</p>
+
+<p align="center"><sub>The veil over a running desktop on a OnePlus 15</sub></p>
+
 ## Features
 
 ### Monitors and TVs
 
 Connect a monitor or TV and the desktop moves onto it, sized for that screen. The phone becomes a touchpad, a keyboard, or a full game controller. You can also leave Portal and use Android as usual while the desktop keeps running on the big screen.
+
+<p align="center">
+  <img src="docs/screenshots/monitor-controller.webp" width="860" alt="Steam Big Picture on a monitor, with a phone in front of it showing Portal's full-screen game controller" />
+</p>
+
+<p align="center"><sub>Steam Big Picture on a monitor, with the phone as the controller</sub></p>
 
 1. Connect the monitor with a USB-C to HDMI cable or a dock, or cast to a wireless display.
 2. On the desktop, open the Portal pill, then **Portal settings → External display**, and pick the monitor.
@@ -49,8 +61,6 @@ Samsung DeX does something similar for Android apps. Portal gives you a Linux de
 | **On the monitor** | KDE Plasma with Linux desktop apps: Firefox, LibreOffice, GIMP, Krita, Steam | Android apps in windows |
 | **Devices** | Snapdragon phones and tablets of any brand, including phones that normally only mirror their screen | Samsung Galaxy phones and tablets |
 | **In your hand** | Touchpad, keyboard or a full game controller | Touchpad and keyboard |
-
-<!-- photo: phone as touchpad in front of a monitor showing Plasma -->
 
 ### Workspaces
 
