@@ -175,6 +175,14 @@ const char *tawcroot_foreign_elf_interp(int fd)
 	unsigned machine = eh[18] | (unsigned)eh[19] << 8;
 	if (machine != TAWC_EM_X86_64 || (type != TAWC_ET_EXEC && type != TAWC_ET_DYN))
 		return 0;
+	/* Steam includes an ARM64 Box64 build that preserves the x86 D-Bus ABI.
+	 * Use it for x86 ELFs started by shell launchers as well as direct games. */
+	const char *portal_box64 = "/usr/share/steam/compatibilitytools.d/portal-box64/box64";
+	long portal_fd = tawcroot_rescue_open_in_view(portal_box64);
+	if (portal_fd >= 0) {
+		tawc_close((int)portal_fd);
+		return portal_box64;
+	}
 	return "/usr/bin/box64";
 #else
 	(void)fd;

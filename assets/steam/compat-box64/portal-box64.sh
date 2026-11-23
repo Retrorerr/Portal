@@ -73,23 +73,26 @@ if [ -n "$LD_LIBRARY_PATH" ]; then
     LD_LIBRARY_PATH=$(printf '%s' "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v -e '/steamrtarm64' -e '/ubuntu12_32' -e '/linuxarm64' | paste -sd: -)
     [ -n "$LD_LIBRARY_PATH" ] && export LD_LIBRARY_PATH || unset LD_LIBRARY_PATH
 fi
-# Steam prepends its overlay to LD_PRELOAD without a separator, which
-# swallows Portal's drmshim.so (the GPU render-node shim). Split the glued
-# entries and keep only libraries that exist.
-repair_preload() {
-    preload=$(printf '%s\n' "$LD_PRELOAD" | sed 's#\.so/#.so:/#g' | tr ' :' '\n\n' |
-        while IFS= read -r lib; do [ -n "$lib" ] && [ -f "$lib" ] && echo "$lib"; done | paste -sd: -)
-    [ -n "$preload" ] && export LD_PRELOAD="$preload" || unset LD_PRELOAD
-}
-repair_preload
-
 # Games bundle SDL builds that read SDL_VIDEODRIVER as one driver name and
 # fail on Portal's "wayland,x11" list; Xwayland suits every one of them.
 export SDL_VIDEODRIVER="${PORTAL_SDL_VIDEODRIVER:-x11}"
+# Older bundled SDL builds ignore SDL_JOYSTICK_DISABLE_UDEV. Give them the
+# virtual pads directly. Newer SDL can still discover pads that arrive later.
+if [ -z "${SDL_JOYSTICK_DEVICE+x}" ]; then
+    pads=
+    for device in /dev/input/event*; do
+        [ -L "$device" ] && [ -c "$device" ] || continue
+        pads="${pads:+$pads:}$device"
+    done
+    [ -z "$pads" ] || export SDL_JOYSTICK_DEVICE="$pads"
+fi
 ulimit -n "$(ulimit -Hn)" 2>/dev/null
 export MESA_SHADER_CACHE_MAX_SIZE="${MESA_SHADER_CACHE_MAX_SIZE:-4G}"
 
-box64="${PORTAL_BOX64:-$(command -v box64)}"
+box64="${PORTAL_BOX64:-${0%/*}/box64}"
+if [ -z "$PORTAL_BOX64" ] && [ ! -x "$box64" ]; then
+    box64=$(command -v box64)
+fi
 
 # The ELF class and machine of a file: x86_64, i386, aarch64 or empty.
 elf_kind() {
@@ -118,6 +121,37 @@ for arg in "$@"; do
         break
     fi
 done
+
+# Steam can pass renderers for all three architectures in LD_PRELOAD,
+# sometimes glued to the preceding Portal shim. Native and emulated
+# renderers in the same Box64 process compete for Steam's overlay IPC.
+repair_preload() {
+    preload=
+    overlay=
+    while IFS= read -r lib; do
+        [ -n "$lib" ] && [ -f "$lib" ] || continue
+        case "$lib" in
+            */gameoverlayrenderer.so)
+                case "$(elf_kind "$lib"):$kind" in
+                    aarch64:aarch64) ;;
+                    x86_64:x86_64|x86_64:) overlay="${overlay:-$lib}"; continue ;;
+                    *) continue ;;
+                esac
+                ;;
+        esac
+        preload="${preload:+$preload:}$lib"
+    done <<EOF
+$(printf '%s\n' "$LD_PRELOAD" | sed 's#\.so/#.so:/#g' | tr ' :' '\n\n')
+EOF
+    [ -n "$preload" ] && export LD_PRELOAD="$preload" || unset LD_PRELOAD
+    if [ -n "$overlay" ]; then
+        case "$BOX64_LD_PRELOAD:" in
+            */gameoverlayrenderer.so:*) ;;
+            *) export BOX64_LD_PRELOAD="${BOX64_LD_PRELOAD:+$BOX64_LD_PRELOAD:}$overlay" ;;
+        esac
+    fi
+}
+repair_preload
 
 # Games built for a Steam Linux Runtime check that they run inside its
 # container (Source games' launch scripts: VERSION_CODENAME=sniper in

@@ -1,0 +1,70 @@
+--- a/src/wrapped/wrappeddbus.c
++++ b/src/wrapped/wrappeddbus.c
+@@ -405,6 +405,39 @@
+     my->dbus_connection_remove_filter(connection, find_DBusHandleMessageFunction_Fct(fnc), data);
+ }
+ 
++#if defined(__aarch64__)
++static uint32_t dbus_va_arg(x64_va_list_t args)
++{
++    const void *slot;
++    if (args->gp_offset < X64_VA_MAX_REG) {
++        slot = args->reg_save_area + args->gp_offset;
++        args->gp_offset += 8;
++    } else {
++        slot = args->overflow_arg_area;
++        args->overflow_arg_area += 8;
++    }
++    uint32_t value;
++    memcpy(&value, slot, sizeof(value));
++    return value;
++}
++
++/* ARM passes va_list by value. On x86-64, libdbus advances the caller's
++ * list. Older SDL reads the reply types after the request's terminator.
++ * libdbus takes values by address and arrays also take a type and count,
++ * so all these parameters use general-purpose argument slots. */
++static void dbus_advance_va_list(int type, x64_va_list_t args)
++{
++    while (type != 0) { /* DBUS_TYPE_INVALID */
++        if (type == 'a') { /* DBUS_TYPE_ARRAY */
++            dbus_va_arg(args);
++            dbus_va_arg(args);
++        }
++        dbus_va_arg(args);
++        type = dbus_va_arg(args);
++    }
++}
++#endif
++
+ EXPORT int my_dbus_message_get_args_valist(x64emu_t* emu, void* message, void* e, int arg, x64_va_list_t b)
+ {
+     (void)emu;
+@@ -413,7 +446,12 @@
+     #else
+     CREATE_VALIST_FROM_VALIST(b, emu->scratch);
+     #endif
+-    return my->dbus_message_get_args_valist(message, e, arg, VARARGS);
++    int result = my->dbus_message_get_args_valist(message, e, arg, VARARGS);
++#if defined(__aarch64__)
++    if (result)
++        dbus_advance_va_list(arg, b);
++#endif
++    return result;
+ }
+ 
+ EXPORT int my_dbus_message_get_args(x64emu_t* emu, void* message, void* e, int arg, uint64_t* V)
+@@ -488,7 +526,12 @@
+     sysv_varargs = (va_list)p;
+     #endif
+     #endif
+-    return my->dbus_message_append_args_valist(message, arg, VARARGS);
++    int result = my->dbus_message_append_args_valist(message, arg, VARARGS);
++#if defined(__aarch64__)
++    if (result)
++        dbus_advance_va_list(arg, b);
++#endif
++    return result;
+ }
+ 
+ EXPORT int my_dbus_message_append_args(x64emu_t* emu, void* message, int arg, uint64_t* V)

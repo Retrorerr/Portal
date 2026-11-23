@@ -56,6 +56,8 @@ const STEAM_BOX64_TOOL_VDF: &str =
 const STEAM_BOX64_MANIFEST_VDF: &str =
     include_str!("../../../assets/steam/compat-box64/toolmanifest.vdf");
 const STEAM_BOX64_SCRIPT: &str = include_str!("../../../assets/steam/compat-box64/portal-box64.sh");
+const STEAM_BOX64_BIN: &[u8] = include_bytes!("../../../assets/guest-arm64/portal-box64");
+const STEAM_BOX64_LICENSE: &[u8] = include_bytes!("../../../patches/box64/LICENSE");
 const STEAM_COMPAT_MAPPER: &str = include_str!("../../../assets/steam/portal-steam-compat.py");
 /// Source: `assets/guest-arm64/portal-lsof.c`. Steam checks its websocket
 /// peers with `lsof -i`, which needs /proc/net/tcp; Android denies it.
@@ -64,6 +66,9 @@ const PORTAL_LSOF: &[u8] = include_bytes!("../../../assets/guest-arm64/portal-ls
 /// bar drag the window for a mouse and a finger; the launcher preloads it.
 const STEAM_TOUCHDRAG: &[u8] =
     include_bytes!("../../../assets/guest-arm64/portal-sdl-touchdrag.so");
+/// Source: `assets/guest-arm64/portal-steam-native.c`. Handles Steam's
+/// first launch of Linux games installed while the client was open.
+const STEAM_NATIVE: &[u8] = include_bytes!("../../../assets/guest-arm64/portal-steam-native.so");
 /// Source: `assets/guest-arm64/portal-execmod.c`. Lets Wine make relocated DLL
 /// pages executable without SELinux execmod; the Proton tool preloads it.
 const STEAM_EXECMOD: &[u8] = include_bytes!("../../../assets/guest-arm64/portal-execmod.so");
@@ -81,6 +86,7 @@ const STEAM_BOX64_DIR_REL: &str = "usr/share/steam/compatibilitytools.d/portal-b
 const STEAM_COMPAT_MAPPER_REL: &str = "usr/local/lib/portal/steam/portal-steam-compat.py";
 const PORTAL_LSOF_REL: &str = "usr/sbin/lsof";
 const STEAM_TOUCHDRAG_REL: &str = "usr/local/lib/portal/steam/portal-sdl-touchdrag.so";
+const STEAM_NATIVE_REL: &str = "usr/local/lib/portal/steam/portal-steam-native.so";
 const STEAM_EXECMOD_REL: &str = "usr/local/lib/portal/steam/portal-execmod.so";
 /// The retired steamwebhelper KGSL sync preload; the Mesa layer's KGSL
 /// winsys does implicit sync for every app now.
@@ -704,6 +710,8 @@ fn sync_steam_files(fs_root: &Path) -> anyhow::Result<()> {
         &guest_text(STEAM_BOX64_SCRIPT),
         0o755,
     )?;
+    write_file(&box64.join("box64"), STEAM_BOX64_BIN, 0o755)?;
+    write_file(&box64.join("BOX64-LICENSE"), STEAM_BOX64_LICENSE, 0o644)?;
     write_file(
         &fs_root.join(STEAM_COMPAT_MAPPER_REL),
         &guest_text(STEAM_COMPAT_MAPPER),
@@ -711,6 +719,7 @@ fn sync_steam_files(fs_root: &Path) -> anyhow::Result<()> {
     )?;
     write_file(&fs_root.join(PORTAL_LSOF_REL), PORTAL_LSOF, 0o755)?;
     write_file(&fs_root.join(STEAM_TOUCHDRAG_REL), STEAM_TOUCHDRAG, 0o755)?;
+    write_file(&fs_root.join(STEAM_NATIVE_REL), STEAM_NATIVE, 0o755)?;
     write_file(&fs_root.join(STEAM_EXECMOD_REL), STEAM_EXECMOD, 0o755)?;
     write_file(
         &fs_root.join(STEAM_APPINDICATOR_REL),
@@ -738,6 +747,7 @@ pub fn sync_steam_integration(fs_root: &Path) {
         STEAM_ICON_REL,
         PORTAL_LSOF_REL,
         STEAM_TOUCHDRAG_REL,
+        STEAM_NATIVE_REL,
         STEAM_EXECMOD_REL,
         STEAM_APPINDICATOR_REL,
     ] {
@@ -746,6 +756,7 @@ pub fn sync_steam_integration(fs_root: &Path) {
             STEAM_ICON_REL => fs::read(&path).is_ok_and(|bytes| bytes == STEAM_ICON),
             PORTAL_LSOF_REL => fs::read(&path).is_ok_and(|bytes| bytes == PORTAL_LSOF),
             STEAM_TOUCHDRAG_REL => fs::read(&path).is_ok_and(|bytes| bytes == STEAM_TOUCHDRAG),
+            STEAM_NATIVE_REL => fs::read(&path).is_ok_and(|bytes| bytes == STEAM_NATIVE),
             STEAM_EXECMOD_REL => fs::read(&path).is_ok_and(|bytes| bytes == STEAM_EXECMOD),
             STEAM_APPINDICATOR_REL => {
                 fs::read(&path).is_ok_and(|bytes| bytes == STEAM_APPINDICATOR)

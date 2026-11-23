@@ -35,22 +35,26 @@ if [ ! -x "$CLIENT" ]; then
 fi
 
 # The paths Steam, games and tools expect (steam.sh creates the same links).
+steam_link() {
+    [ -L "$2" ] || [ ! -e "$2" ] || return 0
+    [ "$(readlink "$2")" = "$1" ] || ln -sfn "$1" "$2"
+}
 mkdir -p "$HOME/.steam"
 for link in steam root; do
-    [ -L "$HOME/.steam/$link" ] || [ ! -e "$HOME/.steam/$link" ] &&
-        ln -sfn "$STEAM_ROOT" "$HOME/.steam/$link"
+    steam_link "$STEAM_ROOT" "$HOME/.steam/$link"
 done
-# Steam starts every game through sdkarm64/steam-launch-wrapper, and games'
-# Steamworks loads sdk64 (x86-64) or sdk32 steamclient.so; Box64 runs the
-# x86 ones. Earlier Portal builds pointed sdk64 at linuxarm64: repair it.
-for pair in sdkarm64:linuxarm64 sdk64:linux64 sdk32:linux32; do
-    link="$HOME/.steam/${pair%%:*}"
-    target="$STEAM_ROOT/${pair#*:}"
-    if [ -L "$link" ] || [ ! -e "$link" ]; then
-        [ "$(readlink "$link")" = "$target" ] || ln -sfn "$target" "$link"
-    fi
+# Steam starts games through sdkarm64/steam-launch-wrapper. Games load
+# Steamworks from sdk64 or sdk32 and the overlay from bin64 or bin32.
+# The ARM64 client uses the same x86 binary aliases as Valve's steam.sh.
+for pair in sdkarm64:linuxarm64 sdk64:linux64 sdk32:linux32 \
+    bin64:ubuntu12_64 bin32:ubuntu12_32; do
+    steam_link "$STEAM_ROOT/${pair#*:}" "$HOME/.steam/${pair%%:*}"
 done
-echo $$ > "$HOME/.steam/steam.pid"
+steam_link "$HOME/.steam/bin32" "$HOME/.steam/bin"
+# Older Steamworks clients use these aliases. The client writes steam.pid,
+# including while another launcher forwards a steam:// URL to it.
+steam_link "$HOME/.steam/sdk32/steam" "$HOME/.steampath"
+steam_link "$HOME/.steam/steam.pid" "$HOME/.steampid"
 
 # First start: enable Steam Play for every Windows title with Portal's
 # Proton tool. Steam owns config.vdf afterwards; a user's choice is kept.
@@ -103,6 +107,14 @@ touchdrag=/usr/local/lib/portal/steam/portal-sdl-touchdrag.so
 case ":$LD_PRELOAD:" in
     *":$touchdrag:"*) ;;
     *) [ -f "$touchdrag" ] && export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$touchdrag" ;;
+esac
+
+# The launcher below maps games Steam knows about at startup. A game
+# installed later still needs Portal's Linux runtime on its first Play.
+native_launch=/usr/local/lib/portal/steam/portal-steam-native.so
+case ":$LD_PRELOAD:" in
+    *":$native_launch:"*) ;;
+    *) [ -f "$native_launch" ] && export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$native_launch" ;;
 esac
 
 export STEAM_RUNTIME_ROOT="$STEAM_ROOT/steamrtarm64"
