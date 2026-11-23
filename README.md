@@ -30,9 +30,9 @@ Portal is one app. Install it, tap through a short setup, and a few minutes late
 
 Plug the phone into a monitor and it's a desktop computer, with the phone in your hand as the touchpad.
 
-## What Portal does
+## Features
 
-### Turn your phone into a PC
+### Monitors and TVs
 
 Connect a monitor or TV and the desktop moves onto it, sized for that screen. The phone becomes a touchpad, a keyboard, or a full game controller. You can also leave Portal and use Android as usual while the desktop keeps running on the big screen.
 
@@ -58,13 +58,13 @@ Keep several separate Linux setups on one device, each with its own apps, files 
 
 <!-- screenshot: Workspaces card -->
 
-### A desktop that runs on the GPU
+### GPU acceleration
 
 Plasma's compositor draws on the device's Adreno GPU and hands each frame straight to Android's display. There's no VNC and no extra copy in between. Firefox, Chromium, Electron and Flatpak apps get GPU acceleration too.
 
 Video uses the device's own hardware decoder, the same one Android's apps use. That cuts the cost of video dramatically: 4K YouTube in Firefox plays as smoothly and efficiently as it does in a native Android app. It works in Firefox, Chromium, mpv, VLC and GStreamer apps, for H.264, HEVC, VP9 and AV1.
 
-### Games
+### Gaming
 
 Pick Steam during setup and you get the ARM64 Steam client. Native ARM64 games run directly, x86 Linux games run through Box64, and Windows games run through Proton. Controllers connected to Android show up as Xbox controllers. Without one, there's an on-screen controller you can lay out per game, and per-game frame-rate caps. With the desktop on a monitor, the whole phone becomes the controller.
 
@@ -74,7 +74,7 @@ Pick Steam during setup and you get the ARM64 Steam client. Native ARM64 games r
 
 <p align="center"><sub>Kerbal Space Program from Steam, an x86-64 Linux game running through Box64</sub></p>
 
-### Part of Android, not a window into somewhere else
+### Android integration
 
 - **Sound** plays as ordinary Android media, so volume keys, Bluetooth headphones and equaliser apps all work.
 - **Camera and microphone** work in Linux apps, for example for video calls in Firefox.
@@ -108,7 +108,7 @@ sudo apt install gnome-calculator
 
 Third-party arm64 `.deb` files and APT repositories work too. Flatpak apps keep their sandbox and get the GPU. AppImages and other portable apps open with **Open with Portal** in Dolphin, or `portal-run <path>`.
 
-## What you need
+## Requirements
 
 - **An Android phone or tablet with a Snapdragon chip** (Adreno GPU), 64-bit.
 - **About 6 GB free.** Debian itself is roughly a 1 GB download.
@@ -128,7 +128,7 @@ Portal updates itself. When there's an update for Portal, its graphics drivers o
 
 The [user guide](docs/user-guide.md) covers everything in more detail.
 
-## Portal is still early
+## Early days
 
 Portal is a young project, tested on a handful of devices, so expect rough edges, especially on hardware nobody has tried yet. Reports are what get those fixed.
 
@@ -194,7 +194,7 @@ Debian runs under tawcroot, Portal's rootless engine, which translates Linux fil
 
 More detail: [architecture](docs/architecture.md), [Debian provisioning](docs/debian-provisioning.md), [user guide](docs/user-guide.md).
 
-## Building it yourself
+## Building
 
 You'll need Rust, the Android SDK and NDK, and the vendored `xbuild`:
 
