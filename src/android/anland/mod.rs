@@ -492,7 +492,6 @@ pub fn session_binds() -> Vec<crate::core::runtime::BindMount> {
     binds.extend(fake_drm_binds(files));
     binds.extend(fake_pci_binds(files));
     binds.extend(fake_video_binds());
-    binds.extend(crate::android::guest_procfs::session_binds());
     binds
 }
 

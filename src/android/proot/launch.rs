@@ -336,6 +336,8 @@ pub fn launch() {
         .run_with_cancel(thread_cancel.clone());
 
         let username = crate::core::config::DESKTOP_USER.to_owned();
+        let runtime = crate::android::runtime::proot::PRootRuntime::active();
+        crate::android::proot::setup::sync_guest_network_config(runtime.rootfs_path());
 
         let started = Instant::now();
         let broker_environment = crate::android::clipboard::ClipboardBridge::broker_environment();
@@ -371,6 +373,7 @@ pub fn launch() {
             );
         }
         extra_binds.extend(library_overlay_binds);
+        extra_binds.extend(crate::android::guest_procfs::session_binds());
         // Abstract AF_UNIX listener owned by ScreenInhibition in PortalActivity.
         extra_env.push((
             "PORTAL_SCREEN_INHIBIT_SOCKET".into(),

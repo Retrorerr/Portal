@@ -14,13 +14,14 @@ use crate::core::steam_processes::SteamScan;
 static ACCOUNT: Mutex<Option<CpuAccount>> = Mutex::new(None);
 /// Steam detection from the latest pass, for the touch controls.
 static STEAM: Mutex<Option<SteamScan>> = Mutex::new(None);
+static NETWORK_ROUTES: Mutex<()> = Mutex::new(());
 
 fn directory() -> PathBuf {
     Path::new(crate::core::config::APP_FILES_ROOT).join("fake-proc")
 }
 
-/// Binds for every stand-in whose real file the app cannot read, after
-/// writing their first contents. Called once per session launch.
+/// Bind the guest route view and any other /proc files Android hides.
+/// Called once per session launch.
 pub fn session_binds() -> Vec<BindMount> {
     let dir = directory();
     if let Err(error) = fs::create_dir_all(&dir) {
@@ -41,8 +42,32 @@ pub fn session_binds() -> Vec<BindMount> {
     procfs::FILES
         .iter()
         .filter(|(_, guest)| fs::File::open(guest).is_err())
+        .chain(
+            procfs::ROUTE_FILES
+                .iter()
+                .filter(|(name, _)| dir.join(name).is_file()),
+        )
         .map(|(name, guest)| BindMount::new(dir.join(name), *guest))
         .collect()
+}
+
+/// Android uses per-network routing tables. Expose the active network's
+/// routes in Linux's legacy format for callers such as Wine's IP Helper.
+pub fn sync_network_routes(routes: &[procfs::NetworkRoute]) {
+    let Ok(_guard) = NETWORK_ROUTES.lock() else {
+        return;
+    };
+    let dir = directory();
+    if let Err(error) = fs::create_dir_all(&dir) {
+        log::warn!("guest routes directory could not be created: {error}");
+        return;
+    }
+    let (v4, v6) = procfs::render_network_routes(routes);
+    for ((name, _), contents) in procfs::ROUTE_FILES.into_iter().zip([v4, v6]) {
+        if !fs::read_to_string(dir.join(name)).is_ok_and(|current| current == contents) {
+            write(&dir, name, &contents);
+        }
+    }
 }
 
 /// Rewrite the live files (uptime, CPU time, load) and the Steam scan in

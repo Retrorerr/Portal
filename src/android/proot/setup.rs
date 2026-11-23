@@ -4316,11 +4316,11 @@ fn sync_android_timezone(fs_root: &Path) {
     }
 }
 
-/// Keep guest network configuration (DNS resolver, NSS, hosts, SSL CA certificates)
-/// synchronized with Android system state and distro requirements.
+/// Keep guest network routes and configuration synchronized with Android.
 pub fn sync_guest_network_config(fs_root: &Path) {
     let context = get_application_context();
-    let mut dns_servers = context.get_active_dns_servers();
+    let (mut dns_servers, routes) = context.get_active_network();
+    crate::android::guest_procfs::sync_network_routes(&routes);
 
     let etc_dir = fs_root.join("etc");
     let _ = fs::create_dir_all(&etc_dir);

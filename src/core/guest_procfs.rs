@@ -15,6 +15,8 @@
 //! the Android side samples `/proc/<pid>/stat` and writes them.
 
 use std::collections::HashMap;
+use std::fmt::Write;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Files Portal generates, relative to its fake-proc directory, with the
 /// guest path each is bound over.
@@ -31,6 +33,68 @@ pub const FILES: [(&str, &str); 11] = [
     ("pid_max", "/proc/sys/kernel/pid_max"),
     ("max_user_namespaces", "/proc/sys/user/max_user_namespaces"),
 ];
+
+pub const ROUTE_FILES: [(&str, &str); 2] = [
+    ("route", "/proc/net/route"),
+    ("ipv6_route", "/proc/net/ipv6_route"),
+];
+
+/// A unicast route from Android's active network.
+pub struct NetworkRoute {
+    pub interface: String,
+    pub destination: IpAddr,
+    pub prefix: u8,
+    pub gateway: Option<IpAddr>,
+}
+
+/// Linux's legacy route files use little-endian hex for IPv4 addresses
+/// and network-order hex for IPv6 addresses.
+pub fn render_network_routes(routes: &[NetworkRoute]) -> (String, String) {
+    let mut v4 = String::from("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n");
+    let mut v6 = String::new();
+    for route in routes {
+        let iface = &route.interface;
+        if iface.is_empty() || iface.chars().any(char::is_whitespace) {
+            continue;
+        }
+        let gateway = route.gateway.filter(|address| !address.is_unspecified());
+        let flags = if gateway.is_some() { 3 } else { 1 }; // RTF_UP | RTF_GATEWAY
+        match (route.destination, gateway) {
+            (IpAddr::V4(dst), gateway) if route.prefix <= 32 => {
+                let gateway = match gateway {
+                    Some(IpAddr::V4(address)) => address,
+                    None => Ipv4Addr::UNSPECIFIED,
+                    _ => continue,
+                };
+                let mask = u32::MAX.checked_shl(32 - u32::from(route.prefix)).unwrap_or(0);
+                let dst = u32::from_le_bytes(dst.octets());
+                let gateway = u32::from_le_bytes(gateway.octets());
+                let mask = u32::from_le_bytes(mask.to_be_bytes());
+                let _ = writeln!(
+                    v4,
+                    "{iface}\t{dst:08X}\t{gateway:08X}\t{flags:04X}\t0\t0\t0\t{mask:08X}\t0\t0\t0"
+                );
+            }
+            (IpAddr::V6(dst), gateway) if route.prefix <= 128 => {
+                let gateway = match gateway {
+                    Some(IpAddr::V6(address)) => address,
+                    None => Ipv6Addr::UNSPECIFIED,
+                    _ => continue,
+                };
+                let dst = u128::from_be_bytes(dst.octets());
+                let gateway = u128::from_be_bytes(gateway.octets());
+                let prefix = route.prefix;
+                let _ = writeln!(
+                    v6,
+                    "{dst:032x} {prefix:02x} {zero:032x} 00 {gateway:032x} 00000000 00000000 00000000 {flags:08x} {iface}",
+                    zero = 0,
+                );
+            }
+            _ => {}
+        }
+    }
+    (v4, v6)
+}
 
 /// Fixed `/proc/sys` limits, with the values of a stock arm64 kernel.
 pub const SYSCTLS: [(&str, &str); 5] = [
@@ -177,6 +241,50 @@ mod tests {
 
     fn sample(pid: u32, start: u64, cpu_ticks: u64) -> ProcessSample {
         ProcessSample { pid, start, cpu_ticks, runnable: false }
+    }
+
+    #[test]
+    fn renders_default_and_link_routes_in_linux_format() {
+        let (v4, v6) = render_network_routes(&[
+            NetworkRoute {
+                interface: "wlan0".into(),
+                destination: "0.0.0.0".parse().unwrap(),
+                prefix: 0,
+                gateway: Some("192.0.2.1".parse().unwrap()),
+            },
+            NetworkRoute {
+                interface: "wlan0".into(),
+                destination: "192.0.2.0".parse().unwrap(),
+                prefix: 24,
+                gateway: None,
+            },
+            NetworkRoute {
+                interface: "wlan0".into(),
+                destination: "::".parse().unwrap(),
+                prefix: 0,
+                gateway: Some("fe80::1".parse().unwrap()),
+            },
+        ]);
+        let mut routes = v4.lines().skip(1);
+        assert_eq!(
+            routes.next(),
+            Some("wlan0\t00000000\t010200C0\t0003\t0\t0\t0\t00000000\t0\t0\t0")
+        );
+        assert_eq!(
+            routes.next(),
+            Some("wlan0\t000200C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0")
+        );
+        assert_eq!(
+            v6,
+            "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000000 00000000 00000000 00000003 wlan0\n"
+        );
+    }
+
+    #[test]
+    fn an_offline_network_has_no_routes() {
+        let (v4, v6) = render_network_routes(&[]);
+        assert_eq!(v4.lines().count(), 1);
+        assert!(v6.is_empty());
     }
 
     #[test]

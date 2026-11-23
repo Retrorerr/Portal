@@ -1,3 +1,4 @@
+use crate::core::guest_procfs::NetworkRoute;
 use crate::core::runtime::LinuxRuntime;
 use crate::{
     android::utils::ndk::run_in_jvm,
@@ -7,6 +8,7 @@ use jni::{
     objects::{JObject, JString},
     JNIEnv, JavaVM,
 };
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use winit::platform::android::activity::AndroidApp;
@@ -145,107 +147,60 @@ impl ApplicationContext {
         )
     }
 
-    /// Query Android ConnectivityManager for active DNS servers associated with the current default network.
-    pub fn get_active_dns_servers(&self) -> Vec<String> {
+    /// Read DNS and routes from the same Android default-network snapshot.
+    pub fn get_active_network(&self) -> (Vec<String>, Vec<NetworkRoute>) {
         run_in_jvm(
             |env, app| {
-                let mut servers = Vec::new();
-                let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _) };
-
-                let Ok(service_name) = env.new_string("connectivity") else {
-                    return servers;
-                };
-
-                let Ok(cm) = env
-                    .call_method(
-                        &activity,
-                        "getSystemService",
-                        "(Ljava/lang/String;)Ljava/lang/Object;",
-                        &[(&service_name).into()],
-                    )
-                    .and_then(|v| v.l())
-                else {
-                    return servers;
-                };
-
-                if cm.is_null() {
-                    return servers;
-                }
-
-                let Ok(network) = env
-                    .call_method(&cm, "getActiveNetwork", "()Landroid/net/Network;", &[])
-                    .and_then(|v| v.l())
-                else {
-                    return servers;
-                };
-
-                if network.is_null() {
-                    return servers;
-                }
-
-                let Ok(link_properties) = env
-                    .call_method(
-                        &cm,
-                        "getLinkProperties",
-                        "(Landroid/net/Network;)Landroid/net/LinkProperties;",
-                        &[(&network).into()],
-                    )
-                    .and_then(|v| v.l())
-                else {
-                    return servers;
-                };
-
-                if link_properties.is_null() {
-                    return servers;
-                }
-
-                let Ok(dns_list) = env
-                    .call_method(&link_properties, "getDnsServers", "()Ljava/util/List;", &[])
-                    .and_then(|v| v.l())
-                else {
-                    return servers;
-                };
-
-                if dns_list.is_null() {
-                    return servers;
-                }
-
-                let Ok(size) = env
-                    .call_method(&dns_list, "size", "()I", &[])
-                    .and_then(|v| v.i())
-                else {
-                    return servers;
-                };
-
-                for i in 0..size {
-                    let Ok(inet_addr) = env
-                        .call_method(&dns_list, "get", "(I)Ljava/lang/Object;", &[i.into()])
-                        .and_then(|v| v.l())
-                    else {
-                        continue;
-                    };
-
-                    if inet_addr.is_null() {
-                        continue;
+                (|| -> jni::errors::Result<_> {
+                    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _) };
+                    let service_name = env.new_string("connectivity")?;
+                    let cm = env
+                        .call_method(
+                            &activity,
+                            "getSystemService",
+                            "(Ljava/lang/String;)Ljava/lang/Object;",
+                            &[(&service_name).into()],
+                        )?
+                        .l()?;
+                    if cm.is_null() {
+                        return Ok(Default::default());
                     }
-
-                    let Ok(host_addr) = env
-                        .call_method(&inet_addr, "getHostAddress", "()Ljava/lang/String;", &[])
-                        .and_then(|v| v.l())
-                    else {
-                        continue;
-                    };
-
-                    if let Ok(addr_str) = env.get_string(&JString::from(host_addr)) {
-                        let ip: String = addr_str.into();
-                        let clean_ip = ip.split('%').next().unwrap_or(&ip).trim().to_string();
-                        if !clean_ip.is_empty() && !servers.contains(&clean_ip) {
-                            servers.push(clean_ip);
+                    let network = env
+                        .call_method(&cm, "getActiveNetwork", "()Landroid/net/Network;", &[])?
+                        .l()?;
+                    if network.is_null() {
+                        return Ok(Default::default());
+                    }
+                    let link_properties = env
+                        .call_method(
+                            &cm,
+                            "getLinkProperties",
+                            "(Landroid/net/Network;)Landroid/net/LinkProperties;",
+                            &[(&network).into()],
+                        )?
+                        .l()?;
+                    if link_properties.is_null() {
+                        return Ok(Default::default());
+                    }
+                    let mut servers = Vec::new();
+                    for address in
+                        link_values(env, &link_properties, "getDnsServers", inet_address)?
+                    {
+                        let address = address.to_string();
+                        if !servers.contains(&address) {
+                            servers.push(address);
                         }
                     }
-                }
-
-                servers
+                    let sdk = env
+                        .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
+                        .i()?;
+                    let routes = link_values(env, &link_properties, "getRoutes", |env, route| {
+                        read_route(env, route, sdk >= 33)
+                    })
+                    .unwrap_or_default();
+                    Ok((servers, routes))
+                })()
+                .unwrap_or_default()
             },
             self.android_app.clone(),
         )
@@ -309,6 +264,87 @@ impl ApplicationContext {
             self.android_app.clone(),
         )
     }
+}
+
+fn link_values<T>(
+    env: &mut JNIEnv,
+    properties: &JObject,
+    method: &str,
+    mut read: impl FnMut(&mut JNIEnv, &JObject) -> jni::errors::Result<Option<T>>,
+) -> jni::errors::Result<Vec<T>> {
+    let list = env
+        .call_method(properties, method, "()Ljava/util/List;", &[])?
+        .l()?;
+    let mut values = Vec::new();
+    let size = env.call_method(&list, "size", "()I", &[])?.i()?;
+    for index in 0..size {
+        let value = env.with_local_frame(16, |env| -> jni::errors::Result<_> {
+            let item = env
+                .call_method(&list, "get", "(I)Ljava/lang/Object;", &[index.into()])?
+                .l()?;
+            read(env, &item)
+        })?;
+        values.extend(value);
+    }
+    Ok(values)
+}
+
+fn read_string(
+    env: &mut JNIEnv,
+    object: &JObject,
+    method: &str,
+) -> jni::errors::Result<Option<String>> {
+    let string = env
+        .call_method(object, method, "()Ljava/lang/String;", &[])?
+        .l()?;
+    if string.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(env.get_string(&JString::from(string))?.into()))
+}
+
+fn inet_address(env: &mut JNIEnv, address: &JObject) -> jni::errors::Result<Option<IpAddr>> {
+    if address.is_null() {
+        return Ok(None);
+    }
+    Ok(read_string(env, address, "getHostAddress")?
+        .and_then(|value| value.split('%').next()?.parse().ok()))
+}
+
+fn read_route(
+    env: &mut JNIEnv,
+    route: &JObject,
+    typed_routes: bool,
+) -> jni::errors::Result<Option<NetworkRoute>> {
+    const RTN_UNICAST: i32 = 1;
+    if typed_routes && env.call_method(route, "getType", "()I", &[])?.i()? != RTN_UNICAST {
+        return Ok(None);
+    }
+    let Some(interface) = read_string(env, route, "getInterface")? else {
+        return Ok(None);
+    };
+    let dest = env
+        .call_method(route, "getDestination", "()Landroid/net/IpPrefix;", &[])?
+        .l()?;
+    let address = env
+        .call_method(&dest, "getAddress", "()Ljava/net/InetAddress;", &[])?
+        .l()?;
+    let Some(destination) = inet_address(env, &address)? else {
+        return Ok(None);
+    };
+    let prefix = env.call_method(&dest, "getPrefixLength", "()I", &[])?.i()?;
+    let Ok(prefix) = u8::try_from(prefix) else {
+        return Ok(None);
+    };
+    let gateway = env
+        .call_method(route, "getGateway", "()Ljava/net/InetAddress;", &[])?
+        .l()?;
+    Ok(Some(NetworkRoute {
+        interface,
+        destination,
+        prefix,
+        gateway: inet_address(env, &gateway)?,
+    }))
 }
 
 static APPLICATION_CONTEXT: RwLock<Option<ApplicationContext>> = RwLock::new(None);
