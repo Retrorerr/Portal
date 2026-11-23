@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test foreground-service session ownership with the cached Android Kotlin compiler."""
+"""Test foreground desktop service logic with the cached Android Kotlin compiler."""
 from pathlib import Path
 import os
 import subprocess
@@ -30,6 +30,7 @@ with tempfile.TemporaryDirectory(prefix="portal-session-service-") as output:
         "java", "-cp", classpath, "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
         "-no-stdlib", "-no-reflect", "-classpath", stdlib, "-d", output,
         str(root / "src/android/kotlin/app/polarbear/SessionServiceOwnership.kt"),
+        str(root / "src/android/kotlin/app/polarbear/SessionMemoryPressure.kt"),
         str(root / "tests/kotlin/SessionServiceTest.kt"),
     ], check=True)
     subprocess.run([

@@ -1,5 +1,6 @@
 package app.polarbear
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -10,22 +11,29 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.Process
 import android.util.Log
 import android.view.Display
+import java.io.File
+import java.io.IOException
 
 /**
  * The native desktop is ongoing user work even when its SurfaceView is suspended. Without this
  * service Android classifies the entire guest as cached and may freeze it or tear down its TCP
- * connections. This service owns no guest work, wake lock, or automatic session restart.
+ * connections. This service also reports sustained device memory pressure during the session.
  */
 class SessionService : Service() {
+    private var memoryMonitor: HandlerThread? = null
+    private var memoryWarning = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
-            val notification = notification(this)
+            val notification = notification(this, memoryWarning)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
             } else {
@@ -43,13 +51,64 @@ class SessionService : Service() {
         // A launch can fail or end while Android is still creating its service. It must first
         // acknowledge startForegroundService(), then stop, rather than cancel its pending start.
         finishIfInactive()
+        if (instance === this) startMemoryMonitor()
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         if (instance === this) instance = null
         startPending = false
+        memoryMonitor?.quitSafely()
+        memoryMonitor = null
         super.onDestroy()
+    }
+
+    private fun startMemoryMonitor() {
+        if (memoryMonitor != null) return
+        val manager = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
+        val worker = HandlerThread("Portal memory check", Process.THREAD_PRIORITY_BACKGROUND)
+        worker.start()
+        memoryMonitor = worker
+        val handler = Handler(worker.looper)
+        handler.post(object : Runnable {
+            private val info = ActivityManager.MemoryInfo()
+            private val pressure = SessionMemoryPressure()
+
+            override fun run() {
+                sampleMemory()
+                handler.postDelayed(this, MEMORY_SAMPLE_MS)
+            }
+
+            private fun sampleMemory() {
+                try {
+                    manager.getMemoryInfo(info)
+                } catch (error: RuntimeException) {
+                    Log.w(TAG, "Could not read device memory info", error)
+                    return
+                }
+                val swap = try {
+                    File("/proc/meminfo").useLines { SessionMemoryPressure.readSwap(it) }
+                } catch (_: IOException) {
+                    null
+                } catch (_: SecurityException) {
+                    null
+                }
+                val low = SessionMemoryPressure.isLow(info.lowMemory, info.availMem, info.totalMem, swap)
+                if (pressure.update(low)) {
+                    val availableMiB = info.availMem / (1024 * 1024)
+                    Log.i(
+                        TAG,
+                        "Device memory pressure changed: warning=$low systemLow=${info.lowMemory} availableMiB=$availableMiB swap=$swap",
+                    )
+                    main.post {
+                        if (instance === this@SessionService && memoryMonitor === worker) {
+                            memoryWarning = low
+                            refreshNotification()
+                        }
+                    }
+                }
+            }
+        })
     }
 
     private fun finish() {
@@ -76,6 +135,7 @@ class SessionService : Service() {
         private const val TAG = "PortalSessionService"
         private const val CHANNEL_ID = "portal-desktop"
         private const val NOTIFICATION_ID = 1003
+        private const val MEMORY_SAMPLE_MS = 5_000L
         private val ownership = SessionServiceOwnership()
         private val main = Handler(Looper.getMainLooper())
         private var instance: SessionService? = null
@@ -87,7 +147,7 @@ class SessionService : Service() {
         internal fun refreshNotification() {
             val service = instance ?: return
             val manager = service.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.notify(NOTIFICATION_ID, notification(service))
+            manager.notify(NOTIFICATION_ID, notification(service, service.memoryWarning))
         }
 
         /** Called at the native launch boundary, before guest setup/launch work can background. */
@@ -140,7 +200,7 @@ class SessionService : Service() {
             )
         }
 
-        private fun notification(context: Context): Notification {
+        private fun notification(context: Context, memoryWarning: Boolean): Notification {
             val open = PendingIntent.getActivity(
                 context,
                 0,
@@ -175,9 +235,20 @@ class SessionService : Service() {
                 // A phone presenting the desktop opens its touchpad page.
                 content = if (projected.presentedDisplay != null) open else control(false)
             }
+            var title = "Your desktop is running"
+            if (memoryWarning) {
+                title = "Low device memory"
+                contentText = "Close unused apps to free memory."
+                builder.setStyle(
+                    Notification.BigTextStyle().bigText(
+                        "$contentText For Windows games, try lowering Video memory in Portal’s Game settings " +
+                            "and restarting the game.",
+                    ),
+                )
+            }
             return builder
                 .setSmallIcon(context.applicationInfo.icon)
-                .setContentTitle("Your desktop is running")
+                .setContentTitle(title)
                 .setContentText(contentText)
                 .setContentIntent(content)
                 .setOngoing(true)
