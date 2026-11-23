@@ -48,14 +48,21 @@ pub fn unavailable_reason(app: OptionalApp, caps: DeviceCapabilities) -> Option<
     }
 }
 
-/// Bring dpkg/apt to a usable state before installing anything. The image
-/// is extracted without maintainer scripts, so gawk's awk alternative is
-/// missing until restored here.
+/// Finishes Debian work an earlier run left half-done. A logout, a crash or
+/// Android can end Portal while dpkg is unpacking or configuring, and from
+/// then on every apt install fails with "dpkg was interrupted" until this
+/// runs; with nothing to finish it returns at once. The image is extracted
+/// without maintainer scripts, so gawk's awk alternative, which they call, is
+/// restored first. Conffile questions keep the current file, as there is no
+/// one to answer them.
+pub const FINISH_INTERRUPTED_DPKG: &str = "(test -x /usr/bin/awk || \
+     update-alternatives --quiet --install /usr/bin/awk awk /usr/bin/gawk 10) && \
+     dpkg --force-confdef --force-confold --configure -a";
+
+/// Bring dpkg/apt to a usable state before installing anything.
 pub fn prepare_apt_command() -> String {
-    String::from(
-        "(test -x /usr/bin/awk || \
-         update-alternatives --quiet --install /usr/bin/awk awk /usr/bin/gawk 10) && \
-         dpkg --configure -a && \
+    format!(
+        "{FINISH_INTERRUPTED_DPKG} && \
          apt-get -q update && \
          apt-get install -y --no-remove --no-install-recommends --fix-broken"
     )
@@ -212,6 +219,18 @@ mod tests {
                 assert_eq!(unavailable_reason(app, nothing), None);
             }
         }
+    }
+
+    #[test]
+    fn interrupted_dpkg_work_is_finished_before_apt_runs() {
+        let awk = FINISH_INTERRUPTED_DPKG.find("update-alternatives").unwrap();
+        let configure = FINISH_INTERRUPTED_DPKG
+            .find("dpkg --force-confdef --force-confold --configure -a")
+            .unwrap();
+        assert!(awk < configure);
+        let prepare = prepare_apt_command();
+        assert!(prepare.starts_with(FINISH_INTERRUPTED_DPKG), "{prepare}");
+        assert!(prepare.find("apt-get -q update").unwrap() > FINISH_INTERRUPTED_DPKG.len());
     }
 
     #[test]

@@ -3433,6 +3433,35 @@ const DESKTOP_EXTRA_PACKAGES: &[&str] = &[
 const MAN_DB_NO_AUTO_UPDATE: &str =
     "echo 'man-db man-db/auto-update boolean false' | debconf-set-selections";
 
+/// The background installs run behind the desktop, so logging out (which
+/// closes Portal), a crash or Android can stop one inside dpkg. dpkg then
+/// refuses every later install, these jobs' retries and the user's own
+/// `sudo apt install` included, until the interrupted work is finished.
+fn finish_interrupted_package_work(root: &Path) {
+    // dpkg journals each step here and empties it once the step completes.
+    if fs::read_dir(root.join("var/lib/dpkg/updates"))
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+    {
+        log::info!("dpkg was interrupted; finishing its work before installing");
+    }
+    let command = format!(
+        "{MAN_DB_NO_AUTO_UPDATE}; {}",
+        crate::core::optional_apps::FINISH_INTERRUPTED_DPKG
+    );
+    let output = PRootRuntime::active().execute(
+        ProcessSpec::new(command).with_env("DEBIAN_FRONTEND", "noninteractive"),
+        None,
+        None,
+    );
+    if !output.status.success() {
+        log::warn!(
+            "interrupted package work could not be finished: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 /// The image leaves out packages other installed packages depend on
 /// (systemd, udev, libglib2.0-data; see EXCLUDE_PACKAGES in
 /// scripts/build_debian_rootfs.py), so apt refuses every install until its
@@ -3629,6 +3658,7 @@ pub fn spawn_background_installs() {
         // Let Plasma have the CPU while it starts.
         thread::sleep(Duration::from_secs(20));
         let root = &rootfs();
+        finish_interrupted_package_work(root);
         repair_package_dependencies(root);
         // Existing installs also need the IBus repair after an APK upgrade.
         provision_ibus_packages(root);
@@ -3652,6 +3682,8 @@ pub fn spawn_background_installs() {
 fn setup_mozilla_firefox(_: &SetupOptions) -> StageOutput {
     Some(thread::spawn(|| {
         let root = &rootfs();
+        // A resumed setup may follow one stopped inside dpkg.
+        finish_interrupted_package_work(root);
         // The image's apt state has unmet dependencies until this repair.
         repair_package_dependencies(root);
         if sync_firefox_esr_diversion(root) {
