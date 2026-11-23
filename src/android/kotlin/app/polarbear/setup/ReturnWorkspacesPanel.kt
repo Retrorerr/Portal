@@ -342,9 +342,15 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
     SetupBackHandler(enabled = naming) { if (created == null) naming = false }
     // Back lets go of a held tile before it closes the card.
     SetupBackHandler(enabled = !naming && selected != null && deleting == null) { selected = null }
-    // A selection whose workspace has gone (deleted, or given up) ends.
+    // A selection whose workspace has gone (deleted, or given up) ends; a
+    // delete stays in hand until its tile has folded away, so neither the
+    // tile nor the strip shows how it was before while it goes.
     LaunchedEffect(state.workspaces) {
         if (selected != null && state.workspaces.none { it.id == selected }) selected = null
+        if (deleting != null && state.workspaces.none { it.id == deleting }) {
+            delay(TILE_FOLD_MS.toLong())
+            deleting = null
+        }
     }
     LaunchedEffect(selected) { deleteRefusal = null }
     DisposableEffect(veil) {
@@ -435,8 +441,12 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
                             deleteRefusal = null
                             // The open one only answers if refused: Portal restarts into its setup.
                             Workspaces.delete(context, id) { refusal ->
-                                deleting = null
-                                if (refusal == null) selected = null else deleteRefusal = refusal
+                                if (refusal == null) {
+                                    selected = null
+                                } else {
+                                    deleting = null
+                                    deleteRefusal = refusal
+                                }
                             }
                         },
                     ),
@@ -1044,9 +1054,10 @@ private fun DeleteStrip(state: Workspaces.State, selection: WorkspaceSelection, 
     if (target != null) shown = target
     AnimatedVisibility(
         visible = target != null,
-        enter = expandVertically(tween(360, easing = PortalEmphasized), clip = false) +
+        // Unfolds from its top edge, clipped, so it never draws over the tiles above.
+        enter = expandVertically(tween(360, easing = PortalEmphasized), expandFrom = Alignment.Top) +
             fadeIn(tween(260, delayMillis = 80, easing = PortalEmphasizedDecelerate)),
-        exit = shrinkVertically(tween(300, easing = PortalEmphasized), clip = false) +
+        exit = shrinkVertically(tween(300, easing = PortalEmphasized), shrinkTowards = Alignment.Top) +
             fadeOut(tween(140, easing = PortalEmphasizedAccelerate)),
     ) {
         val workspace = shown ?: return@AnimatedVisibility

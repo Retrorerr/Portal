@@ -232,6 +232,8 @@ object Workspaces {
                     refusal != null -> done(refusal)
                     open -> activity?.let(::relaunch) ?: Process.killProcess(Process.myPid())
                     else -> {
+                        // The list without it lands in this same frame.
+                        refresh()
                         previews.remove(id)
                         done(null)
                     }
