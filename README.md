@@ -5,7 +5,8 @@
 <h1 align="center">Portal</h1>
 
 <p align="center">
-  A real Linux desktop on your Android tablet. Debian 13 and KDE Plasma 6, no root, no PC, no streaming.
+  A real Linux computer on your Android phone or tablet.<br />
+  Debian 13 and KDE Plasma 6, running on the device's own GPU.
 </p>
 
 <p align="center">
@@ -25,9 +26,62 @@
   <img src="docs/screenshots/rice-fastfetch.png" width="860" alt="Portal running KDE Plasma with the Cloud Dark rice on a OnePlus Pad 3" />
 </p>
 
-Portal installs Debian on your device and runs the full KDE Plasma desktop right on the screen, with GPU acceleration, sound, your keyboard and mouse, and the Android clipboard all hooked up. It's everything running locally, not a remote desktop or a VNC window.
+Portal is one app. Install it, tap through a short setup, and a few minutes later you're on a full KDE Plasma desktop. You don't need Termux, root, a PC or an unlocked bootloader. Nothing is streamed from somewhere else: Linux and its apps run on the phone itself, drawn by its GPU, with sound, keyboard, mouse, camera and clipboard all connected to Android.
 
-Portal is a fork of [Local Desktop](https://github.com/localdesktop/localdesktop.github.io), rebuilt around Debian, Plasma 6 and a GPU-accelerated KWin. See [Credits](#credits).
+Plug the phone into a monitor and it's a desktop computer, with the phone in your hand as the touchpad.
+
+## What Portal does
+
+### Turn your phone into a PC
+
+Connect a monitor or TV and the desktop moves onto it, sized for that screen. The phone becomes a touchpad, a keyboard, or a full game controller. You can also leave Portal and use Android as usual while the desktop keeps running on the big screen.
+
+1. Connect the monitor with a USB-C to HDMI cable or a dock, or cast to a wireless display.
+2. On the desktop, open the Portal pill, then **Portal settings → External display**, and pick the monitor.
+3. The first time, Portal asks for one or two Android permissions. Allow them, and you're done.
+
+Tap **Return** on the touchpad to bring the desktop back to the phone.
+
+Samsung DeX does something similar for Android apps. Portal gives you a Linux desktop instead, on more phones:
+
+| | Portal | Samsung DeX |
+|---|---|---|
+| **On the monitor** | KDE Plasma with Linux desktop apps: Firefox, LibreOffice, GIMP, Krita, Steam | Android apps in windows |
+| **Devices** | Snapdragon phones and tablets of any brand, including phones that normally only mirror their screen | Samsung Galaxy phones and tablets |
+| **In your hand** | Touchpad, keyboard or a full game controller | Touchpad and keyboard |
+
+<!-- photo: phone as touchpad in front of a monitor showing Plasma -->
+
+### Workspaces
+
+Keep several separate Linux setups on one device, each with its own apps, files and settings: one for work, one for games, one for someone else who borrows the tablet. Switch between them from the veil in a few seconds, without restarting Portal. Touch and hold a workspace to delete it.
+
+<!-- screenshot: Workspaces card -->
+
+### A desktop that runs on the GPU
+
+Plasma's compositor draws on the device's Adreno GPU and hands each frame straight to Android's display. There's no VNC and no extra copy in between. Firefox, Chromium, Electron and Flatpak apps get GPU acceleration too.
+
+Video uses the device's own hardware decoder, the same one Android's apps use. That cuts the cost of video dramatically: 4K YouTube in Firefox plays as smoothly and efficiently as it does in a native Android app. It works in Firefox, Chromium, mpv, VLC and GStreamer apps, for H.264, HEVC, VP9 and AV1.
+
+### Games
+
+Pick Steam during setup and you get the ARM64 Steam client. Native ARM64 games run directly, x86 Linux games run through Box64, and Windows games run through Proton. Controllers connected to Android show up as Xbox controllers. Without one, there's an on-screen controller you can lay out per game, and per-game frame-rate caps. With the desktop on a monitor, the whole phone becomes the controller.
+
+<p align="center">
+  <img src="docs/screenshots/ksp.png" width="860" alt="Kerbal Space Program in a window on the Plasma desktop, a rocket lifting off" />
+</p>
+
+<p align="center"><sub>Kerbal Space Program from Steam, an x86-64 Linux game running through Box64</sub></p>
+
+### Part of Android, not a window into somewhere else
+
+- **Sound** plays as ordinary Android media, so volume keys, Bluetooth headphones and equaliser apps all work.
+- **Camera and microphone** work in Linux apps, for example for video calls in Firefox.
+- **Files:** drag files in from another Android app, add them with Android's picker, or save files from Linux to anywhere Android can.
+- **Typing:** the clipboard is shared. Use Android's keyboard, or Portal's own desktop keyboard with real Ctrl, Alt and F-keys.
+- **Keyboard, mouse, touchpad:** USB or Bluetooth. Plasma switches between tablet and desktop mode by itself.
+- **Background:** leave Portal and the desktop keeps running. Come back and your windows are where you left them.
 
 <table>
   <tr>
@@ -40,109 +94,95 @@ Portal is a fork of [Local Desktop](https://github.com/localdesktop/localdesktop
   </tr>
 </table>
 
-<p align="center">
-  <img src="docs/screenshots/ksp.png" width="860" alt="Kerbal Space Program in a window on the Plasma desktop, a rocket lifting off" />
-</p>
+## Apps
 
-<p align="center"><sub>Kerbal Space Program from Steam, an x86-64 Linux game running through Box64</sub></p>
+**Included:** Firefox, Discover, Dolphin, Konsole, Kate, Okular, Gwenview, Ark, KCalc and System Settings, plus command-line tools such as `git`, `htop`, `nano`, `curl` and `man`.
 
-<p align="center"><sub>Screenshots from a OnePlus Pad 3.</sub></p>
+**Optional**, picked during setup or added later from **Apps** on the veil: Claude, ChatGPT, LibreOffice, Thunderbird, GIMP, Krita, Inkscape, VLC and Steam.
 
-## What you need
-
-Portal is made for **Android tablets with a Snapdragon chip**. That's where it's built and tested, and where it runs best.
-
-- **Tested on:** OnePlus Pad 3 (Snapdragon 8 Elite, Adreno 830). This is the main test device. If you try another one, [tell us how it went](#running-portal-on-another-device).
-- **Should work on:** other 64-bit (arm64) Android devices with a Qualcomm Adreno GPU. The GPU path goes through Mesa's freedreno and Turnip drivers, which cover recent Adreno chips. Most of them are untested, so reports are welcome.
-- **Other GPUs** (Mali, PowerVR, Xclipse): GPU acceleration is built around Adreno, so these get Portal's slower fallback renderer at best. Untested so far; proper support is planned.
-- **Storage:** around 6 GB free. Debian itself is about a 1 GB download.
-- **RAM:** more is better. Firefox and a few apps run comfortably with 8 GB or more.
-- **Nice to have:** a keyboard and mouse or trackpad. Touch works, but a desktop is much easier to use with them.
-
-No root, no PC and no unlocked bootloader needed.
-
-## Getting started
-
-1. Tap **[Download Portal](https://github.com/Retrorerr/Portal/releases/latest/download/Portal.apk)** on your tablet and install the APK (allow installs from your browser if Android asks). Older versions are on [Releases](https://github.com/Retrorerr/Portal/releases).
-2. Open Portal, pick a theme and interface size, and tick any extra apps you want.
-3. Tap **Begin Install**. Portal downloads Debian and sets everything up, which takes a couple of minutes on a fast connection. You can leave the app while it works.
-4. When it's done, swipe up to enter your desktop.
-
-If setup gets interrupted, just open Portal again. It picks up where it left off.
-
-The [user guide](docs/user-guide.md) covers updates, games, Firefox and troubleshooting in more detail.
-
-## Using Portal
-
-- **Coming back:** leaving Portal keeps the desktop running in the background. Open it again and swipe up to jump back in, with your windows right where you left them. Swiping Portal away from recents closes the desktop.
-- **Logging out** (or shutting down or restarting from Plasma) closes the desktop and Portal with it. Open Portal again to start a fresh session.
-- **The Stuff folder:** your desktop starts with stock KDE Plasma and a folder called **Stuff**. Inside there's a link to this repo, a short welcome note, and **CloudDarkRice**, an optional dark theme with a top bar, a dock, a nicer power menu and a bunch of shortcuts. Open the folder, run **Apply Cloud Dark rice** and log out once it's done. It downloads about 25 MB the first time. Don't like it? `apply-portal.sh restore` puts everything back (the README in that folder has the details).
-- **Managing apps:** leave the desktop and come back to Portal's start screen to add or remove the optional apps whenever you like.
-- **Updates:** the same screen shows updates for Portal, its graphics driver layer, ChatGPT and Debian packages. Tap the capsule, then **Update**. Portal updates itself from 2.5.0 on; on 2.4.x, install the latest version once with the Download Portal button.
-- **Keyboard and mouse:** plug them in (USB or Bluetooth) and Plasma switches from tablet mode to desktop mode by itself. Trackpad scrolling works too.
-
-## What you get
-
-**Out of the box:** Firefox, Discover (app store), Dolphin (files), Konsole (terminal), Kate (text editor), Okular (documents), Gwenview (images), Ark (archives), KCalc and System Settings. Handy command-line tools are included too: `git`, `htop`, `nano`, `curl`, `ping`, `man` and friends.
-
-**Optional apps** (pick them during setup, or add and remove them later from the apps panel when you return to Portal): Claude, ChatGPT, LibreOffice, Thunderbird, GIMP, Krita, Inkscape, VLC and Steam.
-
-**Anything else** you can get from Discover, which installs Debian packages and Flatpak apps from Flathub, or the normal Debian way. You're the `desktop` user and `sudo` works without a password:
+**Anything else** comes from Discover (Debian packages and Flathub) or `apt`. You're the `desktop` user, and `sudo` works without a password:
 
 ```bash
-sudo apt update
 sudo apt install gnome-calculator
 ```
 
-Third-party `.deb` files and APT repos work too, as long as they're arm64. Flatpak apps run with their normal sandbox and GPU acceleration. Graphical apps show up in the Plasma launcher after you install them.
+Third-party arm64 `.deb` files and APT repositories work too. Flatpak apps keep their sandbox and get the GPU. AppImages and other portable apps open with **Open with Portal** in Dolphin, or `portal-run <path>`.
 
-## Gaming
+## What you need
 
-Pick Steam during setup and you get the ARM64 Steam client running natively.
+- **An Android phone or tablet with a Snapdragon chip** (Adreno GPU), 64-bit.
+- **About 6 GB free.** Debian itself is roughly a 1 GB download.
+- **8 GB of RAM or more** is comfortable for Firefox and a few apps.
+- **Optional:** a keyboard and mouse, and a monitor. Touch works, but a desktop is easier with them.
 
-- Native ARM64 Linux games run directly.
-- x86 Linux games run through Box64 (Kerbal Space Program works, for example).
-- Windows games through Proton and FEX are early days, so expect hit and miss. Portal prefers Proton Experimental (ARM64) when it's installed.
-- Controllers connected to Android show up in Steam as Xbox controllers.
-- While Steam runs, a small handle at the top of the screen (drag it wherever you like) shows the on-screen controller (while a game is running) and opens the game panel, where you can edit the controller layout and set a frame-rate cap, per game if you like.
+Portal is developed on a OnePlus Pad 3 and a OnePlus 15. Other Snapdragon devices should work, but most are untested. Devices with Mali, PowerVR or Xclipse GPUs only get a slow software fallback for now; proper support is planned.
+
+## Getting started
+
+1. On your phone or tablet, tap **[Download Portal](https://github.com/Retrorerr/Portal/releases/latest/download/Portal.apk)** and install the APK. Allow installs from your browser if Android asks.
+2. Open Portal, pick a theme, interface size and any extra apps.
+3. Tap **Begin Install**. Setup takes a few minutes on a fast connection, and you can leave the app while it works. If it gets interrupted, open Portal again and it carries on.
+4. Swipe up to enter your desktop.
+
+Portal updates itself. When there's an update for Portal, its graphics drivers or Debian's packages, the veil shows it.
+
+The [user guide](docs/user-guide.md) covers everything in more detail.
+
+## Portal is still early
+
+Portal is a young project, tested on a handful of devices, so expect rough edges, especially on hardware nobody has tried yet. Reports are what get those fixed.
+
+On the desktop, open the Portal pill and tap **Report**:
+
+- **Report a bug** opens a prefilled GitHub issue. **Save logs** writes logs you can attach, with personal details removed where Portal can spot them.
+- **Share what works** tells us how each part ran on your device. "Everything worked" is just as useful as a bug.
+
+Portal uploads nothing on its own. If you'd rather write it up yourself, [open an issue](https://github.com/Retrorerr/Portal/issues/new/choose) with your device, Android version, Portal version and what happened.
 
 ## Good to know
 
-- **Keyboard shortcuts and background running:** Android can swallow shortcuts like `Alt+Tab` or `Ctrl+C` before they reach Linux. Turn on Portal under **Android Settings → Accessibility → Downloaded apps** to fix that. It only forwards key presses and doesn't read anything on screen. As a bonus, Android treats Portal as a visible app while the switch is on, so it's far less likely to close the desktop in the background. Portal's start screen shows a tip while it's off.
-  - If the switch is greyed out, open Portal's **App info**, tap **⋮** and choose **Allow restricted settings**. Android 13 and newer does this for apps installed outside an app store.
-- **Tablet or desktop:** with no keyboard or mouse plugged in, Plasma switches to tablet mode and the Android keyboard pops up when you tap a text field. Plug in a keyboard and mouse and it goes back to desktop mode.
-- **Sound** goes through Android, and pausing and resuming Portal doesn't break it. You might notice a "Portal Audio (standby)" device in the volume list. That's what keeps apps connected while Portal is in the background, so leave it be.
-- **Video:** on Snapdragon tablets, Firefox, Chromium and mpv decode video in hardware through Android's decoders, which keeps 4K YouTube smooth.
-- **Camera and microphone:** Linux apps can use the tablet's cameras and microphone (video calls in Firefox, for example). Android asks for permission the first time an app opens one.
-- **Your Android files:** grant **All files access** if you want to open shared storage (Downloads, Pictures and so on) from Linux. Fully close and reopen Portal after granting permission, then open `/android` directly. Android downloads are in `/android/Download`. Debian itself lives in Portal's private storage.
-- **Browsers:** Firefox, Chromium and Electron apps run with their normal sandboxes on, no `--no-sandbox` needed. The Firefox you get is Mozilla's own build from Mozilla's APT repo, and Portal sets up any Firefox you install automatically.
-- **Uninstalling Portal deletes the whole Linux install**, so copy out anything you care about first.
+<details>
+<summary><b>Shortcuts and staying alive in the background</b></summary>
 
-## Known limitations
+Android can catch shortcuts like `Alt+Tab` or `Ctrl+C` before Linux sees them. Turn on Portal under **Android Settings → Accessibility → Downloaded apps** to fix that. It only forwards key presses and doesn't read the screen. It also makes Android far less likely to close the desktop in the background.
 
-- There's no systemd, so `systemctl`, `timedatectl`, `hostnamectl` and friends don't work. Apps that only run as systemd services need starting by hand.
-- Android can pause or kill apps in the background, so long downloads or builds are safest with Portal on screen. Turning on Portal's accessibility switch (see above) helps a lot.
-- If the whole desktop suddenly vanishes under heavy load, Android's child-process limit is the likely cause. Some devices let you turn it off under **Developer options → Disable child process restrictions**.
+If the switch is greyed out, open Portal's **App info**, tap **⋮** and choose **Allow restricted settings**. Android 13 and newer does this for apps installed outside an app store.
+
+</details>
+
+<details>
+<summary><b>Android files</b></summary>
+
+Grant **All files access** to open shared storage from Linux. Fully close and reopen Portal, then open `/android` in Dolphin. Downloads are in `/android/Download` and photos in `/android/DCIM`. Debian itself lives in Portal's private storage.
+
+</details>
+
+<details>
+<summary><b>Logging out, and uninstalling</b></summary>
+
+Logging out, or shutting down from Plasma, closes the desktop and Portal with it. Swiping Portal away from recents does the same.
+
+**Uninstalling Portal deletes every workspace and everything in them**, so copy out anything you care about first.
+
+</details>
+
+<details>
+<summary><b>Known limitations</b></summary>
+
+- There's no systemd, so `systemctl`, `timedatectl` and similar tools don't work. Apps that only run as systemd services need starting by hand.
 - Only arm64 packages install with `apt`. x86 programs need Box64 or FEX.
+- Android can stop apps in the background. Long downloads or builds are safest with Portal on screen, or with the accessibility switch above turned on.
+- If the whole desktop vanishes under heavy load, Android's child-process limit is the likely cause. Some devices can turn it off under **Developer options → Disable child process restrictions**.
+- Sites that need Widevine DRM, such as Netflix, don't play. There's no Widevine for ARM64 Linux.
 
-## Something broke?
-
-Open the floating pill on the desktop and tap **Report**. It shows the device details it will fill in, can save your logs to attach, and opens a ready-made GitHub issue for you to finish. Portal uploads nothing on its own, and posting needs a free GitHub account.
-
-If Plasma or setup fails, the recovery screen has **Export diagnostics** and **Report this on GitHub**. Exported logs have file paths, web addresses, emails and IP addresses removed where Portal can spot them, and they leave out your personal files. Apps can print anything, so look them over before posting.
-
-Prefer to write it up yourself? [Open an issue](https://github.com/Retrorerr/Portal/issues/new/choose) with your device, Android version, Portal version and what happened.
-
-### Running Portal on another device?
-
-Portal is mainly tested on one tablet, so results from other devices are what let it support more of them. Open the floating pill, tap **Report**, then **Share what works**, and pick how each part did. "It all works" is just as useful as a bug.
+</details>
 
 ## How it works
 
 ```text
-Android (display · touch · keyboard · audio · clipboard · files)
+Android (display · touch · keyboard · audio · camera · files)
    │
-Portal app (Rust host + Compose screens)
+Portal app (Rust host + Compose UI)
    │  GPU frames: KWin → Mesa (freedreno / Turnip) → Android buffers
    │
 Debian 13 under tawcroot (rootless)
@@ -150,7 +190,7 @@ Debian 13 under tawcroot (rootless)
 KDE Plasma 6 and your Linux apps
 ```
 
-Debian runs under tawcroot, Portal's rootless engine: it translates Linux file paths and permissions inside each process, so nothing needs root. Older kernels fall back to a patched PRoot. Plasma's compositor (KWin) renders on the GPU through Mesa and hands finished frames straight to Android, with no copying and no VNC in between. A simpler Smithay-based renderer stays in as a fallback. Audio runs through PipeWire, with an Android AAudio output on the other end.
+Debian runs under tawcroot, Portal's rootless engine, which translates Linux file paths and permissions inside each process so nothing needs root. Older kernels fall back to a patched PRoot. KWin renders on the GPU through Mesa and hands finished frames straight to Android, and a simpler Smithay-based renderer stays in as a fallback. Audio goes through PipeWire to an AAudio stream opened in Portal's own process, which is why Android treats it as normal media.
 
 More detail: [architecture](docs/architecture.md), [Debian provisioning](docs/debian-provisioning.md), [user guide](docs/user-guide.md).
 
@@ -165,22 +205,12 @@ cargo install --path patches/xbuild/xbuild --force
 x build --release --platform android --arch arm64 --format apk
 ```
 
-On Windows, `./scripts/build_android_variants.ps1` builds both app variants in one go:
+`scripts/build_android_variants.sh` (or `.ps1` on Windows) builds both variants:
 
 - **Portal** (`app.polarbear.portal`) is the normal app. Its build comes out unsigned, so sign it before installing.
 - **Portal Debug** (`app.polarbear`) has extra diagnostics and a badged icon, and installs alongside Portal with its own separate Debian.
 
-There's also an on-device Termux build: `bash scripts/build-termux.sh`.
-
-Before sending changes, run the host checks:
-
-```bash
-cargo test --tests
-```
-
-Format only the files you changed with `rustfmt`, since `cargo fmt --all` rewrites files you didn't touch.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the rest, and [SECURITY.md](SECURITY.md) for reporting security issues privately.
+Before sending changes, run `cargo test --tests`, and format only the files you changed with `rustfmt`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the rest, and [SECURITY.md](SECURITY.md) for reporting security issues privately.
 
 ## Credits
 
