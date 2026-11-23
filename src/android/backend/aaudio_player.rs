@@ -34,6 +34,11 @@ const WRITE_SLICE_NS: i64 = 100_000_000;
 const WRITE_STALLED_SLICES: u32 = 30;
 /// How often the output latency is sampled and the buffer size reviewed.
 const SAMPLE_EVERY: Duration = Duration::from_millis(500);
+/// Request this much media capacity so the buffer can grow after underruns.
+const MEDIA_BUFFER_CAPACITY_MS: u32 = 200;
+/// Switch streams only if several underruns recur with the buffer already full-size.
+const MEDIA_RESIZE_XRUNS: i32 = 3;
+const MEDIA_RESIZE_WINDOW: Duration = Duration::from_secs(3);
 
 /// Set by AAudio's error callback (route change, Bluetooth, headphones): the
 /// player thread reopens the stream.
@@ -82,6 +87,7 @@ mod aaudio {
         pub set_sharing_mode: unsafe extern "C" fn(*mut Builder, i32),
         pub set_sample_rate: unsafe extern "C" fn(*mut Builder, i32),
         pub set_channel_count: unsafe extern "C" fn(*mut Builder, i32),
+        pub set_buffer_capacity: unsafe extern "C" fn(*mut Builder, i32),
         pub set_usage: unsafe extern "C" fn(*mut Builder, i32),
         pub set_content_type: unsafe extern "C" fn(*mut Builder, i32),
         pub set_session_id: unsafe extern "C" fn(*mut Builder, i32),
@@ -131,6 +137,10 @@ mod aaudio {
                     set_sharing_mode: sym(&lib, b"AAudioStreamBuilder_setSharingMode\0")?,
                     set_sample_rate: sym(&lib, b"AAudioStreamBuilder_setSampleRate\0")?,
                     set_channel_count: sym(&lib, b"AAudioStreamBuilder_setChannelCount\0")?,
+                    set_buffer_capacity: sym(
+                        &lib,
+                        b"AAudioStreamBuilder_setBufferCapacityInFrames\0",
+                    )?,
                     set_usage: sym(&lib, b"AAudioStreamBuilder_setUsage\0")?,
                     set_content_type: sym(&lib, b"AAudioStreamBuilder_setContentType\0")?,
                     set_session_id: sym(&lib, b"AAudioStreamBuilder_setSessionId\0")?,
@@ -189,6 +199,8 @@ struct Player {
     burst: i32,
     capacity: i32,
     buffer: i32,
+    tried_larger_buffer: bool,
+    full_buffer_underrun_window: Option<(Instant, i32)>,
     xruns: i32,
     started: bool,
     /// The quantum the last start left room for.
@@ -197,7 +209,12 @@ struct Player {
 
 impl Player {
     /// Open a stream without starting it, so Android sees nothing playing.
-    fn open(output: Output, rate: u32, channels: u32) -> Result<Player, String> {
+    fn open(
+        output: Output,
+        rate: u32,
+        channels: u32,
+        larger_buffer: bool,
+    ) -> Result<Player, String> {
         let api = aaudio::Api::get()?;
         // SAFETY: the builder and stream pointers come from AAudio and are
         // used as its API describes; the builder is deleted exactly once.
@@ -224,6 +241,11 @@ impl Player {
                 Output::Media => {
                     (api.set_performance_mode)(builder, aaudio::PERFORMANCE_MODE_POWER_SAVING);
                     (api.set_session_id)(builder, aaudio::SESSION_ID_ALLOCATE);
+                    if larger_buffer {
+                        let capacity =
+                            (u64::from(rate) * u64::from(MEDIA_BUFFER_CAPACITY_MS) / 1_000) as i32;
+                        (api.set_buffer_capacity)(builder, capacity);
+                    }
                 }
                 Output::LowLatency => {
                     (api.set_performance_mode)(builder, aaudio::PERFORMANCE_MODE_LOW_LATENCY);
@@ -249,6 +271,8 @@ impl Player {
                 burst: (api.frames_per_burst)(stream).max(1),
                 capacity: (api.buffer_capacity)(stream),
                 buffer: 0,
+                tried_larger_buffer: larger_buffer,
+                full_buffer_underrun_window: None,
                 xruns: 0,
                 started: false,
                 quantum: 1024,
@@ -299,19 +323,26 @@ impl Player {
     /// sits once `next` frames follow. Quanta come one at a time, so an empty
     /// buffer would underrun until it had slowly filled.
     fn start(&mut self, next: usize) -> Result<(), aaudio::Res> {
+        self.quantum = next;
+        let prime = (self.buffer as usize).saturating_sub(next);
+        let mut primed = 0;
+        if prime > 0 {
+            let silence = vec![0.0f32; prime * self.channels as usize];
+            // Fill the queue before starting the mixer. AAudio allows
+            // pre-start writes with a zero timeout.
+            // SAFETY: the stream is open and `silence` holds `prime` frames.
+            primed =
+                unsafe { (self.api.write)(self.stream, silence.as_ptr().cast(), prime as i32, 0) };
+            if primed < 0 {
+                return Err(primed);
+            }
+        }
         // SAFETY: the stream is open.
         let res = unsafe { (self.api.request_start)(self.stream) };
         if res != aaudio::OK {
             return Err(res);
         }
         self.started = true;
-        let prime = (self.buffer as usize).saturating_sub(next);
-        let silence = vec![0.0f32; prime * self.channels as usize];
-        // The buffer is empty, so this does not block.
-        // SAFETY: `silence` holds `prime` frames.
-        let primed =
-            unsafe { (self.api.write)(self.stream, silence.as_ptr().cast(), prime as i32, 0) };
-        self.quantum = next;
         note!("AAudio started primed={primed}");
         Ok(())
     }
@@ -320,6 +351,7 @@ impl Player {
         // SAFETY: the stream is open.
         let res = unsafe { (self.api.request_stop)(self.stream) };
         self.started = false;
+        self.full_buffer_underrun_window = None;
         note!("AAudio stopped (silence) result={res} xruns={}", self.xruns);
     }
 
@@ -358,7 +390,7 @@ impl Player {
     fn reopen(&mut self) -> Result<(), String> {
         let started = self.started;
         self.close();
-        let mut fresh = Player::open(self.output, self.rate, self.channels)?;
+        let mut fresh = Player::open(self.output, self.rate, self.channels, false)?;
         if started {
             fresh
                 .start(self.quantum)
@@ -399,24 +431,67 @@ impl Player {
         Some((written - presented_now).max(0) * 1_000_000_000 / rate)
     }
 
-    /// Give the buffer one more burst after an underrun.
-    fn grow_after_underrun(&mut self) {
+    /// Give the buffer one more burst after an underrun. True if we opened a
+    /// larger media stream and the Android audio session changed.
+    fn grow_after_underrun(&mut self) -> bool {
         // SAFETY: the stream is open.
         let xruns = unsafe { (self.api.xrun_count)(self.stream) };
         if xruns <= self.xruns {
-            return;
+            return false;
         }
+        let previous = self.xruns;
         self.xruns = xruns;
-        if self.buffer >= self.capacity {
-            return;
+        if self.buffer < self.capacity {
+            let wanted = self.buffer.saturating_add(self.burst).min(self.capacity);
+            // SAFETY: the stream is open.
+            let buffer = unsafe { (self.api.set_buffer_size)(self.stream, wanted) };
+            if buffer > 0 && buffer <= self.capacity {
+                self.buffer = buffer;
+                note!("AAudio underrun (total {xruns}): buffer now {buffer} frames");
+            }
+            return false;
         }
-        let wanted = self.buffer.saturating_add(self.burst).min(self.capacity);
-        // SAFETY: the stream is open.
-        let buffer = unsafe { (self.api.set_buffer_size)(self.stream, wanted) };
-        if buffer > 0 && buffer <= self.capacity {
-            self.buffer = buffer;
-            note!("AAudio underrun (total {xruns}): buffer now {buffer} frames");
+
+        if self.output != Output::Media || self.tried_larger_buffer {
+            return false;
         }
+        let now = Instant::now();
+        let (first, baseline) = self
+            .full_buffer_underrun_window
+            .filter(|(first, _)| now.duration_since(*first) <= MEDIA_RESIZE_WINDOW)
+            .unwrap_or((now, previous));
+        self.full_buffer_underrun_window = Some((first, baseline));
+        if xruns - baseline < MEDIA_RESIZE_XRUNS {
+            return false;
+        }
+        // The default capacity keeps everyday playback delay down. Some
+        // deep-buffer routes expose only three bursts and need more room
+        // when the writer repeatedly falls behind.
+        self.tried_larger_buffer = true;
+        let mut larger = match Player::open(self.output, self.rate, self.channels, true) {
+            Ok(player) => player,
+            Err(error) => {
+                note!("could not open larger AAudio media buffer: {error}");
+                return false;
+            }
+        };
+        if larger.buffer <= self.buffer {
+            return false;
+        }
+        if let Err(res) = larger.start(self.quantum) {
+            note!(
+                "could not start larger AAudio media buffer: {}",
+                self.api.text(res)
+            );
+            return false;
+        }
+        note!(
+            "AAudio underruns at capacity (total {xruns}): switching media buffer from {} to {} frames",
+            self.buffer,
+            larger.buffer
+        );
+        *self = larger;
+        true
     }
 
     fn close(&mut self) {
@@ -453,7 +528,7 @@ pub fn serve(
     unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, -19) };
 
     DISCONNECTED.store(false, Ordering::Release);
-    let mut player = Player::open(output, rate, channels)?;
+    let mut player = Player::open(output, rate, channels, false)?;
     session_changed(player.session());
 
     let mut samples: Vec<f32> = Vec::new();
@@ -498,7 +573,11 @@ pub fn serve(
                     latencies.clear();
                 } else if sampled.elapsed() >= SAMPLE_EVERY {
                     sampled = Instant::now();
-                    player.grow_after_underrun();
+                    if player.grow_after_underrun() {
+                        session_changed(player.session());
+                        latencies.clear();
+                        latency_ns = LATENCY_UNKNOWN;
+                    }
                     // A single sample swings by about one burst, so the
                     // average of the last 8 is what clients get.
                     if let Some(ns) = player.latency_ns() {

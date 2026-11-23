@@ -115,6 +115,15 @@ repair_preload
 execmod=/usr/local/lib/portal/steam/portal-execmod.so
 [ -f "$execmod" ] && export LD_PRELOAD="$execmod${LD_PRELOAD:+:$LD_PRELOAD}"
 
+# Use Wine's ALSA driver when its default device is backed by PipeWire.
+# This keeps both playback and capture in Portal's audio graph. The Wine
+# PulseAudio driver can stall games while they open their audio devices.
+if [ -r /etc/alsa/conf.d/99-pipewire-default.conf ] &&
+   ! printf '%s\n' "$WINEDLLOVERRIDES" |
+       grep -qiE '(^|[;,])[[:blank:]]*[*]?wine(pulse|alsa)(\.drv)?[[:blank:]]*[,=]'; then
+    export WINEDLLOVERRIDES="winepulse.drv=d${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+fi
+
 # Wine's esync fallback needs many descriptors; fsync (futex_waitv) is
 # available on Portal's Android kernels and is Proton's default.
 ulimit -n "$(ulimit -Hn)" 2>/dev/null
