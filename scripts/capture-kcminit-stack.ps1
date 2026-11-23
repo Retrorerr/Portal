@@ -6,7 +6,7 @@ param(
     [int]$WaitSeconds = 30
 )
 
-# Diagnostic-only probe. No APK install, data clear, or production asset
+# Diagnostic-only probe for the legacy Arch guest. No APK install, data clear, or production asset
 # change is performed. Every app-private target is inspected and backed up
 # before staging, and is restored and read-back-verified in finally.
 $ErrorActionPreference = "Stop"
@@ -21,9 +21,15 @@ if (-not $DeviceId) {
         } else { throw "No adb device connected" }
     }
 }
+$launcher = & $adb -s $DeviceId shell cmd package resolve-activity --brief app.polarbear 2>&1
+if ($LASTEXITCODE -ne 0 -or (($launcher | Out-String) -notmatch '(?m)^app\.polarbear/android\.app\.NativeActivity\s*$')) {
+    throw "This stack probe requires the legacy Portal Debug launcher and Arch guest."
+}
+& $adb -s $DeviceId shell run-as app.polarbear test -d files/arch
+if ($LASTEXITCODE -ne 0) { throw "The legacy Arch guest directory is missing or unreadable." }
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
 if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
-    $ArtifactRoot = Join-Path $RepoRoot ("artifacts\qa\kcminit-stack-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+    $ArtifactRoot = Join-Path $RepoRoot ("artifacts\qa\kcminit-stack-{0}-{1}" -f (Get-Date -Format "yyyyMMdd-HHmmss"), [Guid]::NewGuid().ToString("N"))
 }
 $runRoot = [IO.Path]::GetFullPath($ArtifactRoot)
 if (Test-Path -LiteralPath $runRoot) {
@@ -229,6 +235,13 @@ try {
     Start-Sleep -Seconds 2
     $stackBytes = GuestBytes $targets[4].Path
     [IO.File]::WriteAllBytes((Join-Path $runRoot "kcminit-stack.log"), $stackBytes)
+    $stackText = [Text.Encoding]::UTF8.GetString($stackBytes)
+    $signalRecord = "(?ms)^kcminit-stack-probe signal=12 pid=$childPid(?: |\r?$)(?<trace>.*?)(?=^kcminit-stack-probe signal=|\z)"
+    $record = [regex]::Match($stackText, $signalRecord)
+    if (-not $record.Success) { throw "no PID-specific SIGUSR2 record for kcminit $childPid" }
+    if ($record.Groups["trace"].Value -notmatch '(?ms)^maps_begin\r?$.*^maps_end\r?$.*^backtrace_begin\r?$.*^backtrace_end\r?$') {
+        throw "incomplete SIGUSR2 stack record for kcminit $childPid"
+    }
     SaveCommand "cat /proc/$childPid/wchan" (Join-Path $runRoot "wchan-after-signal.txt") -AllowFailure
     SaveCommand "cat /proc/$childPid/syscall" (Join-Path $runRoot "syscall-after-signal.txt") -AllowFailure
     SaveCommand "cat /proc/$childPid/maps" (Join-Path $runRoot "maps-after-signal.txt") -AllowFailure

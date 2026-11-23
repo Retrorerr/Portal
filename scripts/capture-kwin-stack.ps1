@@ -8,7 +8,7 @@ param(
     [int]$DelaySeconds = 90
 )
 
-# Diagnostic-only KWin probe. It does not install an APK or clear app data.
+# Diagnostic-only KWin probe for the legacy Arch guest. It does not install an APK or clear app data.
 # The existing KWin wrapper and every probe path are backed up before staging,
 # and all touched paths are restored and read-back verified in finally.
 $ErrorActionPreference = "Stop"
@@ -23,9 +23,15 @@ if (-not $DeviceId) {
         } else { throw "No adb device connected" }
     }
 }
+$launcher = & $adb -s $DeviceId shell cmd package resolve-activity --brief app.polarbear 2>&1
+if ($LASTEXITCODE -ne 0 -or (($launcher | Out-String) -notmatch '(?m)^app\.polarbear/android\.app\.NativeActivity\s*$')) {
+    throw "This stack probe requires the legacy Portal Debug launcher and Arch guest."
+}
+& $adb -s $DeviceId shell run-as app.polarbear test -d files/arch
+if ($LASTEXITCODE -ne 0) { throw "The legacy Arch guest directory is missing or unreadable." }
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
 if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
-    $ArtifactRoot = Join-Path $RepoRoot ("artifacts\qa\kwin-stack-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+    $ArtifactRoot = Join-Path $RepoRoot ("artifacts\qa\kwin-stack-{0}-{1}" -f (Get-Date -Format "yyyyMMdd-HHmmss"), [Guid]::NewGuid().ToString("N"))
 }
 $runRoot = [IO.Path]::GetFullPath($ArtifactRoot)
 if (Test-Path -LiteralPath $runRoot) {
@@ -392,9 +398,11 @@ try {
     $stackBytes = GuestBytes $guestLog
     [IO.File]::WriteAllBytes((Join-Path $runRoot "kwin-stack.log"), $stackBytes)
     $stackText = [Text.Encoding]::UTF8.GetString($stackBytes)
-    if ($stackText -notmatch "kwin-stack-probe signal=12 pid=$kwinPid") { throw "no PID-specific SIGUSR2 record for KWin $kwinPid" }
-    foreach ($marker in @("maps_begin", "maps_end", "backtrace_begin", "backtrace_end")) {
-        if ($stackText -notmatch [regex]::Escape($marker)) { throw "KWin stack capture is incomplete: $marker" }
+    $signalRecord = "(?ms)^kwin-stack-probe signal=12 pid=$kwinPid(?: |\r?$)(?<trace>.*?)(?=^kwin-stack-probe signal=|\z)"
+    $record = [regex]::Match($stackText, $signalRecord)
+    if (-not $record.Success) { throw "no PID-specific SIGUSR2 record for KWin $kwinPid" }
+    if ($record.Groups["trace"].Value -notmatch '(?ms)^maps_begin\r?$.*^maps_end\r?$.*^backtrace_begin\r?$.*^backtrace_end\r?$') {
+        throw "incomplete SIGUSR2 stack record for KWin $kwinPid"
     }
     SaveCommand "cat /proc/$kwinPid/wchan" (Join-Path $runRoot "wchan-after-signal.txt") -AllowFailure
     SaveCommand "cat /proc/$kwinPid/syscall" (Join-Path $runRoot "syscall-after-signal.txt") -AllowFailure

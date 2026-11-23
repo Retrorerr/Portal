@@ -14,6 +14,11 @@ param()
 
 $ErrorActionPreference = "Stop"
 $script:Failures = New-Object 'System.Collections.Generic.List[string]'
+$script:AdbCalls = 0
+function adb {
+    $script:AdbCalls++
+    throw "Parser fixtures must never invoke adb."
+}
 
 function Assert-QaTrue {
     param(
@@ -97,11 +102,13 @@ function New-QaLifecycleScenarioContent {
 function New-QaPng {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [switch]$Black
+        [switch]$Black,
+        [int]$Width = 32,
+        [int]$Height = 32
     )
 
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
-    $bitmap = [System.Drawing.Bitmap]::new(32, 32)
+    $bitmap = [System.Drawing.Bitmap]::new($Width, $Height)
     $graphics = $null
     try {
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -126,6 +133,14 @@ $blackPng = Join-Path $tempRoot "black.png"
 try {
     New-QaPng -Path $goodPng
     New-QaPng -Path $blackPng -Black
+    $nativePng = Join-Path $tempRoot "native.png"
+    New-QaPng -Path $nativePng -Width 3392 -Height 2400
+    $nativeResolution = Test-ScreenResolution -ScreenshotPath $nativePng
+    Assert-QaTrue $nativeResolution.Passed "screenshot retains both bytes of the native display dimensions"
+    $truncatedPng = Join-Path $tempRoot "truncated.png"
+    [IO.File]::WriteAllBytes($truncatedPng, ([IO.File]::ReadAllBytes($nativePng)[0..23]))
+    Assert-QaFalse (Test-ScreenResolution -ScreenshotPath $truncatedPng).Passed "a truncated PNG header cannot pass"
+    Assert-QaFalse (Test-ScreenResolution -ScreenshotPath (Join-Path $tempRoot "absent.png")).Passed "a missing supplied screenshot cannot fall back to the device"
 
     $positive = Test-StrictPlasmaReleaseEvidence `
         -HostLogContent (New-QaFixtureLog) `
@@ -312,6 +327,9 @@ try {
         -HostLogContent (New-QaFixtureLog) `
         -ScreenshotPath $goodPng
     Assert-QaFalse $noBoundary.Passed "missing run boundary fails closed"
+    Assert-QaTrue ($script:AdbCalls -eq 0) "fixture verification is independent of ADB"
+    $unavailable = Test-AppCrashes -DeviceId "fixture-device"
+    Assert-QaFalse $unavailable.Passed "unavailable crash evidence cannot pass"
 } finally {
     $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
     $resolvedTempRoot = $null

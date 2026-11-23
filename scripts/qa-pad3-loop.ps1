@@ -39,7 +39,7 @@
     Skip APK installation (strictly preserving existing app/guest data).
 
 .PARAMETER SkipLaunch
-    Skip launching the NativeActivity.
+    Skip launching PortalActivity.
 
 .PARAMETER TimeoutSeconds
     Maximum wait time for desktop startup and diagnostics generation.
@@ -62,18 +62,6 @@
     Runs the full continuous validation loop on the OnePlus Pad 3.
 
 .EXAMPLE
-
-.PARAMETER EnforceReleaseGates
-    If set, exits with non-zero exit code if release gates fail.
-
-.PARAMETER FunctionsOnly
-    Only load helper functions into the session without running the loop.
-
-.EXAMPLE
-    .\scripts\qa-pad3-loop.ps1
-    Runs the full continuous validation loop on the OnePlus Pad 3.
-
-.EXAMPLE
     . .\scripts\qa-pad3-loop.ps1 -FunctionsOnly
     Test-ScreenResolution -DeviceId "<adb serial>"
     Test-KWinConnection -DeviceId "<adb serial>"
@@ -84,7 +72,7 @@
 param(
     [string]$DeviceId = "",
     [string]$PackageName = "app.polarbear",
-    [string]$ActivityName = "android.app.NativeActivity",
+    [string]$ActivityName = "app.polarbear.PortalActivity",
     [int]$ExpectedWidth = 3392,
     [int]$ExpectedHeight = 2400,
     [string]$ArtifactDir = "",
@@ -113,13 +101,14 @@ function Get-DefaultQaDeviceId {
     throw "No adb device connected"
 }
 
-if (-not $DeviceId) {
+if (-not $FunctionsOnly -and -not $DeviceId) {
     $DeviceId = Get-DefaultQaDeviceId
 }
-$script:QaDefaultDeviceId = $DeviceId
 
-$ErrorActionPreference = "Continue"
-$PSNativeCommandUseErrorActionPreference = $false
+if (-not $FunctionsOnly) {
+    $ErrorActionPreference = "Continue"
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 # Determine repository root and artifact directory
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -216,7 +205,7 @@ function Test-ScreenResolution {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceId = (Get-DefaultQaDeviceId),
+        [string]$DeviceId = "",
         [int]$ExpectedWidth = 3392,
         [int]$ExpectedHeight = 2400,
         [string]$ScreenshotPath = ""
@@ -232,15 +221,19 @@ function Test-ScreenResolution {
     }
 
     # Priority 1: Check PNG screenshot dimensions if provided and valid
-    if ($ScreenshotPath -and (Test-Path $ScreenshotPath)) {
+    if ($ScreenshotPath) {
+        if (-not (Test-Path -LiteralPath $ScreenshotPath -PathType Leaf)) {
+            $result.Message = "Screenshot is missing: $ScreenshotPath"
+            return $result
+        }
         try {
             $bytes = [System.IO.File]::ReadAllBytes($ScreenshotPath)
-            # Check PNG magic (89 50 4E 47 0D 0A 1A 0A) and IHDR at byte 12
-            if ($bytes.Length -ge 24 -and $bytes[12] -eq 73 -and $bytes[13] -eq 72 -and $bytes[14] -eq 68 -and $bytes[15] -eq 82) {
+            # Check the signature and the complete 13-byte IHDR chunk.
+            if ($bytes.Length -ge 33 -and [BitConverter]::ToString($bytes, 0, 16) -eq "89-50-4E-47-0D-0A-1A-0A-00-00-00-0D-49-48-44-52") {
                 # PNG IHDR dimensions are big-endian; do not reverse the byte
                 # order through BitConverter (which is little-endian here).
-                $w = [uint32](($bytes[16] -shl 24) -bor ($bytes[17] -shl 16) -bor ($bytes[18] -shl 8) -bor $bytes[19])
-                $h = [uint32](($bytes[20] -shl 24) -bor ($bytes[21] -shl 16) -bor ($bytes[22] -shl 8) -bor $bytes[23])
+                $w = ([uint32]$bytes[16] -shl 24) -bor ([uint32]$bytes[17] -shl 16) -bor ([uint32]$bytes[18] -shl 8) -bor $bytes[19]
+                $h = ([uint32]$bytes[20] -shl 24) -bor ([uint32]$bytes[21] -shl 16) -bor ([uint32]$bytes[22] -shl 8) -bor $bytes[23]
                 $result.DetectedWidth = $w
                 $result.DetectedHeight = $h
                 $result.Method = "Screenshot IHDR Inspection"
@@ -254,7 +247,7 @@ function Test-ScreenResolution {
                 $result.Message = "Screenshot dimensions ${w}x${h} do not match expected ${ExpectedWidth}x${ExpectedHeight}."
                 return $result
             }
-            $result.Message = "Screenshot is not a valid PNG with an IHDR header."
+            $result.Message = "Screenshot is missing a complete PNG header."
             return $result
         } catch {
             $result.Message = "Screenshot dimensions could not be inspected; treating them as unknown: $($_.Exception.Message)"
@@ -264,6 +257,7 @@ function Test-ScreenResolution {
 
     # Priority 2: Check device wm size via adb
     try {
+        if (-not $DeviceId) { $DeviceId = Get-DefaultQaDeviceId }
         $wmOut = & adb -s $DeviceId shell wm size 2>&1
         $wmText = ($wmOut | Out-String).Trim()
 
@@ -1293,7 +1287,7 @@ function Test-KWinConnection {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceId = (Get-DefaultQaDeviceId),
+        [string]$DeviceId = "",
         [string]$HostLogContent = "",
         [string]$LogcatContent = "",
         [Int64]$RunStartTimestampMs = 0
@@ -1329,7 +1323,7 @@ function Test-WaylandReadinessMarker {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceId = (Get-DefaultQaDeviceId),
+        [string]$DeviceId = "",
         [string]$HostLogContent = "",
         [Int64]$RunStartTimestampMs = 0,
         [PSCustomObject]$KWinIdentity = $null
@@ -1373,7 +1367,7 @@ function Test-AppCrashes {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceId = (Get-DefaultQaDeviceId),
+        [string]$DeviceId = "",
         [string]$HostLogContent = "",
         [string]$GuestLogContent = "",
         [string]$LogcatContent = ""
@@ -1388,40 +1382,21 @@ function Test-AppCrashes {
         Details       = @()
     }
 
-    # 1. Check for failure markers in guest state directory only when the
-    # caller did not supply cached diagnostics. Parser/regression callers must
-    # never cause an implicit ADB query; a missing cache is unknown, not a
-    # license to inspect a different device.
+    # 1. If no diagnostics were supplied, read the current Debug host log.
     $hasCachedDiagnostics = (-not [string]::IsNullOrWhiteSpace($HostLogContent)) -or
         (-not [string]::IsNullOrWhiteSpace($GuestLogContent)) -or
         (-not [string]::IsNullOrWhiteSpace($LogcatContent))
     if (-not $hasCachedDiagnostics) {
         try {
-            $failCheck = & adb -s $DeviceId shell "run-as app.polarbear cat /data/data/app.polarbear/files/arch/var/lib/localdesktop/plasma-failed 2>/dev/null" 2>&1
-            $failText = ($failCheck | Out-String).Trim()
-            if ($failText -and $failText -notmatch "No such file") {
-                $result.CrashFound = $true
-                $result.FailureReason = "plasma-failed: $failText"
-                $result.Details += "Guest recorded plasma-failed marker: $failText"
-            }
-
-            $crashCheck = & adb -s $DeviceId shell "run-as app.polarbear cat /data/data/app.polarbear/files/arch/var/lib/localdesktop/kwin-crash 2>/dev/null" 2>&1
-            $crashText = ($crashCheck | Out-String).Trim()
-            if ($crashText -and $crashText -notmatch "No such file") {
-                $result.CrashFound = $true
-                $result.FailureReason = "kwin-crash: $crashText"
-                $result.Details += "Guest recorded kwin-crash marker: $crashText"
-            }
-
-            $btCheck = & adb -s $DeviceId shell "run-as app.polarbear grep -iE 'fault_address|signal=11' /data/data/app.polarbear/files/arch/var/lib/localdesktop/kwin-backtrace.log 2>/dev/null | head -n 5" 2>&1
-            $btText = ($btCheck | Out-String).Trim()
-            if ($btText -and $btText -notmatch "No such file") {
-                $result.Backtrace = $btText
-                $result.CrashFound = $true
-                $result.Details += "KWin crash backtrace recorded: $btText"
-            }
+            if (-not $DeviceId) { $DeviceId = Get-DefaultQaDeviceId }
+            $hostLog = & adb -s $DeviceId shell run-as app.polarbear cat files/diagnostics/host.log 2>&1
+            if ($LASTEXITCODE -ne 0) { throw ($hostLog | Out-String).Trim() }
+            $HostLogContent = ($hostLog | Out-String).Trim()
+            if (-not $HostLogContent) { throw "The Portal Debug host log is empty." }
         } catch {
-            Write-Verbose "Failed checking guest failure markers: $_"
+            $result.Passed = $false
+            $result.FailureReason = "Crash evidence unavailable: $($_.Exception.Message)"
+            return $result
         }
     }
 
@@ -1460,7 +1435,7 @@ function Assert-ReleaseGates {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceId = (Get-DefaultQaDeviceId),
+        [string]$DeviceId = "",
         [int]$ExpectedWidth = 3392,
         [int]$ExpectedHeight = 2400,
         [string]$ScreenshotPath = "",
@@ -1784,19 +1759,15 @@ function Get-AppDiagnostics {
         $elapsed += $interval
         Write-Host "  -> Waiting for session stabilization ($elapsed / $TimeoutSeconds s)..." -ForegroundColor Gray
 
-        # Markers are diagnostic context only. Continue through the full wait
-        # so a release decision cannot stop before its stability interval.
-        $markerCheck = & adb -s $DeviceId shell "run-as $PackageName ls /data/data/$PackageName/files/arch/var/lib/localdesktop/ 2>/dev/null" 2>&1
-        $markerText = ($markerCheck | Out-String)
-        if ($markerText -match "plasma-ready|plasma-failed|kwin-crash") {
-            Write-Host "  -> Desktop state marker observed for diagnostics: $($Matches[0])" -ForegroundColor Yellow
-        }
     }
 
     # Extract host.log via app-scoped run-as (including rotated host.log.1)
     try {
         $hostLogContent = & adb -s $DeviceId shell "run-as $PackageName sh -c 'cat /data/data/$PackageName/files/diagnostics/host.log.1 /data/data/$PackageName/files/diagnostics/host.log 2>/dev/null || cat /data/data/$PackageName/files/diagnostics/host.log 2>/dev/null'" 2>&1 | Out-String
-        if ($hostLogContent) {
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Could not retrieve host.log (adb exit $LASTEXITCODE)."
+            $hostLogContent = ""
+        } elseif ($hostLogContent) {
             Set-Content -Path $hostLogFile -Value $hostLogContent -Encoding utf8
             Write-Host "  -> Saved host.log to $hostLogFile ($( [math]::Round((Get-Item $hostLogFile).Length / 1KB, 1) ) KB)" -ForegroundColor Green
         }
@@ -1807,7 +1778,10 @@ function Get-AppDiagnostics {
     # Extract guest.log via app-scoped run-as
     try {
         $guestLogContent = & adb -s $DeviceId shell "run-as $PackageName cat /data/data/$PackageName/files/diagnostics/guest.log 2>/dev/null" 2>&1 | Out-String
-        if ($guestLogContent) {
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Could not retrieve guest.log (adb exit $LASTEXITCODE)."
+            $guestLogContent = ""
+        } elseif ($guestLogContent) {
             Set-Content -Path $guestLogFile -Value $guestLogContent -Encoding utf8
             Write-Host "  -> Saved guest.log to $guestLogFile ($( [math]::Round((Get-Item $guestLogFile).Length / 1KB, 1) ) KB)" -ForegroundColor Green
         }
@@ -1857,20 +1831,20 @@ function Capture-DeviceScreenshot {
     Write-Host "[6/7] Capturing screenshot to artifacts/qa/pad3-screenshot.png..." -ForegroundColor Cyan
 
     $localScreenshot = Join-Path $ArtifactDir "pad3-screenshot.png"
-    $remoteTemp = "/data/local/tmp/pad3-screenshot.png"
-
-    # Capture on device, pull binary cleanly, then clean up temp file
-    & adb -s $DeviceId shell screencap -p $remoteTemp
-    cmd /c "adb -s $DeviceId pull `"$remoteTemp`" `"$localScreenshot`" >nul 2>&1"
-    & adb -s $DeviceId shell rm -f $remoteTemp
-
-    if (Test-Path $localScreenshot) {
-        $fileInfo = Get-Item $localScreenshot
+    $remoteTemp = "/data/local/tmp/portal-qa-$([Guid]::NewGuid().ToString('N')).png"
+    try {
+        & adb -s $DeviceId shell screencap -p $remoteTemp | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "adb screencap failed (exit $LASTEXITCODE)" }
+        & adb -s $DeviceId pull $remoteTemp $localScreenshot | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "adb pull failed (exit $LASTEXITCODE)" }
+        $fileInfo = Get-Item -LiteralPath $localScreenshot -ErrorAction Stop
         Write-Host "  -> Screenshot captured: $localScreenshot ($( [math]::Round($fileInfo.Length / 1MB, 2) ) MB)" -ForegroundColor Green
         return $localScreenshot
-    } else {
-        Write-Warning "Screenshot could not be pulled from device."
+    } catch {
+        Write-Warning "Screenshot could not be captured: $_"
         return $null
+    } finally {
+        & adb -s $DeviceId shell rm -f $remoteTemp | Out-Null
     }
 }
 
@@ -1883,7 +1857,7 @@ function Invoke-QaLoop {
     param(
         [string]$DeviceId = (Get-DefaultQaDeviceId),
         [string]$PackageName = "app.polarbear",
-        [string]$ActivityName = "android.app.NativeActivity",
+        [string]$ActivityName = "app.polarbear.PortalActivity",
         [int]$ExpectedWidth = 3392,
         [int]$ExpectedHeight = 2400,
         [string]$ArtifactDir = "",
