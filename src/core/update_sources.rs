@@ -18,6 +18,59 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
+/// The host release offers follow the APK and driver across workspaces.
+/// Check freshness and the ChatGPT offer follow the guest.
+#[cfg(any(target_os = "android", test))]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct CachedUpdateSources {
+    pub checked_at: u64,
+    pub app: Option<AppRelease>,
+    pub driver: Option<MesaRelease>,
+    pub chatgpt: bool,
+}
+
+#[cfg(any(target_os = "android", test))]
+impl CachedUpdateSources {
+    fn read(path: &std::path::Path) -> Self {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn load(shared: &std::path::Path, workspace: &std::path::Path) -> Self {
+        let mut cache = Self::read(shared);
+        if workspace != shared {
+            let guest = Self::read(workspace);
+            cache.checked_at = guest.checked_at;
+            cache.chatgpt = guest.chatgpt;
+        }
+        cache
+    }
+
+    pub(crate) fn save(
+        &self,
+        shared: &std::path::Path,
+        workspace: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        use crate::core::provisioning::write_atomic;
+
+        if workspace == shared {
+            return write_atomic(shared, &serde_json::to_vec_pretty(self)?);
+        }
+        let mut shared_cache = Self::read(shared);
+        shared_cache.app.clone_from(&self.app);
+        shared_cache.driver.clone_from(&self.driver);
+        write_atomic(shared, &serde_json::to_vec_pretty(&shared_cache)?)?;
+        let guest = Self {
+            checked_at: self.checked_at,
+            chatgpt: self.chatgpt,
+            ..Self::default()
+        };
+        write_atomic(workspace, &serde_json::to_vec_pretty(&guest)?)
+    }
+}
+
 /// Newest non-draft, non-prerelease Portal release.
 pub const APP_RELEASE_API: &str = "https://api.github.com/repos/Retrorerr/Portal/releases/latest";
 /// Every release asset of the app must come from here.
@@ -475,6 +528,43 @@ pub fn deb_refresh_needed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_workspace_keeps_shared_update_offers_and_its_own_check_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("updates/state.json");
+        let other = tmp.path().join("workspaces/second/updates/state.json");
+        let app = AppRelease {
+            version: "3.0.0".into(),
+            ..AppRelease::default()
+        };
+        let driver = MesaRelease {
+            version: "26.3.0-20260824".into(),
+            ..MesaRelease::default()
+        };
+        CachedUpdateSources {
+            checked_at: 100,
+            app: Some(app.clone()),
+            driver: Some(driver.clone()),
+            chatgpt: true,
+        }
+        .save(&main, &main)
+        .unwrap();
+        let mut next = CachedUpdateSources::load(&main, &other);
+        assert_eq!(next.app.as_ref(), Some(&app));
+        assert_eq!(next.driver.as_ref(), Some(&driver));
+        assert_eq!(next.checked_at, 0);
+        assert!(!next.chatgpt);
+        next.checked_at = 200;
+        next.driver = None;
+        next.save(&main, &other).unwrap();
+        let original = CachedUpdateSources::load(&main, &main);
+        assert_eq!(original.app, Some(app));
+        assert_eq!(original.driver, None);
+        assert_eq!(original.checked_at, 100);
+        assert!(original.chatgpt);
+        assert_eq!(CachedUpdateSources::load(&main, &other).checked_at, 200);
+    }
 
     #[test]
     fn release_summary_is_the_first_prose_line() {

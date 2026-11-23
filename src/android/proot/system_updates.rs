@@ -34,10 +34,12 @@ use crate::{
         runtime::proot::PRootRuntime,
         update_net,
         utils::{application_context::get_application_context, compose_overlay, webview_handoff},
+        workspace_switch,
     },
     core::{
         config::{rootfs, APP_FILES_ROOT, VERSION},
         install_plan::OptionalApp,
+        provisioning::write_atomic,
         runtime::{LinuxRuntime, ProcessSpec},
         system_updates::{
             apt_pin_content_with_holds, changed_protected_packages, check_due, friendly_status,
@@ -48,23 +50,19 @@ use crate::{
         },
         update_sources::{
             compare_mesa_versions, deb_refresh_needed, mesa_update, parse_http_date, parse_semver,
-            release_summary,
-            AppRelease, DebStamp, GithubRelease, MesaRelease, UpdatePolicy, CHATGPT_DEB_URL,
-            CHATGPT_STAMP_REL, SOURCE_CHECK_INTERVAL_SECS, MESA_RELEASES_API, POLICY_URL,
+            release_summary, AppRelease, CachedUpdateSources, DebStamp, GithubRelease, MesaRelease, UpdatePolicy,
+            CHATGPT_DEB_URL, CHATGPT_STAMP_REL, MESA_RELEASES_API, POLICY_URL,
+            SOURCE_CHECK_INTERVAL_SECS,
         },
     },
 };
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::HashMap,
     fs,
-    path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering as AtomicOrdering},
-        Arc, Mutex, MutexGuard, OnceLock,
-    },
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -90,8 +88,9 @@ const LOG_LIMIT_BYTES: u64 = 4 << 20;
 /// How long a user-started download waits for a lost connection.
 const OFFLINE_BUDGET: Duration = Duration::from_secs(5 * 60);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum UpdateStatus {
+    #[default]
     None,
     Available,
     Running,
@@ -152,17 +151,8 @@ pub struct RunStep {
     pub note: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct HostCache {
-    /// Unix seconds of the last check in which every source answered.
-    checked_at: u64,
-    app: Option<AppRelease>,
-    driver: Option<MesaRelease>,
-    chatgpt: bool,
-}
-
 /// What the Return screen shows.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct UpdateSnapshot {
     pub status: UpdateStatus,
     pub progress: u16,
@@ -249,7 +239,7 @@ struct RunReport {
 }
 
 struct Coordinator {
-    loaded: bool,
+    loaded_root: Option<PathBuf>,
     snapshot: UpdateSnapshot,
     result: Option<UpdateResult>,
     /// Runs started since launch: a check that saw this change found
@@ -261,18 +251,8 @@ fn coordinator() -> &'static Mutex<Coordinator> {
     static COORDINATOR: OnceLock<Mutex<Coordinator>> = OnceLock::new();
     COORDINATOR.get_or_init(|| {
         Mutex::new(Coordinator {
-            loaded: false,
-            snapshot: UpdateSnapshot {
-                status: UpdateStatus::None,
-                progress: 0,
-                message: String::new(),
-                updates: Vec::new(),
-                interrupted: false,
-                app: None,
-                driver: None,
-                chatgpt: false,
-                steps: Vec::new(),
-            },
+            loaded_root: None,
+            snapshot: UpdateSnapshot::default(),
             result: None,
             runs: 0,
         })
@@ -290,7 +270,7 @@ pub fn apt_lock() -> MutexGuard<'static, ()> {
     APT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn root() -> std::path::PathBuf {
+fn root() -> PathBuf {
     rootfs()
 }
 
@@ -303,17 +283,6 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0)
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes)?;
-    fs::File::open(&temporary)?.sync_all()?;
-    fs::rename(&temporary, path)?;
-    Ok(())
 }
 
 /// The update policy in force: the last one fetched, else the APK's copy.
@@ -365,21 +334,26 @@ fn read_cache(fs_root: &Path) -> Option<UpdateCache> {
     UpdateCache::parse(&fs::read_to_string(fs_root.join(CACHE_REL)).ok()?)
 }
 
-fn read_host_cache() -> Option<HostCache> {
-    serde_json::from_str(&fs::read_to_string(files().join(HOST_CACHE_REL)).ok()?).ok()
+fn host_cache_path(fs_root: &Path) -> PathBuf {
+    // The host-side record includes the guest's ChatGPT check and freshness.
+    fs_root
+        .parent()
+        .expect("rootfs is inside the workspace")
+        .join(HOST_CACHE_REL)
 }
 
-fn write_host_cache(cache: &HostCache) -> anyhow::Result<()> {
-    write_atomic(
-        &files().join(HOST_CACHE_REL),
-        serde_json::to_string_pretty(cache)?.as_bytes(),
-    )
+fn read_host_cache(fs_root: &Path) -> CachedUpdateSources {
+    CachedUpdateSources::load(&files().join(HOST_CACHE_REL), &host_cache_path(fs_root))
+}
+
+fn write_host_cache(fs_root: &Path, cache: &CachedUpdateSources) -> anyhow::Result<()> {
+    cache.save(&files().join(HOST_CACHE_REL), &host_cache_path(fs_root))
 }
 
 /// Drop cached findings that no longer apply: an app release this build
 /// already is (or no longer updates from), a driver Portal already has (or
 /// must not take), ChatGPT removed since.
-fn still_relevant(mut cache: HostCache, installed: Option<&HashMap<String, String>>) -> HostCache {
+fn still_relevant(mut cache: CachedUpdateSources, installed: Option<&HashMap<String, String>>) -> CachedUpdateSources {
     let policy = current_policy();
     if cache.app.as_ref().is_some_and(|app| {
         !app_update::enabled()
@@ -410,33 +384,37 @@ fn idle_status(snapshot: &UpdateSnapshot) -> UpdateStatus {
     }
 }
 
-/// Load the last check's result once per process, dropping anything the
-/// user has since installed another way.
-fn ensure_loaded(coordinator: &mut Coordinator) {
-    if coordinator.loaded {
+/// Load the current workspace's results, dropping anything already installed.
+fn ensure_loaded(coordinator: &mut Coordinator, fs_root: &Path) {
+    if coordinator.loaded_root.as_deref() == Some(fs_root) {
         return;
     }
-    coordinator.loaded = true;
-    let fs_root = &root();
+    coordinator.loaded_root = Some(fs_root.to_path_buf());
     let installed = read_installed(fs_root).ok();
     let mut updates = match (read_cache(fs_root), installed.as_ref()) {
         (Some(cache), Some(installed)) => still_pending(&cache.updates, installed),
         _ => Vec::new(),
     };
     sort_for_display(&mut updates);
-    let host = still_relevant(read_host_cache().unwrap_or_default(), installed.as_ref());
-    let snapshot = &mut coordinator.snapshot;
-    snapshot.interrupted = fs_root.join(INTERRUPTED_REL).is_file();
-    snapshot.updates = updates;
-    snapshot.app = host.app;
-    snapshot.driver = host.driver;
-    snapshot.chatgpt = host.chatgpt;
-    snapshot.status = idle_status(snapshot);
+    let host = still_relevant(
+        read_host_cache(fs_root),
+        installed.as_ref(),
+    );
+    let mut snapshot = UpdateSnapshot {
+        interrupted: fs_root.join(INTERRUPTED_REL).is_file(),
+        updates,
+        app: host.app,
+        driver: host.driver,
+        chatgpt: host.chatgpt,
+        ..UpdateSnapshot::default()
+    };
+    snapshot.status = idle_status(&snapshot);
+    coordinator.snapshot = snapshot;
 }
 
 pub fn ui_snapshot() -> Option<UpdateSnapshot> {
     let mut coordinator = coordinator().lock().ok()?;
-    ensure_loaded(&mut coordinator);
+    ensure_loaded(&mut coordinator, &root());
     Some(coordinator.snapshot.clone())
 }
 
@@ -465,8 +443,8 @@ fn log_tail(bytes: &[u8]) -> String {
 }
 
 /// Run a guest shell command as root, its output appended to the log.
-fn guest(command: &str) -> anyhow::Result<()> {
-    let output = PRootRuntime::active().execute(
+fn guest(fs_root: &Path, command: &str) -> anyhow::Result<()> {
+    let output = PRootRuntime::new(fs_root).execute(
         ProcessSpec::new(format!("{{ {command} ; }} >>{LOG_GUEST_PATH} 2>&1"))
             .with_env("DEBIAN_FRONTEND", "noninteractive")
             .with_env("APT_LISTCHANGES_FRONTEND", "none"),
@@ -483,12 +461,10 @@ fn guest(command: &str) -> anyhow::Result<()> {
 
 /// The plan `apt-get upgrade --with-new-pkgs` would carry out from the
 /// current package lists. Simulation needs no lock.
-fn simulate_upgrade_output() -> anyhow::Result<String> {
-    let output = PRootRuntime::active().execute(
-        ProcessSpec::new(
-            "nice -n 10 apt-get -s -o Debug::NoLocking=true upgrade --with-new-pkgs",
-        )
-        .with_env("DEBIAN_FRONTEND", "noninteractive"),
+fn simulate_upgrade_output(fs_root: &Path) -> anyhow::Result<String> {
+    let output = PRootRuntime::new(fs_root).execute(
+        ProcessSpec::new("nice -n 10 apt-get -s -o Debug::NoLocking=true upgrade --with-new-pkgs")
+            .with_env("DEBIAN_FRONTEND", "noninteractive"),
         None,
         None,
     );
@@ -500,16 +476,16 @@ fn simulate_upgrade_output() -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn simulate_upgrade() -> anyhow::Result<Vec<PendingUpdate>> {
-    Ok(parse_upgrade_simulation(&simulate_upgrade_output()?))
+fn simulate_upgrade(fs_root: &Path) -> anyhow::Result<Vec<PendingUpdate>> {
+    Ok(parse_upgrade_simulation(&simulate_upgrade_output(fs_root)?))
 }
 
-fn write_cache(updates: &[PendingUpdate]) -> anyhow::Result<()> {
+fn write_cache(fs_root: &Path, updates: &[PendingUpdate]) -> anyhow::Result<()> {
     let cache = UpdateCache {
         checked_at: now_secs(),
         updates: updates.to_vec(),
     };
-    write_atomic(&root().join(CACHE_REL), cache.to_json().as_bytes())
+    write_atomic(&fs_root.join(CACHE_REL), cache.to_json().as_bytes())
 }
 
 /// `apt-get update`, recovering from the usual damage: a half-downloaded
@@ -525,22 +501,34 @@ fn apt_refresh_command() -> String {
 }
 
 /// Refresh apt's lists and record what an upgrade would install.
-fn check_debian() -> anyhow::Result<usize> {
+fn check_debian(fs_root: &Path) -> anyhow::Result<()> {
     let _apt = apt_lock();
-    sync_apt_policy(&root())?;
-    guest(&format!("nice -n 10 sh -c '{}'", apt_refresh_command().replace('\'', "'\\''")))
-        .context("apt-get update failed")?;
-    let mut updates = simulate_upgrade()?;
-    write_cache(&updates)?;
+    if root() != fs_root || workspace_switch::in_progress() || update_in_progress() {
+        return Ok(());
+    }
+    sync_apt_policy(fs_root)?;
+    guest(
+        fs_root,
+        &format!(
+            "nice -n 10 sh -c '{}'",
+            apt_refresh_command().replace('\'', "'\\''")
+        ),
+    )
+    .context("apt-get update failed")?;
+    let mut updates = simulate_upgrade(fs_root)?;
+    if root() != fs_root || workspace_switch::in_progress() {
+        return Ok(());
+    }
+    write_cache(fs_root, &updates)?;
     sort_for_display(&mut updates);
-    let count = updates.len();
+    log::info!("updates: {} Debian updates available", updates.len());
     if let Ok(mut coordinator) = coordinator().lock() {
-        ensure_loaded(&mut coordinator);
-        if coordinator.snapshot.status != UpdateStatus::Running {
+        if root() == fs_root && coordinator.snapshot.status != UpdateStatus::Running {
+            ensure_loaded(&mut coordinator, fs_root);
             coordinator.snapshot.updates = updates;
         }
     }
-    Ok(count)
+    Ok(())
 }
 
 fn mtime_secs(path: &Path) -> Option<u64> {
@@ -555,11 +543,10 @@ fn mtime_secs(path: &Path) -> Option<u64> {
 
 /// Whether OpenAI's server has a different ChatGPT build than the one
 /// installed. False when ChatGPT is not installed.
-fn check_chatgpt(installed: &HashMap<String, String>) -> anyhow::Result<bool> {
+fn check_chatgpt(fs_root: &Path, installed: &HashMap<String, String>) -> anyhow::Result<bool> {
     if !installed.contains_key("chatgpt") {
         return Ok(false);
     }
-    let fs_root = &root();
     let stamp = fs::read_to_string(fs_root.join(CHATGPT_STAMP_REL))
         .ok()
         .map(|text| DebStamp::parse(&text));
@@ -577,14 +564,17 @@ fn check_chatgpt(installed: &HashMap<String, String>) -> anyhow::Result<bool> {
 /// reported and the others still count. Returns an error listing the
 /// failed sources, so the caller retries sooner.
 /// Record what a check found and show it, unless the user's update is running.
-fn apply_findings(cache: HostCache, fs_root: &Path) -> anyhow::Result<HostCache> {
+fn apply_findings(cache: CachedUpdateSources, fs_root: &Path, runs: u64) -> anyhow::Result<CachedUpdateSources> {
     let installed = read_installed(fs_root).ok();
     let cache = still_relevant(cache, installed.as_ref());
-    write_host_cache(&cache)?;
     if let Ok(mut coordinator) = coordinator().lock() {
-        ensure_loaded(&mut coordinator);
-        let snapshot = &mut coordinator.snapshot;
-        if snapshot.status != UpdateStatus::Running {
+        if root() == fs_root
+            && coordinator.runs == runs
+            && coordinator.snapshot.status != UpdateStatus::Running
+        {
+            write_host_cache(fs_root, &cache)?;
+            ensure_loaded(&mut coordinator, fs_root);
+            let snapshot = &mut coordinator.snapshot;
             snapshot.app = cache.app.clone();
             snapshot.driver = cache.driver.clone();
             snapshot.chatgpt = cache.chatgpt;
@@ -601,20 +591,37 @@ fn apply_findings(cache: HostCache, fs_root: &Path) -> anyhow::Result<HostCache>
     Ok(cache)
 }
 
-fn run_check(android_app: &AndroidApp, desktop_ready: Instant) -> anyhow::Result<()> {
+fn run_check(
+    android_app: &AndroidApp,
+    fs_root: &Path,
+    desktop_ready: Instant,
+) -> anyhow::Result<()> {
     let runs = runs_started();
+    let still_current = || {
+        root() == fs_root
+            && !workspace_switch::in_progress()
+            && runs_started() == runs
+            && !update_in_progress()
+    };
     let metered = crate::android::utils::ndk::is_active_network_metered(android_app);
     let policy = refresh_policy();
-    let fs_root = &root();
     let mut errors = Vec::new();
-    let mut cache = read_host_cache().unwrap_or_default();
+    let mut cache = read_host_cache(fs_root);
 
-    if app_update::enabled() {
+    let app_checked = if app_update::enabled() {
         match app_update::check(&policy) {
-            Ok(app) => cache.app = app,
-            Err(error) => errors.push(format!("Portal release: {error:#}")),
+            Ok(app) => {
+                cache.app = app;
+                true
+            }
+            Err(error) => {
+                errors.push(format!("Portal release: {error:#}"));
+                false
+            }
         }
-    }
+    } else {
+        false
+    };
 
     let anland = crate::android::anland::is_anland_requested();
     if anland && mesa_layer::is_provisioned() && !mesa_layer::trial_pending() {
@@ -634,7 +641,7 @@ fn run_check(android_app: &AndroidApp, desktop_ready: Instant) -> anyhow::Result
     }
 
     match read_installed(fs_root) {
-        Ok(installed) => match check_chatgpt(&installed) {
+        Ok(installed) => match check_chatgpt(fs_root, &installed) {
             Ok(needed) => cache.chatgpt = needed,
             Err(error) => errors.push(format!("ChatGPT: {error:#}")),
         },
@@ -643,8 +650,8 @@ fn run_check(android_app: &AndroidApp, desktop_ready: Instant) -> anyhow::Result
 
     // Show these now: apt's lists wait for startup to settle and can take
     // minutes. Only a complete check below counts as checked.
-    if runs_started() == runs && !update_in_progress() {
-        cache = apply_findings(cache, fs_root)?;
+    if still_current() {
+        cache = apply_findings(cache, fs_root, runs)?;
     }
     log::info!(
         "updates: sources checked {} ms after the desktop appeared",
@@ -660,11 +667,12 @@ fn run_check(android_app: &AndroidApp, desktop_ready: Instant) -> anyhow::Result
     if metered {
         log::info!("updates: skipping Debian's package lists on a metered network");
     } else if debian_due() {
-        thread::sleep(APT_REFRESH_DELAY.saturating_sub(desktop_ready.elapsed()));
-        if debian_due() && runs_started() == runs && !update_in_progress() {
-            match check_debian() {
-                Ok(count) => log::info!("updates: {count} Debian updates available"),
-                Err(error) => errors.push(format!("Debian: {error:#}")),
+        while still_current() && desktop_ready.elapsed() < APT_REFRESH_DELAY {
+            thread::park_timeout(APT_REFRESH_DELAY.saturating_sub(desktop_ready.elapsed()));
+        }
+        if debian_due() && still_current() {
+            if let Err(error) = check_debian(fs_root) {
+                errors.push(format!("Debian: {error:#}"));
             }
         }
     }
@@ -672,16 +680,18 @@ fn run_check(android_app: &AndroidApp, desktop_ready: Instant) -> anyhow::Result
     // An update the user started meanwhile may have installed what this
     // check found, and owns the downloaded APK until it is done: it records
     // what is still pending itself, and the next check starts fresh.
-    if runs_started() != runs || update_in_progress() {
-        log::info!("updates: an update ran during this check; its findings are dropped");
-        anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
+    if !still_current() {
+        log::info!("updates: the workspace or its update state changed during this check");
         return Ok(());
     }
 
     if errors.is_empty() {
         cache.checked_at = now_secs();
     }
-    let cache = apply_findings(cache, fs_root)?;
+    let cache = apply_findings(cache, fs_root, runs)?;
+    if !still_current() {
+        return Ok(());
+    }
     diagnostics::host_event(
         "updates-check",
         &format!(
@@ -695,7 +705,9 @@ fn run_check(android_app: &AndroidApp, desktop_ready: Instant) -> anyhow::Result
 
     // Fetch a new Portal release ahead of time on Wi-Fi, so installing it
     // later is instant. Partial downloads resume on the next check.
-    app_update::discard_stale(cache.app.as_ref());
+    if app_checked {
+        app_update::discard_stale(cache.app.as_ref());
+    }
     if let (Some(app), false) = (&cache.app, metered) {
         if !app_update::is_downloaded(app) {
             if let Err(error) = app_update::download(app, Duration::from_secs(60), |_, _| {}) {
@@ -708,14 +720,10 @@ fn run_check(android_app: &AndroidApp, desktop_ready: Instant) -> anyhow::Result
     Ok(())
 }
 
-fn check_is_due() -> bool {
+fn check_is_due(fs_root: &Path) -> bool {
     let now = now_secs();
-    match read_host_cache() {
-        None => true,
-        Some(cache) => {
-            cache.checked_at > now || now - cache.checked_at >= SOURCE_CHECK_INTERVAL_SECS
-        }
-    }
+    let checked_at = read_host_cache(fs_root).checked_at;
+    checked_at == 0 || checked_at > now || now - checked_at >= SOURCE_CHECK_INTERVAL_SECS
 }
 
 /// Wait before retrying a failed check: 15 minutes, doubling to 2 hours.
@@ -729,39 +737,55 @@ fn retry_delay(failures: u32) -> Duration {
 /// retrying failures with a growing delay. Results show on the
 /// Return-to-Plasma screen.
 pub fn schedule_background_check(android_app: &AndroidApp) {
-    static SCHEDULED: AtomicBool = AtomicBool::new(false);
-    if SCHEDULED.swap(true, AtomicOrdering::AcqRel) {
+    static CHECKER: OnceLock<thread::Thread> = OnceLock::new();
+    if let Some(checker) = CHECKER.get() {
+        checker.unpark();
         return;
     }
-    let android_app = android_app.clone();
-    thread::spawn(move || {
-        let desktop_ready = Instant::now();
-        app_update::discard_installed();
-        let mut failures = 0u32;
-        loop {
-            let ready = crate::core::provisioning::RuntimeArtifact::production().is_bootable(&root())
-                && !update_in_progress();
-            if ready && (failures > 0 || check_is_due()) {
-                match run_check(&android_app, desktop_ready) {
-                    Ok(()) => failures = 0,
-                    Err(error) => {
-                        log::warn!("updates: check incomplete: {error:#}");
-                        diagnostics::host_event("updates-check-failed", &format!("{error:#}"));
-                        // The network may still be coming up right after launch.
-                        if let Some(rest) = APT_REFRESH_DELAY.checked_sub(desktop_ready.elapsed()) {
-                            thread::sleep(rest);
-                            continue;
+    CHECKER.get_or_init(|| {
+        let android_app = android_app.clone();
+        thread::spawn(move || {
+            let mut desktop_ready = Instant::now();
+            let mut checked_root = root();
+            app_update::discard_installed();
+            let mut failures = 0u32;
+            loop {
+                let active = root();
+                if active != checked_root {
+                    checked_root = active;
+                    desktop_ready = Instant::now();
+                    failures = 0;
+                }
+                let ready = crate::core::provisioning::RuntimeArtifact::production()
+                    .is_bootable(&checked_root)
+                    && !workspace_switch::in_progress()
+                    && !update_in_progress();
+                if ready && (failures > 0 || check_is_due(&checked_root)) {
+                    match run_check(&android_app, &checked_root, desktop_ready) {
+                        Ok(()) => failures = 0,
+                        Err(error) => {
+                            log::warn!("updates: check incomplete: {error:#}");
+                            diagnostics::host_event("updates-check-failed", &format!("{error:#}"));
+                            // The network may still be coming up right after launch.
+                            if let Some(rest) =
+                                APT_REFRESH_DELAY.checked_sub(desktop_ready.elapsed())
+                            {
+                                thread::park_timeout(rest);
+                                continue;
+                            }
+                            failures += 1;
                         }
-                        failures += 1;
                     }
                 }
+                thread::park_timeout(if failures > 0 {
+                    retry_delay(failures)
+                } else {
+                    CHECK_TICK
+                });
             }
-            thread::sleep(if failures > 0 {
-                retry_delay(failures)
-            } else {
-                CHECK_TICK
-            });
-        }
+        })
+        .thread()
+        .clone()
     });
 }
 
@@ -769,8 +793,12 @@ pub fn schedule_background_check(android_app: &AndroidApp) {
 /// while one runs, further calls attach to it. `include_app` is false when
 /// the user would not let Portal install apps; everything else still runs.
 pub fn begin_update(include_app: bool) -> bool {
-    let fs_root = &root();
-    if !crate::core::provisioning::RuntimeArtifact::production().is_bootable(fs_root) {
+    if workspace_switch::in_progress() {
+        log::warn!("Ignoring update while a workspace switch runs");
+        return false;
+    }
+    let fs_root = root();
+    if !crate::core::provisioning::RuntimeArtifact::production().is_bootable(&fs_root) {
         log::warn!("Ignoring update: the runtime is not a completed Portal install");
         return false;
     }
@@ -787,7 +815,7 @@ pub fn begin_update(include_app: bool) -> bool {
         let Ok(mut coordinator) = coordinator().lock() else {
             return false;
         };
-        ensure_loaded(&mut coordinator);
+        ensure_loaded(&mut coordinator, &fs_root);
         match coordinator.snapshot.status {
             UpdateStatus::Running => return true,
             UpdateStatus::Available | UpdateStatus::Failed => {}
@@ -816,11 +844,14 @@ pub fn begin_update(include_app: bool) -> bool {
     };
     publish();
     thread::spawn(move || {
-        let report = std::panic::catch_unwind(|| run_update(&plan)).unwrap_or_else(|_| RunReport {
-            errors: vec!["the update worker panicked".to_owned()],
-            ..Default::default()
-        });
-        finish_update(report);
+        let report =
+            std::panic::catch_unwind(|| run_update(&plan, &fs_root)).unwrap_or_else(|_| {
+                RunReport {
+                    errors: vec!["the update worker panicked".to_owned()],
+                    ..Default::default()
+                }
+            });
+        finish_update(report, &fs_root);
     });
     true
 }
@@ -932,7 +963,7 @@ fn plan_steps(plan: &Plan) -> Vec<Arc<Step>> {
         .collect()
 }
 
-fn run_update(plan: &Plan) -> RunReport {
+fn run_update(plan: &Plan, fs_root: &Path) -> RunReport {
     let mut report = RunReport::default();
     if let Err(error) = stop_plasma() {
         report.errors.push(format!("{error:#}"));
@@ -949,13 +980,13 @@ fn run_update(plan: &Plan) -> RunReport {
     if plan.debian {
         let step = steps.next().expect("a step per planned update");
         set_step("debian", StepState::Active, String::new());
-        let result = run_debian(&step);
+        let result = run_debian(&step, fs_root);
         report.debian_done = finish_step("debian", "Debian", result.map(|()| true), &mut report);
     }
     if plan.chatgpt {
         let step = steps.next().expect("a step per planned update");
         set_step("chatgpt", StepState::Active, String::new());
-        let result = run_chatgpt(&step);
+        let result = run_chatgpt(&step, fs_root);
         report.chatgpt_done = finish_step("chatgpt", "ChatGPT", result.map(|()| true), &mut report);
     }
     if let Some(app) = &plan.app {
@@ -1009,13 +1040,13 @@ fn trim_log(fs_root: &Path) {
 }
 
 /// `ldd` complaints for the desktop's critical binaries.
-fn unresolved_libraries() -> anyhow::Result<Vec<String>> {
+fn unresolved_libraries(fs_root: &Path) -> anyhow::Result<Vec<String>> {
     let script = CRITICAL_BINARIES
         .iter()
         .map(|binary| format!("[ -x {binary} ] && ldd {binary}"))
         .collect::<Vec<_>>()
         .join("; ");
-    let output = PRootRuntime::active().execute(
+    let output = PRootRuntime::new(fs_root).execute(
         ProcessSpec::new(format!("{{ {script} ; }} 2>&1; true")),
         None,
         None,
@@ -1024,9 +1055,8 @@ fn unresolved_libraries() -> anyhow::Result<Vec<String>> {
     Ok(missing_libraries(&String::from_utf8_lossy(&output.stdout)))
 }
 
-fn run_debian(step: &Arc<Step>) -> anyhow::Result<()> {
+fn run_debian(step: &Arc<Step>, fs_root: &Path) -> anyhow::Result<()> {
     let _apt = apt_lock();
-    let fs_root = &root();
     if let Some(free) = free_bytes(fs_root) {
         anyhow::ensure!(
             free >= MIN_FREE_BYTES,
@@ -1041,14 +1071,16 @@ fn run_debian(step: &Arc<Step>) -> anyhow::Result<()> {
     let before = read_installed(fs_root)?;
     // Libraries that already do not resolve outside a session (some are
     // only bound in when Plasma starts) are not this update's doing.
-    let baseline = unresolved_libraries()?;
+    let baseline = unresolved_libraries(fs_root)?;
     write_atomic(&fs_root.join(INTERRUPTED_REL), b"1\n")?;
     step.report(2, "Refreshing package lists…".to_owned());
 
     // Finish anything an earlier run left half-done, refresh the lists and
     // repair broken dependencies without removing anything.
-    guest(&format!(
-        "echo \"== Portal system update $(date -Is) ==\"; \
+    guest(
+        fs_root,
+        &format!(
+            "echo \"== Portal system update $(date -Is) ==\"; \
          (test -x /usr/bin/awk || \
           update-alternatives --quiet --install /usr/bin/awk awk /usr/bin/gawk 10) && \
          dpkg --configure -a && \
@@ -1056,13 +1088,14 @@ fn run_debian(step: &Arc<Step>) -> anyhow::Result<()> {
          apt-get -q -y {APT_OPTIONS} --no-remove \
              -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
              install --fix-broken",
-        apt_refresh_command()
-    ))
+            apt_refresh_command()
+        ),
+    )
     .context("preparing apt failed")?;
 
     // Refuse the plan outright if it would remove anything or touch the
     // platform, before a single package changes.
-    let simulated = simulate_upgrade_output()?;
+    let simulated = simulate_upgrade_output(fs_root)?;
     let violations = plan_violations(&simulated, &policy.debian_hold);
     anyhow::ensure!(
         violations.is_empty(),
@@ -1083,7 +1116,7 @@ fn run_debian(step: &Arc<Step>) -> anyhow::Result<()> {
     let last_error = Arc::new(Mutex::new(None::<String>));
     let callback_error = last_error.clone();
     let callback_step = step.clone();
-    let output = PRootRuntime::active().execute(
+    let output = PRootRuntime::new(fs_root).execute(
         ProcessSpec::new(command)
             .with_env("DEBIAN_FRONTEND", "noninteractive")
             .with_env("APT_LISTCHANGES_FRONTEND", "none"),
@@ -1126,7 +1159,7 @@ fn run_debian(step: &Arc<Step>) -> anyhow::Result<()> {
         "kwin_wayland is missing after the update"
     );
     let _ = fs::remove_file(fs_root.join(INTERRUPTED_REL));
-    let broken: Vec<String> = unresolved_libraries()?
+    let broken: Vec<String> = unresolved_libraries(fs_root)?
         .into_iter()
         .filter(|line| !baseline.contains(line))
         .collect();
@@ -1138,11 +1171,11 @@ fn run_debian(step: &Arc<Step>) -> anyhow::Result<()> {
         );
     }
     // Downloaded packages are no use once installed.
-    let _ = guest("apt-get -q clean");
+    let _ = guest(fs_root, "apt-get -q clean");
     // Whatever apt kept back stays listed; it is not an error.
-    match simulate_upgrade() {
+    match simulate_upgrade(fs_root) {
         Ok(remaining) => {
-            if let Err(error) = write_cache(&remaining) {
+            if let Err(error) = write_cache(fs_root, &remaining) {
                 log::warn!("system-updates: could not record the remaining updates: {error:#}");
             }
             if let Ok(mut coordinator) = coordinator().lock() {
@@ -1158,24 +1191,22 @@ fn run_debian(step: &Arc<Step>) -> anyhow::Result<()> {
 }
 
 /// Install OpenAI's current ChatGPT build over the installed one.
-fn run_chatgpt(step: &Arc<Step>) -> anyhow::Result<()> {
+fn run_chatgpt(step: &Arc<Step>, fs_root: &Path) -> anyhow::Result<()> {
     let _apt = apt_lock();
-    sync_apt_policy(&root())?;
+    sync_apt_policy(fs_root)?;
     step.report(0, "Downloading ChatGPT…".to_owned());
     let command = format!(
         "exec 3>&1 >>{LOG_GUEST_PATH} 2>&1; echo \"== Portal ChatGPT refresh $(date -Is) ==\"; {}",
         crate::core::optional_apps::install_command(OptionalApp::Chatgpt)
     );
-    let output = PRootRuntime::active().execute(
+    let output = PRootRuntime::new(fs_root).execute(
         ProcessSpec::new(command)
             .with_env("DEBIAN_FRONTEND", "noninteractive")
             .with_env("APT_LISTCHANGES_FRONTEND", "none"),
         Some(Arc::new({
             let step = step.clone();
             move |line: String| match parse_apt_status(&line) {
-                Some(AptStatus::Download(_)) => {
-                    step.report(30, "Downloading ChatGPT…".to_owned())
-                }
+                Some(AptStatus::Download(_)) => step.report(30, "Downloading ChatGPT…".to_owned()),
                 Some(AptStatus::Install(percent, message)) => {
                     step.report(50 + (percent * 0.5) as u16, friendly_status(&message))
                 }
@@ -1216,7 +1247,16 @@ fn run_app(app: &AppRelease, step: &Step) -> anyhow::Result<bool> {
     }
 }
 
-fn finish_update(report: RunReport) {
+fn finish_update(report: RunReport, fs_root: &Path) {
+    let result = if report.errors.is_empty() {
+        diagnostics::host_event("system-update-complete", "");
+        UpdateResult::Installed
+    } else {
+        let detail = report.errors.join("\n");
+        log::error!("updates: update did not complete: {detail}");
+        diagnostics::host_event("system-update-failed", &detail);
+        UpdateResult::Failed(detail)
+    };
     if let Ok(mut coordinator) = coordinator().lock() {
         let snapshot = &mut coordinator.snapshot;
         if report.driver_done {
@@ -1225,7 +1265,7 @@ fn finish_update(report: RunReport) {
         if report.debian_done {
             snapshot.interrupted = false;
         } else {
-            snapshot.interrupted = root().join(INTERRUPTED_REL).is_file();
+            snapshot.interrupted = fs_root.join(INTERRUPTED_REL).is_file();
         }
         if report.chatgpt_done {
             snapshot.chatgpt = false;
@@ -1233,46 +1273,39 @@ fn finish_update(report: RunReport) {
         if report.app_done {
             snapshot.app = None;
         }
-        let cache = HostCache {
-            checked_at: read_host_cache().map_or(0, |cache| cache.checked_at),
+        let cache = CachedUpdateSources {
+            checked_at: read_host_cache(fs_root).checked_at,
             app: snapshot.app.clone(),
             driver: snapshot.driver.clone(),
             chatgpt: snapshot.chatgpt,
         };
-        if let Err(error) = write_host_cache(&cache) {
+        if let Err(error) = write_host_cache(fs_root, &cache) {
             log::warn!("updates: could not record what is still pending: {error:#}");
         }
-    }
-    let result = if report.errors.is_empty() {
-        diagnostics::host_event("system-update-complete", "");
-        update_snapshot(|snapshot| {
-            snapshot.status = UpdateStatus::Complete;
-            snapshot.progress = 100;
-            snapshot.message = "Restarting Plasma…".to_owned();
-        });
-        UpdateResult::Installed
-    } else {
-        let detail = report.errors.join("\n");
-        log::error!("updates: update did not complete: {detail}");
-        diagnostics::host_event("system-update-failed", &detail);
-        update_snapshot(|snapshot| {
-            snapshot.status = UpdateStatus::Failed;
-            snapshot.message = detail.clone();
-        });
-        UpdateResult::Failed(detail)
-    };
-    if let Ok(mut coordinator) = coordinator().lock() {
+        match &result {
+            UpdateResult::Installed => {
+                snapshot.status = UpdateStatus::Complete;
+                snapshot.progress = 100;
+                snapshot.message = "Restarting Plasma…".to_owned();
+            }
+            UpdateResult::Failed(detail) => {
+                snapshot.status = UpdateStatus::Failed;
+                snapshot.message = detail.clone();
+            }
+        }
         coordinator.result = Some(result);
     }
+    publish();
     webview_handoff::wake_event_loop();
 }
 
-/// While an update runs, no Plasma session may start: its libraries are
-/// being replaced. The update result handler starts the next session.
+/// The update owns the guest until the event loop consumes its result.
 pub fn update_in_progress() -> bool {
     coordinator()
         .lock()
-        .map(|coordinator| coordinator.snapshot.status == UpdateStatus::Running)
+        .map(|coordinator| {
+            coordinator.snapshot.status == UpdateStatus::Running || coordinator.result.is_some()
+        })
         .unwrap_or(false)
 }
 

@@ -883,6 +883,9 @@ impl PolarBearApp {
     /// before touching packages, so a fresh one starts on either outcome;
     /// the Return screen already shows what happened.
     fn handle_system_update_result(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if self.frontend.android_app.native_window().is_none() {
+            return false;
+        }
         let Some(result) = crate::android::proot::system_updates::take_update_result() else {
             return false;
         };
@@ -929,6 +932,7 @@ impl PolarBearApp {
             &format!("Portal is installed, but {name} could not start. Tap Retry Plasma."),
         );
         crate::android::workspace_switch::publish();
+        crate::android::proot::system_updates::publish_current(&self.frontend.android_app);
         true
     }
 
