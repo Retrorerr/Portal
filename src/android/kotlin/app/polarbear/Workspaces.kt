@@ -58,6 +58,8 @@ object Workspaces {
         val error: String? = null,
         /** While the running workspace is being set up: where giving up goes back to. */
         val setupReturn: Workspace? = null,
+        /** Where Portal goes if the open one is deleted; null when it is the only one. */
+        val afterDelete: Workspace? = null,
     ) {
         fun name(id: String?) = workspaces.firstOrNull { it.id == id }?.name
     }
@@ -102,6 +104,9 @@ object Workspaces {
             switching = root.optString("switching").takeIf { !root.isNull("switching") && it.isNotEmpty() },
             error = root.optString("error").takeIf { !root.isNull("error") && it.isNotEmpty() },
             setupReturn = root.optJSONObject("setupReturn")?.let {
+                Workspace(it.getString("id"), it.getString("name"), 0)
+            },
+            afterDelete = root.optJSONObject("afterDelete")?.let {
                 Workspace(it.getString("id"), it.getString("name"), 0)
             },
         )
@@ -212,9 +217,10 @@ object Workspaces {
 
     /**
      * Delete a workspace with its files and preview, Main included. [done]
-     * gets null when deleted, else why not, on the main thread. The open one
-     * is stopped and emptied instead and Portal restarts into its setup, so
-     * [done] hears from it only if it was refused.
+     * gets null when deleted, else why not, on the main thread. Deleting the
+     * open one switches to another in place, as a switch does ([opening]
+     * names it); as the last one, Portal restarts into its setup and [done]
+     * hears only a refusal.
      */
     fun delete(context: Context, id: String, done: (String?) -> Unit) {
         val dir = previewDir
@@ -228,8 +234,17 @@ object Workspaces {
             }
             if (refusal == null) dir?.let { File(it, "$id.jpg").delete() }
             main.post {
+                if (open && refusal == null) refresh()
+                val next = state.value.switching
                 when {
                     refusal != null -> done(refusal)
+                    open && next != null -> {
+                        // The veil shows the one arriving and lifts onto it.
+                        returnAfterSwitch.set(true)
+                        opening.value = next
+                        previews.remove(id)
+                        done(null)
+                    }
                     open -> activity?.let(::relaunch) ?: Process.killProcess(Process.myPid())
                     else -> {
                         // The list without it lands in this same frame.

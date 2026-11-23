@@ -2,9 +2,9 @@
 //! the veil's Workspaces card relies on.
 
 use localdesktop::core::workspaces::{
-    abandon_setup, activate, active_dir, delete, delete_files, edit, normalise_name, registry_path,
-    reset_running, workspace_dir, workspace_rootfs, Registry, WorkspaceError, MAIN_ID,
-    MAX_NAME_CHARS,
+    abandon_setup, activate, active_dir, delete, delete_files, delete_running, edit,
+    normalise_name, registry_path, workspace_dir, workspace_rootfs, AfterDelete, Registry,
+    WorkspaceError, MAIN_ID, MAX_NAME_CHARS,
 };
 use std::{fs, path::Path};
 
@@ -414,7 +414,7 @@ fn giving_up_saves_the_registry_then_deletes_only_that_workspace() {
     assert!(saved.get(&uni.id).is_none());
 
     // A finished workspace that isn't running can be deleted; the running
-    // one can't be removed, only emptied (reset_running).
+    // one can't be removed this way (delete_running).
     let (_, games) = edit(temp.path(), |registry| {
         registry.create(temp.path(), "Games", 3)
     })
@@ -610,85 +610,91 @@ fn an_interrupted_main_delete_leaves_no_install_and_is_finished_next_time() {
 }
 
 #[test]
-fn deleting_the_open_workspace_empties_it_for_its_installer() {
+fn deleting_the_open_workspace_switches_to_the_last_one_used() {
     let temp = tempfile::tempdir().unwrap();
     main_install(temp.path());
     shared_files(temp.path());
-    let (_, games) = edit(temp.path(), |registry| {
+    let (_, (games, uni)) = edit(temp.path(), |registry| {
         let games = registry.add("Games", 1)?;
+        let uni = registry.add("Uni", 1)?;
+        registry.set_active(&uni.id, 3)?;
         registry.set_active(MAIN_ID, 5)?;
         registry.set_active(&games.id, 10)?;
         registry.set_open_at_launch(Some(&games.id))?;
-        Ok(games)
+        Ok((games, uni))
     })
     .unwrap();
     mark_ready(temp.path(), &games.id);
+    mark_ready(temp.path(), &uni.id);
+    let listing: serde_json::Value = serde_json::from_str(
+        &Registry::read(temp.path())
+            .unwrap()
+            .listing_json(temp.path(), &ready),
+    )
+    .unwrap();
+    assert_eq!(listing["afterDelete"]["id"], MAIN_ID);
 
-    // Another workspace opened meanwhile: nothing is emptied.
-    assert_eq!(
-        reset_running(temp.path(), MAIN_ID, 20)
-            .unwrap_err()
-            .downcast_ref::<WorkspaceError>(),
-        Some(&WorkspaceError::NotOpen)
-    );
-    assert!(workspace_rootfs(temp.path(), MAIN_ID).is_dir());
+    // Another workspace opened meanwhile, or the plan changed: nothing goes.
+    for (id, expected) in [
+        (MAIN_ID, Some(uni.id.as_str())),
+        (games.id.as_str(), Some("uni")),
+    ] {
+        assert_eq!(
+            delete_running(temp.path(), id, expected, 20, &ready)
+                .unwrap_err()
+                .downcast_ref::<WorkspaceError>(),
+            Some(&WorkspaceError::NotOpen)
+        );
+    }
+    assert!(workspace_rootfs(temp.path(), &games.id).is_dir());
 
-    assert_eq!(
-        reset_running(temp.path(), &games.id, 20).unwrap().id,
-        games.id
-    );
-    let dir = workspace_dir(temp.path(), &games.id);
-    assert!(dir.is_dir());
-    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    let after = delete_running(temp.path(), &games.id, Some(MAIN_ID), 20, &ready).unwrap();
+    let AfterDelete::Switched(main) = after else {
+        panic!("expected a switch, got {after:?}");
+    };
+    assert_eq!(main.id, MAIN_ID);
     let saved = Registry::read(temp.path()).unwrap();
-    // Still listed, the next launch opens its installer, and launch no
-    // longer prefers it.
-    assert_eq!(saved.active, games.id);
-    assert_eq!(saved.open_next.as_deref(), Some(games.id.as_str()));
+    assert_eq!(saved.active, MAIN_ID);
+    assert!(saved.get(&games.id).is_none());
+    assert_eq!(saved.open_next, None);
     assert_eq!(saved.open_at_launch, None);
-    let listing: serde_json::Value =
-        serde_json::from_str(&saved.listing_json(temp.path(), &ready)).unwrap();
-    assert_eq!(listing["workspaces"][1]["needsSetup"], true);
-    // Its installer can go back to Main, and giving it up removes it.
-    assert_eq!(listing["setupReturn"]["id"], MAIN_ID);
-    assert_eq!(abandon_setup(temp.path(), &ready).unwrap().id, MAIN_ID);
-    assert!(!dir.exists());
-    assert!(Registry::read(temp.path())
-        .unwrap()
-        .get(&games.id)
-        .is_none());
+    // Its files are the caller's to delete once the switch is under way.
+    delete_files(temp.path(), &games.id).unwrap();
+    assert!(!workspace_dir(temp.path(), &games.id).exists());
+    assert!(workspace_rootfs(temp.path(), &uni.id).is_dir());
     assert_shared_kept(temp.path());
 }
 
 #[test]
-fn deleting_main_while_it_is_open_goes_to_its_installer() {
+fn deleting_the_open_workspace_with_only_unfinished_ones_left_restarts_into_one() {
     let temp = tempfile::tempdir().unwrap();
     main_install(temp.path());
     shared_files(temp.path());
-    let (_, games) = edit(temp.path(), |registry| {
-        let games = registry.add("Games", 1)?;
-        registry.set_active(&games.id, 5)?;
-        registry.set_active(MAIN_ID, 10)?;
-        Ok(games)
+    let (_, uni) = edit(temp.path(), |registry| {
+        let uni = registry.create(temp.path(), "Uni", 1)?;
+        registry.set_active(&uni.id, 2)?;
+        registry.set_active(MAIN_ID, 3)?;
+        Ok(uni)
     })
     .unwrap();
-    mark_ready(temp.path(), &games.id);
 
-    reset_running(temp.path(), MAIN_ID, 20).unwrap();
+    let after = delete_running(temp.path(), MAIN_ID, Some(&uni.id), 4, &ready).unwrap();
+    assert_eq!(
+        after,
+        AfterDelete::Restart(
+            Registry::read(temp.path())
+                .unwrap()
+                .get(&uni.id)
+                .unwrap()
+                .clone()
+        )
+    );
     assert_main_install_gone(temp.path());
     assert_shared_kept(temp.path());
     let saved = Registry::read(temp.path()).unwrap();
-    assert_eq!(saved.open_next.as_deref(), Some(MAIN_ID));
-    assert_eq!(
-        saved.setup_return(temp.path(), &ready).unwrap().id,
-        games.id
-    );
-    // Giving up Main's fresh install goes to Games and unlists Main.
-    assert_eq!(abandon_setup(temp.path(), &ready).unwrap().id, games.id);
-    let saved = Registry::read(temp.path()).unwrap();
     assert!(saved.get(MAIN_ID).is_none());
-    assert_eq!(saved.active, games.id);
-    assert_shared_kept(temp.path());
+    assert_eq!(saved.active, uni.id);
+    assert_eq!(saved.open_next.as_deref(), Some(uni.id.as_str()));
 }
 
 #[test]
@@ -696,17 +702,41 @@ fn deleting_the_only_workspace_starts_over_with_nowhere_to_go_back() {
     let temp = tempfile::tempdir().unwrap();
     main_install(temp.path());
     shared_files(temp.path());
-    reset_running(temp.path(), MAIN_ID, 5).unwrap();
+    let (_, ()) = edit(temp.path(), |registry| {
+        registry.set_open_at_launch(Some(MAIN_ID))
+    })
+    .unwrap();
+    let after = delete_running(temp.path(), MAIN_ID, None, 5, &ready).unwrap();
+    let AfterDelete::Restart(main) = after else {
+        panic!("expected a restart, got {after:?}");
+    };
+    assert_eq!(main.id, MAIN_ID);
     assert_main_install_gone(temp.path());
+    assert_shared_kept(temp.path());
     let saved = Registry::read(temp.path()).unwrap();
+    // Still listed for its fresh install, which the next launch opens.
     assert_eq!(saved.workspaces.len(), 1);
+    assert_eq!(saved.open_next.as_deref(), Some(MAIN_ID));
+    assert_eq!(saved.open_at_launch, None);
     assert_eq!(saved.setup_return(temp.path(), &ready), None);
-    assert_eq!(
-        saved
-            .listing_json(temp.path(), &ready)
-            .contains("\"needsSetup\":true"),
-        true
-    );
+    assert_eq!(saved.after_deleting_active(temp.path(), &ready), None);
+    assert!(saved
+        .listing_json(temp.path(), &ready)
+        .contains("\"needsSetup\":true"));
     // A fresh install of Main alone never offers to go back to itself.
     assert_eq!(Registry::implicit().setup_return(temp.path(), &ready), None);
+
+    // A workspace emptied this way keeps its folder for the installer.
+    let (_, games) = edit(temp.path(), |registry| {
+        let games = registry.create(temp.path(), "Games", 6)?;
+        registry.set_active(&games.id, 7)?;
+        registry.remove(MAIN_ID)?;
+        Ok(games)
+    })
+    .unwrap();
+    mark_ready(temp.path(), &games.id);
+    delete_running(temp.path(), &games.id, None, 8, &ready).unwrap();
+    let dir = workspace_dir(temp.path(), &games.id);
+    assert!(dir.is_dir());
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
 }

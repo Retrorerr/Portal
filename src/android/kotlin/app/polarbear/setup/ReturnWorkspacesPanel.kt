@@ -22,10 +22,13 @@ package app.polarbear.setup
 import android.text.format.DateUtils
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -83,6 +86,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -102,6 +107,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -113,7 +119,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
@@ -138,6 +146,7 @@ import app.polarbear.setup.components.PortalEmphasizedAccelerate
 import app.polarbear.setup.components.PortalEmphasizedDecelerate
 import app.polarbear.setup.components.findDesktopSurface
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 /** Long enough to see the chosen card answer the tap before the card folds. */
 private const val SWITCH_FOLD_DELAY_MS = 160L
@@ -162,6 +171,8 @@ internal val WorkspacesCapsuleNameMaxWidth = 132.dp
 private val TileCorner = 14.dp
 /** A deleted tile folding away, and the others closing up behind it. */
 private const val TILE_FOLD_MS = 420
+/** After the card's own opening morph, so composing the delete strip never shares its frames. */
+private const val STRIP_COMPOSE_DELAY_MS = 700L
 
 /**
  * The Workspaces pill in the veil's row beside Apps and Files, opening into
@@ -336,6 +347,8 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
     /** Confirmed; its files are going. */
     var deleting by remember { mutableStateOf<String?>(null) }
     var deleteRefusal by remember { mutableStateOf<String?>(null) }
+    /** The open one was deleted and Portal is switching away: the card folds. */
+    var leaving by remember { mutableStateOf(false) }
     val restarting = chosen != null || created != null || deleting != null
     // Android's Back leaves the new-workspace page for the list, like the page's
     // own Back; once Portal is restarting into the new workspace it waits.
@@ -353,6 +366,11 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
         }
     }
     LaunchedEffect(selected) { deleteRefusal = null }
+    LaunchedEffect(leaving) {
+        if (!leaving) return@LaunchedEffect
+        delay(SWITCH_FOLD_DELAY_MS)
+        onClose()
+    }
     DisposableEffect(veil) {
         onDispose {
             veil.gestureExclusions.remove(exclusionKey)
@@ -443,6 +461,7 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
                             Workspaces.delete(context, id) { refusal ->
                                 if (refusal == null) {
                                     selected = null
+                                    if (Workspaces.opening.value != null) leaving = true
                                 } else {
                                     deleting = null
                                     deleteRefusal = refusal
@@ -678,20 +697,33 @@ private fun WorkspaceTile(
 ) {
     val tap = remember { MutableInteractionSource() }
     val pressed by tap.collectIsPressedAsState()
+    // A held tile sinks over the long-press time to exactly where a selected
+    // one rests, so selection lands without a jump; a tap lets go early.
+    val holdMillis = LocalViewConfiguration.current.longPressTimeoutMillis.toInt()
     val scale by animateFloatAsState(
         targetValue = when {
             chosen -> 1.03f
-            selected -> 0.95f
-            pressed && (!running || selecting) -> 0.97f
+            selected || pressed -> 0.95f
             else -> 1f
         },
-        animationSpec = tween(if (chosen || selected) 260 else 110, easing = PortalEmphasized),
+        animationSpec = when {
+            chosen -> tween(260, easing = PortalEmphasized)
+            pressed && !selected -> tween(holdMillis, easing = LinearOutSlowInEasing)
+            else -> tween(220, easing = PortalEmphasized)
+        },
         label = "workspace tile press",
     )
-    val ring by animateColorAsState(
+    // Ring, badge and emphasis are read only while drawing, so their
+    // animations redraw the tile without composing it again each frame.
+    val ring = animateColorAsState(
         if (running || chosen || selected) palette.accent else palette.surfaceBorder,
         tween(220),
         label = "workspace tile ring",
+    )
+    val ringWidth = animateFloatAsState(
+        if (running || chosen || selected) 2f else 1f,
+        tween(220, easing = PortalEmphasized),
+        label = "workspace tile ring width",
     )
     val emphasis by animateFloatAsState(
         if (selecting && !selected) 0.5f else 1f,
@@ -699,7 +731,7 @@ private fun WorkspaceTile(
         label = "workspace tile emphasis",
     )
     // The badge's check draws in as the tile is held and out as it is let go.
-    val held by animateFloatAsState(
+    val held = animateFloatAsState(
         if (selected) 1f else 0f,
         if (selected) tween(320, easing = PortalEmphasizedDecelerate) else tween(200, easing = PortalEmphasizedAccelerate),
         label = "workspace tile held",
@@ -732,7 +764,18 @@ private fun WorkspaceTile(
                 }
                 .clip(shape)
                 .background(Brush.verticalGradient(listOf(palette.surfaceTop, palette.surfaceBottom)))
-                .border(if (running || chosen || selected) 2.dp else 1.dp, ring, shape)
+                .drawWithContent {
+                    drawContent()
+                    val stroke = ringWidth.value.dp.toPx()
+                    val corner = TileCorner.toPx() - stroke / 2
+                    drawRoundRect(
+                        color = ring.value,
+                        topLeft = Offset(stroke / 2, stroke / 2),
+                        size = Size(size.width - stroke, size.height - stroke),
+                        cornerRadius = CornerRadius(corner, corner),
+                        style = Stroke(stroke),
+                    )
+                }
                 .combinedClickable(
                     interactionSource = tap,
                     indication = null,
@@ -774,7 +817,7 @@ private fun WorkspaceTile(
                     Text("Open", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
                 }
             }
-            if (held > 0.001f) HeldBadge(held, palette, Modifier.align(Alignment.TopEnd).padding(8.dp))
+            HeldBadge({ held.value }, palette, Modifier.align(Alignment.TopEnd).padding(8.dp))
         }
         Spacer(Modifier.height(8.dp))
         Column(Modifier.height(TileFooterHeight)) {
@@ -1013,17 +1056,20 @@ private fun rememberTileEntries(workspaces: List<Workspaces.Workspace>): Pair<Li
 
 /** A round check on a held tile, drawn in by [progress]. */
 @Composable
-private fun HeldBadge(progress: Float, palette: PortalPalette, modifier: Modifier) {
+private fun HeldBadge(progress: () -> Float, palette: PortalPalette, modifier: Modifier) {
     Canvas(
         modifier
             .size(22.dp)
             .graphicsLayer {
-                val scale = 0.6f + 0.4f * progress
+                val shown = progress()
+                val scale = 0.6f + 0.4f * shown
                 scaleX = scale
                 scaleY = scale
-                alpha = progress.coerceIn(0f, 1f)
+                alpha = shown.coerceIn(0f, 1f)
             },
     ) {
+        val progress = progress()
+        if (progress <= 0.001f) return@Canvas
         drawCircle(palette.accent)
         drawCircle(PortalColors.Charcoal.copy(alpha = 0.35f), style = Stroke(1.dp.toPx()))
         // The tick draws along its length as the badge arrives.
@@ -1052,22 +1098,58 @@ private fun DeleteStrip(state: Workspaces.State, selection: WorkspaceSelection, 
     val target = selection.selected?.let { id -> state.workspaces.firstOrNull { it.id == id } }
     var shown by remember { mutableStateOf<Workspaces.Workspace?>(null) }
     if (target != null) shown = target
-    AnimatedVisibility(
-        visible = target != null,
-        // Unfolds from its top edge, clipped, so it never draws over the tiles above.
-        enter = expandVertically(tween(360, easing = PortalEmphasized), expandFrom = Alignment.Top) +
-            fadeIn(tween(260, delayMillis = 80, easing = PortalEmphasizedDecelerate)),
-        exit = shrinkVertically(tween(300, easing = PortalEmphasized), shrinkTowards = Alignment.Top) +
-            fadeOut(tween(140, easing = PortalEmphasizedAccelerate)),
+    // Composed once the card has opened and kept composed, so holding a tile
+    // only animates the strip in: composing it at that moment cost a visible
+    // hitch.
+    var ready by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        delay(STRIP_COMPOSE_DELAY_MS)
+        ready = true
+    }
+    val reveal = animateFloatAsState(
+        if (target != null) 1f else 0f,
+        tween(if (target != null) 360 else 300, easing = PortalEmphasized),
+        label = "delete strip reveal",
+    )
+    val fade = animateFloatAsState(
+        if (target != null) 1f else 0f,
+        if (target != null) {
+            tween(260, delayMillis = 80, easing = PortalEmphasizedDecelerate)
+        } else {
+            tween(140, easing = PortalEmphasizedAccelerate)
+        },
+        label = "delete strip fade",
+    )
+    if (!ready && target == null) return
+    // Hidden, the name and detail change without animating, so the strip
+    // never arrives mid-transition.
+    val hidden = { fade.value < 0.05f }
+    // Unfolds from its top edge, clipped, so it never draws over the tiles
+    // above; the height is read while laying out, never composing.
+    Box(
+        Modifier
+            .clipToBounds()
+            .layout { measurable, constraints ->
+                val placeable = measurable.measure(constraints)
+                layout(placeable.width, (placeable.height * reveal.value).roundToInt()) {
+                    placeable.placeRelative(0, 0)
+                }
+            }
+            .graphicsLayer { alpha = fade.value }
+            .then(if (target == null) Modifier.clearAndSetSemantics {} else Modifier),
     ) {
-        val workspace = shown ?: return@AnimatedVisibility
+        val workspace = shown ?: state.workspaces.firstOrNull() ?: return@Box
         val open = workspace.id == state.active
         val deleting = selection.deleting == workspace.id
+        val next = state.afterDelete?.name
         val detail = when {
             selection.refusal != null -> selection.refusal
-            deleting && open -> "Closing it, then Portal starts its setup again…"
+            deleting && open && next != null -> "Switching to “$next”…"
+            deleting && open -> "Closing it, then Portal starts setup again…"
             deleting -> "Removing its apps, files and settings…"
-            open -> "It’s open now. Its apps, files and settings are removed for good, and Portal starts its setup again."
+            open && next != null ->
+                "It’s open now: Portal switches to “$next”. Its apps, files and settings are removed for good."
+            open -> "It’s your only workspace. Its apps, files and settings are removed for good, and Portal starts setup again."
             else -> "Its apps, files and settings are removed for good."
         }
         val shape = RoundedCornerShape(TileCorner)
@@ -1078,10 +1160,14 @@ private fun DeleteStrip(state: Workspaces.State, selection: WorkspaceSelection, 
                     AnimatedContent(
                         targetState = workspace.name,
                         transitionSpec = {
-                            (fadeIn(tween(260, delayMillis = 60, easing = PortalEmphasizedDecelerate)) +
-                                slideInVertically(tween(360, easing = PortalEmphasized)) { it / 2 })
-                                .togetherWith(fadeOut(tween(120, easing = PortalEmphasizedAccelerate)))
-                                .using(SizeTransform(clip = false))
+                            if (hidden()) {
+                                EnterTransition.None togetherWith ExitTransition.None
+                            } else {
+                                (fadeIn(tween(260, delayMillis = 60, easing = PortalEmphasizedDecelerate)) +
+                                    slideInVertically(tween(360, easing = PortalEmphasized)) { it / 2 })
+                                    .togetherWith(fadeOut(tween(120, easing = PortalEmphasizedAccelerate)))
+                                    .using(SizeTransform(clip = false))
+                            }
                         },
                         label = "delete strip name",
                     ) { name ->
@@ -1097,9 +1183,13 @@ private fun DeleteStrip(state: Workspaces.State, selection: WorkspaceSelection, 
                     AnimatedContent(
                         targetState = detail,
                         transitionSpec = {
-                            fadeIn(tween(220, delayMillis = 60, easing = PortalEmphasizedDecelerate))
-                                .togetherWith(fadeOut(tween(120, easing = PortalEmphasizedAccelerate)))
-                                .using(SizeTransform(clip = false))
+                            if (hidden()) {
+                                EnterTransition.None togetherWith ExitTransition.None
+                            } else {
+                                fadeIn(tween(220, delayMillis = 60, easing = PortalEmphasizedDecelerate))
+                                    .togetherWith(fadeOut(tween(120, easing = PortalEmphasizedAccelerate)))
+                                    .using(SizeTransform(clip = false))
+                            }
                         },
                         label = "delete strip detail",
                     ) { text ->

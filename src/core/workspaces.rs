@@ -26,7 +26,8 @@
 //!
 //! Any workspace can be deleted, Main included: Main's install files leave
 //! the app files directory and Portal's own stay. Deleting the open one
-//! empties it and restarts into its installer, which can then give it up.
+//! switches to another, or, when it was the last, empties it and restarts
+//! into its installer.
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -518,11 +519,30 @@ impl Registry {
             .max_by_key(|workspace| workspace.last_used_unix)
     }
 
-    /// Empties the running workspace for a fresh install, as deleting it
-    /// from inside does: it stays listed, needing setup, and the next launch
-    /// opens its installer, whose "Back to …" gives it up for good. Launch
-    /// stops preferring it, so Portal doesn't start into an installer every
-    /// time. Deleting its files is the caller's job, after this is saved.
+    /// Where Portal goes if the running workspace is deleted: the most
+    /// recently used other one that is set up, else the most recently used
+    /// other one (through its installer). `None` when it is the only one.
+    pub fn after_deleting_active(
+        &self,
+        app_files: &Path,
+        system_ready: SystemReady,
+    ) -> Option<&Workspace> {
+        let others = || {
+            self.workspaces
+                .iter()
+                .filter(|workspace| workspace.id != self.active)
+        };
+        others()
+            .filter(|workspace| is_set_up(app_files, &workspace.id, system_ready))
+            .max_by_key(|workspace| workspace.last_used_unix)
+            .or_else(|| others().max_by_key(|workspace| workspace.last_used_unix))
+    }
+
+    /// Empties the running workspace for a fresh install, as deleting the
+    /// last one does: it stays listed, needing setup, and the next launch
+    /// opens its installer. Launch stops preferring it, so Portal doesn't
+    /// start into an installer every time. Deleting its files is the
+    /// caller's job, after this is saved.
     pub fn reset_active(&mut self, id: &str, now_unix: u64) -> Result<Workspace, WorkspaceError> {
         if self.active != id {
             return Err(WorkspaceError::NotOpen);
@@ -564,6 +584,9 @@ impl Registry {
             "active": self.active,
             "openAtLaunch": self.open_at_launch,
             "setupReturn": self.setup_return(app_files, system_ready).map(|workspace| {
+                serde_json::json!({ "id": workspace.id, "name": workspace.name })
+            }),
+            "afterDelete": self.after_deleting_active(app_files, system_ready).map(|workspace| {
                 serde_json::json!({ "id": workspace.id, "name": workspace.name })
             }),
             "workspaces": workspaces
@@ -812,16 +835,68 @@ pub fn delete(app_files: &Path, id: &str) -> anyhow::Result<Workspace> {
     Ok(removed)
 }
 
-/// Deletes the running workspace's files and leaves it listed for a fresh
-/// install ([`Registry::reset_active`]); Portal must restart into it. The
-/// guest must already be stopped. `id` is the workspace the user chose, so
-/// a switch that raced the delete never empties another one.
-pub fn reset_running(app_files: &Path, id: &str, now_unix: u64) -> anyhow::Result<Workspace> {
-    let (_, workspace) = edit(app_files, |registry| registry.reset_active(id, now_unix))?;
-    delete_files(app_files, &workspace.id)?;
-    // The next launch opens it only if its folder is there.
-    fs::create_dir_all(workspace_dir(app_files, &workspace.id))?;
-    Ok(workspace)
+/// Where Portal goes once the running workspace is deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterDelete {
+    /// Another workspace that is set up, opened in place like any switch.
+    /// The caller points this process at it ([`set_active_dir`]) and then
+    /// deletes the old one's files, once the switch is under way.
+    Switched(Workspace),
+    /// Opened by the next launch, which Portal must restart into: another
+    /// workspace whose setup never finished, or, when none is left, the
+    /// deleted one again, emptied for a fresh install. Its files are gone.
+    Restart(Workspace),
+}
+
+/// Deletes the running workspace. With others left, it is unregistered and
+/// Portal moves to [`Registry::after_deleting_active`]; as the last one, it
+/// is emptied for a fresh install ([`Registry::reset_active`]). The guest
+/// must already be stopped. `id` is the workspace the user chose and
+/// `expected` where the caller planned to go, so a registry that changed
+/// since never deletes the wrong one or lands somewhere unplanned.
+pub fn delete_running(
+    app_files: &Path,
+    id: &str,
+    expected: Option<&str>,
+    now_unix: u64,
+    system_ready: SystemReady,
+) -> anyhow::Result<AfterDelete> {
+    let (_, after) = edit(app_files, |registry| {
+        if registry.active != id {
+            return Err(WorkspaceError::NotOpen);
+        }
+        let next = registry
+            .after_deleting_active(app_files, system_ready)
+            .cloned();
+        if next.as_ref().map(|next| next.id.as_str()) != expected {
+            return Err(WorkspaceError::NotOpen);
+        }
+        Ok(match next {
+            Some(next) if is_set_up(app_files, &next.id, system_ready) => {
+                registry.switch_target(app_files, &next.id, system_ready)?;
+                registry.set_active(&next.id, now_unix)?;
+                registry.remove(id)?;
+                AfterDelete::Switched(next)
+            }
+            Some(next) => {
+                registry.active = next.id.clone();
+                registry.open_next = Some(next.id.clone());
+                registry.remove(id)?;
+                AfterDelete::Restart(next)
+            }
+            None => AfterDelete::Restart(registry.reset_active(id, now_unix)?),
+        })
+    })?;
+    match &after {
+        AfterDelete::Switched(_) => {}
+        AfterDelete::Restart(next) if next.id == id => {
+            delete_files(app_files, id)?;
+            // The next launch opens it only if its folder is there.
+            fs::create_dir_all(workspace_dir(app_files, id))?;
+        }
+        AfterDelete::Restart(_) => delete_files(app_files, id)?,
+    }
+    Ok(after)
 }
 
 /// Deletes one workspace's files: its folder, or for Main (the app files
