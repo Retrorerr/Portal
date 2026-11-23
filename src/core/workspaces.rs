@@ -23,6 +23,10 @@
 //! up there. Until that install has committed the workspace needs setup:
 //! opening it resumes the installer, and the installer can give it up and
 //! go back to a workspace that works.
+//!
+//! Any workspace can be deleted, Main included: Main's install files leave
+//! the app files directory and Portal's own stay. Deleting the open one
+//! empties it and restarts into its installer, which can then give it up.
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -86,8 +90,8 @@ pub enum WorkspaceError {
     NeedsSetup,
     /// Only a workspace still being set up can be given up from its installer.
     AlreadySetUp,
-    /// Main is the app files directory itself; its files are never deleted.
-    MainIsPermanent,
+    /// Another workspace opened while the open one was being deleted.
+    NotOpen,
     FolderUnavailable,
 }
 
@@ -109,7 +113,7 @@ impl std::fmt::Display for WorkspaceError {
             Self::FilesMissing => write!(f, "That workspace's files are missing."),
             Self::NeedsSetup => write!(f, "That workspace isn't set up yet."),
             Self::AlreadySetUp => write!(f, "That workspace is already set up."),
-            Self::MainIsPermanent => write!(f, "Main can't be deleted."),
+            Self::NotOpen => write!(f, "That workspace isn't open any more."),
             Self::FolderUnavailable => {
                 write!(f, "Portal couldn't make the workspace's folder.")
             }
@@ -141,11 +145,48 @@ pub fn registry_path(app_files: &Path) -> PathBuf {
 /// [`system_ready`]; tests pass their own.
 pub type SystemReady<'a> = &'a dyn Fn(&Path) -> bool;
 
-/// Whether a workspace's Debian install has committed. Main always counts:
-/// it is the install Portal had before workspaces (legacy markers included),
-/// and its own launch path repairs it rather than offering a fresh install.
+/// Whether a workspace's Debian install has committed. Main counts while its
+/// rootfs is there at all: it is the install Portal had before workspaces
+/// (legacy markers included), and its own launch path repairs it rather than
+/// offering a fresh install. Once deleted, it needs setup like any other.
 pub fn is_set_up(app_files: &Path, id: &str, system_ready: SystemReady) -> bool {
-    id == MAIN_ID || system_ready(&workspace_rootfs(app_files, id))
+    let rootfs = workspace_rootfs(app_files, id);
+    if id == MAIN_ID {
+        fs::symlink_metadata(rootfs).is_ok()
+    } else {
+        system_ready(&rootfs)
+    }
+}
+
+/// Files in the app files directory that belong to Main's Debian install
+/// rather than to Portal itself: the rootfs with its A/B promotion and
+/// quarantine siblings (`runtime-B.*`), the runtime download, tawcroot's
+/// hardlink store and tmpfs beside the rootfs, the install plan and the
+/// deferred optional apps. An entry matches by its name or `<name>.` prefix.
+/// Everything else there (settings, the APK updater, the Mesa layer,
+/// diagnostics, `workspaces/`) is shared and is never deleted with Main.
+const MAIN_INSTALL_ENTRIES: &[&str] = &[
+    ROOTFS_DIR,
+    // With its resumable `.part` and `.part.offset`.
+    "portal-runtime.tar.xz",
+    "tawcroot",
+    ".tawcroot-tmpfs",
+    crate::core::install_plan::INSTALL_PLAN_FILE,
+    DEFERRED_OPTIONAL_APPS_FILE,
+];
+/// Optional apps the installer left for the desktop's first start.
+pub const DEFERRED_OPTIONAL_APPS_FILE: &str = "optional-apps-deferred";
+/// Where Main's files go while they are deleted, so an interrupted delete
+/// leaves nothing that reads as an install.
+const MAIN_TRASH_DIR: &str = ".deleting-main";
+
+fn is_main_install_entry(name: &str) -> bool {
+    MAIN_INSTALL_ENTRIES.iter().any(|entry| {
+        name == *entry
+            || name
+                .strip_prefix(entry)
+                .is_some_and(|rest| rest.starts_with('.'))
+    })
 }
 
 /// The production test of a committed install: the runtime's completion
@@ -362,8 +403,9 @@ impl Registry {
         Ok(())
     }
 
-    /// Unregisters a workspace that is not running. Deleting its files is the
-    /// caller's job, after the registry without it has been saved.
+    /// Unregisters a workspace that is not running, Main included. Deleting
+    /// its files is the caller's job, after the registry without it has been
+    /// saved.
     pub fn remove(&mut self, id: &str) -> Result<Workspace, WorkspaceError> {
         let index = self
             .workspaces
@@ -461,8 +503,9 @@ impl Registry {
     }
 
     /// Where the running workspace's installer goes back to if its setup is
-    /// given up: the most recently used workspace that is set up, else Main.
-    /// `None` when the running workspace is set up.
+    /// given up: the most recently used workspace that is set up. `None`
+    /// when the running workspace is set up, or when no other one is (its
+    /// installer is then the only way on).
     pub fn setup_return(&self, app_files: &Path, system_ready: SystemReady) -> Option<&Workspace> {
         if is_set_up(app_files, &self.active, system_ready) {
             return None;
@@ -473,7 +516,24 @@ impl Registry {
                 workspace.id != self.active && is_set_up(app_files, &workspace.id, system_ready)
             })
             .max_by_key(|workspace| workspace.last_used_unix)
-            .or_else(|| self.get(MAIN_ID))
+    }
+
+    /// Empties the running workspace for a fresh install, as deleting it
+    /// from inside does: it stays listed, needing setup, and the next launch
+    /// opens its installer, whose "Back to …" gives it up for good. Launch
+    /// stops preferring it, so Portal doesn't start into an installer every
+    /// time. Deleting its files is the caller's job, after this is saved.
+    pub fn reset_active(&mut self, id: &str, now_unix: u64) -> Result<Workspace, WorkspaceError> {
+        if self.active != id {
+            return Err(WorkspaceError::NotOpen);
+        }
+        if self.open_at_launch.as_deref() == Some(id) {
+            self.open_at_launch = None;
+        }
+        self.open_next = Some(id.to_owned());
+        let workspace = self.get_mut(id)?;
+        workspace.last_used_unix = now_unix;
+        Ok(workspace.clone())
     }
 
     /// Gives up the running workspace's unfinished setup: Portal goes back
@@ -486,9 +546,6 @@ impl Registry {
         system_ready: SystemReady,
     ) -> Result<(Workspace, Workspace), WorkspaceError> {
         let id = self.active.clone();
-        if id == MAIN_ID {
-            return Err(WorkspaceError::MainIsPermanent);
-        }
         let back = self
             .setup_return(app_files, system_ready)
             .ok_or(WorkspaceError::AlreadySetUp)?
@@ -658,10 +715,12 @@ pub fn switch_to(
 
 /// Picks the workspace to open at launch and points this process at it.
 ///
-/// A one-shot `open_next` wins once and is cleared. A launch target other
-/// than `main` whose directory has gone (deleted by hand, or a half-made
-/// workspace) is skipped for `main`, which always exists, so Portal never
-/// starts into nothing. The registry is written only when something changed.
+/// A one-shot `open_next` wins once and is cleared. A launch target whose
+/// directory has gone (deleted by hand, or a half-made workspace) is skipped
+/// for `main` if it is still listed, else for the last one used that still
+/// has its directory, so Portal never starts into nothing. With none left,
+/// the target's folder is made again and its installer starts there. The
+/// registry is written only when something changed.
 pub fn activate(app_files: &Path, now_unix: u64) -> Workspace {
     let mut registry = Registry::load(app_files);
     let once = registry.open_next.take();
@@ -670,10 +729,26 @@ pub fn activate(app_files: &Path, now_unix: u64) -> Workspace {
         .and_then(|id| registry.get(id))
         .unwrap_or_else(|| registry.launch_target())
         .clone();
-    if target.id != MAIN_ID && !workspace_dir(app_files, &target.id).is_dir() {
-        log::warn!("Workspace {} has no directory; opening Main", target.id);
-        if registry.get(MAIN_ID).is_some() {
-            target = registry.get(MAIN_ID).cloned().expect("checked above");
+    if !workspace_dir(app_files, &target.id).is_dir() {
+        let fallback = registry
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace_dir(app_files, &workspace.id).is_dir())
+            .max_by_key(|workspace| (workspace.id == MAIN_ID, workspace.last_used_unix));
+        match fallback {
+            Some(fallback) => {
+                log::warn!(
+                    "Workspace {} has no directory; opening {}",
+                    target.id,
+                    fallback.id
+                );
+                target = fallback.clone();
+            }
+            None => {
+                if let Err(error) = fs::create_dir_all(workspace_dir(app_files, &target.id)) {
+                    log::warn!("Could not remake workspace {}'s folder: {error}", target.id);
+                }
+            }
         }
     }
     if registry.active != target.id || once.is_some() {
@@ -727,34 +802,64 @@ pub fn abandon_setup(app_files: &Path, system_ready: SystemReady) -> anyhow::Res
     Ok(back)
 }
 
-/// Deletes a workspace that isn't running, files and all. Main is never
-/// deleted: it is the app files directory itself. The registry is saved
-/// first, so an interrupted delete leaves only an unlisted folder.
+/// Deletes a workspace that isn't running, files and all; Main too, whose
+/// install files leave the app files directory while Portal's own stay.
+/// The registry is saved first, so an interrupted delete leaves only
+/// unlisted files.
 pub fn delete(app_files: &Path, id: &str) -> anyhow::Result<Workspace> {
-    let (_, removed) = edit(app_files, |registry| {
-        if id == MAIN_ID {
-            return Err(WorkspaceError::MainIsPermanent);
-        }
-        registry.remove(id)
-    })?;
+    let (_, removed) = edit(app_files, |registry| registry.remove(id))?;
     delete_files(app_files, &removed.id)?;
     Ok(removed)
 }
 
-/// Deletes one workspace's folder, never Main's (the app files directory
-/// itself). Directories the guest left without write permission are opened
-/// up first, since a rootfs may hold read-only trees.
+/// Deletes the running workspace's files and leaves it listed for a fresh
+/// install ([`Registry::reset_active`]); Portal must restart into it. The
+/// guest must already be stopped. `id` is the workspace the user chose, so
+/// a switch that raced the delete never empties another one.
+pub fn reset_running(app_files: &Path, id: &str, now_unix: u64) -> anyhow::Result<Workspace> {
+    let (_, workspace) = edit(app_files, |registry| registry.reset_active(id, now_unix))?;
+    delete_files(app_files, &workspace.id)?;
+    // The next launch opens it only if its folder is there.
+    fs::create_dir_all(workspace_dir(app_files, &workspace.id))?;
+    Ok(workspace)
+}
+
+/// Deletes one workspace's files: its folder, or for Main (the app files
+/// directory itself) only [`MAIN_INSTALL_ENTRIES`]. Directories the guest
+/// left without write permission are opened up first, since a rootfs may
+/// hold read-only trees.
 pub fn delete_files(app_files: &Path, id: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        id != MAIN_ID && is_valid_id(id),
-        "refusing to delete workspace {id:?}"
-    );
-    let dir = workspace_dir(app_files, id);
-    if fs::symlink_metadata(&dir).is_err() || fs::remove_dir_all(&dir).is_ok() {
+    anyhow::ensure!(is_valid_id(id), "refusing to delete workspace {id:?}");
+    if id == MAIN_ID {
+        return delete_main_files(app_files);
+    }
+    remove_tree(&workspace_dir(app_files, id))
+}
+
+/// Moves Main's install files into one trash folder, each in a single
+/// rename, then deletes that. An interrupted delete leaves only the trash,
+/// never a partial rootfs that could read as an install; the next delete
+/// finishes it.
+fn delete_main_files(app_files: &Path) -> anyhow::Result<()> {
+    let trash = app_files.join(WORKSPACES_DIR).join(MAIN_TRASH_DIR);
+    remove_tree(&trash)?;
+    fs::create_dir_all(&trash)?;
+    for entry in fs::read_dir(app_files)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_str().is_some_and(is_main_install_entry) {
+            fs::rename(entry.path(), trash.join(&name))?;
+        }
+    }
+    remove_tree(&trash)
+}
+
+fn remove_tree(dir: &Path) -> anyhow::Result<()> {
+    if fs::symlink_metadata(dir).is_err() || fs::remove_dir_all(dir).is_ok() {
         return Ok(());
     }
-    open_up_directories(&dir);
-    fs::remove_dir_all(&dir)?;
+    open_up_directories(dir);
+    fs::remove_dir_all(dir)?;
     Ok(())
 }
 

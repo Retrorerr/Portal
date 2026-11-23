@@ -1112,7 +1112,7 @@ fn provision_ibus_stage() -> StageOutput {
 }
 
 /// Optional apps setup could not install; queued for the app manager.
-const DEFERRED_OPTIONAL_APPS: &str = "optional-apps-deferred";
+const DEFERRED_OPTIONAL_APPS: &str = crate::core::workspaces::DEFERRED_OPTIONAL_APPS_FILE;
 
 fn defer_optional_apps(apps: &[OptionalApp]) -> anyhow::Result<()> {
     let ids = apps

@@ -9,6 +9,11 @@ package app.polarbear.setup
 // workspace Portal opens at launch. Native state (Workspaces.state) is the
 // only source of truth.
 //
+// Holding a tile selects it for deletion: a strip under the tiles names it
+// and says what goes, and Delete there removes it, Main and the open one
+// included. A deleted tile folds away and the rest close up; deleting the
+// open one stops it and restarts Portal into its setup.
+//
 // New, beside Done, turns the card to a page for a new workspace: a separate
 // Debian with its own apps, files and settings (NewWorkspaceSheet.kt). Portal
 // restarts into the first-run setup for it, as it does for a workspace whose
@@ -19,6 +24,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -29,6 +35,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
@@ -37,6 +45,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -65,6 +74,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -82,7 +93,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
@@ -95,6 +111,7 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -143,6 +160,8 @@ private const val BACKDROP_SHADE = 0.38f
 /** Long names end early so the pill stays beside Apps and Files; narrower where the row is short. */
 internal val WorkspacesCapsuleNameMaxWidth = 132.dp
 private val TileCorner = 14.dp
+/** A deleted tile folding away, and the others closing up behind it. */
+private const val TILE_FOLD_MS = 420
 
 /**
  * The Workspaces pill in the veil's row beside Apps and Files, opening into
@@ -312,10 +331,22 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
     var naming by remember { mutableStateOf(false) }
     /** A new workspace was made; Portal is restarting into its installer. */
     var created by remember { mutableStateOf<String?>(null) }
-    val restarting = chosen != null || created != null
+    /** Held to be deleted: the strip under the tiles asks to confirm. */
+    var selected by remember { mutableStateOf<String?>(null) }
+    /** Confirmed; its files are going. */
+    var deleting by remember { mutableStateOf<String?>(null) }
+    var deleteRefusal by remember { mutableStateOf<String?>(null) }
+    val restarting = chosen != null || created != null || deleting != null
     // Android's Back leaves the new-workspace page for the list, like the page's
     // own Back; once Portal is restarting into the new workspace it waits.
     SetupBackHandler(enabled = naming) { if (created == null) naming = false }
+    // Back lets go of a held tile before it closes the card.
+    SetupBackHandler(enabled = !naming && selected != null && deleting == null) { selected = null }
+    // A selection whose workspace has gone (deleted, or given up) ends.
+    LaunchedEffect(state.workspaces) {
+        if (selected != null && state.workspaces.none { it.id == selected }) selected = null
+    }
+    LaunchedEffect(selected) { deleteRefusal = null }
     DisposableEffect(veil) {
         onDispose {
             veil.gestureExclusions.remove(exclusionKey)
@@ -389,6 +420,26 @@ private fun WorkspacesCard(state: Workspaces.State, palette: PortalPalette, onCl
                     onClose = onClose,
                     onChoose = { chosen = it },
                     onRenaming = { renaming = it },
+                    selection = WorkspaceSelection(
+                        selected = selected,
+                        deleting = deleting,
+                        refusal = deleteRefusal,
+                        onSelect = {
+                            if (deleting == null) {
+                                if (it != null) renaming = null
+                                selected = it
+                            }
+                        },
+                        onDelete = { id ->
+                            deleting = id
+                            deleteRefusal = null
+                            // The open one only answers if refused: Portal restarts into its setup.
+                            Workspaces.delete(context, id) { refusal ->
+                                deleting = null
+                                if (refusal == null) selected = null else deleteRefusal = refusal
+                            }
+                        },
+                    ),
                 )
             }
         }
@@ -407,6 +458,7 @@ private fun WorkspacesList(
     onClose: () -> Unit,
     onChoose: (String) -> Unit,
     onRenaming: (String?) -> Unit,
+    selection: WorkspaceSelection,
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -430,7 +482,7 @@ private fun WorkspacesList(
             val compact = budget < CompactListHeight
             val scroll = rememberScrollState()
             Column(Modifier.fillMaxWidth().veilScrollRegion(scroll).verticalScroll(scroll)) {
-                WorkspacesBody(state, palette, chosen, renaming, restarting, onChoose, onRenaming, budget, compact)
+                WorkspacesBody(state, palette, chosen, renaming, restarting, onChoose, onRenaming, selection, budget, compact)
             }
         }
     }
@@ -449,13 +501,22 @@ private fun WorkspacesBody(
     restarting: Boolean,
     onChoose: (String) -> Unit,
     onRenaming: (String?) -> Unit,
+    selection: WorkspaceSelection,
     budget: Dp,
     compact: Boolean,
 ) {
     val gap = if (compact) 10.dp else 14.dp
+    val (entries, onGone) = rememberTileEntries(state.workspaces)
+    // Tiles widen or narrow as one goes, in step with it folding away.
+    val tileCount by animateFloatAsState(
+        state.workspaces.size.coerceAtLeast(1).toFloat(),
+        tween(TILE_FOLD_MS, easing = PortalEmphasized),
+        label = "workspace tile count",
+    )
+    val haptics = LocalHapticFeedback.current
     Layout(content = {
         Text(
-            "Each has its own apps, files and settings. Tap one to open it, or its name to rename it.",
+            "Each has its own apps, files and settings. Tap one to open it, its name to rename it, or hold it to delete it.",
             modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp),
             fontSize = 11.sp,
             lineHeight = 15.sp,
@@ -463,8 +524,9 @@ private fun WorkspacesBody(
             color = palette.textMuted,
         )
         BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
-            val count = state.workspaces.size.coerceAtLeast(1)
-            val byWidth = ((maxWidth - TileGap * (count - 1)) / count).coerceIn(TileMinWidth, TileMaxWidth)
+            // Each tile carries half a gap on either side, so one folding
+            // away takes its gap with it.
+            val byWidth = ((maxWidth - TileGap * tileCount) / tileCount).coerceIn(TileMinWidth, TileMaxWidth)
             // A tile is 16:10 over its name; where height is short, that sets its width.
             val byHeight = if (constraints.hasBoundedHeight) {
                 ((maxHeight - 8.dp - TileFooterHeight) * 1.6f).coerceAtLeast(TileMinHeight * 1.6f)
@@ -476,33 +538,69 @@ private fun WorkspacesBody(
                 // At least the card's width, so a few tiles sit centred and
                 // more than fit scroll.
                 modifier = Modifier.horizontalScroll(rememberScrollState()).widthIn(min = maxWidth),
-                horizontalArrangement = Arrangement.spacedBy(TileGap, Alignment.CenterHorizontally),
+                horizontalArrangement = Arrangement.Center,
             ) {
-                state.workspaces.forEach { workspace ->
-                    WorkspaceTile(
-                        workspace = workspace,
-                        width = tileWidth,
-                        preview = Workspaces.previews[workspace.id],
-                        running = workspace.id == state.active,
-                        chosen = chosen == workspace.id,
-                        renaming = renaming == workspace.id,
-                        renamingAny = renaming != null,
-                        palette = palette,
-                        onOpen = {
-                            when {
-                                // A tap away from a field ends it, unsaved.
-                                renaming != null -> onRenaming(null)
-                                !restarting && workspace.id != state.active -> onChoose(workspace.id)
-                            }
-                        },
-                        onRename = { if (!restarting) onRenaming(workspace.id) },
-                        onRenameDone = { onRenaming(null) },
-                    )
+                entries.forEach { entry ->
+                    val workspace = entry.workspace
+                    key(workspace.id) {
+                        val shown = remember { MutableTransitionState(true) }
+                        shown.targetState = entry.present
+                        if (!entry.present && shown.isIdle && !shown.currentState) {
+                            LaunchedEffect(Unit) { onGone(workspace.id) }
+                        }
+                        AnimatedVisibility(
+                            visibleState = shown,
+                            exit = shrinkHorizontally(tween(TILE_FOLD_MS, easing = PortalEmphasized)) +
+                                scaleOut(tween(TILE_FOLD_MS, easing = PortalEmphasized), targetScale = 0.86f) +
+                                fadeOut(tween(TILE_FOLD_MS / 2, easing = PortalEmphasizedAccelerate)),
+                        ) {
+                            WorkspaceTile(
+                                workspace = workspace,
+                                width = tileWidth,
+                                preview = Workspaces.previews[workspace.id],
+                                present = entry.present,
+                                running = workspace.id == state.active,
+                                chosen = chosen == workspace.id,
+                                renaming = renaming == workspace.id,
+                                renamingAny = renaming != null,
+                                selected = selection.selected == workspace.id,
+                                selecting = selection.selected != null,
+                                deleting = selection.deleting == workspace.id,
+                                palette = palette,
+                                modifier = Modifier.padding(horizontal = TileGap / 2),
+                                onOpen = {
+                                    when {
+                                        // A tap away from a field ends it, unsaved.
+                                        renaming != null -> onRenaming(null)
+                                        // While one is held, a tap moves the hold or lets go.
+                                        selection.selected != null -> selection.onSelect(
+                                            workspace.id.takeIf { it != selection.selected },
+                                        )
+                                        !restarting && workspace.id != state.active -> onChoose(workspace.id)
+                                    }
+                                },
+                                onHold = {
+                                    if (!restarting && selection.selected != workspace.id) {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        selection.onSelect(workspace.id)
+                                    }
+                                },
+                                onRename = {
+                                    if (!restarting) {
+                                        selection.onSelect(null)
+                                        onRenaming(workspace.id)
+                                    }
+                                },
+                                onRenameDone = { onRenaming(null) },
+                            )
+                        }
+                    }
                 }
             }
         }
-        // A Box, so the layout keeps a child here while the error is gone.
-        Box {
+        // A Column, so the layout keeps a child here while both are gone.
+        Column {
+            DeleteStrip(state, selection, palette)
             AnimatedVisibility(
                 visible = state.error != null,
                 enter = expandVertically(tween(300)) + fadeIn(tween(300, delayMillis = 60)),
@@ -543,18 +641,28 @@ private fun WorkspacesBody(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WorkspaceTile(
     workspace: Workspaces.Workspace,
     width: androidx.compose.ui.unit.Dp,
     preview: ImageBitmap?,
+    /** False while a deleted tile folds away: it keeps its looks and takes no taps. */
+    present: Boolean,
     running: Boolean,
     chosen: Boolean,
     renaming: Boolean,
     /** Any tile is being renamed: a tap on this one, even the running one, ends it. */
     renamingAny: Boolean,
+    /** Held for deletion. */
+    selected: Boolean,
+    /** Some tile is held; the others step back. */
+    selecting: Boolean,
+    deleting: Boolean,
     palette: PortalPalette,
+    modifier: Modifier = Modifier,
     onOpen: () -> Unit,
+    onHold: () -> Unit,
     onRename: () -> Unit,
     onRenameDone: () -> Unit,
 ) {
@@ -563,24 +671,45 @@ private fun WorkspaceTile(
     val scale by animateFloatAsState(
         targetValue = when {
             chosen -> 1.03f
-            pressed && !running -> 0.97f
+            selected -> 0.95f
+            pressed && (!running || selecting) -> 0.97f
             else -> 1f
         },
-        animationSpec = tween(if (chosen) 220 else 110, easing = PortalEmphasized),
+        animationSpec = tween(if (chosen || selected) 260 else 110, easing = PortalEmphasized),
         label = "workspace tile press",
     )
     val ring by animateColorAsState(
-        if (running || chosen) palette.accent else palette.surfaceBorder,
+        if (running || chosen || selected) palette.accent else palette.surfaceBorder,
         tween(220),
         label = "workspace tile ring",
     )
+    val emphasis by animateFloatAsState(
+        if (selecting && !selected) 0.5f else 1f,
+        tween(260, easing = PortalEmphasized),
+        label = "workspace tile emphasis",
+    )
+    // The badge's check draws in as the tile is held and out as it is let go.
+    val held by animateFloatAsState(
+        if (selected) 1f else 0f,
+        if (selected) tween(320, easing = PortalEmphasizedDecelerate) else tween(200, easing = PortalEmphasizedAccelerate),
+        label = "workspace tile held",
+    )
+    // A tile folding away keeps the frame it had, never its initial.
+    var lastPreview by remember { mutableStateOf<ImageBitmap?>(null) }
+    if (preview != null) lastPreview = preview
+    val shownPreview = preview ?: lastPreview
     val shape = RoundedCornerShape(TileCorner)
     Column(
-        Modifier
+        modifier
             .width(width)
+            .graphicsLayer { alpha = emphasis }
             .semantics {
-                contentDescription = if (running) "${workspace.name}, open now" else "Open ${workspace.name}"
-                selected = running
+                contentDescription = when {
+                    selected -> "${workspace.name}, selected to delete"
+                    running -> "${workspace.name}, open now"
+                    else -> "Open ${workspace.name}"
+                }
+                this.selected = running || selected
             },
     ) {
         Box(
@@ -593,20 +722,22 @@ private fun WorkspaceTile(
                 }
                 .clip(shape)
                 .background(Brush.verticalGradient(listOf(palette.surfaceTop, palette.surfaceBottom)))
-                .border(if (running || chosen) 2.dp else 1.dp, ring, shape)
-                .clickable(
+                .border(if (running || chosen || selected) 2.dp else 1.dp, ring, shape)
+                .combinedClickable(
                     interactionSource = tap,
                     indication = null,
                     role = Role.Button,
-                    enabled = !running || renamingAny,
-                    onClickLabel = "Open ${workspace.name}",
+                    enabled = present,
+                    onClickLabel = if (selecting) "Select ${workspace.name}" else "Open ${workspace.name}",
                     onClick = onOpen,
+                    onLongClickLabel = "Select ${workspace.name} to delete",
+                    onLongClick = onHold,
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            if (preview != null) {
+            if (shownPreview != null) {
                 Image(
-                    bitmap = preview,
+                    bitmap = shownPreview,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
@@ -633,6 +764,7 @@ private fun WorkspaceTile(
                     Text("Open", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
                 }
             }
+            if (held > 0.001f) HeldBadge(held, palette, Modifier.align(Alignment.TopEnd).padding(8.dp))
         }
         Spacer(Modifier.height(8.dp))
         Column(Modifier.height(TileFooterHeight)) {
@@ -645,10 +777,6 @@ private fun WorkspaceTile(
                     if (name.trim() == workspace.name) null else Workspaces.rename(workspace.id, name)
                 },
                 onDone = onRenameDone,
-                // Main holds Portal's own files and the running one is in use.
-                onDelete = if (running || workspace.id == "main") null else { done ->
-                    Workspaces.delete(workspace.id, done)
-                },
             )
         } else {
             Text(
@@ -664,6 +792,8 @@ private fun WorkspaceTile(
             )
             Text(
                 text = when {
+                    deleting && running -> "Closing…"
+                    deleting -> "Deleting…"
                     chosen && workspace.needsSetup -> "Restarting Portal…"
                     chosen -> "Opening…"
                     running -> "Open now"
@@ -679,7 +809,7 @@ private fun WorkspaceTile(
                 },
                 modifier = Modifier.padding(start = 2.dp),
                 fontSize = 11.sp,
-                color = if (chosen) palette.accent else palette.textSecondary,
+                color = if (chosen || deleting) palette.accent else palette.textSecondary,
                 maxLines = 1,
             )
         }
@@ -699,11 +829,7 @@ private fun NameField(
     palette: PortalPalette,
     submit: (String) -> String?,
     onDone: () -> Unit,
-    /** Deletes the workspace; its callback gets null when deleted, else why not. */
-    onDelete: ((done: (String?) -> Unit) -> Unit)? = null,
 ) {
-    var confirmDelete by remember { mutableStateOf(false) }
-    var deleting by remember { mutableStateOf(false) }
     // The whole name selected, so typing replaces it.
     var value by remember {
         mutableStateOf(TextFieldValue(initial, selection = TextRange(0, initial.length)))
@@ -745,44 +871,14 @@ private fun NameField(
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { save() }),
         )
-        Row(Modifier.padding(start = 2.dp, top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = refusal ?: note,
-                modifier = Modifier.weight(1f),
-                fontSize = 11.sp,
-                color = if (refusal != null) palette.accent else palette.textMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (onDelete != null) {
-                // Two taps: a workspace's files go with it.
-                Text(
-                    text = when {
-                        deleting -> "Deleting…"
-                        confirmDelete -> "Tap to delete"
-                        else -> "Delete"
-                    },
-                    modifier = Modifier
-                        .padding(start = 6.dp)
-                        .clickable(enabled = !deleting, role = Role.Button) {
-                            if (!confirmDelete) {
-                                confirmDelete = true
-                            } else {
-                                deleting = true
-                                onDelete { reason ->
-                                    deleting = false
-                                    confirmDelete = false
-                                    if (reason != null) refusal = reason else onDone()
-                                }
-                            }
-                        },
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.accent,
-                    maxLines = 1,
-                )
-            }
-        }
+        Text(
+            text = refusal ?: note,
+            modifier = Modifier.padding(start = 2.dp, top = 3.dp),
+            fontSize = 11.sp,
+            color = if (refusal != null) palette.accent else palette.textMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -859,5 +955,189 @@ private fun LaunchChoice(label: String, selected: Boolean, palette: PortalPalett
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+/** The held tile and what happens to it. */
+private class WorkspaceSelection(
+    val selected: String?,
+    val deleting: String?,
+    /** Why the last delete was refused, shown in the strip. */
+    val refusal: String?,
+    val onSelect: (String?) -> Unit,
+    val onDelete: (String) -> Unit,
+)
+
+private class TileEntry(val workspace: Workspaces.Workspace, val present: Boolean)
+
+/**
+ * The tiles to draw: every workspace, plus any that just went, still in its
+ * place, until its fold reports back through the returned callback.
+ */
+@Composable
+private fun rememberTileEntries(workspaces: List<Workspaces.Workspace>): Pair<List<TileEntry>, (String) -> Unit> {
+    // The tiles last drawn, in order. Plain, so composition keeps it current.
+    val drawn = remember { ArrayList<Workspaces.Workspace>() }
+    var folded by remember { mutableIntStateOf(0) }
+    val entries = remember(workspaces, folded) {
+        val ids = workspaces.mapTo(HashSet()) { it.id }
+        val merged = workspaces.mapTo(ArrayList()) { TileEntry(it, present = true) }
+        drawn.forEachIndexed { index, old ->
+            if (old.id in ids) return@forEachIndexed
+            // Back where it was: after the tile that came before it.
+            val before = drawn.subList(0, index).lastOrNull { prev -> merged.any { it.workspace.id == prev.id } }
+            val at = before?.let { prev -> merged.indexOfFirst { it.workspace.id == prev.id } + 1 } ?: 0
+            merged.add(at, TileEntry(old, present = false))
+        }
+        drawn.clear()
+        merged.mapTo(drawn) { it.workspace }
+        merged
+    }
+    val gone: (String) -> Unit = remember {
+        { id ->
+            if (drawn.removeAll { it.id == id }) folded++
+        }
+    }
+    return entries to gone
+}
+
+/** A round check on a held tile, drawn in by [progress]. */
+@Composable
+private fun HeldBadge(progress: Float, palette: PortalPalette, modifier: Modifier) {
+    Canvas(
+        modifier
+            .size(22.dp)
+            .graphicsLayer {
+                val scale = 0.6f + 0.4f * progress
+                scaleX = scale
+                scaleY = scale
+                alpha = progress.coerceIn(0f, 1f)
+            },
+    ) {
+        drawCircle(palette.accent)
+        drawCircle(PortalColors.Charcoal.copy(alpha = 0.35f), style = Stroke(1.dp.toPx()))
+        // The tick draws along its length as the badge arrives.
+        val tick = Path().apply {
+            moveTo(size.width * 0.29f, size.height * 0.52f)
+            lineTo(size.width * 0.44f, size.height * 0.66f)
+            lineTo(size.width * 0.72f, size.height * 0.37f)
+        }
+        val measure = PathMeasure().apply { setPath(tick, false) }
+        val drawnTick = Path()
+        measure.getSegment(0f, measure.length * progress.coerceIn(0f, 1f), drawnTick, true)
+        drawPath(
+            drawnTick,
+            PortalColors.Charcoal,
+            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
+        )
+    }
+}
+
+/**
+ * Under the tiles while one is held: it names the workspace, says what goes
+ * and asks to delete. It keeps the last one it named while folding away.
+ */
+@Composable
+private fun DeleteStrip(state: Workspaces.State, selection: WorkspaceSelection, palette: PortalPalette) {
+    val target = selection.selected?.let { id -> state.workspaces.firstOrNull { it.id == id } }
+    var shown by remember { mutableStateOf<Workspaces.Workspace?>(null) }
+    if (target != null) shown = target
+    AnimatedVisibility(
+        visible = target != null,
+        enter = expandVertically(tween(360, easing = PortalEmphasized), clip = false) +
+            fadeIn(tween(260, delayMillis = 80, easing = PortalEmphasizedDecelerate)),
+        exit = shrinkVertically(tween(300, easing = PortalEmphasized), clip = false) +
+            fadeOut(tween(140, easing = PortalEmphasizedAccelerate)),
+    ) {
+        val workspace = shown ?: return@AnimatedVisibility
+        val open = workspace.id == state.active
+        val deleting = selection.deleting == workspace.id
+        val detail = when {
+            selection.refusal != null -> selection.refusal
+            deleting && open -> "Closing it, then Portal starts its setup again…"
+            deleting -> "Removing its apps, files and settings…"
+            open -> "It’s open now. Its apps, files and settings are removed for good, and Portal starts its setup again."
+            else -> "Its apps, files and settings are removed for good."
+        }
+        val shape = RoundedCornerShape(TileCorner)
+        BoxWithConstraints(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 12.dp)) {
+            val stacked = maxWidth < 420.dp
+            val words = @Composable { mod: Modifier ->
+                Column(mod) {
+                    AnimatedContent(
+                        targetState = workspace.name,
+                        transitionSpec = {
+                            (fadeIn(tween(260, delayMillis = 60, easing = PortalEmphasizedDecelerate)) +
+                                slideInVertically(tween(360, easing = PortalEmphasized)) { it / 2 })
+                                .togetherWith(fadeOut(tween(120, easing = PortalEmphasizedAccelerate)))
+                                .using(SizeTransform(clip = false))
+                        },
+                        label = "delete strip name",
+                    ) { name ->
+                        Text(
+                            "Delete “$name”?",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.textPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    AnimatedContent(
+                        targetState = detail,
+                        transitionSpec = {
+                            fadeIn(tween(220, delayMillis = 60, easing = PortalEmphasizedDecelerate))
+                                .togetherWith(fadeOut(tween(120, easing = PortalEmphasizedAccelerate)))
+                                .using(SizeTransform(clip = false))
+                        },
+                        label = "delete strip detail",
+                    ) { text ->
+                        Text(
+                            text,
+                            modifier = Modifier.padding(top = 2.dp),
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (selection.refusal != null) palette.accent else palette.textMuted,
+                        )
+                    }
+                }
+            }
+            val buttons = @Composable {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    PanelButton(text = "Cancel", primary = false, palette = palette, enabled = !deleting) {
+                        selection.onSelect(null)
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    PanelButton(
+                        text = if (deleting) "Deleting" else "Delete",
+                        primary = true,
+                        palette = palette,
+                        enabled = !deleting,
+                    ) { selection.onDelete(workspace.id) }
+                }
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .background(Brush.verticalGradient(listOf(palette.surfaceTop, palette.surfaceBottom)))
+                    .border(1.dp, palette.accent.copy(alpha = 0.45f), shape)
+                    .padding(start = 14.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+            ) {
+                if (stacked) {
+                    Column {
+                        words(Modifier.padding(end = 6.dp))
+                        Spacer(Modifier.height(8.dp))
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) { buttons() }
+                    }
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        words(Modifier.weight(1f).padding(end = 10.dp))
+                        buttons()
+                    }
+                }
+            }
+        }
     }
 }

@@ -33,7 +33,8 @@ A workspace is a separate Debian install with its own home folder, apps and desk
 - Open **Workspaces** on the veil to see each one as it was last left. Tap one to open it; Portal restarts only the desktop.
 - To make one, tap **New workspace**, type a name and press Enter. Portal closes the running desktop, restarts and opens the setup screen for the new workspace, which downloads and installs a fresh Debian (several GB). Your other workspaces stay as they are.
 - Until its setup finishes, the workspace shows **Not set up yet**; tapping it carries on with the setup. On its setup screen, **Back to …** deletes the unfinished workspace and returns to the one you came from.
-- Tap a workspace's name to rename it. While renaming one that isn't open, **Delete** (tap it twice) removes it and all its files. Main can't be deleted.
+- Tap a workspace's name to rename it.
+- To delete a workspace, touch and hold it, then tap **Delete** in the strip under the workspaces. Its apps, files and settings are removed for good. Any workspace can be deleted, Main included; Portal's own settings stay. Deleting the one that is open closes it and restarts Portal into its setup screen, where you can set it up again or use **Back to …** to go to another workspace. Deleting your only workspace starts setup from the beginning.
 - **When Portal starts** chooses whether Portal opens the last workspace used or always the same one.
 
 ## Transferring files

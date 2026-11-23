@@ -211,11 +211,15 @@ object Workspaces {
     }
 
     /**
-     * Delete a workspace that isn't running, with its files and preview.
-     * [done] gets null when deleted, else why not, on the main thread.
+     * Delete a workspace with its files and preview, Main included. [done]
+     * gets null when deleted, else why not, on the main thread. The open one
+     * is stopped and emptied instead and Portal restarts into its setup, so
+     * [done] hears from it only if it was refused.
      */
-    fun delete(id: String, done: (String?) -> Unit) {
+    fun delete(context: Context, id: String, done: (String?) -> Unit) {
         val dir = previewDir
+        val open = id == state.value.active
+        val activity = context.findActivity()
         io.execute {
             val refusal = try {
                 ComposeOverlay.nativeDeleteWorkspace(id)
@@ -224,8 +228,14 @@ object Workspaces {
             }
             if (refusal == null) dir?.let { File(it, "$id.jpg").delete() }
             main.post {
-                if (refusal == null) previews.remove(id)
-                done(refusal)
+                when {
+                    refusal != null -> done(refusal)
+                    open -> activity?.let(::relaunch) ?: Process.killProcess(Process.myPid())
+                    else -> {
+                        previews.remove(id)
+                        done(null)
+                    }
+                }
             }
         }
     }

@@ -441,9 +441,10 @@ fn abandon_setup() -> Option<String> {
 
 /// Stop the running session cleanly before Portal restarts, so Plasma and
 /// its apps save their settings. Blocking, bounded like a switch's stop.
-fn stop_for_restart() {
+/// False when it was still running at the end of that bound.
+fn stop_for_restart() -> bool {
     if !crate::android::proot::launch::is_running() {
-        return;
+        return true;
     }
     let started = Instant::now();
     let app = crate::android::utils::application_context::get_application_context().android_app;
@@ -452,7 +453,7 @@ fn stop_for_restart() {
     while crate::android::proot::launch::is_running() {
         if started.elapsed() > STOP_BUDGET {
             log::warn!("Plasma didn't stop before the restart; it ends with the process");
-            return;
+            return false;
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -460,6 +461,60 @@ fn stop_for_restart() {
         "workspace",
         &format!("restart-stop stop_ms={}", started.elapsed().as_millis()),
     );
+    true
+}
+
+/// Delete a workspace, files and all. The open one is stopped and emptied
+/// instead, and Portal restarts into its installer; nothing is deleted
+/// under a session that didn't stop. Blocking.
+fn delete(id: &str) -> Option<String> {
+    let active = match workspaces::Registry::read(app_files()) {
+        Ok(registry) => registry.active,
+        Err(error) => {
+            log::error!("Workspace registry unreadable for a delete: {error:#}");
+            return Some("Portal couldn't read its workspace list.".into());
+        }
+    };
+    if id != active {
+        // A switch or restart in flight owns the registry's next step.
+        if in_progress() {
+            return Some("Wait for the switch to finish first.".into());
+        }
+        return match workspaces::delete(app_files(), id) {
+            Ok(removed) => {
+                crate::android::diagnostics::host_event(
+                    "workspace",
+                    &format!("deleted id={}", removed.id),
+                );
+                None
+            }
+            Err(error) => Some(refusal(&error, "Portal couldn't delete that workspace.")),
+        };
+    }
+    if let Err(reason) = reserve_for_restart(id) {
+        return Some(refuse(reason));
+    }
+    if !stop_for_restart() {
+        // The session still runs; it is the user's to keep.
+        return Some(release_restart(
+            "Plasma didn't stop, so nothing was deleted.".into(),
+        ));
+    }
+    match workspaces::reset_running(app_files(), id, workspaces::now_unix()) {
+        Ok(workspace) => {
+            crate::android::diagnostics::host_event(
+                "workspace",
+                &format!("deleted-open id={}", workspace.id),
+            );
+            None
+        }
+        // Past the stop there is no session to go back to: Portal restarts
+        // either way, into whatever the registry now says.
+        Err(error) => {
+            log::error!("Could not empty the open workspace {id}: {error:#}");
+            None
+        }
+    }
 }
 
 /// JNI: make a workspace. Null when Portal should now restart into it,
@@ -503,8 +558,9 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeAbandonWorkspaceS
     string_result(&mut env, refusal)
 }
 
-/// JNI, off the main thread: delete a workspace that isn't running, files
-/// and all. Null when deleted, else why not.
+/// JNI, off the main thread: delete a workspace, files and all. Null when
+/// deleted (for the open one: when Portal should now restart into its
+/// installer), else why not.
 #[no_mangle]
 pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeDeleteWorkspace(
     mut env: JNIEnv,
@@ -512,18 +568,7 @@ pub extern "system" fn Java_app_polarbear_ComposeOverlay_nativeDeleteWorkspace(
     id: JString,
 ) -> jstring {
     let refusal = match read_string(&mut env, &id) {
-        // A switch or restart in flight owns the registry's next step.
-        Some(_) if in_progress() => Some("Wait for the switch to finish first.".to_owned()),
-        Some(id) => match workspaces::delete(app_files(), &id) {
-            Ok(removed) => {
-                crate::android::diagnostics::host_event(
-                    "workspace",
-                    &format!("deleted id={}", removed.id),
-                );
-                None
-            }
-            Err(error) => Some(refusal(&error, "Portal couldn't delete that workspace.")),
-        },
+        Some(id) => delete(&id),
         None => Some("Portal couldn't delete that workspace.".into()),
     };
     publish();

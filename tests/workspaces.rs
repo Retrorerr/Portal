@@ -3,7 +3,8 @@
 
 use localdesktop::core::workspaces::{
     abandon_setup, activate, active_dir, delete, delete_files, edit, normalise_name, registry_path,
-    workspace_dir, workspace_rootfs, Registry, WorkspaceError, MAIN_ID, MAX_NAME_CHARS,
+    reset_running, workspace_dir, workspace_rootfs, Registry, WorkspaceError, MAIN_ID,
+    MAX_NAME_CHARS,
 };
 use std::{fs, path::Path};
 
@@ -156,6 +157,23 @@ fn the_registry_round_trips_and_activation_follows_it() {
     assert_eq!(saved.active, fresh.id);
     assert_eq!(saved.open_next, None);
     assert_eq!(activate(temp.path(), 60).id, "uni");
+
+    // With Main deleted, a workspace whose folder has gone falls back to the
+    // last one used that still has its own.
+    let (_, ()) = edit(temp.path(), |registry| {
+        registry.set_open_at_launch(None)?;
+        registry.remove(MAIN_ID)?;
+        Ok(())
+    })
+    .unwrap();
+    fs::remove_dir_all(workspace_dir(temp.path(), "uni")).unwrap();
+    assert_eq!(activate(temp.path(), 70).id, fresh.id);
+    assert_eq!(Registry::read(temp.path()).unwrap().active, fresh.id);
+    // With no folder left at all, the target's is made again for its
+    // installer rather than opening nothing.
+    fs::remove_dir_all(workspace_dir(temp.path(), &fresh.id)).unwrap();
+    assert_eq!(activate(temp.path(), 80).id, fresh.id);
+    assert!(workspace_dir(temp.path(), &fresh.id).is_dir());
 }
 
 #[test]
@@ -238,6 +256,7 @@ fn mark_ready(files: &Path, id: &str) {
 #[test]
 fn a_new_workspace_is_an_empty_folder_the_next_launch_opens() {
     let temp = tempfile::tempdir().unwrap();
+    mark_ready(temp.path(), MAIN_ID);
     let mut registry = Registry::implicit();
     registry.set_open_at_launch(Some(MAIN_ID)).unwrap();
     // A folder left by a workspace given up earlier is never reused.
@@ -273,6 +292,7 @@ fn a_new_workspace_is_an_empty_folder_the_next_launch_opens() {
 #[test]
 fn an_unfinished_workspace_reopens_its_installer() {
     let temp = tempfile::tempdir().unwrap();
+    mark_ready(temp.path(), MAIN_ID);
     let mut registry = Registry::implicit();
     let uni = registry.add("Uni", 1).unwrap();
     // Its folder went missing: it starts again empty.
@@ -295,6 +315,7 @@ fn an_unfinished_workspace_reopens_its_installer() {
 #[test]
 fn giving_up_goes_back_to_the_workspace_it_was_started_from() {
     let temp = tempfile::tempdir().unwrap();
+    mark_ready(temp.path(), MAIN_ID);
     let mut registry = Registry::implicit();
     let games = registry.add("Games", 1).unwrap();
     mark_ready(temp.path(), &games.id);
@@ -350,16 +371,18 @@ fn giving_up_a_setup_goes_back_to_the_last_workspace_that_works() {
         registry.abandon_setup(temp.path(), &ready),
         Err(WorkspaceError::AlreadySetUp)
     );
+    // Main whose install was deleted is given up like any other.
     registry.set_active(MAIN_ID, 90).unwrap();
-    assert_eq!(
-        registry.abandon_setup(temp.path(), &ready),
-        Err(WorkspaceError::MainIsPermanent)
-    );
+    let (removed, back) = registry.abandon_setup(temp.path(), &ready).unwrap();
+    assert_eq!((removed.id.as_str(), back.id.as_str()), (MAIN_ID, "games"));
+    assert!(registry.get(MAIN_ID).is_none());
+    registry.validate().unwrap();
 }
 
 #[test]
 fn giving_up_saves_the_registry_then_deletes_only_that_workspace() {
     let temp = tempfile::tempdir().unwrap();
+    mark_ready(temp.path(), MAIN_ID);
     let (_, uni) = edit(temp.path(), |registry| {
         let uni = registry.create(temp.path(), "Uni", 1)?;
         registry.set_active(&uni.id, 2)?;
@@ -390,8 +413,8 @@ fn giving_up_saves_the_registry_then_deletes_only_that_workspace() {
     assert_eq!(saved.open_next.as_deref(), Some(MAIN_ID));
     assert!(saved.get(&uni.id).is_none());
 
-    // A finished workspace that isn't running can be deleted; Main and the
-    // running one can't.
+    // A finished workspace that isn't running can be deleted; the running
+    // one can't be removed, only emptied (reset_running).
     let (_, games) = edit(temp.path(), |registry| {
         registry.create(temp.path(), "Games", 3)
     })
@@ -403,12 +426,6 @@ fn giving_up_saves_the_registry_then_deletes_only_that_workspace() {
         .unwrap()
         .get(&games.id)
         .is_none());
-    assert_eq!(
-        delete(temp.path(), MAIN_ID)
-            .unwrap_err()
-            .downcast_ref::<WorkspaceError>(),
-        Some(&WorkspaceError::MainIsPermanent)
-    );
     let (_, uni) = edit(temp.path(), |registry| {
         let uni = registry.create(temp.path(), "Uni", 4)?;
         registry.set_active(&uni.id, 5)?;
@@ -423,8 +440,8 @@ fn giving_up_saves_the_registry_then_deletes_only_that_workspace() {
     );
     assert!(workspace_dir(temp.path(), &uni.id).is_dir());
 
-    assert!(delete_files(temp.path(), MAIN_ID).is_err());
     assert!(delete_files(temp.path(), "..").is_err());
+    assert!(delete_files(temp.path(), "").is_err());
     assert!(temp.path().join("renderer-mode").is_file());
 }
 
@@ -468,4 +485,228 @@ fn edits_save_only_what_succeeded() {
         fs::read_to_string(registry_path(temp.path())).unwrap(),
         "not json"
     );
+}
+
+/// Lays out a Main install the way the app files directory holds one,
+/// beside Portal's own files.
+fn main_install(files: &Path) {
+    mark_ready(files, MAIN_ID);
+    let rootfs = workspace_rootfs(files, MAIN_ID);
+    fs::create_dir_all(rootfs.join("usr/share/locked/deeper")).unwrap();
+    fs::write(rootfs.join("usr/share/locked/deeper/file"), "x").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            rootfs.join("usr/share/locked"),
+            fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+    }
+    for dir in [
+        "runtime-B.previous",
+        "runtime-B.invalid.2",
+        "tawcroot/link",
+        ".tawcroot-tmpfs/tmp",
+    ] {
+        fs::create_dir_all(files.join(dir)).unwrap();
+    }
+    for file in [
+        "portal-runtime.tar.xz.part",
+        "portal-runtime.tar.xz.part.offset",
+        "portal-install-plan-v1.json",
+        "optional-apps-deferred",
+    ] {
+        fs::write(files.join(file), "x").unwrap();
+    }
+}
+
+/// Portal's own files, which no workspace's delete may touch.
+const SHARED: &[&str] = &[
+    "renderer-mode",
+    "tawcroot-instances/1/marker",
+    "updates/state.json",
+    "mesa-kgsl-layer/lib",
+    "runtime-Backup",
+    "workspaces/previews/main.jpg",
+];
+
+fn shared_files(files: &Path) {
+    for file in SHARED {
+        let path = files.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "keep").unwrap();
+    }
+}
+
+fn assert_shared_kept(files: &Path) {
+    for file in SHARED {
+        assert!(files.join(file).is_file(), "{file} was deleted");
+    }
+}
+
+fn assert_main_install_gone(files: &Path) {
+    for name in [
+        "runtime-B",
+        "runtime-B.previous",
+        "runtime-B.invalid.2",
+        "tawcroot",
+        ".tawcroot-tmpfs",
+        "portal-runtime.tar.xz.part",
+        "portal-runtime.tar.xz.part.offset",
+        "portal-install-plan-v1.json",
+        "optional-apps-deferred",
+        "workspaces/.deleting-main",
+    ] {
+        assert!(
+            fs::symlink_metadata(files.join(name)).is_err(),
+            "{name} survived"
+        );
+    }
+}
+
+#[test]
+fn main_can_be_deleted_leaving_portals_own_files() {
+    let temp = tempfile::tempdir().unwrap();
+    main_install(temp.path());
+    shared_files(temp.path());
+    let (_, games) = edit(temp.path(), |registry| {
+        let games = registry.add("Games", 1)?;
+        registry.set_active(&games.id, 2)?;
+        registry.set_open_at_launch(Some(MAIN_ID))?;
+        Ok(games)
+    })
+    .unwrap();
+    mark_ready(temp.path(), &games.id);
+
+    assert_eq!(delete(temp.path(), MAIN_ID).unwrap().id, MAIN_ID);
+    assert_main_install_gone(temp.path());
+    assert_shared_kept(temp.path());
+    assert!(workspace_rootfs(temp.path(), &games.id)
+        .join("ready")
+        .is_file());
+    let saved = Registry::read(temp.path()).unwrap();
+    assert!(saved.get(MAIN_ID).is_none());
+    // Launch no longer points at it.
+    assert_eq!(saved.open_at_launch, None);
+    assert_eq!(saved.launch_target().id, games.id);
+    // A new workspace never takes Main's id, which is the app files directory.
+    let (_, again) = edit(temp.path(), |registry| registry.add("Main", 3)).unwrap();
+    assert_ne!(again.id, MAIN_ID);
+}
+
+#[test]
+fn an_interrupted_main_delete_leaves_no_install_and_is_finished_next_time() {
+    let temp = tempfile::tempdir().unwrap();
+    main_install(temp.path());
+    shared_files(temp.path());
+    // A delete cut short left its trash behind.
+    let trash = temp.path().join("workspaces/.deleting-main/runtime-B/etc");
+    fs::create_dir_all(&trash).unwrap();
+    assert!(!workspace_rootfs(temp.path(), MAIN_ID).join("etc").exists());
+    delete_files(temp.path(), MAIN_ID).unwrap();
+    assert_main_install_gone(temp.path());
+    assert_shared_kept(temp.path());
+}
+
+#[test]
+fn deleting_the_open_workspace_empties_it_for_its_installer() {
+    let temp = tempfile::tempdir().unwrap();
+    main_install(temp.path());
+    shared_files(temp.path());
+    let (_, games) = edit(temp.path(), |registry| {
+        let games = registry.add("Games", 1)?;
+        registry.set_active(MAIN_ID, 5)?;
+        registry.set_active(&games.id, 10)?;
+        registry.set_open_at_launch(Some(&games.id))?;
+        Ok(games)
+    })
+    .unwrap();
+    mark_ready(temp.path(), &games.id);
+
+    // Another workspace opened meanwhile: nothing is emptied.
+    assert_eq!(
+        reset_running(temp.path(), MAIN_ID, 20)
+            .unwrap_err()
+            .downcast_ref::<WorkspaceError>(),
+        Some(&WorkspaceError::NotOpen)
+    );
+    assert!(workspace_rootfs(temp.path(), MAIN_ID).is_dir());
+
+    assert_eq!(
+        reset_running(temp.path(), &games.id, 20).unwrap().id,
+        games.id
+    );
+    let dir = workspace_dir(temp.path(), &games.id);
+    assert!(dir.is_dir());
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    let saved = Registry::read(temp.path()).unwrap();
+    // Still listed, the next launch opens its installer, and launch no
+    // longer prefers it.
+    assert_eq!(saved.active, games.id);
+    assert_eq!(saved.open_next.as_deref(), Some(games.id.as_str()));
+    assert_eq!(saved.open_at_launch, None);
+    let listing: serde_json::Value =
+        serde_json::from_str(&saved.listing_json(temp.path(), &ready)).unwrap();
+    assert_eq!(listing["workspaces"][1]["needsSetup"], true);
+    // Its installer can go back to Main, and giving it up removes it.
+    assert_eq!(listing["setupReturn"]["id"], MAIN_ID);
+    assert_eq!(abandon_setup(temp.path(), &ready).unwrap().id, MAIN_ID);
+    assert!(!dir.exists());
+    assert!(Registry::read(temp.path())
+        .unwrap()
+        .get(&games.id)
+        .is_none());
+    assert_shared_kept(temp.path());
+}
+
+#[test]
+fn deleting_main_while_it_is_open_goes_to_its_installer() {
+    let temp = tempfile::tempdir().unwrap();
+    main_install(temp.path());
+    shared_files(temp.path());
+    let (_, games) = edit(temp.path(), |registry| {
+        let games = registry.add("Games", 1)?;
+        registry.set_active(&games.id, 5)?;
+        registry.set_active(MAIN_ID, 10)?;
+        Ok(games)
+    })
+    .unwrap();
+    mark_ready(temp.path(), &games.id);
+
+    reset_running(temp.path(), MAIN_ID, 20).unwrap();
+    assert_main_install_gone(temp.path());
+    assert_shared_kept(temp.path());
+    let saved = Registry::read(temp.path()).unwrap();
+    assert_eq!(saved.open_next.as_deref(), Some(MAIN_ID));
+    assert_eq!(
+        saved.setup_return(temp.path(), &ready).unwrap().id,
+        games.id
+    );
+    // Giving up Main's fresh install goes to Games and unlists Main.
+    assert_eq!(abandon_setup(temp.path(), &ready).unwrap().id, games.id);
+    let saved = Registry::read(temp.path()).unwrap();
+    assert!(saved.get(MAIN_ID).is_none());
+    assert_eq!(saved.active, games.id);
+    assert_shared_kept(temp.path());
+}
+
+#[test]
+fn deleting_the_only_workspace_starts_over_with_nowhere_to_go_back() {
+    let temp = tempfile::tempdir().unwrap();
+    main_install(temp.path());
+    shared_files(temp.path());
+    reset_running(temp.path(), MAIN_ID, 5).unwrap();
+    assert_main_install_gone(temp.path());
+    let saved = Registry::read(temp.path()).unwrap();
+    assert_eq!(saved.workspaces.len(), 1);
+    assert_eq!(saved.setup_return(temp.path(), &ready), None);
+    assert_eq!(
+        saved
+            .listing_json(temp.path(), &ready)
+            .contains("\"needsSetup\":true"),
+        true
+    );
+    // A fresh install of Main alone never offers to go back to itself.
+    assert_eq!(Registry::implicit().setup_return(temp.path(), &ready), None);
 }
