@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <ucontext.h>
 #include <linux/filter.h>
+#include <linux/prctl.h>
 #include <linux/seccomp.h>
 #include <sys/mount.h>
 #include "path.h"
@@ -37,13 +38,6 @@
 #include "syscalls_control.h"
 #include "sysnr.h"
 #include "usercopy.h"
-
-#ifndef PR_GET_SECCOMP
-# define PR_GET_SECCOMP 21
-#endif
-#ifndef PR_SET_SECCOMP
-# define PR_SET_SECCOMP 22
-#endif
 
 #ifndef SIGSYS
 # define SIGSYS 31
@@ -93,18 +87,18 @@ static long handle_prctl(const tawcroot_syscall_args *args, ucontext_t *uc)
 	int op = (int)args->a;
 	if (op == PR_SET_SECCOMP)
 		return args->b == SECCOMP_MODE_FILTER && args->c ? accept_guest_filter(args->c) : TAWC_EINVAL;
-	if (op == 36 /* PR_GET_KEEPCAPS */)
+	if (op == PR_GET_KEEPCAPS)
 		return tawcroot_identity_keepcaps();
 	long rv = TAWC_RAW(TAWC_SYS_prctl, args->a, args->b, args->c,
 			   args->d, args->e, 0);
 	/* Android refuses these to apps; fake root answers them like
 	 * the kernel answers root (see identity.c). */
-	if (op == 8 /* PR_SET_KEEPCAPS */ &&
+	if (op == PR_SET_KEEPCAPS &&
 	    (rv == 0 || (rv == TAWC_EPERM && args->b <= 1))) {
 		tawcroot_identity_set_keepcaps((int)args->b);
 		return 0;
 	}
-	if ((op == 24 /* PR_CAPBSET_DROP */ || op == 28 /* PR_SET_SECUREBITS */) &&
+	if ((op == PR_CAPBSET_DROP || op == PR_SET_SECUREBITS) &&
 	    rv == TAWC_EPERM && tawcroot_identity_fake_caps())
 		return 0;
 	return rv;

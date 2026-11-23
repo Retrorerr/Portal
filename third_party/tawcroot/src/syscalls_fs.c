@@ -320,6 +320,7 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * and has to keep resolving the link itself. */
 	if (!(flags & O_NOFOLLOW))
 		proc_exe_substitute(scratch, dirfd, path);
+	int pad_open = !(flags & (O_PATH | O_DIRECTORY)) && tawcroot_gamepad_path(path);
 	flags = tawcroot_gamepad_open_flags(path, flags);
 	/* The "/proc/..." name of a procfs path reached through a /proc
 	 * dirfd or another bind of /proc (bubblewrap's proc_fd and
@@ -570,6 +571,8 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	/* See the O_CREAT retry above: the leaf turned out not to exist,
 	 * so the create the guest asked for would have been real — EROFS. */
 	if (erofs_creat_retry && fd == TAWC_ENOENT) return TAWC_EROFS;
+	if (fd >= 0 && pad_open)
+		fd = tawcroot_gamepad_reader((int)fd, flags);
 	if (fd >= 0 && ((flags & O_PATH) || path_fallback) &&
 	    t.fd != tawcroot_rootfs_fd)
 		note_fd_name((int)fd, dirfd, gpath);

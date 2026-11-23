@@ -1,20 +1,19 @@
 //! Android game controllers as guest evdev pads.
 //!
-//! Android gives apps neither `/dev/input` nor `/dev/uinput`, so each pad
-//! is a raw pseudo-terminal: Portal holds the master and writes
-//! `struct input_event` records to it, and `/dev/input/eventN` in the guest
-//! (a bind of `fake-input/input`) links to the slave. PRoot answers the
-//! evdev ioctls for every pty registered in `fake-input/desc`
-//! (`syscall/evdev.c`), so SDL, Wine, Steam and x86 programs under FEX all
-//! see an ordinary Xbox 360 pad. Rumble the guest plays comes back on the
-//! master and is forwarded to the controller's vibrator.
+//! Android gives apps neither `/dev/input` nor `/dev/uinput`. Portal
+//! exposes a raw pty for discovery and writes Linux input_event records
+//! to its master. tawcroot requests a separate pty for each open of a pad,
+//! so every reader gets the same events as it would from real evdev.
+//! Both engines answer evdev ioctls for ptys registered in `fake-input/desc`.
+//! Rumble comes back through each master to the controller's vibrator.
 
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -24,9 +23,7 @@ use jni::objects::{GlobalRef, JClass, JFloatArray, JValue};
 use jni::sys::{jboolean, jint};
 use jni::{JNIEnv, JavaVM};
 
-use crate::core::gamepad::{
-    self, EffectTable, PadState, Rumble, INPUT_EVENT_SIZE, PAD_NAME,
-};
+use crate::core::gamepad::{self, EffectTable, PadState, Rumble, INPUT_EVENT_SIZE, PAD_NAME};
 
 /// Device id of the on-screen touch controller (never a real Android id).
 pub const TOUCH_PAD_ID: i32 = -100;
@@ -42,16 +39,21 @@ pub fn registry_dir() -> PathBuf {
     Path::new(crate::core::config::APP_FILES_ROOT).join("fake-input/desc")
 }
 
+struct PadStream {
+    master: Arc<File>,
+    pts: u32,
+    stop: Arc<AtomicBool>,
+    needs_state: bool,
+}
+
 struct Pad {
     slot: usize,
-    master: Arc<File>,
-    // Held so the master never reads EIO while no guest program has the
-    // pad open, and so the raw termios settings persist.
-    slave: File,
-    pts: u32,
+    // Keep the discovery node and its termios alive, including on PRoot.
+    _discovery_slave: File,
+    discovery: PadStream,
+    streams: Vec<PadStream>,
     state: PadState,
     sent: PadState,
-    stop: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -62,6 +64,7 @@ struct Hub {
 
 static HUB: OnceLock<Mutex<Hub>> = OnceLock::new();
 static BRIDGE: OnceLock<(JavaVM, GlobalRef)> = OnceLock::new();
+static READER_BROKER: OnceLock<()> = OnceLock::new();
 
 fn hub() -> &'static Mutex<Hub> {
     HUB.get_or_init(|| Mutex::new(Hub::default()))
@@ -129,12 +132,86 @@ fn event_link(slot: usize) -> PathBuf {
     input_dir().join(format!("event{slot}"))
 }
 
+fn start_reader_broker() -> io::Result<()> {
+    if READER_BROKER.get().is_some() {
+        return Ok(());
+    }
+    let socket_path = input_dir().with_file_name("readers.sock");
+    match fs::remove_file(&socket_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let listener = UnixListener::bind(socket_path)?;
+    std::thread::Builder::new()
+        .name("gamepad-open".into())
+        .spawn(move || {
+            for peer in listener.incoming().flatten() {
+                if let Err(error) = serve_reader(peer) {
+                    log::debug!("gamepad: could not open reader: {error}");
+                }
+            }
+        })?;
+    let _ = READER_BROKER.set(());
+    Ok(())
+}
+
+/// Exchange native-endian pty numbers with tawcroot. Keep the slave live
+/// until the engine has opened it and closed the request socket.
+fn serve_reader(mut peer: UnixStream) -> io::Result<()> {
+    let timeout = Some(Duration::from_millis(250));
+    peer.set_read_timeout(timeout)?;
+    peer.set_write_timeout(timeout)?;
+    let mut request = [0; 4];
+    peer.read_exact(&mut request)?;
+    let discovery = u32::from_ne_bytes(request);
+    let (slave, pts) = {
+        let mut hub = hub()
+            .lock()
+            .map_err(|_| io::Error::other("pad hub unavailable"))?;
+        let (&device_id, pad) = hub
+            .pads
+            .iter_mut()
+            .find(|(_, pad)| pad.discovery.pts == discovery)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "pad was unplugged"))?;
+        if pad.streams.len() >= 32 {
+            return Err(io::Error::other("too many readers for the pad"));
+        }
+        let (master, slave, pts) = open_pty()?;
+        let mut stream = PadStream {
+            master: Arc::new(master),
+            pts,
+            stop: Arc::default(),
+            needs_state: false,
+        };
+        let entry = registry_dir().join(pts.to_string());
+        fs::write(&entry, PAD_NAME)?;
+        if let Err(error) = spawn_reader(device_id, &stream, true) {
+            let _ = fs::remove_file(entry);
+            return Err(error);
+        }
+        let initial = pad.state.diff(&PadState::default());
+        if !initial.is_empty() {
+            stream.needs_state = !write_frame(&stream, &encode_frame(&initial));
+        }
+        pad.streams.push(stream);
+        (slave, pts)
+    };
+    peer.write_all(&pts.to_ne_bytes())?;
+    let _ = peer.read(&mut [0]);
+    drop(slave);
+    Ok(())
+}
+
 fn add_pad(hub: &mut Hub, device_id: i32) -> Option<&mut Pad> {
     if !hub.cleared {
         clear_stale();
         hub.cleared = true;
     }
     if !hub.pads.contains_key(&device_id) {
+        if let Err(error) = start_reader_broker() {
+            log::warn!("gamepad: could not start reader broker: {error}");
+        }
         let (master, slave, pts) = match open_pty() {
             Ok(pty) => pty,
             Err(error) => {
@@ -156,20 +233,25 @@ fn add_pad(hub: &mut Hub, device_id: i32) -> Option<&mut Pad> {
             let _ = fs::remove_file(registry_dir().join(pts.to_string()));
             return None;
         }
-        let master = Arc::new(master);
-        let stop = Arc::new(AtomicBool::new(false));
-        spawn_reader(device_id, master.clone(), stop.clone());
+        let discovery = PadStream {
+            master: Arc::new(master),
+            pts,
+            stop: Arc::default(),
+            needs_state: false,
+        };
+        if let Err(error) = spawn_reader(device_id, &discovery, false) {
+            log::warn!("gamepad: could not start the rumble reader: {error}");
+        }
         log::info!("gamepad: device {device_id} is /dev/input/event{slot} (pty {pts})");
         hub.pads.insert(
             device_id,
             Pad {
                 slot,
-                master,
-                slave,
-                pts,
+                _discovery_slave: slave,
+                discovery,
+                streams: Vec::new(),
                 state: PadState::default(),
                 sent: PadState::default(),
-                stop,
             },
         );
     }
@@ -181,10 +263,25 @@ fn remove_pad(hub: &mut Hub, device_id: i32) {
         // Unlink first: SDL and Wine notice removals through inotify, then
         // the hang-up of the closed pty ends their reads.
         let _ = fs::remove_file(event_link(pad.slot));
-        let _ = fs::remove_file(registry_dir().join(pad.pts.to_string()));
-        pad.stop.store(true, Ordering::Relaxed);
+        for stream in std::iter::once(&pad.discovery).chain(&pad.streams) {
+            close_stream(stream);
+        }
         log::info!("gamepad: device {device_id} removed (event{})", pad.slot);
     }
+}
+
+fn close_stream(stream: &PadStream) {
+    let _ = fs::remove_file(registry_dir().join(stream.pts.to_string()));
+    stream.stop.store(true, Ordering::Relaxed);
+}
+
+fn encode_frame(events: &[gamepad::EvdevEvent]) -> Vec<u8> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
+    gamepad::encode_events(events, now.tv_sec, now.tv_nsec / 1000)
 }
 
 fn flush(pad: &mut Pad) {
@@ -192,40 +289,44 @@ fn flush(pad: &mut Pad) {
     if events.is_empty() {
         return;
     }
-    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
-    let bytes = gamepad::encode_events(&events, now.tv_sec, now.tv_nsec / 1000);
-    // One write per frame keeps a frame contiguous in the pty buffer.
-    if write_frame(pad, &bytes) {
-        pad.sent = pad.state;
-        return;
+    let bytes = encode_frame(&events);
+    let mut full_frame = None;
+    for stream in std::iter::once(&mut pad.discovery).chain(&mut pad.streams) {
+        if !stream.needs_state && write_frame(stream, &bytes) {
+            continue;
+        }
+        // A slow reader must never stall input or affect another reader.
+        // Drop only its backlog and enqueue the whole current state.
+        stream.needs_state = true;
+        let Ok(slave) = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(format!("/dev/pts/{}", stream.pts))
+        else {
+            continue;
+        };
+        if unsafe { libc::tcflush(slave.as_raw_fd(), libc::TCIFLUSH) } != 0 {
+            continue;
+        }
+        let current = full_frame.get_or_insert_with(|| {
+            let mut unknown = pad.state;
+            for button in &mut unknown.buttons {
+                *button = !*button;
+            }
+            for axis in &mut unknown.axes {
+                *axis = axis.wrapping_add(1);
+            }
+            encode_frame(&pad.state.diff(&unknown))
+        });
+        stream.needs_state = !write_frame(stream, current);
     }
-    // The master is non-blocking: a full buffer means no program has read
-    // this pad for a while (or none has it open). Like evdev, drop the
-    // stale backlog (it also drops any torn partial frame) and send the
-    // whole current state, so a reader that opens later starts in sync.
-    // Never block here: this runs on Android's input thread under HUB.
-    unsafe { libc::tcflush(pad.slave.as_raw_fd(), libc::TCIFLUSH) };
-    let mut unknown = pad.state;
-    for button in &mut unknown.buttons {
-        *button = !*button;
-    }
-    for axis in &mut unknown.axes {
-        *axis = axis.wrapping_add(1);
-    }
-    let events = pad.state.diff(&unknown);
-    let bytes = gamepad::encode_events(&events, now.tv_sec, now.tv_nsec / 1000);
-    if write_frame(pad, &bytes) {
-        pad.sent = pad.state;
-    } else {
-        log::debug!("gamepad: event write failed after flushing the backlog");
-    }
+    pad.sent = pad.state;
 }
 
 /// Whole-frame write to the non-blocking master; false on a short write.
-fn write_frame(pad: &Pad, bytes: &[u8]) -> bool {
+fn write_frame(stream: &PadStream, bytes: &[u8]) -> bool {
     loop {
-        match (&*pad.master).write(bytes) {
+        match (&*stream.master).write(bytes) {
             Ok(count) => return count == bytes.len(),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => return false,
@@ -233,16 +334,27 @@ fn write_frame(pad: &Pad, bytes: &[u8]) -> bool {
     }
 }
 
-fn spawn_reader(device_id: i32, master: Arc<File>, stop: Arc<AtomicBool>) {
-    let spawned = std::thread::Builder::new()
+fn spawn_reader(device_id: i32, stream: &PadStream, dedicated: bool) -> io::Result<()> {
+    let master = stream.master.clone();
+    let stop = stream.stop.clone();
+    let pts = stream.pts;
+    std::thread::Builder::new()
         .name(format!("gamepad-{device_id}"))
         .spawn(move || {
             let mut effects = EffectTable::default();
+            let mut rumbling = false;
             let mut pending = Vec::with_capacity(INPUT_EVENT_SIZE * 16);
             let mut buffer = [0u8; INPUT_EVENT_SIZE * 16];
             while !stop.load(Ordering::Relaxed) {
-                let mut poll = libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                let mut poll = libc::pollfd {
+                    fd: master.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
                 let ready = unsafe { libc::poll(&mut poll, 1, 500) };
+                if dedicated && poll.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                    break;
+                }
                 if ready <= 0 || poll.revents & libc::POLLIN == 0 {
                     continue;
                 }
@@ -257,17 +369,35 @@ fn spawn_reader(device_id: i32, master: Arc<File>, stop: Arc<AtomicBool>) {
                 let (records, _) = pending.as_chunks::<INPUT_EVENT_SIZE>();
                 let whole = records.len() * INPUT_EVENT_SIZE;
                 for record in records {
-                    if let Some(rumble) = gamepad::parse_request(record).and_then(|request| effects.apply(request)) {
+                    if let Some(rumble) =
+                        gamepad::parse_request(record).and_then(|request| effects.apply(request))
+                    {
+                        rumbling = rumble.strong != 0 || rumble.weak != 0;
                         vibrate(device_id, rumble);
                     }
                 }
                 pending.drain(..whole);
             }
-            vibrate(device_id, Rumble::default());
-        });
-    if let Err(error) = spawned {
-        log::warn!("gamepad: could not start the rumble reader: {error}");
-    }
+            if rumbling {
+                vibrate(device_id, Rumble::default());
+            }
+            if dedicated {
+                // Hold the master until the registry is gone so its pty
+                // number cannot be reused by another stream meanwhile.
+                if let Ok(mut hub) = hub().lock() {
+                    if let Some(pad) = hub.pads.get_mut(&device_id) {
+                        pad.streams.retain(|stream| {
+                            if stream.pts != pts {
+                                return true;
+                            }
+                            close_stream(stream);
+                            false
+                        });
+                    }
+                }
+            }
+        })?;
+    Ok(())
 }
 
 fn vibrate(device_id: i32, rumble: Rumble) {
@@ -335,7 +465,9 @@ pub extern "system" fn Java_app_polarbear_GamepadBridge_nativeKey(
     down: jboolean,
 ) -> jboolean {
     remember_bridge(&mut env, &class);
-    u8::from(with_pad(device_id, |state| state.apply_key(key_code, down != 0)))
+    u8::from(with_pad(device_id, |state| {
+        state.apply_key(key_code, down != 0)
+    }))
 }
 
 #[no_mangle]

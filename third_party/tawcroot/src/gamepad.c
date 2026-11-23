@@ -1,14 +1,11 @@
 /* Emulated evdev game pads (Portal).
  *
  * Android gives apps no /dev/input or /dev/uinput, so Portal creates one
- * pseudo-terminal per controller, puts it in raw mode and links
+ * discovery pseudo-terminal per controller and links
  * /dev/input/eventN (a host directory bound onto the guest's /dev/input)
- * to its slave. Reads, writes and poll(2) then already behave like an
- * evdev node: the host writes struct input_event records on the master,
- * and force-feedback records the guest side produces come back on it.
- * Only the evdev ioctl(2) requests are missing; this file answers them for
- * every pty the host registered in its pad registry (one file per pty
- * number, holding the pad name).
+ * to its slave. Each open gets a separate raw pty from Portal's reader
+ * broker, matching evdev's per-open queues. This file also answers evdev
+ * ioctls for every pty registered by Portal.
  *
  * This is the same contract PRoot's syscall/evdev.c serves through
  * $PROOT_FAKE_EVDEV_DIR (patches/build-proot-android). The registry is the
@@ -21,7 +18,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <asm/socket.h>
 #include <linux/input.h>
+#include <linux/un.h>
 #include "gamepad.h"
 #include "errno_neg.h"
 #include "io.h"
@@ -79,8 +78,8 @@ static void set_bit_in(unsigned long *bitmap, unsigned int bit)
 	bitmap[bit / LONG_BITS] |= 1UL << (bit % LONG_BITS);
 }
 
-/* Host registry directory into `out`, or 0 when no pad input bind exists. */
-static int registry(char *out, size_t cap)
+/* A sibling of the host input directory, or 0 if it is not bound. */
+static int input_sibling(const char *leaf, char *out, size_t cap)
 {
 	const size_t suffix = sizeof(REGISTRY_INPUT_SUFFIX) - 1;
 	for (size_t i = 0; i < tawcroot_n_binds; i++) {
@@ -91,10 +90,11 @@ static int registry(char *out, size_t cap)
 		    !tawc_streq(bind->src + bind->src_len - suffix, REGISTRY_INPUT_SUFFIX))
 			return 0;
 		size_t keep = bind->src_len - (sizeof("input") - 1);
-		if (keep + sizeof(REGISTRY_LEAF) > cap)
+		size_t length = strlen(leaf) + 1;
+		if (keep + length > cap)
 			return 0;
 		memcpy(out, bind->src, keep);
-		memcpy(out + keep, REGISTRY_LEAF, sizeof(REGISTRY_LEAF));
+		memcpy(out + keep, leaf, length);
 		return 1;
 	}
 	return 0;
@@ -103,7 +103,7 @@ static int registry(char *out, size_t cap)
 /* Registry entry path for pty `pts` into `out`; 0 when unavailable. */
 static int entry_path(int pts, char *out, size_t cap)
 {
-	if (!registry(out, cap))
+	if (!input_sibling(REGISTRY_LEAF, out, cap))
 		return 0;
 	size_t pos = strlen(out);
 	return tawc_str_append(out, cap, &pos, "/") == 0 &&
@@ -305,6 +305,69 @@ int tawcroot_gamepad_open_flags(const char *guest_path, int flags)
 	if (tawc_starts_with(guest_path, "/dev/input/"))
 		flags |= TAWC_O_NOCTTY;
 	return flags;
+}
+
+int tawcroot_gamepad_path(const char *guest_path)
+{
+	if (tawc_starts_with(guest_path, "/dev/input/") ||
+	    tawc_starts_with(guest_path, "/dev/pts/"))
+		return 1;
+	if (guest_path[0] == '/')
+		return 0;
+	const char *leaf = guest_path;
+	for (const char *p = guest_path; *p; ++p)
+		if (*p == '/')
+			leaf = p + 1;
+	return tawc_starts_with(leaf, "event");
+}
+
+int tawcroot_gamepad_reader(int fd, int flags)
+{
+	int32_t original = fd_pts(fd);
+	if (original < 0)
+		return fd;
+	struct sockaddr_un address = { .sun_family = 1 /* AF_UNIX */ };
+	if (!input_sibling("readers.sock", address.sun_path, sizeof address.sun_path))
+		return fd;
+	long sock = TAWC_RAW(TAWC_SYS_socket, 1 /* AF_UNIX */,
+			     1 /* SOCK_STREAM */ | O_CLOEXEC, 0, 0, 0, 0);
+	if (sock < 0)
+		return fd;
+	long timeout[2] = { 0, 250000 }; /* timeval: seconds, microseconds */
+	(void)TAWC_RAW(TAWC_SYS_setsockopt, sock, SOL_SOCKET, SO_RCVTIMEO_OLD,
+		       (long)timeout, sizeof timeout, 0);
+	(void)TAWC_RAW(TAWC_SYS_setsockopt, sock, SOL_SOCKET, SO_SNDTIMEO_OLD,
+		       (long)timeout, sizeof timeout, 0);
+	if (TAWC_RAW(TAWC_SYS_connect, sock, (long)&address, sizeof address, 0, 0, 0) < 0 ||
+	    TAWC_RAW(TAWC_SYS_sendto, sock, (long)&original, sizeof original,
+		     0x4000 /* MSG_NOSIGNAL */, 0, 0) != sizeof original) {
+		tawc_close((int)sock);
+		return fd;
+	}
+
+	int32_t pts;
+	size_t received = 0;
+	while (received < sizeof pts) {
+		long n = tawc_read((int)sock, (char *)&pts + received, sizeof pts - received);
+		if (n == TAWC_EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		received += (size_t)n;
+	}
+
+	long reader = -1;
+	if (received == sizeof pts && pts >= 0 && pts != original) {
+		char path[32] = "/dev/pts/";
+		size_t length = sizeof "/dev/pts/" - 1;
+		if (tawc_str_append_dec(path, sizeof path, &length, pts) == 0)
+			reader = tawc_openat(AT_FDCWD, path, flags | O_NOCTTY, 0);
+	}
+	tawc_close((int)sock);
+	if (reader < 0)
+		return fd;
+	tawc_close(fd);
+	return (int)reader;
 }
 
 static long pad_ioctl(int fd, int pts, unsigned int request, long arg)
