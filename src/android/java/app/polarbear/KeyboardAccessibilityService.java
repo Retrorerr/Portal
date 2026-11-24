@@ -33,6 +33,9 @@ public class KeyboardAccessibilityService extends AccessibilityService {
         info.flags = AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
         setServiceInfo(info);
+        // A desktop already on a monitor took the mouse without the service
+        // (switched on just now, in the monitor setup): hand it over now.
+        TabletGrab.serviceConnected();
     }
 
     /**

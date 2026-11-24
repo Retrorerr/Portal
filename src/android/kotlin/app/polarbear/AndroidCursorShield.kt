@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Build
 import android.util.Log
+import android.view.Display
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.PointerIcon
@@ -25,6 +26,14 @@ import androidx.annotation.RequiresApi
  * mouse events reaching any window, Android keeps the empty icon until the
  * grab ends and this window goes; the next window the arrow enters sets its
  * own icon again.
+ *
+ * Android may keep its arrow on a monitor rather than the tablet (OxygenOS
+ * puts it on the first external display, which mirrors the tablet until an
+ * app shows something there). Over a mirror this window still gets the
+ * event, but over the desktop's own Presentation that window is the one
+ * under the arrow: it hands its events here through [offer] while arming and
+ * shows the empty icon for the rest of the grab ([hidesArrow]). Should the
+ * arrow move to another display mid-grab, the next motion hides it there.
  */
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 internal class AndroidCursorShield(context: Context, private val forward: (MotionEvent) -> Unit) {
@@ -61,10 +70,14 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
     var hidden = false
         private set
 
+    /** The display Android's arrow was on when it was hidden. */
+    private var hiddenOn = Display.INVALID_DISPLAY
+
     fun show(): Boolean {
         try {
             manager.addView(view, layout)
             added = true
+            active = this
         } catch (error: RuntimeException) {
             Log.w(TAG, "Could not add the cursor shield", error)
         }
@@ -73,14 +86,27 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
 
     /** A routed event: the first plain motion while the arrow shows lets the mouse through onto this window. */
     fun routed(event: MotionEvent) {
-        if (!added || hidden || arming) return
+        if (!added || arming) return
+        if (hidden && event.displayId != hiddenOn && event.displayId != Display.INVALID_DISPLAY) {
+            // Android moved its arrow to another display: hide it there too.
+            Log.i(TAG, "Arrow moved from display $hiddenOn to ${event.displayId}")
+            hidden = false
+        }
+        if (hidden) return
         if (event.actionMasked != MotionEvent.ACTION_HOVER_MOVE || event.buttonState != 0) return
         arming = true
         setTouchable(true)
         KeyboardAccessibilityService.routeMotion(false)
         view.postDelayed(giveUp, ARMING_TIMEOUT_MS)
-        Log.i(TAG, "Letting the mouse through")
+        Log.i(TAG, "Letting the mouse through on display ${event.displayId}")
     }
+
+    /**
+     * The window under Android's arrow when it isn't this one, such as the
+     * desktop's Presentation on the monitor the arrow is on: while arming, its
+     * events are this window's. True when the event was taken.
+     */
+    fun offer(event: MotionEvent): Boolean = arming && take(event)
 
     private fun take(event: MotionEvent): Boolean {
         if (!arming) return false
@@ -88,7 +114,8 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
             forward(event)
             if (!hidden) {
                 hidden = true
-                Log.i(TAG, "Mouse reached the shield (action ${event.actionMasked}, source 0x${Integer.toHexString(event.source)})")
+                hiddenOn = event.displayId
+                Log.i(TAG, "Mouse reached the shield on display ${event.displayId} (action ${event.actionMasked}, source 0x${Integer.toHexString(event.source)})")
                 // After this event, so Android applies the empty icon first.
                 view.post(::takeBack)
             }
@@ -127,6 +154,7 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
     fun close() {
         arming = false
         view.removeCallbacks(giveUp)
+        if (active === this) active = null
         if (!added) return
         added = false
         try {
@@ -137,8 +165,17 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
         Log.i(TAG, "Closed")
     }
 
-    private companion object {
-        const val TAG = "PortalCursorShield"
-        const val ARMING_TIMEOUT_MS = 250L
+    companion object {
+        private const val TAG = "PortalCursorShield"
+        private const val ARMING_TIMEOUT_MS = 250L
+
+        /** The shield of the routed grab on now, UI thread only. */
+        private var active: AndroidCursorShield? = null
+
+        /** Windows Android's arrow may rest on show the empty icon while a routed grab holds the mouse. */
+        fun hidesArrow(): Boolean = active != null
+
+        /** See [offer]; false without a routed grab. */
+        fun offerToActive(event: MotionEvent): Boolean = active?.offer(event) ?: false
     }
 }

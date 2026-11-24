@@ -370,8 +370,23 @@ internal class DesktopControlView(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        attached.add(this)
         inputManager?.registerInputDeviceListener(devices, Handler(Looper.getMainLooper()))
         devicesChanged()
+    }
+
+    /**
+     * Portal's accessibility service connected. A grab that went ahead with
+     * pointer capture (or is still waiting for it) because the service wasn't
+     * running yet moves over to the service: that grab outlasts this window's
+     * focus, leaves the touchscreen to Android and hides Android's arrow.
+     */
+    private fun upgradeToRouted() {
+        if (!holdsGrab || routed || !(captured || waiting)) return
+        if (!KeyboardAccessibilityService.canRouteMotion() || readySurface() == null) return
+        Log.i(TAG, "Accessibility service connected during a pointer-capture grab; moving the grab to it")
+        relinquish("accessibility service connected")
+        if (!takeRoutedControl()) capturePointer()
     }
 
     // Sliding off, the window takes no touches; until then Return's pinned
@@ -676,6 +691,7 @@ internal class DesktopControlView(
     }
 
     override fun onDetachedFromWindow() {
+        attached.remove(this)
         inputManager?.unregisterInputDeviceListener(devices)
         dispose()
         super.onDetachedFromWindow()
@@ -697,6 +713,14 @@ internal class DesktopControlView(
     }
 
     internal companion object {
+        /** Controls on screen, UI thread only. */
+        private val attached = mutableSetOf<DesktopControlView>()
+
+        /** UI thread: see [TabletGrab.serviceConnected]. */
+        fun serviceConnected() {
+            for (control in attached.toList()) control.upgradeToRouted()
+        }
+
         const val TAG = "PortalDesktopControl"
         const val CAPTURE_TIMEOUT_MS = 2000L
         const val CLICK_GUARD_MS = 500L

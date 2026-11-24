@@ -1,9 +1,13 @@
 package app.polarbear
 
 import android.app.Presentation
+import android.content.Context
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.view.Display
+import android.view.MotionEvent
+import android.view.PointerIcon
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.ViewGroup
@@ -38,12 +42,40 @@ internal class DesktopPresentation(
         super.onCreate(savedInstanceState)
         surfaceView.holder.addCallback(callback)
         setContentView(
-            FrameLayout(context).apply {
+            ArrowShield(context).apply {
                 setBackgroundColor(Color.BLACK)
                 addView(surfaceView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             },
         )
         // Also when Android removes the monitor or cancels the window.
         setOnDismissListener { ended(this) }
+    }
+
+    /**
+     * Android may keep its own arrow on this monitor (OxygenOS puts it on the
+     * first external display). While the desktop holds the mouse, KWin draws
+     * the only cursor here: this window shows Android's empty icon, and while
+     * [AndroidCursorShield] arms, the mouse events Android delivers here are
+     * the shield's.
+     */
+    private class ArrowShield(context: Context) : FrameLayout(context) {
+        private val empty = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            PointerIcon.getSystemIcon(context, PointerIcon.TYPE_NULL)
+        } else null
+
+        private fun shielding(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+            AndroidCursorShield.hidesArrow()
+
+        override fun onResolvePointerIcon(event: MotionEvent, pointerIndex: Int): PointerIcon? =
+            if (shielding()) empty else super.onResolvePointerIcon(event, pointerIndex)
+
+        override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean =
+            offer(event) || super.dispatchGenericMotionEvent(event)
+
+        override fun dispatchTouchEvent(event: MotionEvent): Boolean =
+            offer(event) || super.dispatchTouchEvent(event)
+
+        private fun offer(event: MotionEvent): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+            event.isFromSource(android.view.InputDevice.SOURCE_MOUSE) && AndroidCursorShield.offerToActive(event)
     }
 }

@@ -17,6 +17,7 @@ import android.view.WindowManager
 import android.view.WindowManager.LayoutParams
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.Lifecycle
@@ -50,6 +51,23 @@ object TabletGrab {
     @JvmStatic fun routeMotion(event: MotionEvent) { routed?.motion(event) }
     @JvmStatic fun routeKey(event: KeyEvent): Boolean = routed?.key(event) ?: false
     @JvmStatic fun routeLost() { routed?.lost("accessibility service stopped") }
+
+    /**
+     * Counts the accessibility service's connections. Compose-observable: the
+     * touchpad takes the mouse again when the service arrives after it opened.
+     */
+    internal var serviceConnections by mutableIntStateOf(0)
+        private set
+
+    /**
+     * UI thread: Portal's accessibility service has just connected, typically
+     * moments after the user switched it on in the monitor setup. A grab that
+     * started without it moves over to it at once, so no restart is needed.
+     */
+    @JvmStatic fun serviceConnected() {
+        serviceConnections++
+        DesktopControlView.serviceConnected()
+    }
 }
 
 /**

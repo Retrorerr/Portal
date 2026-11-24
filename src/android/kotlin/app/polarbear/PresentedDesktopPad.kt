@@ -259,10 +259,13 @@ internal class PresentedDesktopPad(
                 // comes back in front, until it is handed back here.
                 LaunchedEffect(Unit) {
                     snapshotFlow {
-                        mouseWanted && pointerConnected && focused && rise.value > 0f && !leaving &&
+                        val take = mouseWanted && pointerConnected && focused && rise.value > 0f && !leaving &&
                             !SessionControls.utilityOpen.value && !DisplaySetup.isShowing() &&
                             !grab.grabbed && !grab.asksAboutTouch
-                    }.collectLatest { take ->
+                        // The accessibility service connecting (just switched on in the
+                        // monitor setup) is another chance, after a pointer-capture try failed.
+                        take to TabletGrab.serviceConnections
+                    }.collectLatest { (take, _) ->
                         if (!take) return@collectLatest
                         // The monitor's surface may still be on its way.
                         repeat(40) {
