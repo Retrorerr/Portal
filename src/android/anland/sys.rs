@@ -776,20 +776,45 @@ fn pump_thread_timer(
     }
 }
 
-/// Display-VSYNC tick source for demand-driven presentation.
-///
-/// Preferred mode is Android Choreographer on a dedicated looper thread (one
-/// eventfd write per display vsync, no polling, no timers). When the NDK
-/// symbols are unavailable it degrades to a nanosleep timer at the panel
-/// rate. The render loop polls the tick fd alongside its kick fd, so both
-/// modes share the pacing logic.
+/// External surfaces have their own cadence. A kernel timer can wake the
+/// render loop directly, without a second thread or handset-frame deadlines.
+struct DisplayTimer {
+    fd: Arc<OwnedFd>,
+    period_ns: AtomicU64,
+}
+
+impl DisplayTimer {
+    fn arm(&self, armed: bool) -> io::Result<()> {
+        let ns = if armed {
+            self.period_ns.load(Ordering::Relaxed)
+        } else {
+            0
+        };
+        let period = libc::timespec {
+            tv_sec: (ns / 1_000_000_000) as libc::time_t,
+            tv_nsec: (ns % 1_000_000_000) as libc::c_long,
+        };
+        let spec = libc::itimerspec {
+            it_interval: period,
+            it_value: period,
+        };
+        let result =
+            unsafe { libc::timerfd_settime(self.fd.as_raw_fd(), 0, &spec, std::ptr::null_mut()) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
 /// Arms and disarms a [`VsyncPump`]'s display ticks from another thread.
 #[derive(Clone)]
 pub struct VsyncGate {
     armed: Arc<AtomicBool>,
-    /// The Choreographer pump's `ALooper` (0 before it exists, and always
-    /// with the timer pump, which ignores the gate).
+    /// The Choreographer pump's `ALooper` (0 before it exists).
     looper: Arc<Mutex<usize>>,
+    timer: Option<Arc<DisplayTimer>>,
     /// `CLOCK_MONOTONIC` time of the latest tick's vsync (0 before the first).
     vsync_ns: Arc<AtomicU64>,
     /// A time at which SurfaceFlinger latches frames, from the latest tick
@@ -802,6 +827,7 @@ impl VsyncGate {
         Self {
             armed: Arc::new(AtomicBool::new(true)),
             looper: Arc::new(Mutex::new(0)),
+            timer: None,
             vsync_ns: Arc::new(AtomicU64::new(0)),
             deadline_ns: Arc::new(AtomicU64::new(0)),
         }
@@ -821,7 +847,16 @@ impl VsyncGate {
 
     /// Request display ticks (`true`), or let the pump sleep until re-armed.
     pub fn set_armed(&self, armed: bool) {
-        if self.armed.swap(armed, Ordering::AcqRel) == armed || !armed {
+        if self.armed.swap(armed, Ordering::AcqRel) == armed {
+            return;
+        }
+        if let Some(timer) = &self.timer {
+            if let Err(error) = timer.arm(armed) {
+                log::warn!("anland.vsync could not change display timer state: {error}");
+            }
+            return;
+        }
+        if !armed {
             return;
         }
         let looper = self.looper.lock().unwrap();
@@ -832,10 +867,35 @@ impl VsyncGate {
             }
         }
     }
+
+    pub fn set_refresh_millihz(&self, refresh_mhz: u32) {
+        if let Some(timer) = &self.timer {
+            let period = refresh_period_ns(refresh_mhz);
+            if timer.period_ns.swap(period, Ordering::Relaxed) != period
+                && self.armed.load(Ordering::Acquire)
+            {
+                if let Err(error) = timer.arm(true) {
+                    log::warn!("anland.vsync could not retime display timer: {error}");
+                }
+            }
+        }
+    }
 }
 
+fn refresh_period_ns(refresh_mhz: u32) -> u64 {
+    1_000_000_000_000
+        / u64::from(if refresh_mhz == 0 {
+            60_000
+        } else {
+            refresh_mhz
+        })
+}
+
+/// Display ticks polled by the render loop alongside its damage and input
+/// wakeups. The built-in display uses Choreographer's real frame timelines.
+/// External displays use their own mode cadence and BufferQueue fences.
 pub struct VsyncPump {
-    tick: OwnedFd,
+    tick: Arc<OwnedFd>,
     gate: VsyncGate,
     running: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -844,14 +904,15 @@ pub struct VsyncPump {
 }
 
 impl VsyncPump {
-    pub fn start(refresh_mhz: u32) -> io::Result<Self> {
-        let tick = make_eventfd()?;
-        // refresh is millihertz (144000 = 144Hz): period_ns = 1e12/mHz.
-        let period_ns = if refresh_mhz > 0 {
-            1_000_000_000_000u64 / refresh_mhz.max(1) as u64
-        } else {
-            16_666_666
-        };
+    pub fn start(refresh_mhz: u32, external: bool) -> io::Result<Self> {
+        let period_ns = refresh_period_ns(refresh_mhz);
+        if external {
+            match Self::start_display_timer(period_ns) {
+                Ok(pump) => return Ok(pump),
+                Err(error) => log::warn!("anland.vsync display timer unavailable: {error}"),
+            }
+        }
+        let tick = Arc::new(make_eventfd()?);
         let running = Arc::new(AtomicBool::new(true));
         let gate = VsyncGate::new();
         let tick_fd = tick.as_raw_fd();
@@ -882,6 +943,39 @@ impl VsyncPump {
             gate,
             running,
             handle: Some(handle),
+            mode,
+            period_ns,
+        })
+    }
+
+    fn start_display_timer(period_ns: u64) -> io::Result<Self> {
+        let fd = unsafe {
+            libc::timerfd_create(
+                libc::CLOCK_MONOTONIC,
+                libc::TFD_CLOEXEC | libc::TFD_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: timerfd_create returned a fresh descriptor.
+        let tick = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
+        let timer = Arc::new(DisplayTimer {
+            fd: tick.clone(),
+            period_ns: AtomicU64::new(period_ns),
+        });
+        timer.arm(true)?;
+        let gate = VsyncGate {
+            timer: Some(timer),
+            ..VsyncGate::new()
+        };
+        let mode = "external-display-timer";
+        log::info!("anland.vsync mode={mode} period_ns={period_ns}");
+        Ok(Self {
+            tick,
+            gate,
+            running: Arc::new(AtomicBool::new(true)),
+            handle: None,
             mode,
             period_ns,
         })
@@ -1168,6 +1262,30 @@ pub fn wait_fence(fence_fd: &OwnedFd, timeout_ms: i32) -> io::Result<()> {
 #[cfg(test)]
 mod pacing_tests {
     use super::*;
+
+    #[test]
+    fn external_clock_follows_the_mode_and_sleeps_without_damage() {
+        let pump = VsyncPump::start(60_000, true).unwrap();
+        assert_eq!(pump.mode(), "external-display-timer");
+        let gate = pump.gate();
+        let interval = || {
+            let mut spec = unsafe { std::mem::zeroed::<libc::itimerspec>() };
+            assert_eq!(
+                unsafe { libc::timerfd_gettime(pump.tick_fd().as_raw_fd(), &mut spec) },
+                0
+            );
+            spec.it_interval.tv_nsec
+        };
+        assert_eq!(interval(), 16_666_666);
+        gate.set_armed(false);
+        gate.set_refresh_millihz(120_000);
+        assert_eq!(interval(), 0);
+        assert!(!poll_readable(pump.tick_fd(), 0).unwrap());
+        gate.set_armed(true);
+        assert_eq!(interval(), 8_333_333);
+        gate.set_refresh_millihz(59_940);
+        assert_eq!(interval(), 16_683_350);
+    }
     use std::cell::RefCell;
 
     #[test]

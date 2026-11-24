@@ -40,6 +40,17 @@ internal class DesktopPresentation(
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val active = display.mode
+            val preferred = display.supportedModes.asSequence()
+                .filter { it.physicalWidth == active.physicalWidth && it.physicalHeight == active.physicalHeight }
+                .maxByOrNull { it.refreshRate } ?: active
+            window?.let { presentationWindow ->
+                presentationWindow.attributes = presentationWindow.attributes.apply {
+                    preferredDisplayModeId = preferred.modeId
+                }
+            }
+        }
         surfaceView.holder.addCallback(callback)
         setContentView(
             ArrowShield(context).apply {

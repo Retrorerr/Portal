@@ -499,6 +499,7 @@ open class PortalActivity : GameActivity() {
         }
         presentation = shown
         holdingPhoneSurface = fromHere
+        desktopHighRefresh = false
         if (previous != null) {
             presentedPad?.let { overlayHost().removeView(it) }
             dismissPresentation(previous)
@@ -582,8 +583,12 @@ open class PortalActivity : GameActivity() {
      * Native (any thread): refresh rate in millihertz to advertise for the
      * desktop's output; see [highRefreshTargetMillihz].
      */
-    fun desktopRefreshTargetMillihz(): Int = presentation?.display?.let { Math.round(it.refreshRate * 1000f) }
-        ?: highRefreshTargetMillihz()
+    fun desktopRefreshTargetMillihz(): Int {
+        val output = desktopDisplay()
+        if (output == null || output.displayId == Display.DEFAULT_DISPLAY) return highRefreshTargetMillihz()
+        val rate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) output.mode.refreshRate else output.refreshRate
+        return Math.round(rate * 1000f)
+    }
 
     private fun applyPointerCapture() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || presentation != null) return
@@ -740,7 +745,10 @@ open class PortalActivity : GameActivity() {
      * returns the panel to the system's normal low-rate policy.
      */
     fun setHighRefreshPreferred(enable: Boolean) {
+        // A Presentation has its own window and display mode vote.
+        if (presentation != null) return
         runOnUiThread {
+            if (presentation != null || desktopHighRefresh == enable) return@runOnUiThread
             desktopHighRefresh = enable
             applyHighRefresh()
         }

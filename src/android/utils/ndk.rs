@@ -130,6 +130,21 @@ fn desktop_display<'local>(
     .ok()
 }
 
+/// Whether the desktop's surface is on an Android secondary display.
+pub fn desktop_is_external(android_app: &AndroidApp) -> bool {
+    run_in_jvm(
+        |env, app| {
+            let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            let display = desktop_display(env, &activity)?;
+            env.call_method(display, "getDisplayId", "()I", &[])
+                .and_then(|value| value.i())
+                .ok()
+        },
+        android_app.clone(),
+    )
+    .is_some_and(|id| id > 0)
+}
+
 /// Current Android display refresh rate expressed in Wayland mode units (millihertz).
 ///
 /// This is the legacy `Display.getRefreshRate()` reading. New code should prefer

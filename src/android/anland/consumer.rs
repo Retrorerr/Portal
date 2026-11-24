@@ -185,8 +185,14 @@ const FREE_RUNNING_SLOTS: usize = 4;
 /// (0 of 125 slipped). It also lets SurfaceFlinger hold a frame more than it
 /// shows, which is a frame of latency; the render loop detects and drains
 /// that (see `sys::backlogged`). Costs one more buffer (~32 MB at 3392x2400).
-fn window_buffer_count(min_undequeued: i32) -> usize {
-    let slack = tuning_value("slack").map(|v| v as i32).unwrap_or(3);
+fn window_buffer_count(min_undequeued: i32, external_display: bool) -> usize {
+    // The monitor is paced independently of handset vsync. Leave room for
+    // the current render and the stop-time spare above Android's minimum.
+    // Another slot lets a full refresh of already-rendered content queue up.
+    let default_slack = if external_display { 2 } else { 3 };
+    let slack = tuning_value("slack")
+        .map(|v| v as i32)
+        .unwrap_or(default_slack);
     (min_undequeued + slack).clamp(3, MAX_BUFS as i32) as usize
 }
 
@@ -251,6 +257,7 @@ struct Inner {
     /// attachment so a changed Android peak-refresh setting reaches KWin's
     /// RenderLoop/OutputMode through the existing DISPLAY_REFRESH seed.
     refresh_mhz: AtomicU32,
+    external_display: AtomicBool,
     /// Native-window epoch minted for each surface attachment (see
     /// [`surface_geometry::mint_surface_epoch`]). Delayed resize events from
     /// a destroyed surface carry the old epoch and are rejected as stale.
@@ -416,6 +423,7 @@ pub struct AnlandConfig {
     pub width: u32,
     pub height: u32,
     pub refresh_mhz: u32,
+    pub external_display: bool,
     pub socket_path: std::path::PathBuf,
 }
 
@@ -573,7 +581,7 @@ fn configure_window(
         );
         let transform = set_window_geometry(window, anw, w, h, None)?;
         let min_undequeued = unsafe { anw.query_min_undequeued(window) }?;
-        let total = window_buffer_count(min_undequeued);
+        let total = window_buffer_count(min_undequeued, cfg.external_display);
         let r = unsafe { anw.set_buffer_count(window, total) };
         if r != 0 {
             return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
@@ -666,7 +674,7 @@ impl AnlandSession {
                 return Err(format!("input eventfd: {error}"));
             }
         };
-        let vsync = match sys::VsyncPump::start(cfg.refresh_mhz) {
+        let vsync = match sys::VsyncPump::start(cfg.refresh_mhz, cfg.external_display) {
             Ok(vsync) => vsync,
             Err(error) => {
                 unsafe { anw::release(window, &anw) };
@@ -694,6 +702,7 @@ impl AnlandSession {
             transform_checked_ns: AtomicU64::new(0),
             transform_mismatches: AtomicU32::new(0),
             refresh_mhz: AtomicU32::new(cfg.refresh_mhz),
+            external_display: AtomicBool::new(cfg.external_display),
             surface_epoch: AtomicU64::new(surface_epoch),
             surface_gen: Mutex::new(1),
             rebind_active: AtomicBool::new(false),
@@ -856,6 +865,9 @@ impl AnlandSession {
         inner.full_rate_until_ns.store(0, Ordering::Release);
         *inner.screen.lock().unwrap() = (w, h);
         inner.refresh_mhz.store(cfg.refresh_mhz, Ordering::Release);
+        inner
+            .external_display
+            .store(cfg.external_display, Ordering::Release);
         inner.broker.set_screen(ScreenInfo {
             width: w,
             height: h,
@@ -863,7 +875,7 @@ impl AnlandSession {
             refresh: cfg.refresh_mhz,
         });
 
-        let vsync = match sys::VsyncPump::start(cfg.refresh_mhz) {
+        let vsync = match sys::VsyncPump::start(cfg.refresh_mhz, cfg.external_display) {
             Ok(vsync) => vsync,
             Err(error) => {
                 self.suspend_surface();
@@ -1492,7 +1504,10 @@ impl AnlandSession {
         inner.transform_mismatches.store(0, Ordering::Release);
         let min_undequeued = unsafe { inner.anw.query_min_undequeued(window) }
             .map_err(|e| format!("ANativeWindow query min-undequeued after resize: {e}"))?;
-        let total = window_buffer_count(min_undequeued);
+        let total = window_buffer_count(
+            min_undequeued,
+            inner.external_display.load(Ordering::Acquire),
+        );
         let r = unsafe { inner.anw.set_buffer_count(window, total) };
         if r != 0 {
             return Err(format!("ANativeWindow_setBufferCount({total}) failed: {r}"));
@@ -1968,15 +1983,16 @@ fn follow_transform_hint(inner: &Arc<Inner>, now: u64) {
 /// display-mode target re-resolved at the latest high-refresh request as the
 /// advertised output rate, for new producers (broker screen info) and for the
 /// connected KWin (DISPLAY_REFRESH). Render thread only.
-fn follow_refresh_target(inner: &Arc<Inner>) {
+fn follow_refresh_target(inner: &Arc<Inner>, vsync: &sys::VsyncGate, external_display: bool) {
     let Some(target) = crate::android::utils::display_mode_request::target_millihz() else {
         return;
     };
     let current = inner.refresh_mhz.load(Ordering::Acquire);
-    if target.abs_diff(current) < 500 {
+    if target == current || (!external_display && target.abs_diff(current) < 500) {
         return;
     }
     inner.refresh_mhz.store(target, Ordering::Release);
+    vsync.set_refresh_millihz(target);
     let (w, h) = *inner.screen.lock().unwrap();
     inner.broker.set_screen(ScreenInfo {
         width: w,
@@ -2112,6 +2128,7 @@ fn render_loop(inner: Arc<Inner>) {
     let mut cur_gen: u64 = 0;
     let mut cur_fence: Option<Arc<OwnedFd>> = None;
     let mut idle_logged = false;
+    let external_display = inner.external_display.load(Ordering::Acquire);
     // Thread-local dups keep the pacing fds valid outside the vsync lock.
     let (tick, wake, vsync_gate) = {
         let vsync = inner.vsync.lock().unwrap();
@@ -2249,8 +2266,6 @@ fn render_loop(inner: Arc<Inner>) {
             drain_fd(&wake);
         }
         let now = sys::now_ns();
-        let period_ns =
-            1_000_000_000_000 / u64::from(inner.refresh_mhz.load(Ordering::Acquire).max(1));
         let burst = inner.demand_until_ns.load(Ordering::Acquire) > now;
         // An unserved hint outlives its burst: the client that sent it waits
         // for a frame callback and sends no other, so dropping it here would
@@ -2262,17 +2277,21 @@ fn render_loop(inner: Arc<Inner>) {
         // just to skip. The heartbeat below runs off the poll timeout, and a
         // kick selects at once and re-arms the ticks for the next frame.
         vsync_gate.set_armed(demanding || deferred);
-        follow_refresh_target(&inner);
+        follow_refresh_target(&inner, &vsync_gate, external_display);
+        let period_ns =
+            1_000_000_000_000 / u64::from(inner.refresh_mhz.load(Ordering::Acquire).max(1));
         follow_transform_hint(&inner, sys::now_ns());
         // Window-level display-mode request follows interactive demand (plus
         // a short hold so bursty input does not flap Android's mode choice).
-        crate::android::utils::display_mode_request::request(
+        crate::android::utils::display_mode_request::request(if external_display {
+            demanding
+        } else {
             inner
                 .high_refresh_until_ns
                 .load(Ordering::Acquire)
                 .saturating_add(HIGH_REFRESH_HOLD_NS)
-                > now,
-        );
+                > now
+        });
         let since_last = now.wrapping_sub(last_select_ns);
         // Explicit bursts present every tick. Damage-only demand presents
         // one frame per hint (a 24 fps player got ~89 identical frames/s at
@@ -2280,7 +2299,9 @@ fn render_loop(inner: Arc<Inner>) {
         // interacts.
         let paced = inner.full_rate_until_ns.load(Ordering::Acquire) > now
             || (inner.damage_pending.load(Ordering::Acquire)
-                && (since_last >= IDLE_SELECT_INTERVAL_NS || interactive(&inner, now)));
+                && (external_display
+                    || since_last >= IDLE_SELECT_INTERVAL_NS
+                    || interactive(&inner, now)));
         // A deferred start runs at the next tick, or when none comes.
         let want = wake_ready
             || (tick_ready && ((demanding && paced) || since_last >= HEARTBEAT_NS))

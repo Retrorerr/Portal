@@ -328,20 +328,26 @@ fn resume_anland(
     }
     // Demand-driven window display-mode requests target this activity.
     crate::android::utils::display_mode_request::attach(android_app);
+    let external_display = ndk::desktop_is_external(android_app);
+    let refresh_mhz = if external_display {
+        ndk::active_refresh_millihz(android_app)
+    } else {
+        ndk::preferred_high_refresh_millihz(android_app)
+    } as u32;
     // Same per-window high-refresh hint as the Smithay path; from here on
     // display_mode_request withdraws and restores it with presentation demand.
     if !backend.frame_rate_requested {
-        let rate_hz = ndk::preferred_high_refresh_millihz(android_app) as f32 / 1000.0;
+        let rate_hz = refresh_mhz as f32 / 1000.0;
         crate::android::utils::frame_rate::ensure_high_refresh_rate_hz(android_app, rate_hz);
         backend.frame_rate_requested = true;
         ndk::log_display_modes(android_app);
     }
     backend.last_refresh_poll_ms = Some(backend.clock.now().as_millis() as u64);
-    let refresh_mhz = ndk::preferred_high_refresh_millihz(android_app).max(1) as u32;
     let config = crate::android::anland::AnlandConfig {
         width: size.width,
         height: size.height,
         refresh_mhz,
+        external_display,
         socket_path: crate::android::anland::host_socket_path(),
     };
     if existing_session {

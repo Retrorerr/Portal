@@ -45,8 +45,10 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -369,6 +371,8 @@ internal class DisplaySetupView(
         }
 
         val compact = LocalConfiguration.current.screenHeightDp < 560
+        val scroll = rememberScrollState()
+        LaunchedEffect(index) { scroll.scrollTo(0) }
         Layout(
             content = {
                 Shell(palette, open) { fromRow }
@@ -377,6 +381,7 @@ internal class DisplaySetupView(
                         // The card's own space doesn't close it.
                         .pointerInput(Unit) { detectTapGestures { } }
                         .graphicsLayer { alpha = smooth(if (fromRow) 0.4f else 0.25f, 0.85f, open.value) }
+                        .verticalScroll(scroll)
                         .padding(start = 22.dp, end = 22.dp, top = 18.dp, bottom = 12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
