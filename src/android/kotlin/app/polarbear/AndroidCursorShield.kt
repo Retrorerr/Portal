@@ -60,9 +60,20 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
         title = "Portal cursor shield"
     }
     private val giveUp = Runnable {
-        if (arming) Log.i(TAG, "No mouse event reached the shield")
+        if (arming) {
+            // No Portal window under the arrow there: trying again would only
+            // hand the mouse to Android for a moment on every motion.
+            failedOn = armedOn
+            Log.i(TAG, "No mouse event reached the shield on display $armedOn; not trying there again this grab")
+        }
         takeBack()
     }
+
+    /** The display the arrow was on when arming began. */
+    private var armedOn = Display.INVALID_DISPLAY
+
+    /** A display where arming found no Portal window under the arrow. */
+    private var failedOn = Display.INVALID_DISPLAY
     private var added = false
     private var arming = false
 
@@ -92,8 +103,9 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
             Log.i(TAG, "Arrow moved from display $hiddenOn to ${event.displayId}")
             hidden = false
         }
-        if (hidden) return
+        if (hidden || event.displayId == failedOn) return
         if (event.actionMasked != MotionEvent.ACTION_HOVER_MOVE || event.buttonState != 0) return
+        armedOn = event.displayId
         arming = true
         setTouchable(true)
         KeyboardAccessibilityService.routeMotion(false)
