@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail the APK release build if its pinned public runtime asset is unavailable."""
 import json
+import os
 import urllib.request
 from pathlib import Path
 
@@ -10,8 +11,12 @@ def verify():
     prefix = f"https://github.com/Retrorerr/Portal/releases/download/{tag}/"
     if not manifest["url"].startswith(prefix):
         raise RuntimeError("Runtime must be a versioned Portal release asset")
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "Portal-release-verifier"}
+    # Anonymous API calls share a small per-IP limit that CI runners exhaust.
+    if os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
     request = urllib.request.Request(f"https://api.github.com/repos/Retrorerr/Portal/releases/tags/{tag}",
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "Portal-release-verifier"})
+        headers=headers)
     with urllib.request.urlopen(request, timeout=30) as response:
         release = json.load(response)
     asset = next(a for a in release["assets"] if a["browser_download_url"] == manifest["url"])
