@@ -3,8 +3,8 @@ package app.polarbear
 import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
-import android.view.Display
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.PointerIcon
@@ -32,8 +32,9 @@ import androidx.annotation.RequiresApi
  * app shows something there). Over a mirror this window still gets the
  * event, but over the desktop's own Presentation that window is the one
  * under the arrow: it hands its events here through [offer] while arming and
- * shows the empty icon for the rest of the grab ([hidesArrow]). Should the
- * arrow move to another display mid-grab, the next motion hides it there.
+ * shows the empty icon for the rest of the grab ([hidesArrow]). Where no
+ * Portal window is under the arrow, tries soon stop: each hands the mouse to
+ * Android for a moment, which would make the desktop cursor stutter.
  */
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 internal class AndroidCursorShield(context: Context, private val forward: (MotionEvent) -> Unit) {
@@ -61,28 +62,24 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
     }
     private val giveUp = Runnable {
         if (arming) {
-            // No Portal window under the arrow there: trying again would only
-            // hand the mouse to Android for a moment on every motion.
-            failedOn = armedOn
-            Log.i(TAG, "No mouse event reached the shield on display $armedOn; not trying there again this grab")
+            // No Portal window under the arrow: every try hands the mouse to
+            // Android for a moment, so they are spaced out and soon stop.
+            failures++
+            failedAt = SystemClock.uptimeMillis()
+            Log.i(TAG, "No mouse event reached the shield (try $failures of $MAX_TRIES)")
         }
         takeBack()
     }
 
-    /** The display the arrow was on when arming began. */
-    private var armedOn = Display.INVALID_DISPLAY
-
-    /** A display where arming found no Portal window under the arrow. */
-    private var failedOn = Display.INVALID_DISPLAY
+    /** Tries this grab that found no Portal window under the arrow. */
+    private var failures = 0
+    private var failedAt = 0L
     private var added = false
     private var arming = false
 
     /** Android's arrow is hidden. */
     var hidden = false
         private set
-
-    /** The display Android's arrow was on when it was hidden. */
-    private var hiddenOn = Display.INVALID_DISPLAY
 
     fun show(): Boolean {
         try {
@@ -97,20 +94,14 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
 
     /** A routed event: the first plain motion while the arrow shows lets the mouse through onto this window. */
     fun routed(event: MotionEvent) {
-        if (!added || arming) return
-        if (hidden && event.displayId != hiddenOn && event.displayId != Display.INVALID_DISPLAY) {
-            // Android moved its arrow to another display: hide it there too.
-            Log.i(TAG, "Arrow moved from display $hiddenOn to ${event.displayId}")
-            hidden = false
-        }
-        if (hidden || event.displayId == failedOn) return
+        if (!added || hidden || arming) return
         if (event.actionMasked != MotionEvent.ACTION_HOVER_MOVE || event.buttonState != 0) return
-        armedOn = event.displayId
+        if (failures >= MAX_TRIES || failures > 0 && SystemClock.uptimeMillis() - failedAt < RETRY_DELAY_MS) return
         arming = true
         setTouchable(true)
         KeyboardAccessibilityService.routeMotion(false)
         view.postDelayed(giveUp, ARMING_TIMEOUT_MS)
-        Log.i(TAG, "Letting the mouse through on display ${event.displayId}")
+        Log.i(TAG, "Letting the mouse through")
     }
 
     /**
@@ -118,16 +109,15 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
      * desktop's Presentation on the monitor the arrow is on: while arming, its
      * events are this window's. True when the event was taken.
      */
-    fun offer(event: MotionEvent): Boolean = arming && take(event)
+    fun offer(event: MotionEvent, from: String): Boolean = arming && take(event, from)
 
-    private fun take(event: MotionEvent): Boolean {
+    private fun take(event: MotionEvent, from: String = "the shield"): Boolean {
         if (!arming) return false
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
             forward(event)
             if (!hidden) {
                 hidden = true
-                hiddenOn = event.displayId
-                Log.i(TAG, "Mouse reached the shield on display ${event.displayId} (action ${event.actionMasked}, source 0x${Integer.toHexString(event.source)})")
+                Log.i(TAG, "Mouse reached $from (action ${event.actionMasked}, source 0x${Integer.toHexString(event.source)})")
                 // After this event, so Android applies the empty icon first.
                 view.post(::takeBack)
             }
@@ -180,6 +170,8 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
     companion object {
         private const val TAG = "PortalCursorShield"
         private const val ARMING_TIMEOUT_MS = 250L
+        private const val MAX_TRIES = 3
+        private const val RETRY_DELAY_MS = 2000L
 
         /** The shield of the routed grab on now, UI thread only. */
         private var active: AndroidCursorShield? = null
@@ -188,6 +180,6 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
         fun hidesArrow(): Boolean = active != null
 
         /** See [offer]; false without a routed grab. */
-        fun offerToActive(event: MotionEvent): Boolean = active?.offer(event) ?: false
+        fun offerToActive(event: MotionEvent, from: String): Boolean = active?.offer(event, from) ?: false
     }
 }
