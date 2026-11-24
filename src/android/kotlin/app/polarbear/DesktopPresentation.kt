@@ -76,6 +76,7 @@ internal class DesktopPresentation(
             offer(event) || super.dispatchTouchEvent(event)
 
         private fun offer(event: MotionEvent): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
-            event.isFromSource(android.view.InputDevice.SOURCE_MOUSE) && AndroidCursorShield.offerToActive(event, "the desktop on display ${display?.displayId}")
+            event.isFromSource(android.view.InputDevice.SOURCE_MOUSE) && shielding() &&
+            AndroidCursorShield.offerToActive(event, "the desktop on display ${display?.displayId}")
     }
 }

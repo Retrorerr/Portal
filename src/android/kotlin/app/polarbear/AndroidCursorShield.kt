@@ -30,11 +30,13 @@ import androidx.annotation.RequiresApi
  * Android may keep its arrow on a monitor rather than the tablet (OxygenOS
  * puts it on the first external display, which mirrors the tablet until an
  * app shows something there). Over a mirror this window still gets the
- * event, but over the desktop's own Presentation that window is the one
- * under the arrow: it hands its events here through [offer] while arming and
- * shows the empty icon for the rest of the grab ([hidesArrow]). Where no
- * Portal window is under the arrow, tries soon stop: each hands the mouse to
- * Android for a moment, which would make the desktop cursor stutter.
+ * event, but over the desktop's own window (its Presentation, or Portal moved
+ * there) that window is the one under the arrow: it hands its events here
+ * through [offer] while arming and shows the empty icon for the rest of the
+ * grab ([hidesArrow]). Where no Portal window is under the arrow, tries soon
+ * stop: each hands the mouse to Android for a moment, which would make the
+ * desktop cursor stutter. A press that starts while arming ends on the window
+ * that got it, so the service takes the mouse back once the buttons are up.
  */
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 internal class AndroidCursorShield(context: Context, private val forward: (MotionEvent) -> Unit) {
@@ -61,19 +63,29 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
         title = "Portal cursor shield"
     }
     private val giveUp = Runnable {
-        if (arming) {
-            // No Portal window under the arrow: every try hands the mouse to
-            // Android for a moment, so they are spaced out and soon stop.
-            failures++
-            failedAt = SystemClock.uptimeMillis()
-            Log.i(TAG, "No mouse event reached the shield (try $failures of $MAX_TRIES)")
+        if (arming && !hidden) {
+            // Either the mouse stopped, or no Portal window is under the arrow;
+            // the next routed motion tells which ([routed]).
+            missedAt = SystemClock.uptimeMillis()
+            Log.i(TAG, "No mouse event reached the shield")
+        } else if (arming) {
+            Log.i(TAG, "A button stayed down over the shield; taking the mouse back anyway")
         }
         takeBack()
     }
 
+    /** A press that came in meanwhile keeps the mouse with its window until it ends. */
+    private val takeBackWhenUp = Runnable { if (buttons == 0) takeBack() }
+
     /** Tries this grab that found no Portal window under the arrow. */
     private var failures = 0
     private var failedAt = 0L
+
+    /** When the last try ended with nothing reaching a Portal window, until the next routed motion. */
+    private var missedAt = 0L
+
+    /** Buttons held in the last mouse event a Portal window took while arming. */
+    private var buttons = 0
     private var added = false
     private var arming = false
 
@@ -95,9 +107,22 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
     /** A routed event: the first plain motion while the arrow shows lets the mouse through onto this window. */
     fun routed(event: MotionEvent) {
         if (!added || hidden || arming) return
+        if (missedAt > 0L) {
+            // Motion right after the hand-back kept going through it, to no
+            // Portal window: every such try makes the desktop cursor stall
+            // for a moment, so they are spaced out and soon stop. After a
+            // pause, the mouse had only stopped; that try costs nothing.
+            if (event.eventTime - missedAt < CONTINUED_MS) {
+                failures++
+                failedAt = missedAt
+                Log.i(TAG, "No Portal window under the arrow (try $failures of $MAX_TRIES)")
+            }
+            missedAt = 0L
+        }
         if (event.actionMasked != MotionEvent.ACTION_HOVER_MOVE || event.buttonState != 0) return
         if (failures >= MAX_TRIES || failures > 0 && SystemClock.uptimeMillis() - failedAt < RETRY_DELAY_MS) return
         arming = true
+        buttons = 0
         setTouchable(true)
         KeyboardAccessibilityService.routeMotion(false)
         view.postDelayed(giveUp, ARMING_TIMEOUT_MS)
@@ -115,11 +140,21 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
         if (!arming) return false
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
             forward(event)
+            val wasHeld = buttons != 0
+            buttons = if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) 0
+            else event.buttonState
             if (!hidden) {
                 hidden = true
                 Log.i(TAG, "Mouse reached $from (action ${event.actionMasked}, source 0x${Integer.toHexString(event.source)})")
+            }
+            if (buttons == 0) {
                 // After this event, so Android applies the empty icon first.
-                view.post(::takeBack)
+                // A press that started on a window ends there: the service
+                // takes the mouse back once the buttons are up.
+                view.post(takeBackWhenUp)
+            } else if (!wasHeld) {
+                view.removeCallbacks(giveUp)
+                view.postDelayed(giveUp, HELD_TIMEOUT_MS)
             }
         } else if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             // A finger in the meantime: Android gets the touchscreen back at
@@ -134,6 +169,7 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
         if (!arming) return
         arming = false
         view.removeCallbacks(giveUp)
+        view.removeCallbacks(takeBackWhenUp)
         setTouchable(false)
         KeyboardAccessibilityService.routeMotion(true)
         Log.i(TAG, if (hidden) "Arrow hidden, mouse taken again" else "Mouse taken again, arrow still shown")
@@ -172,6 +208,10 @@ internal class AndroidCursorShield(context: Context, private val forward: (Motio
         private const val ARMING_TIMEOUT_MS = 250L
         private const val MAX_TRIES = 3
         private const val RETRY_DELAY_MS = 2000L
+        /** Routed motion this soon after a missed try means the mouse never stopped. */
+        private const val CONTINUED_MS = 100L
+        /** Longest a press that began on a window keeps the mouse off the service. */
+        private const val HELD_TIMEOUT_MS = 2000L
 
         /** The shield of the routed grab on now, UI thread only. */
         private var active: AndroidCursorShield? = null

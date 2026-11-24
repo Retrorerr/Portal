@@ -50,6 +50,7 @@ import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.PointerIcon
@@ -184,8 +185,22 @@ open class PortalActivity : GameActivity() {
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean =
-        dispatchCaptured(event) || GamepadBridge.dispatchMotion(event) ||
+        offerToCursorShield(event) || dispatchCaptured(event) || GamepadBridge.dispatchMotion(event) ||
             super.dispatchGenericMotionEvent(event)
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean =
+        offerToCursorShield(event) || super.dispatchTouchEvent(event)
+
+    /**
+     * Moved to the monitor Android keeps its arrow on, this activity is the
+     * window under the arrow while [AndroidCursorShield] arms: its mouse events
+     * are the shield's, as the presented desktop's are, rather than positions
+     * the desktop cursor would jump to.
+     */
+    private fun offerToCursorShield(event: MotionEvent): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+            event.isFromSource(InputDevice.SOURCE_MOUSE) && AndroidCursorShield.hidesArrow() &&
+            AndroidCursorShield.offerToActive(event, "Portal on display ${currentDisplay()?.displayId}")
 
     // A captured mouse reports as SOURCE_MOUSE_RELATIVE, a trackball-class
     // source, which reaches the activity here when no view consumed it.

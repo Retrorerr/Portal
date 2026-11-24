@@ -97,6 +97,8 @@ internal class DesktopControlView(
     val asksAboutTouch: Boolean get() = askingTouch
     private var releaseHint by mutableStateOf<String?>(null)
     private var grabbedAt = 0L
+    /** The next [beginGrab] continues a grab moved over to the service ([upgradeToRouted]). */
+    private var carryHint = false
     /** The grab comes through the accessibility service rather than pointer capture. */
     private var routed = false
     private val heldKeys = mutableSetOf<Pair<Int, Int>>()
@@ -385,7 +387,10 @@ internal class DesktopControlView(
         if (!holdsGrab || routed || !(captured || waiting)) return
         if (!KeyboardAccessibilityService.canRouteMotion() || readySurface() == null) return
         Log.i(TAG, "Accessibility service connected during a pointer-capture grab; moving the grab to it")
+        val wasCaptured = captured
         relinquish("accessibility service connected")
+        // The same grab carries on: it keeps the release-keys hint it had.
+        carryHint = wasCaptured
         if (!takeRoutedControl()) capturePointer()
     }
 
@@ -488,12 +493,22 @@ internal class DesktopControlView(
 
     override fun onPointerCaptureChange(hasCapture: Boolean) {
         super.onPointerCaptureChange(hasCapture)
+        // Android reports capture changes later than they are asked for. A grab
+        // that moved over to the accessibility service ([upgradeToRouted]) uses
+        // no capture: the release it asked for, or a request still on its way,
+        // must not end it, and a late grant is given straight back.
+        if (routed) {
+            if (hasCapture) releasePointerCapture()
+            return
+        }
         if (!hasCapture) {
             if (captured) release("capture lost")
+            // Released for the service, which then refused the grab: capture again.
+            else if (waiting) requestCaptureWhenFocused()
             return
         }
         val surface = readySurface()
-        if (!waiting || routed || !hasWindowFocus() || surface == null) {
+        if (!waiting || !hasWindowFocus() || surface == null) {
             release("desktop unavailable")
             return
         }
@@ -504,7 +519,8 @@ internal class DesktopControlView(
         removeCallbacks(captureTimeout)
         askingTouch = false
         grabbedAt = SystemClock.uptimeMillis()
-        releaseHint = if (host.portalDisplays.takeReleaseHint()) "Ctrl+Alt hands control back" else null
+        if (carryHint) carryHint = false
+        else releaseHint = if (host.portalDisplays.takeReleaseHint()) "Ctrl+Alt hands control back" else null
         waiting = false
         captured = true
         onGrabbed?.invoke()
@@ -661,6 +677,7 @@ internal class DesktopControlView(
         val state = if (captured) "grab" else "pending grab"
         val heldMs = if (captured) SystemClock.uptimeMillis() - grabbedAt else 0L
         Log.i(TAG, "Released $state ($reason) after $heldMs ms")
+        carryHint = false
         captured = false
         waiting = false
         TabletGrab.active = false
