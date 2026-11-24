@@ -1,7 +1,7 @@
 use super::process::ArchProcess;
 use crate::android::utils::thread::spawn_named;
 use crate::android::{diagnostics, utils::webview_handoff};
-use crate::core::runtime::LinuxRuntime;
+use crate::core::runtime::{BindMount, LinuxRuntime};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -16,7 +16,6 @@ static LAUNCH_RUNNING: AtomicBool = AtomicBool::new(false);
 struct LaunchState {
     cancel: Option<Arc<AtomicBool>>,
     handle: Option<JoinHandle<()>>,
-    failure_monitor: Option<JoinHandle<()>>,
 }
 
 static LAUNCH_STATE: OnceLock<Mutex<LaunchState>> = OnceLock::new();
@@ -192,19 +191,27 @@ static NEXT_SESSION_OWNER: AtomicI64 = AtomicI64::new(1);
 
 struct LaunchRunningGuard {
     owner: i64,
+    cancel: Arc<AtomicBool>,
+    failure_monitor: Option<JoinHandle<()>>,
 }
 
 impl LaunchRunningGuard {
-    fn new() -> Self {
+    fn new(cancel: Arc<AtomicBool>) -> Self {
         let owner = NEXT_SESSION_OWNER.fetch_add(1, Ordering::Relaxed);
         let app = crate::android::utils::application_context::get_application_context().android_app;
         crate::android::utils::ndk::set_desktop_session_active(&app, owner, true);
-        Self { owner }
+        Self {
+            owner,
+            cancel,
+            failure_monitor: None,
+        }
     }
 }
 
 impl Drop for LaunchRunningGuard {
     fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+        join_bounded(self.failure_monitor.take(), "guest failure monitor");
         let app = crate::android::utils::application_context::get_application_context().android_app;
         crate::android::utils::ndk::set_desktop_session_active(&app, self.owner, false);
         LAUNCH_RUNNING.store(false, Ordering::Release);
@@ -222,32 +229,10 @@ pub fn is_running() -> bool {
     LAUNCH_RUNNING.load(Ordering::Acquire)
 }
 
-pub fn launch() {
-    if crate::android::proot::system_updates::update_in_progress() {
-        log::info!("Skipping launch while a system update replaces guest packages");
-        return;
-    }
-    if crate::android::workspace_switch::in_progress() {
-        log::info!("Skipping launch while a workspace switch changes the guest");
-        return;
-    }
-    if LAUNCH_RUNNING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        log::info!("Skipping launch because the desktop session is already running");
-        return;
-    }
-
-    // Claim Android foreground importance while the launch is still eligible, before asset sync
-    // or guest login can take time. The same guard follows the native worker through logout,
-    // failure and bounded teardown; Android surface loss/resume never releases it.
-    let guard = LaunchRunningGuard::new();
-
+/// Prepare the guest before starting Plasma, off Android's event loop.
+fn prepare_session_runtime() -> Result<(bool, Vec<BindMount>), &'static str> {
+    let _trace = crate::android::anland::sys::trace::section(c"portal.prepareDesktop");
     clear_failure_markers();
-    if let Ok(mut failure) = launch_failure().lock() {
-        *failure = None;
-    }
     // A refreshed graphics driver that keeps failing to draw a desktop is
     // swapped back for the previous one before this session starts.
     if crate::android::anland::is_anland_requested() {
@@ -261,13 +246,9 @@ pub fn launch() {
         !committed && crate::android::proot::setup::can_launch_pending_initial_preferences(rootfs);
     if !committed && !pending_initial_preferences {
         log::error!("Refusing to launch an incomplete or incompatible Debian runtime");
-        // Surface the failure instead of sitting on a blank UI: an
-        // interrupted download leaves no error page otherwise, and
-        // `sync_session_runtime_files` never runs to attempt repair.
-        report_failure(
+        return Err(
             "Debian runtime is incomplete or incompatible. Portal preserved it instead of replacing user data; export diagnostics before repairing the guest.",
         );
-        return;
     }
     if pending_initial_preferences {
         log::info!("Launching provisional Plasma session to apply initial preferences");
@@ -289,33 +270,68 @@ pub fn launch() {
         synced
     } {
         log::error!("Portal session integration repair failed: {error:#}");
-        report_failure(
+        return Err(
             "Portal could not repair its desktop session files. Tap Retry Plasma to try again.",
         );
-        return;
     }
     clear_stale_guest_tmp(rootfs);
     crate::android::ime::start_ime_fifo_listener(rootfs);
-    let library_overlay_binds = crate::android::proot::setup::library_overlay_binds(rootfs);
+    Ok((
+        committed,
+        crate::android::proot::setup::library_overlay_binds(rootfs),
+    ))
+}
 
-    let cancel = Arc::new(AtomicBool::new(false));
+pub fn launch() {
     let Ok(mut state) = launch_state().lock() else {
         log::error!(
             "Launch registry lock is poisoned; refusing to start an untracked guest session"
         );
         return;
     };
+    if crate::android::proot::system_updates::update_in_progress() {
+        log::info!("Skipping launch while a system update replaces guest packages");
+        return;
+    }
+    if crate::android::workspace_switch::in_progress() {
+        log::info!("Skipping launch while a workspace switch changes the guest");
+        return;
+    }
+    if LAUNCH_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        log::info!("Skipping launch because the desktop session is already running");
+        return;
+    }
 
-    // Publish the cancellation token before spawning either worker and keep the registry lock
-    // through both spawns. A Retry Plasma request cannot observe LAUNCH_RUNNING=true with an empty
-    // registry and accidentally miss the cancellation window.
+    if let Ok(mut failure) = launch_failure().lock() {
+        *failure = None;
+    }
+    // Claim foreground importance while the launch is still eligible, and
+    // publish cancellation before releasing the registry lock to stop().
+    let cancel = Arc::new(AtomicBool::new(false));
+    let guard = LaunchRunningGuard::new(cancel.clone());
     state.cancel = Some(cancel.clone());
-    state.handle = None;
-    state.failure_monitor = None;
 
-    let thread_cancel = cancel.clone();
+    let thread_cancel = cancel;
     let handle = spawn_named("desktop-launch", move || {
-        let _guard = guard;
+        let mut guard = guard;
+        if thread_cancel.load(Ordering::Acquire) {
+            return;
+        }
+        let prepared = prepare_session_runtime();
+        if thread_cancel.load(Ordering::Acquire) {
+            return;
+        }
+        let (committed, library_overlay_binds) = match prepared {
+            Ok(prepared) => prepared,
+            Err(reason) => {
+                report_failure(reason);
+                return;
+            }
+        };
+        guard.failure_monitor = Some(spawn_failure_monitor(thread_cancel.clone()));
         diagnostics::host_event("desktop-launch", "starting configured Plasma session");
 
         if let Err(error) = crate::android::proot::setup::prepare_desktop_login(committed) {
@@ -417,12 +433,9 @@ pub fn launch() {
             diagnostics::host_event("desktop-logout", "session ended by the user");
             webview_handoff::wake_event_loop();
         }
-        thread_cancel.store(true, Ordering::Release);
     });
 
-    let failure_monitor = spawn_failure_monitor(cancel.clone());
     state.handle = Some(handle);
-    state.failure_monitor = Some(failure_monitor);
 }
 
 /// Cancel and reap the currently tracked Plasma/PRoot session.
@@ -431,14 +444,14 @@ pub fn launch() {
 /// bounded grace period. Joining the launch worker here ensures `LAUNCH_RUNNING` is cleared before
 /// a Retry Plasma request can start a replacement session.
 pub fn stop() {
-    let (handle, failure_monitor) = if let Ok(mut state) = launch_state().lock() {
+    let handle = if let Ok(mut state) = launch_state().lock() {
         if let Some(cancel) = state.cancel.take() {
             cancel.store(true, Ordering::Release);
         }
-        (state.handle.take(), state.failure_monitor.take())
+        state.handle.take()
     } else {
         log::error!("Launch registry lock is poisoned; cannot join the guest session");
-        (None, None)
+        None
     };
 
     // Never block the Android event-loop indefinitely on a guest process. The process worker has
@@ -446,7 +459,6 @@ pub fn stop() {
     // reader implementation that outlives that path. Dropping an unfinished JoinHandle detaches
     // it safely; LaunchRunningGuard keeps retries barred until the worker really exits.
     join_bounded(handle, "guest launch worker");
-    join_bounded(failure_monitor, "guest failure monitor");
 }
 
 const STOP_JOIN_BUDGET: Duration = Duration::from_millis(500);

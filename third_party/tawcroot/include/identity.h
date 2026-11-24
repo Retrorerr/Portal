@@ -46,6 +46,13 @@ void tawcroot_identity_load(const tawc_identity *in);
  * everyone else none). */
 uint32_t tawcroot_identity_euid(void);
 
+/* Nonblocking hint for recording DAC-override routes. If an identity update
+ * races the read, record routes as usual and check the euid before a retry. */
+int tawcroot_identity_may_be_root(void);
+
+/* Read effective UID and GID from the same identity snapshot. */
+void tawcroot_identity_effective_ids(uint32_t *uid, uint32_t *gid);
+
 /* Fake root's capabilities (see identity.c): whether capset and
  * bounding-set drops the kernel refuses should be answered as success,
  * and the emulated PR_SET_KEEPCAPS flag. */

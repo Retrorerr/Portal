@@ -125,6 +125,12 @@ static void proc_exe_substitute(struct tawcroot_path_scratch *scratch,
 	const char *cls = path;
 	if (dirfd != AT_FDCWD && path[0] != '/' &&
 	    tawcroot_could_be_proc_relative(path)) {
+		/* The exe classifier matches a literal final component. Avoid
+		 * resolving dirfd through procfs for ordinary filenames. */
+		const char *leaf = path;
+		for (const char *p = path; *p; p++)
+			if (*p == '/') leaf = p + 1;
+		if (!tawc_streq(leaf, "exe")) return;
 		char *composed = scratch->buf[2];
 		if (tawcroot_compose_fd_relative(dirfd, path, composed,
 						 TAWCROOT_PATH_SCRATCH_SIZE) > 0)

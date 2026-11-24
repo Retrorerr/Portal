@@ -58,6 +58,12 @@ static tawc_identity g_ident;      /* protected by g_ident_seq */
  * set[ug]id. */
 #define ID_KEEP UINT32_MAX
 
+static int ident_read_retry(uint32_t sequence)
+{
+	__atomic_thread_fence(__ATOMIC_ACQUIRE);
+	return sequence != __atomic_load_n(&g_ident_seq, __ATOMIC_RELAXED);
+}
+
 void tawcroot_identity_get(tawc_identity *out)
 {
 	uint32_t       *dst = (uint32_t *)out;
@@ -67,9 +73,7 @@ void tawcroot_identity_get(tawc_identity *out)
 		if (s1 & 1) continue;  /* writer in progress, retry */
 		for (size_t i = 0; i < IDENT_WORDS; i++)
 			dst[i] = __atomic_load_n(&src[i], __ATOMIC_RELAXED);
-		__atomic_thread_fence(__ATOMIC_ACQUIRE);
-		uint32_t s2 = __atomic_load_n(&g_ident_seq, __ATOMIC_RELAXED);
-		if (s1 == s2) return;
+		if (!ident_read_retry(s1)) return;
 		/* writer landed mid-copy, retry */
 	}
 }
@@ -132,11 +136,41 @@ void tawcroot_identity_reset(void)
 	ident_writer_release(s, &id);
 }
 
+static int ident_try_read_id(const uint32_t *id, uint32_t *value)
+{
+	uint32_t sequence = __atomic_load_n(&g_ident_seq, __ATOMIC_ACQUIRE);
+	if (sequence & 1) return 0;
+	*value = __atomic_load_n(id, __ATOMIC_RELAXED);
+	return !ident_read_retry(sequence);
+}
+
+static uint32_t ident_read_id(const uint32_t *id)
+{
+	uint32_t value;
+	while (!ident_try_read_id(id, &value)) {}
+	return value;
+}
+
+int tawcroot_identity_may_be_root(void)
+{
+	uint32_t uid;
+	return !ident_try_read_id(&g_ident.euid, &uid) || uid == 0;
+}
+
+void tawcroot_identity_effective_ids(uint32_t *uid, uint32_t *gid)
+{
+	for (;;) {
+		uint32_t sequence = __atomic_load_n(&g_ident_seq, __ATOMIC_ACQUIRE);
+		if (sequence & 1) continue;
+		*uid = __atomic_load_n(&g_ident.euid, __ATOMIC_RELAXED);
+		*gid = __atomic_load_n(&g_ident.egid, __ATOMIC_RELAXED);
+		if (!ident_read_retry(sequence)) return;
+	}
+}
+
 uint32_t tawcroot_identity_euid(void)
 {
-	tawc_identity id;
-	tawcroot_identity_get(&id);
-	return id.euid;
+	return ident_read_id(&g_ident.euid);
 }
 
 /* ----- set*id rule engine ----------------------------------------- */
@@ -402,33 +436,25 @@ static long handle_getgroups(const tawcroot_syscall_args *args, ucontext_t *uc)
 static long handle_getuid(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)args; (void)uc;
-	tawc_identity id;
-	tawcroot_identity_get(&id);
-	return (long)id.ruid;
+	return (long)ident_read_id(&g_ident.ruid);
 }
 
 static long handle_geteuid(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)args; (void)uc;
-	tawc_identity id;
-	tawcroot_identity_get(&id);
-	return (long)id.euid;
+	return (long)tawcroot_identity_euid();
 }
 
 static long handle_getgid(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)args; (void)uc;
-	tawc_identity id;
-	tawcroot_identity_get(&id);
-	return (long)id.rgid;
+	return (long)ident_read_id(&g_ident.rgid);
 }
 
 static long handle_getegid(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)args; (void)uc;
-	tawc_identity id;
-	tawcroot_identity_get(&id);
-	return (long)id.egid;
+	return (long)ident_read_id(&g_ident.egid);
 }
 
 /* getresuid/getresgid take three out-pointer args. Write the tracked

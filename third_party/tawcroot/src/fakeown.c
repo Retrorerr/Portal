@@ -381,8 +381,6 @@ void tawcroot_fakeown_decorate(const struct fakeown_path_ctx *ctx,
 		return;
 	}
 
-	tawc_identity id;
-	tawcroot_identity_get(&id);
 	if (disk_mode & 06000) {
 		/* Setuid/setgid safety rule for dropped callers
 		 * (pre-existing behaviour, preserved verbatim). */
@@ -390,25 +388,17 @@ void tawcroot_fakeown_decorate(const struct fakeown_path_ctx *ctx,
 		*gid_out = 0;
 		return;
 	}
-	if (disk_uid == tawcroot_owner_host_uid()) {
-		/* App-owned: the visitor's identity view. Fake root sees
-		 * root-owned; a dropped identity (runuser'd desktop)
-		 * sees its own ids — an app-owned tree reads as the
-		 * visitor's, matching the prepare-login contract. */
-		if (id.euid == 0) {
-			*uid_out = 0;
-			*gid_out = 0;
-		} else {
-			*uid_out = id.euid;
-			*gid_out = id.egid;
-		}
-		return;
-	}
-	if (id.euid == 0) {
-		/* Vanilla `proot -0` view for a root caller over a
-		 * foreign-owned inode (bind-hosted /dev et al). */
+	uint32_t euid, egid;
+	tawcroot_identity_effective_ids(&euid, &egid);
+	if (euid == 0) {
 		*uid_out = 0;
 		*gid_out = 0;
+		return;
+	}
+	if (disk_uid == tawcroot_owner_host_uid()) {
+		/* A dropped identity sees its own IDs on app-owned files. */
+		*uid_out = euid;
+		*gid_out = egid;
 		return;
 	}
 	/* Dropped identity + foreign owner + no record: kernel truth. */

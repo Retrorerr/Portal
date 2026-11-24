@@ -194,8 +194,7 @@ static void sigsys_handler(int sig, siginfo_t *info, void *ucontext)
 	 * include/dispatch.h about Android's stacked filter potentially
 	 * delivering TRAPs we didn't ask for. The call goes through the
 	 * rescue wrapper (rescue.h), which owns the lazy DAC-override
-	 * retry; on everything but an -EACCES at virtual root it is a
-	 * plain table lookup plus a slot claim. */
+	 * retry. Only virtual root needs a slot to record paths. */
 	long rv = tawcroot_fs_sync();
 	if (!rv) rv = tawcroot_dispatch_call(&args, uc);
 #ifdef TAWCROOT_TRACE

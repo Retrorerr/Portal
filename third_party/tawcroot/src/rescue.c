@@ -323,6 +323,8 @@ static long rescue_retry(struct rescue_slot *s,
 
 long tawcroot_rescue_open_in_view(const char *guest_path)
 {
+	if (!tawcroot_identity_may_be_root()) return tawcroot_open_in_view(guest_path);
+
 	/* Already inside a dispatch wrapper (exec_handler's probe opens):
 	 * that wrapper owns the slot and does the retry for the whole
 	 * handler. Claiming here would reset its recorded routes. */
@@ -350,14 +352,15 @@ long tawcroot_dispatch_call(const tawcroot_syscall_args *args, ucontext_t *uc)
 	tawcroot_handler_fn fn = tawcroot_dispatch_get((int)args->nr);
 	if (!fn) return TAWC_ENOSYS;
 
+	/* A desktop process cannot use DAC override. Skip the thread-ID lookup,
+	 * shared slot claim and path recording for ordinary desktop syscalls. */
+	if (!tawcroot_identity_may_be_root()) return fn(args, uc);
+
 	int idx = slot_claim(current_tid());
 	if (idx < 0) return fn(args, uc);
 
 	long rv = fn(args, uc);
-	/* Virtual euid is only consulted here, on the cold path: a guest
-	 * that dropped privileges gets the real EACCES (same gate as the
-	 * fchmodat/fchownat fakes), and every other trap avoids the
-	 * identity seqlock read. */
+	/* Recheck identity before widening modes in case privileges changed. */
 	if (rv == TAWC_EACCES && tawcroot_identity_euid() == 0)
 		rv = rescue_retry(&g_slots[idx], args, fn, uc, rv);
 	slot_release(idx);

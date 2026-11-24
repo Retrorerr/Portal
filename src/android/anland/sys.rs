@@ -1091,11 +1091,27 @@ pub struct LatchPacer {
 }
 
 impl LatchPacer {
+    fn last_latch_on_timeline(&self, deadline_ns: u64, period_ns: u64) -> Option<u64> {
+        if self.last_latch_ns == 0 {
+            return None;
+        }
+        // Round the previous latch to the nearest slot on this callback's
+        // timeline. Advancing by the nominal period on every queue can drift
+        // into the next slot when the display runs slightly faster.
+        let before = self
+            .last_latch_ns
+            .saturating_sub(period_ns / 2 + LATCH_MARGIN_NS);
+        latch_after(before, deadline_ns, period_ns)
+    }
+
     /// Whether a frame started now would only queue behind the latest one.
     pub fn should_defer(&self, now_ns: u64, deadline_ns: u64, period_ns: u64) -> bool {
+        let Some(occupied) = self.last_latch_on_timeline(deadline_ns, period_ns) else {
+            return false;
+        };
         let estimate = self.frame_max_ns[0].max(self.frame_max_ns[1]);
         latch_after(now_ns.saturating_add(estimate), deadline_ns, period_ns)
-            .is_some_and(|latch| latch <= self.last_latch_ns)
+            .is_some_and(|latch| latch <= occupied)
     }
 
     /// Whether a frame that has its buffer now is expected to be queued for
@@ -1127,7 +1143,11 @@ impl LatchPacer {
         self.work_max_ns[0] = self.work_max_ns[0].max(queued_ns.saturating_sub(buffer_ns));
         if let Some(latch) = latch_after(queued_ns, deadline_ns, period_ns) {
             // Frames are shown in order, one per latch.
-            self.last_latch_ns = latch.max(self.last_latch_ns.saturating_add(period_ns));
+            self.last_latch_ns = self
+                .last_latch_on_timeline(deadline_ns, period_ns)
+                .map_or(latch, |occupied| {
+                    latch.max(occupied.saturating_add(period_ns))
+                });
         }
     }
 }
@@ -1274,6 +1294,22 @@ mod pacing_tests {
             };
             pacer.frame_queued(t, t, t + took, deadline, period);
             t += period;
+        }
+    }
+
+    #[test]
+    fn a_faster_display_does_not_accumulate_latch_drift() {
+        let nominal_period = 8_333_333;
+        let actual_period = 8_300_000;
+        let mut pacer = LatchPacer::default();
+        for frame in 0..500 {
+            let tick = 1_000_000_000 + frame * actual_period;
+            let deadline = tick + 5_000_000;
+            assert!(
+                !pacer.should_defer(tick, deadline, nominal_period),
+                "frame {frame} was deferred on an empty latch"
+            );
+            pacer.frame_queued(tick, tick, tick + 2_500_000, deadline, nominal_period);
         }
     }
 

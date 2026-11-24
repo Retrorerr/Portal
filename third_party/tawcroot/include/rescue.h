@@ -12,7 +12,8 @@
  * Shape: one wrapper at the dispatch call site
  * (`tawcroot_dispatch_call`, used by the SIGSYS handler and by the
  * hosted tests). The path translator drops each translated route
- * (base fd + suffix) into a per-thread rescue slot the wrapper owns.
+ * (base fd + suffix) into a per-thread rescue slot the wrapper owns
+ * for virtual-root calls.
  * When the handler returns -EACCES and the virtual euid is 0, the
  * wrapper widens the app-owned inodes along those routes, re-runs the
  * handler once, and restores the old modes in reverse order whatever
