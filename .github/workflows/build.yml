@@ -105,7 +105,7 @@ jobs:
         run: echo "version=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[0].version')" >> "$GITHUB_OUTPUT"
 
       - name: Verify pinned production runtime is publicly available
-        # The run's read-only token: anonymous API calls from shared runners
+        # The run's own token: anonymous API calls from shared runners
         # hit GitHub's rate limit.
         env:
           GITHUB_TOKEN: ${{ github.token }}
