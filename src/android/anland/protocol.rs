@@ -156,6 +156,92 @@ pub const OUTPUT_TYPE_SCHEDULING: u32 = 4;
 
 pub const PIXEL_FORMAT_RGBA_8888: u32 = 1;
 
+// ---- DRM format modifiers --------------------------------------------------
+
+pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+/// Qualcomm Adreno UBWC (`fourcc_mod_code(QCOM, 1)`).
+pub const DRM_FORMAT_MOD_QCOM_COMPRESSED: u64 = 0x0500_0000_0000_0001;
+/// Qualcomm Adreno gralloc private UBWC usage bit (`GRALLOC_USAGE_PRIVATE_ALLOC_UBWC`).
+pub const GRALLOC_USAGE_PRIVATE_ALLOC_UBWC: u64 = 1 << 28;
+
+fn align_up_u64(value: u64, align: u64) -> Option<u64> {
+    if align == 0 || !align.is_power_of_two() {
+        return None;
+    }
+    let rem = value & (align - 1);
+    if rem == 0 {
+        Some(value)
+    } else {
+        value.checked_add(align - rem)
+    }
+}
+
+/// Expected byte size of a single-level Adreno UBWC `RGBA_8888` buffer
+/// matching Mesa's `fdl6_layout_image` (`TILE6_3`, `cpp = 4`, no mipmaps).
+/// Returns `None` if geometry or stride violates UBWC alignment constraints.
+pub fn ubwc_rgba8888_expected_size(width: u32, height: u32, stride_px: u32) -> Option<u64> {
+    // Mesa fdl6_layout_image falls back to linear below 16 texels wide for 4-byte formats.
+    if width < 16 || height == 0 || stride_px < width {
+        return None;
+    }
+    let pitch_bytes = u64::from(stride_px).checked_mul(4)?;
+    // TILE6_3 with cpp=4 requires 256-byte pitch alignment (64 pixels).
+    if pitch_bytes & 255 != 0 {
+        return None;
+    }
+    // Data plane: height aligned to 16, total aligned to 4096 bytes.
+    let data_height = align_up_u64(u64::from(height), 16)?;
+    let data_size = align_up_u64(data_height.checked_mul(pitch_bytes)?, 4096)?;
+    // Metadata plane: 16x4 pixel blocks, pitch aligned to 64 bytes, height aligned to 16 rows,
+    // total aligned to 4096 bytes.
+    let meta_blocks_x = u64::from(width).div_ceil(16);
+    let meta_blocks_y = u64::from(height).div_ceil(4);
+    let meta_pitch = align_up_u64(meta_blocks_x, 64)?;
+    let meta_height = align_up_u64(meta_blocks_y, 16)?;
+    let meta_size = align_up_u64(meta_pitch.checked_mul(meta_height)?, 4096)?;
+    meta_size.checked_add(data_size)
+}
+
+/// Linear `RGBA_8888` byte size (page-aligned) for comparison against UBWC allocation size.
+pub fn linear_rgba8888_min_size(height: u32, stride_px: u32) -> Option<u64> {
+    let pitch_bytes = u64::from(stride_px).checked_mul(4)?;
+    align_up_u64(u64::from(height).checked_mul(pitch_bytes)?, 4096)
+}
+
+/// Decide the DRM format modifier for an allocated `ANativeWindowBuffer`.
+///
+/// Only returns `DRM_FORMAT_MOD_QCOM_COMPRESSED` when UBWC was requested, the
+/// buffer carries the Qualcomm UBWC gralloc usage bit, its stride/dimensions
+/// satisfy Adreno `fdl6_layout_image` alignment rules, and its backing dma-buf
+/// is at least the full UBWC metadata+data size (and strictly larger than a
+/// linear buffer of the same stride/height). Otherwise falls back to linear.
+pub fn classify_rgba8888_buffer_modifier(
+    width: u32,
+    height: u32,
+    stride_px: u32,
+    dmabuf_size: Option<u64>,
+    usage: u64,
+    requested_ubwc: bool,
+) -> u64 {
+    if !requested_ubwc || (usage & GRALLOC_USAGE_PRIVATE_ALLOC_UBWC) == 0 {
+        return DRM_FORMAT_MOD_LINEAR;
+    }
+    let Some(fd_size) = dmabuf_size else {
+        return DRM_FORMAT_MOD_LINEAR;
+    };
+    let Some(expected_ubwc) = ubwc_rgba8888_expected_size(width, height, stride_px) else {
+        return DRM_FORMAT_MOD_LINEAR;
+    };
+    let Some(linear_size) = linear_rgba8888_min_size(height, stride_px) else {
+        return DRM_FORMAT_MOD_LINEAR;
+    };
+    if fd_size >= expected_ubwc && fd_size > linear_size {
+        DRM_FORMAT_MOD_QCOM_COMPRESSED
+    } else {
+        DRM_FORMAT_MOD_LINEAR
+    }
+}
+
 // ---- packed wire structs ---------------------------------------------------
 
 #[repr(C, packed)]
@@ -535,5 +621,72 @@ mod tests {
     fn hello_slot_count_matches_producer() {
         assert_eq!(HELLO_FD_COUNT, 5);
         const { assert!(MAX_BUFS <= 8) };
+    }
+
+    #[test]
+    fn ubwc_rgba8888_size_matches_adreno_fdl6_layout() {
+        // OnePlus Pad 3 landscape 3392x2400 (stride=3392):
+        // meta = align(align(212,64)*align(600,16), 4096) = 256*608 = 155_648
+        // data = align(2400*13568, 4096) = 32_563_200 -> total = 32_718_848.
+        assert_eq!(
+            ubwc_rgba8888_expected_size(3392, 2400, 3392),
+            Some(32_718_848)
+        );
+        // Portrait 2400x3392 (stride=2432):
+        // meta = align(192*848, 4096) = 163_840
+        // data = 3392*9728 = 32_997_376 -> total = 33_161_216.
+        assert_eq!(
+            ubwc_rgba8888_expected_size(2400, 3392, 2432),
+            Some(33_161_216)
+        );
+        // Pitch not 256-byte aligned (stride_px not multiple of 64) rejected.
+        assert_eq!(ubwc_rgba8888_expected_size(2400, 3392, 2400), None);
+        // Width below Mesa linear fallback threshold rejected.
+        assert_eq!(ubwc_rgba8888_expected_size(12, 64, 64), None);
+    }
+
+    #[test]
+    fn classify_buffer_modifier_enforces_ubwc_and_falls_back_to_linear() {
+        let ubwc_usage = (1 << 8) | (1 << 9) | (1 << 11) | GRALLOC_USAGE_PRIVATE_ALLOC_UBWC;
+        let linear_usage = (1 << 8) | (1 << 9) | (1 << 11);
+        // Genuine UBWC allocation accepted.
+        assert_eq!(
+            classify_rgba8888_buffer_modifier(3392, 2400, 3392, Some(32_718_848), ubwc_usage, true),
+            DRM_FORMAT_MOD_QCOM_COMPRESSED
+        );
+        // Opted out -> linear.
+        assert_eq!(
+            classify_rgba8888_buffer_modifier(
+                3392,
+                2400,
+                3392,
+                Some(32_718_848),
+                ubwc_usage,
+                false
+            ),
+            DRM_FORMAT_MOD_LINEAR
+        );
+        // Missing UBWC usage bit -> linear.
+        assert_eq!(
+            classify_rgba8888_buffer_modifier(
+                3392,
+                2400,
+                3392,
+                Some(32_718_848),
+                linear_usage,
+                true
+            ),
+            DRM_FORMAT_MOD_LINEAR
+        );
+        // Linear-sized dma-buf (non-Qualcomm gralloc ignored bit 28) -> linear.
+        assert_eq!(
+            classify_rgba8888_buffer_modifier(3392, 2400, 3392, Some(32_563_200), ubwc_usage, true),
+            DRM_FORMAT_MOD_LINEAR
+        );
+        // Unaligned stride -> linear.
+        assert_eq!(
+            classify_rgba8888_buffer_modifier(2400, 3392, 2400, Some(33_161_216), ubwc_usage, true),
+            DRM_FORMAT_MOD_LINEAR
+        );
     }
 }

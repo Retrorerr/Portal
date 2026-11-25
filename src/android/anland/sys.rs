@@ -12,6 +12,15 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 
+/// Return the backing size in bytes of a dma-buf fd via `lseek(SEEK_END)`.
+pub fn dmabuf_size(fd: libc::c_int) -> Option<u64> {
+    if fd < 0 {
+        return None;
+    }
+    let size = unsafe { libc::lseek(fd, 0, libc::SEEK_END) };
+    (size > 0).then_some(size as u64)
+}
+
 // ---------------------------------------------------------------------------
 // byte-stream framing
 // ---------------------------------------------------------------------------
@@ -479,6 +488,7 @@ struct VsyncDataApi {
     frame_time: unsafe extern "C" fn(*const libc::c_void) -> i64,
     preferred_index: unsafe extern "C" fn(*const libc::c_void) -> usize,
     deadline: unsafe extern "C" fn(*const libc::c_void, usize) -> i64,
+    expected_present: Option<unsafe extern "C" fn(*const libc::c_void, usize) -> i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -554,6 +564,16 @@ fn load_choreo() -> Option<ChoreoApi> {
                     lib,
                     b"AChoreographerFrameCallbackData_getFrameTimelineDeadlineNanos\0",
                 )?),
+                expected_present: sym(
+                    lib,
+                    b"AChoreographerFrameCallbackData_getFrameTimelineExpectedPresentationTimeNanos\0",
+                )
+                .map(|p| {
+                    std::mem::transmute::<
+                        *mut libc::c_void,
+                        unsafe extern "C" fn(*const libc::c_void, usize) -> i64,
+                    >(p)
+                }),
             })
         })();
         Some(ChoreoApi {
@@ -602,11 +622,15 @@ struct TickHolder {
     armed: Arc<AtomicBool>,
     vsync_ns: Arc<AtomicU64>,
     deadline_ns: Arc<AtomicU64>,
+    expected_present_ns: Arc<AtomicU64>,
+    observed_period_ns: Arc<AtomicU64>,
+    prev_vsync_ns: u64,
+    prev_dt_ns: u64,
     vsync_data: Option<VsyncDataApi>,
 }
 
-/// Vsync callback with frame timelines: records the latch deadline, then
-/// ticks like the plain frame callback.
+/// Vsync callback with frame timelines: records the latch deadline and expected
+/// presentation time, then ticks like the plain frame callback.
 unsafe extern "C" fn vsync_trampoline(callback_data: *const libc::c_void, data: *mut libc::c_void) {
     if data.is_null() || callback_data.is_null() {
         return;
@@ -615,16 +639,20 @@ unsafe extern "C" fn vsync_trampoline(callback_data: *const libc::c_void, data: 
     let Some(api) = holder.vsync_data else {
         return;
     };
-    let (when_ns, deadline_ns) = unsafe {
+    let (when_ns, deadline_ns, expected_present_ns) = unsafe {
         let index = (api.preferred_index)(callback_data);
         (
             (api.frame_time)(callback_data),
             (api.deadline)(callback_data, index),
+            api.expected_present.map_or(0, |f| f(callback_data, index)),
         )
     };
     holder
         .deadline_ns
         .store(deadline_ns.max(0) as u64, Ordering::Release);
+    holder
+        .expected_present_ns
+        .store(expected_present_ns.max(0) as u64, Ordering::Release);
     unsafe { frame_trampoline(when_ns, data) };
 }
 
@@ -635,12 +663,32 @@ unsafe extern "C" fn frame_trampoline(when_ns: i64, data: *mut libc::c_void) {
     let holder = unsafe { &mut *(data as *mut TickHolder) };
     holder.pending = false;
     if !holder.armed.load(Ordering::Acquire) {
+        holder.prev_vsync_ns = 0;
+        holder.prev_dt_ns = 0;
         return;
     }
     holder.count += 1;
-    holder
-        .vsync_ns
-        .store(when_ns.max(0) as u64, Ordering::Release);
+    let vsync = when_ns.max(0) as u64;
+    if vsync != 0 {
+        if holder.prev_vsync_ns != 0 && vsync > holder.prev_vsync_ns {
+            let dt = vsync - holder.prev_vsync_ns;
+            // Plausible display refresh period: 20 Hz (50 ms) to 250 Hz (4 ms).
+            if (4_000_000..=50_000_000).contains(&dt) {
+                if holder.prev_dt_ns != 0
+                    && dt.abs_diff(holder.prev_dt_ns).saturating_mul(8) <= dt.max(holder.prev_dt_ns)
+                {
+                    holder
+                        .observed_period_ns
+                        .store((dt + holder.prev_dt_ns) / 2, Ordering::Release);
+                }
+                holder.prev_dt_ns = dt;
+            } else {
+                holder.prev_dt_ns = 0;
+            }
+        }
+        holder.prev_vsync_ns = vsync;
+    }
+    holder.vsync_ns.store(vsync, Ordering::Release);
     let one: u64 = 1;
     unsafe {
         libc::write(holder.tick_fd, &one as *const u64 as *const libc::c_void, 8);
@@ -679,6 +727,10 @@ fn pump_thread_choreo(
             armed: gate.armed.clone(),
             vsync_ns: gate.vsync_ns.clone(),
             deadline_ns: gate.deadline_ns.clone(),
+            expected_present_ns: gate.expected_present_ns.clone(),
+            observed_period_ns: gate.observed_period_ns.clone(),
+            prev_vsync_ns: 0,
+            prev_dt_ns: 0,
             vsync_data: api.vsync_data,
         });
         let holder_ptr = Box::into_raw(holder) as *mut libc::c_void;
@@ -820,6 +872,12 @@ pub struct VsyncGate {
     /// A time at which SurfaceFlinger latches frames, from the latest tick
     /// (0 when the platform does not report frame timelines).
     deadline_ns: Arc<AtomicU64>,
+    /// Expected display presentation time for the latest tick's preferred
+    /// frame timeline (0 when unavailable).
+    expected_present_ns: Arc<AtomicU64>,
+    /// Live vsync spacing observed from consecutive Choreographer ticks (0
+    /// while disarmed or before two consistent ticks arrive).
+    observed_period_ns: Arc<AtomicU64>,
 }
 
 impl VsyncGate {
@@ -830,6 +888,8 @@ impl VsyncGate {
             timer: None,
             vsync_ns: Arc::new(AtomicU64::new(0)),
             deadline_ns: Arc::new(AtomicU64::new(0)),
+            expected_present_ns: Arc::new(AtomicU64::new(0)),
+            observed_period_ns: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -838,6 +898,23 @@ impl VsyncGate {
     /// is shown at the following vsync. 0 when unknown.
     pub fn deadline_ns(&self) -> u64 {
         self.deadline_ns.load(Ordering::Acquire)
+    }
+
+    /// Expected display presentation time for the preferred Choreographer
+    /// timeline (0 when unavailable).
+    pub fn expected_present_ns(&self) -> u64 {
+        self.expected_present_ns.load(Ordering::Acquire)
+    }
+
+    /// Live display vsync period observed from Choreographer, or `fallback_ns`
+    /// when not yet established (or on external display timers).
+    pub fn live_period_ns(&self, fallback_ns: u64) -> u64 {
+        let observed = self.observed_period_ns.load(Ordering::Acquire);
+        if observed != 0 {
+            observed
+        } else {
+            fallback_ns
+        }
     }
 
     /// The vsync of the latest tick (Choreographer frame time).
@@ -857,6 +934,7 @@ impl VsyncGate {
             return;
         }
         if !armed {
+            self.observed_period_ns.store(0, Ordering::Release);
             return;
         }
         let looper = self.looper.lock().unwrap();
@@ -1139,86 +1217,453 @@ pub fn backlogged(release_age_ns: Option<u64>, period_ns: u64) -> bool {
 /// SurfaceFlinger needs a frame a little before its latch time: the buffer
 /// reaches it in a binder transaction.
 const LATCH_MARGIN_NS: u64 = 300_000;
+/// Minimum lead time HWC/SurfaceFlinger needs between GPU completion and
+/// display scanout.
+const HWC_MIN_GPU_MARGIN_NS: u64 = 1_500_000;
 /// Frames per bucket of the frame-time estimate, which is the worst of the
 /// current and the previous bucket.
 const FRAME_TIME_BUCKET: u32 = 8;
+/// Number of recent queued frames tracked until their GPU fence and actual
+/// presentation timestamp are observed.
+const MAX_TRACKED_FRAMES: usize = 16;
+
+/// The first slot on the `anchor_ns` lattice (step `period_ns`) at or after
+/// `ready_ns + margin_ns`. `None` when either anchor or period is unknown.
+pub fn slot_after(ready_ns: u64, margin_ns: u64, anchor_ns: u64, period_ns: u64) -> Option<u64> {
+    if anchor_ns == 0 || period_ns == 0 {
+        return None;
+    }
+    let t = ready_ns.saturating_add(margin_ns);
+    Some(if t <= anchor_ns {
+        anchor_ns - (anchor_ns - t) / period_ns * period_ns
+    } else {
+        anchor_ns + (t - anchor_ns).div_ceil(period_ns) * period_ns
+    })
+}
 
 /// The first latch time at or after `queued_ns` (plus the margin), given any
 /// one latch time and the display period. `None` when either is unknown.
 pub fn latch_after(queued_ns: u64, deadline_ns: u64, period_ns: u64) -> Option<u64> {
-    if deadline_ns == 0 || period_ns == 0 {
-        return None;
-    }
-    let t = queued_ns.saturating_add(LATCH_MARGIN_NS);
-    Some(if t <= deadline_ns {
-        deadline_ns - (deadline_ns - t) / period_ns * period_ns
-    } else {
-        deadline_ns + (t - deadline_ns).div_ceil(period_ns) * period_ns
-    })
+    slot_after(queued_ns, LATCH_MARGIN_NS, deadline_ns, period_ns)
 }
 
-/// Keeps the render loop to one frame per SurfaceFlinger latch.
+#[derive(Clone, Copy, Debug)]
+struct TrackedFrame {
+    seq: u64,
+    started_ns: u64,
+    buffer_ns: u64,
+    queued_ns: u64,
+    deadline_ns: u64,
+    expected_present_ns: u64,
+    /// Presentation slot (or latch slot when `expected_present_ns == 0`) that
+    /// this frame is predicted or observed to occupy.
+    present_slot_ns: u64,
+    /// Observed GPU render-fence signal time (`CLOCK_MONOTONIC` ns), if done.
+    gpu_done_ns: Option<u64>,
+    /// Observed hardware presentation time (`CLOCK_MONOTONIC` ns), if known.
+    actual_present_ns: Option<u64>,
+}
+
+/// Keeps the render loop to one frame per SurfaceFlinger presentation slot,
+/// accounting for both CPU queue submission AND actual GPU completion and
+/// display presentation timestamps.
 ///
-/// SurfaceFlinger takes a layer's frames in order, one per vsync, and what
-/// decides the vsync is when the frame was queued (it latches a buffer whose
-/// GPU work is still running). A frame queued just past a latch time is
-/// shown a vsync late, and the frame after it, queued in time, waits behind
-/// it: from then on every frame of the gesture is shown a vsync late. The
-/// first frames after an idle spell are slow (clocks ramp up), so this
-/// happened at the start of most gestures.
+/// SurfaceFlinger shows a layer's frames in order, one per vsync. A frame
+/// only lands on a presentation slot when both its `queueBuffer` submission
+/// meets the latch deadline AND its GPU render fence finishes in time for
+/// SurfaceFlinger/HWC to scan it out. Relying on `queueBuffer` alone misses
+/// multi-millisecond GPU tails (causing frames to pile up behind a slow GPU
+/// frame) and misses real presentation slips reported by release fences.
 ///
-/// The pacer tracks which latch each frame takes and asks the loop to skip a
-/// frame start that would only queue behind the previous frame.
-///
-/// A slow frame keeps the frame-time estimate up for the next 8 to 16
-/// frames, so a load that cannot make the latch settles into a steady
-/// one-frame pipeline instead of alternating between making and missing it.
+/// A slow frame keeps the completion-time estimate up for the next 8 to 16
+/// frames, so a heavy GPU load settles into a steady one-frame pipeline
+/// instead of oscillating between making and missing its target vsync.
 #[derive(Default)]
 pub struct LatchPacer {
-    /// Latch time the latest frame takes (0 before the first).
-    last_latch_ns: u64,
-    /// Worst start-to-queued time in the current and previous bucket.
-    frame_max_ns: [u64; 2],
-    /// The same without the wait for a free buffer: the work itself.
-    work_max_ns: [u64; 2],
-    bucket_frames: u32,
+    /// Presentation (or latch) slot the latest queued frame occupies.
+    last_present_ns: u64,
+    /// Worst start-to-queued (CPU + acquire) time in current & previous bucket.
+    frame_cpu_max_ns: [u64; 2],
+    /// Worst buffer-to-queued (CPU work) time in current & previous bucket.
+    work_cpu_max_ns: [u64; 2],
+    /// Worst start-to-GPU-complete time in current & previous bucket.
+    frame_complete_max_ns: [u64; 2],
+    /// Worst buffer-to-GPU-complete time in current & previous bucket.
+    work_complete_max_ns: [u64; 2],
+    /// Worst GPU execution tail (`gpu_done_ns - queued_ns`) per bucket.
+    gpu_tail_max_ns: [u64; 2],
+    cpu_bucket_frames: u32,
+    gpu_bucket_frames: u32,
+    next_auto_seq: u64,
+    present_slips: u64,
+    /// Presentation slot of the most recently evicted frame from `recent`,
+    /// preserving FIFO ordering across ring-buffer eviction.
+    retired_last_slot_ns: u64,
+    recent: std::collections::VecDeque<TrackedFrame>,
 }
 
 impl LatchPacer {
-    fn last_latch_on_timeline(&self, deadline_ns: u64, period_ns: u64) -> Option<u64> {
-        if self.last_latch_ns == 0 {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn present_slips(&self) -> u64 {
+        self.present_slips
+    }
+
+    /// Estimated CPU + GPU work duration from buffer-ready to GPU completion.
+    pub fn estimated_work_ns(&self) -> u64 {
+        let cpu = self.work_cpu_max_ns[0].max(self.work_cpu_max_ns[1]);
+        let complete = self.work_complete_max_ns[0].max(self.work_complete_max_ns[1]);
+        let gpu_tail = self.estimated_gpu_tail_ns();
+        complete.max(cpu.saturating_add(gpu_tail))
+    }
+
+    /// Estimated CPU + acquire + GPU duration from frame-start to GPU completion.
+    pub fn estimated_frame_ns(&self) -> u64 {
+        let cpu = self.frame_cpu_max_ns[0].max(self.frame_cpu_max_ns[1]);
+        let complete = self.frame_complete_max_ns[0].max(self.frame_complete_max_ns[1]);
+        let gpu_tail = self.estimated_gpu_tail_ns();
+        complete.max(cpu.saturating_add(gpu_tail))
+    }
+
+    /// Estimated GPU execution time after `queueBuffer`.
+    pub fn estimated_gpu_tail_ns(&self) -> u64 {
+        self.gpu_tail_max_ns[0].max(self.gpu_tail_max_ns[1])
+    }
+
+    fn estimated_cpu_frame_ns(&self) -> u64 {
+        self.frame_cpu_max_ns[0].max(self.frame_cpu_max_ns[1])
+    }
+
+    /// Estimated CPU work duration from buffer-ready to `queueBuffer`.
+    pub fn estimated_cpu_work_ns(&self) -> u64 {
+        self.work_cpu_max_ns[0].max(self.work_cpu_max_ns[1])
+    }
+
+    /// Latest `CLOCK_MONOTONIC` time at which the render loop may stop waiting
+    /// for an input batch and still meet the earliest reachable latch and GPU
+    /// completion deadlines, capped at `vsync_ns + cap_ns`.
+    ///
+    /// Returns `now_ns` (no wait) when `cap_ns == 0`, when `now_ns` is already
+    /// past the cap, or when the remaining budget before the latch or GPU
+    /// presentation cutoff cannot afford any extra wait.
+    #[allow(clippy::too_many_arguments)]
+    pub fn input_batch_deadline_ns(
+        &self,
+        vsync_ns: u64,
+        now_ns: u64,
+        cap_ns: u64,
+        deadline_ns: u64,
+        expected_present_ns: u64,
+        period_ns: u64,
+    ) -> u64 {
+        const INPUT_WAIT_SAFETY_NS: u64 = 250_000;
+        let max_wait = vsync_ns.saturating_add(cap_ns);
+        if cap_ns == 0 || now_ns >= max_wait {
+            return now_ns;
+        }
+        let Some((_, present_offset_ns, has_present)) =
+            Self::timeline_params(deadline_ns, expected_present_ns, period_ns)
+        else {
+            return max_wait;
+        };
+        let Some(next_latch) = latch_after(now_ns, deadline_ns, period_ns) else {
+            return max_wait;
+        };
+        let cpu_budget = self
+            .estimated_cpu_work_ns()
+            .saturating_add(LATCH_MARGIN_NS)
+            .saturating_add(INPUT_WAIT_SAFETY_NS);
+        let latest_for_submit = next_latch.saturating_sub(cpu_budget);
+
+        let latest_for_gpu = if has_present {
+            let target_present = next_latch.saturating_add(present_offset_ns);
+            let gpu_margin = self.gpu_present_margin_ns(present_offset_ns, period_ns);
+            let gpu_budget = self
+                .estimated_work_ns()
+                .saturating_add(gpu_margin)
+                .saturating_add(INPUT_WAIT_SAFETY_NS);
+            target_present.saturating_sub(gpu_budget)
+        } else {
+            let gpu_budget = self
+                .estimated_work_ns()
+                .saturating_add(LATCH_MARGIN_NS)
+                .saturating_add(INPUT_WAIT_SAFETY_NS);
+            next_latch.saturating_sub(gpu_budget)
+        };
+
+        let budget_deadline = latest_for_submit.min(latest_for_gpu);
+        if budget_deadline <= now_ns {
+            now_ns
+        } else {
+            max_wait.min(budget_deadline)
+        }
+    }
+
+    fn timeline_params(
+        deadline_ns: u64,
+        expected_present_ns: u64,
+        period_ns: u64,
+    ) -> Option<(u64, u64, bool)> {
+        if deadline_ns == 0 || period_ns == 0 {
             return None;
         }
-        // Round the previous latch to the nearest slot on this callback's
-        // timeline. Advancing by the nominal period on every queue can drift
-        // into the next slot when the display runs slightly faster.
-        let before = self
-            .last_latch_ns
-            .saturating_sub(period_ns / 2 + LATCH_MARGIN_NS);
-        latch_after(before, deadline_ns, period_ns)
+        let has_present = expected_present_ns > deadline_ns
+            && expected_present_ns - deadline_ns <= period_ns.saturating_mul(4);
+        if has_present {
+            Some((expected_present_ns, expected_present_ns - deadline_ns, true))
+        } else {
+            Some((deadline_ns, 0, false))
+        }
     }
 
-    /// Whether a frame started now would only queue behind the latest one.
-    pub fn should_defer(&self, now_ns: u64, deadline_ns: u64, period_ns: u64) -> bool {
-        let Some(occupied) = self.last_latch_on_timeline(deadline_ns, period_ns) else {
+    fn gpu_present_margin_ns(&self, present_offset_ns: u64, period_ns: u64) -> u64 {
+        // When Choreographer reports a multi-vsync app->present pipeline
+        // (`present_offset_ns > period_ns`, e.g. 10.35 ms at 144 Hz where
+        // period is 6.94 ms), SurfaceFlinger latches a vsync early while GPU
+        // work runs; SurfaceFlinger/HWC's own commit window before scanout is
+        // the remainder (`present_offset_ns % period_ns`, ~3.40 ms on Pad 3)
+        // plus binder/fence jitter (`LATCH_MARGIN_NS`).
+        if present_offset_ns > period_ns {
+            (present_offset_ns % period_ns)
+                .max(HWC_MIN_GPU_MARGIN_NS)
+                .saturating_add(LATCH_MARGIN_NS)
+        } else {
+            present_offset_ns.saturating_add(LATCH_MARGIN_NS)
+        }
+    }
+
+    /// Presentation slot (or latch slot when `expected_present_ns == 0`) that a
+    /// frame submitted at `queued_ns` with GPU completion at `gpu_done_ns` can
+    /// make.
+    fn target_present_slot(
+        &self,
+        queued_ns: u64,
+        gpu_done_ns: u64,
+        deadline_ns: u64,
+        expected_present_ns: u64,
+        period_ns: u64,
+    ) -> Option<u64> {
+        let (anchor_ns, present_offset_ns, has_present) =
+            Self::timeline_params(deadline_ns, expected_present_ns, period_ns)?;
+        let latch_ns = latch_after(queued_ns, deadline_ns, period_ns)?;
+        let from_submit = latch_ns.saturating_add(present_offset_ns);
+        let effective_gpu_ns = gpu_done_ns.max(queued_ns);
+        let from_gpu = if has_present {
+            let gpu_margin = self.gpu_present_margin_ns(present_offset_ns, period_ns);
+            slot_after(effective_gpu_ns, gpu_margin, anchor_ns, period_ns)?
+        } else {
+            latch_after(effective_gpu_ns, deadline_ns, period_ns)?
+        };
+        Some(from_submit.max(from_gpu))
+    }
+
+    fn snap_to_timeline(slot_ns: u64, anchor_ns: u64, period_ns: u64) -> Option<u64> {
+        if slot_ns == 0 || anchor_ns == 0 || period_ns == 0 {
+            return None;
+        }
+        // Round to the nearest slot on this callback's timeline so slight
+        // display clock drift does not walk into the next slot.
+        let before = slot_ns.saturating_sub(period_ns / 2);
+        slot_after(before, 0, anchor_ns, period_ns)
+    }
+
+    fn last_present_on_timeline(
+        &self,
+        deadline_ns: u64,
+        expected_present_ns: u64,
+        period_ns: u64,
+    ) -> Option<u64> {
+        let (anchor_ns, _, _) = Self::timeline_params(deadline_ns, expected_present_ns, period_ns)?;
+        Self::snap_to_timeline(self.last_present_ns, anchor_ns, period_ns)
+    }
+
+    fn reconcile_recent(&mut self, deadline_ns: u64, expected_present_ns: u64, period_ns: u64) {
+        if self.recent.is_empty() || period_ns == 0 {
+            return;
+        }
+        let est_tail = self.estimated_gpu_tail_ns();
+        let mut prev_slot: Option<u64> =
+            (self.retired_last_slot_ns != 0).then_some(self.retired_last_slot_ns);
+        for idx in 0..self.recent.len() {
+            let frame = self.recent[idx];
+            let f_dl = if frame.deadline_ns != 0 {
+                frame.deadline_ns
+            } else {
+                deadline_ns
+            };
+            let f_ep = if frame.expected_present_ns != 0 {
+                frame.expected_present_ns
+            } else {
+                expected_present_ns
+            };
+            let new_slot = if let Some(actual) = frame.actual_present_ns {
+                if let Some((anchor, _, _)) = Self::timeline_params(f_dl, f_ep, period_ns) {
+                    Self::snap_to_timeline(actual, anchor, period_ns).unwrap_or(actual)
+                } else {
+                    actual
+                }
+            } else {
+                let gpu_ns = frame
+                    .gpu_done_ns
+                    .unwrap_or_else(|| frame.queued_ns.saturating_add(est_tail));
+                let own = self
+                    .target_present_slot(frame.queued_ns, gpu_ns, f_dl, f_ep, period_ns)
+                    .unwrap_or(frame.present_slot_ns);
+                match prev_slot {
+                    Some(prev) if prev != 0 => {
+                        let aligned_prev = Self::timeline_params(f_dl, f_ep, period_ns)
+                            .and_then(|(a, _, _)| Self::snap_to_timeline(prev, a, period_ns))
+                            .unwrap_or(prev);
+                        own.max(aligned_prev.saturating_add(period_ns))
+                    }
+                    _ => own,
+                }
+            };
+            self.recent[idx].present_slot_ns = new_slot;
+            if new_slot != 0 {
+                prev_slot = Some(new_slot);
+            }
+        }
+        if let Some(last) = prev_slot {
+            self.last_present_ns = last;
+        }
+    }
+
+    /// Whether a frame started now would only queue behind the latest one,
+    /// accounting for both CPU submission and GPU completion time.
+    pub fn should_defer_for_timeline(
+        &self,
+        now_ns: u64,
+        deadline_ns: u64,
+        expected_present_ns: u64,
+        period_ns: u64,
+    ) -> bool {
+        let Some(occupied) =
+            self.last_present_on_timeline(deadline_ns, expected_present_ns, period_ns)
+        else {
             return false;
         };
-        let estimate = self.frame_max_ns[0].max(self.frame_max_ns[1]);
-        latch_after(now_ns.saturating_add(estimate), deadline_ns, period_ns)
-            .is_some_and(|latch| latch <= occupied)
+        let est_submit = now_ns.saturating_add(self.estimated_cpu_frame_ns());
+        let est_gpu = now_ns.saturating_add(self.estimated_frame_ns());
+        self.target_present_slot(
+            est_submit,
+            est_gpu,
+            deadline_ns,
+            expected_present_ns,
+            period_ns,
+        )
+        .is_some_and(|slot| slot <= occupied)
     }
 
-    /// Whether a frame that has its buffer now is expected to be queued for
-    /// the next latch. False when the deadline is unknown.
+    /// Convenience wrapper when only the latch deadline is available.
+    pub fn should_defer(&self, now_ns: u64, deadline_ns: u64, period_ns: u64) -> bool {
+        self.should_defer_for_timeline(now_ns, deadline_ns, 0, period_ns)
+    }
+
+    /// Whether a frame with its buffer ready now is expected to complete CPU
+    /// and GPU work in time for the earliest reachable presentation slot.
+    pub fn expects_on_time_for_timeline(
+        &self,
+        now_ns: u64,
+        deadline_ns: u64,
+        expected_present_ns: u64,
+        period_ns: u64,
+    ) -> bool {
+        let Some(earliest) =
+            self.target_present_slot(now_ns, now_ns, deadline_ns, expected_present_ns, period_ns)
+        else {
+            return false;
+        };
+        let est_submit = now_ns.saturating_add(self.estimated_cpu_work_ns());
+        let est_gpu = now_ns.saturating_add(self.estimated_work_ns());
+        self.target_present_slot(
+            est_submit,
+            est_gpu,
+            deadline_ns,
+            expected_present_ns,
+            period_ns,
+        ) == Some(earliest)
+    }
+
+    /// Convenience wrapper when only the latch deadline is available.
     pub fn expects_on_time(&self, now_ns: u64, deadline_ns: u64, period_ns: u64) -> bool {
-        let estimate = self.work_max_ns[0].max(self.work_max_ns[1]);
-        latch_after(now_ns, deadline_ns, period_ns).is_some_and(|next| {
-            latch_after(now_ns.saturating_add(estimate), deadline_ns, period_ns) == Some(next)
-        })
+        self.expects_on_time_for_timeline(now_ns, deadline_ns, 0, period_ns)
     }
 
-    /// A frame whose start was decided at `started_ns` had its buffer at
-    /// `buffer_ns` and was queued at `queued_ns`.
+    /// Record a frame queued to SurfaceFlinger. When `has_gpu_fence` is true,
+    /// GPU completion is estimated from recent GPU tails until
+    /// [`Self::frame_gpu_completed`] reports the actual fence timestamp; when
+    /// false (software/synchronous), GPU completion equals `queued_ns`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn frame_queued_timed(
+        &mut self,
+        seq: u64,
+        started_ns: u64,
+        buffer_ns: u64,
+        queued_ns: u64,
+        has_gpu_fence: bool,
+        deadline_ns: u64,
+        expected_present_ns: u64,
+        period_ns: u64,
+    ) {
+        if self.cpu_bucket_frames >= FRAME_TIME_BUCKET {
+            self.frame_cpu_max_ns = [0, self.frame_cpu_max_ns[0]];
+            self.work_cpu_max_ns = [0, self.work_cpu_max_ns[0]];
+            self.cpu_bucket_frames = 0;
+        }
+        self.cpu_bucket_frames += 1;
+        self.frame_cpu_max_ns[0] =
+            self.frame_cpu_max_ns[0].max(queued_ns.saturating_sub(started_ns));
+        self.work_cpu_max_ns[0] = self.work_cpu_max_ns[0].max(queued_ns.saturating_sub(buffer_ns));
+
+        let est_gpu_ns = if has_gpu_fence {
+            queued_ns.saturating_add(self.estimated_gpu_tail_ns())
+        } else {
+            queued_ns
+        };
+        let slot = self
+            .target_present_slot(
+                queued_ns,
+                est_gpu_ns,
+                deadline_ns,
+                expected_present_ns,
+                period_ns,
+            )
+            .map(|own| {
+                self.last_present_on_timeline(deadline_ns, expected_present_ns, period_ns)
+                    .map_or(own, |occupied| own.max(occupied.saturating_add(period_ns)))
+            })
+            .unwrap_or(0);
+        if slot != 0 {
+            self.last_present_ns = slot;
+        }
+        if self.recent.len() >= MAX_TRACKED_FRAMES {
+            if let Some(evicted) = self.recent.pop_front() {
+                if evicted.present_slot_ns != 0 {
+                    self.retired_last_slot_ns =
+                        self.retired_last_slot_ns.max(evicted.present_slot_ns);
+                }
+            }
+        }
+        self.recent.push_back(TrackedFrame {
+            seq,
+            started_ns,
+            buffer_ns,
+            queued_ns,
+            deadline_ns,
+            expected_present_ns,
+            present_slot_ns: slot,
+            gpu_done_ns: None,
+            actual_present_ns: None,
+        });
+        if !has_gpu_fence {
+            self.frame_gpu_completed(seq, queued_ns, deadline_ns, expected_present_ns, period_ns);
+        }
+    }
+
+    /// Record a frame queued synchronously (no async GPU fence).
     pub fn frame_queued(
         &mut self,
         started_ns: u64,
@@ -1227,22 +1672,154 @@ impl LatchPacer {
         deadline_ns: u64,
         period_ns: u64,
     ) {
-        if self.bucket_frames >= FRAME_TIME_BUCKET {
-            self.frame_max_ns = [0, self.frame_max_ns[0]];
-            self.work_max_ns = [0, self.work_max_ns[0]];
-            self.bucket_frames = 0;
+        self.next_auto_seq = self.next_auto_seq.saturating_add(1);
+        let seq = self.next_auto_seq;
+        self.frame_queued_timed(
+            seq,
+            started_ns,
+            buffer_ns,
+            queued_ns,
+            false,
+            deadline_ns,
+            0,
+            period_ns,
+        );
+    }
+
+    /// Record the actual GPU completion timestamp (`SYNC_IOC_FILE_INFO`) for
+    /// frame `seq` and reconcile the presentation pipeline if it slipped.
+    pub fn frame_gpu_completed(
+        &mut self,
+        seq: u64,
+        gpu_done_ns: u64,
+        deadline_ns: u64,
+        expected_present_ns: u64,
+        period_ns: u64,
+    ) {
+        let Some(pos) = self.recent.iter().position(|f| f.seq == seq) else {
+            return;
+        };
+        if self.recent[pos].gpu_done_ns.is_some() {
+            return;
         }
-        self.bucket_frames += 1;
-        self.frame_max_ns[0] = self.frame_max_ns[0].max(queued_ns.saturating_sub(started_ns));
-        self.work_max_ns[0] = self.work_max_ns[0].max(queued_ns.saturating_sub(buffer_ns));
-        if let Some(latch) = latch_after(queued_ns, deadline_ns, period_ns) {
-            // Frames are shown in order, one per latch.
-            self.last_latch_ns = self
-                .last_latch_on_timeline(deadline_ns, period_ns)
-                .map_or(latch, |occupied| {
-                    latch.max(occupied.saturating_add(period_ns))
-                });
+        let frame = self.recent[pos];
+        let gpu_done_ns = gpu_done_ns.max(frame.queued_ns);
+        self.recent[pos].gpu_done_ns = Some(gpu_done_ns);
+
+        if self.gpu_bucket_frames >= FRAME_TIME_BUCKET {
+            self.frame_complete_max_ns = [0, self.frame_complete_max_ns[0]];
+            self.work_complete_max_ns = [0, self.work_complete_max_ns[0]];
+            self.gpu_tail_max_ns = [0, self.gpu_tail_max_ns[0]];
+            self.gpu_bucket_frames = 0;
         }
+        self.gpu_bucket_frames += 1;
+        self.frame_complete_max_ns[0] =
+            self.frame_complete_max_ns[0].max(gpu_done_ns.saturating_sub(frame.started_ns));
+        self.work_complete_max_ns[0] =
+            self.work_complete_max_ns[0].max(gpu_done_ns.saturating_sub(frame.buffer_ns));
+        self.gpu_tail_max_ns[0] =
+            self.gpu_tail_max_ns[0].max(gpu_done_ns.saturating_sub(frame.queued_ns));
+
+        let prev_slot = frame.present_slot_ns;
+        self.reconcile_recent(deadline_ns, expected_present_ns, period_ns);
+        if prev_slot != 0
+            && period_ns != 0
+            && self.recent[pos].present_slot_ns > prev_slot.saturating_add(period_ns / 2)
+        {
+            self.present_slips = self.present_slips.saturating_add(1);
+        }
+    }
+
+    /// Observe that frame `seq`'s GPU fence is still unsignaled at `now_ns`:
+    /// acts as a live lower bound on GPU completion so an active GPU stall
+    /// updates occupied presentation slots before the fence even signals.
+    pub fn note_gpu_pending(
+        &mut self,
+        seq: u64,
+        now_ns: u64,
+        deadline_ns: u64,
+        expected_present_ns: u64,
+        period_ns: u64,
+    ) {
+        let Some(pos) = self.recent.iter().position(|f| f.seq == seq) else {
+            return;
+        };
+        let frame = self.recent[pos];
+        if frame.gpu_done_ns.is_some()
+            || frame.actual_present_ns.is_some()
+            || now_ns <= frame.queued_ns
+        {
+            return;
+        }
+        let f_dl = if frame.deadline_ns != 0 {
+            frame.deadline_ns
+        } else {
+            deadline_ns
+        };
+        let f_ep = if frame.expected_present_ns != 0 {
+            frame.expected_present_ns
+        } else {
+            expected_present_ns
+        };
+        let Some(lower_slot) =
+            self.target_present_slot(frame.queued_ns, now_ns, f_dl, f_ep, period_ns)
+        else {
+            return;
+        };
+        if lower_slot > frame.present_slot_ns {
+            self.recent[pos].present_slot_ns = lower_slot;
+            let mut prev = lower_slot;
+            for idx in (pos + 1)..self.recent.len() {
+                if self.recent[idx].actual_present_ns.is_none() {
+                    let next_min = prev.saturating_add(period_ns);
+                    if next_min > self.recent[idx].present_slot_ns {
+                        self.recent[idx].present_slot_ns = next_min;
+                    }
+                }
+                if self.recent[idx].present_slot_ns != 0 {
+                    prev = self.recent[idx].present_slot_ns;
+                }
+            }
+            self.last_present_ns = self.last_present_ns.max(prev);
+        }
+    }
+
+    /// Record an observed hardware presentation timestamp for frame `seq`
+    /// (e.g., from the superseded slot's release fence) and reconciles the
+    /// predicted presentation timeline.
+    pub fn frame_presented(
+        &mut self,
+        seq: u64,
+        actual_present_ns: u64,
+        deadline_ns: u64,
+        expected_present_ns: u64,
+        period_ns: u64,
+    ) {
+        let Some(pos) = self.recent.iter().position(|f| f.seq == seq) else {
+            return;
+        };
+        let frame = self.recent[pos];
+        // Ignore stale or out-of-order release timestamps (e.g. after idle).
+        if actual_present_ns < frame.queued_ns
+            || actual_present_ns.saturating_sub(frame.queued_ns) >= 500_000_000
+        {
+            return;
+        }
+        let prev_slot = frame.present_slot_ns;
+        self.recent[pos].actual_present_ns = Some(actual_present_ns);
+        // A late present is not evidence that SurfaceFlinger needs more GPU
+        // lead time: a frame that SurfaceFlinger missed once leaves every
+        // later frame queued a vsync behind it. Widening the GPU margin on
+        // that made every start look late, which disabled both the defer and
+        // the drain that clear such a backlog (10-27 frames a vsync late on
+        // the Pad 3). The reconciled slots below let the next start defer.
+        if prev_slot != 0
+            && period_ns != 0
+            && actual_present_ns > prev_slot.saturating_add(period_ns / 2)
+        {
+            self.present_slips = self.present_slips.saturating_add(1);
+        }
+        self.reconcile_recent(deadline_ns, expected_present_ns, period_ns);
     }
 }
 
@@ -1471,6 +2048,264 @@ mod pacing_tests {
         let mut pacer = LatchPacer::default();
         pacer.frame_queued(0, 0, 1_000, 0, 8_333_333);
         assert!(!pacer.should_defer(1_001, 0, 8_333_333));
+    }
+
+    #[test]
+    fn slow_gpu_completion_after_fast_queue_is_paced_not_ignored() {
+        let period = 6_944_444; // 144 Hz
+        let tick = 1_000_000_000;
+        let deadline = tick + 4_500_000;
+        let expected_present = tick + 2 * period;
+        let mut pacer = LatchPacer::default();
+
+        // Frame 1 submits fast on CPU (2.0 ms), well before deadline, but GPU
+        // finishes at +11.5 ms (9.5 ms GPU tail), missing expected_present.
+        pacer.frame_queued_timed(
+            1,
+            tick,
+            tick,
+            tick + 2_000_000,
+            true,
+            deadline,
+            expected_present,
+            period,
+        );
+        pacer.frame_gpu_completed(1, tick + 11_500_000, deadline, expected_present, period);
+        assert!(pacer.present_slips() >= 1);
+        assert!(pacer.estimated_gpu_tail_ns() >= 9_500_000);
+        // Because GPU completion takes 11 ms, expects_on_time must now be false.
+        assert!(!pacer.expects_on_time_for_timeline(
+            tick + period,
+            deadline + period,
+            expected_present + period,
+            period,
+        ));
+
+        // Subsequent frames speed back up (GPU finishes at +4.5 ms). Once the
+        // slow GPU bucket rolls out, pacer drains one start so latency drops.
+        let mut t = tick + period;
+        let mut seq = 2u64;
+        let mut drained_at = None;
+        for frame in 1..40 {
+            let dl = t + 4_500_000;
+            let ep = t + 2 * period;
+            if pacer.should_defer_for_timeline(t, dl, ep, period) {
+                drained_at = Some(frame);
+                break;
+            }
+            pacer.frame_queued_timed(seq, t, t, t + 2_000_000, true, dl, ep, period);
+            pacer.frame_gpu_completed(seq, t + 4_500_000, dl, ep, period);
+            seq += 1;
+            t += period;
+        }
+        let drained_at = drained_at.expect("slow GPU backlog was never drained");
+        assert!((8..=18).contains(&drained_at), "drained at {drained_at}");
+    }
+
+    #[test]
+    fn pad3_144hz_pipeline_does_not_halve_rate_for_normal_gpu_work() {
+        // Real Pad 3 144 Hz Choreographer timeline: period=6.945ms,
+        // dl=+10.333ms (lattice at +3.388ms), ep=+20.680ms (lattice at +13.735ms).
+        let period = 6_945_000;
+        let mut pacer = LatchPacer::default();
+        for i in 0..120u64 {
+            let t = 1_000_000_000 + i * period;
+            let dl = t + 10_333_000;
+            let ep = t + 20_680_000;
+            assert!(
+                !pacer.should_defer_for_timeline(t + 400_000, dl, ep, period),
+                "frame {i} falsely deferred at 144 Hz"
+            );
+            // CPU submits at +2.7 ms, GPU finishes at +6.9 ms (4.2 ms GPU tail).
+            pacer.frame_queued_timed(
+                i + 1,
+                t + 400_000,
+                t + 500_000,
+                t + 2_700_000,
+                true,
+                dl,
+                ep,
+                period,
+            );
+            pacer.frame_gpu_completed(i + 1, t + 6_900_000, dl, ep, period);
+            if i >= 2 {
+                // Frame i-1 presented cleanly on its N+2 slot (+13.735ms).
+                let t_prev = 1_000_000_000 + (i - 2) * period;
+                pacer.frame_presented(i - 1, t_prev + 13_735_000, dl, ep, period);
+            }
+        }
+        assert_eq!(pacer.present_slips(), 0);
+    }
+
+    #[test]
+    fn input_batch_wait_respects_latch_and_gpu_deadlines() {
+        let period = 6_945_000; // 144 Hz
+        let vsync = 1_000_000_000;
+        let dl = vsync + 10_333_000; // lattice at vsync + 3.388 ms
+        let ep = vsync + 20_680_000; // lattice at vsync + 13.735 ms
+        let cap = 1_500_000;
+
+        // Without timeline, falls back to vsync + cap.
+        let mut pacer = LatchPacer::default();
+        assert_eq!(
+            pacer.input_batch_deadline_ns(vsync, vsync + 300_000, cap, 0, 0, period),
+            vsync + cap
+        );
+
+        // Light frame (CPU 1.2 ms, GPU +2.0 ms = 3.2 ms): plenty of headroom ->
+        // keeps the full 1.5 ms cap (3.388 - 1.2 - 0.55 = 1.638 ms > 1.5 ms).
+        pacer.frame_queued_timed(1, vsync, vsync, vsync + 1_200_000, true, dl, ep, period);
+        pacer.frame_gpu_completed(1, vsync + 3_200_000, dl, ep, period);
+        assert_eq!(
+            pacer.input_batch_deadline_ns(vsync, vsync + 300_000, cap, dl, ep, period),
+            vsync + cap
+        );
+
+        // Moderate CPU frame (1.6 ms CPU -> 3.388 - 1.6 - 0.55 = 1.238 ms):
+        // shrinks wait below 1.5 ms so KWin still submits before the latch.
+        pacer.frame_queued_timed(2, vsync, vsync, vsync + 1_600_000, true, dl, ep, period);
+        pacer.frame_gpu_completed(2, vsync + 3_600_000, dl, ep, period);
+        let shrunk = pacer.input_batch_deadline_ns(vsync, vsync + 300_000, cap, dl, ep, period);
+        assert!(
+            shrunk > vsync + 300_000 && shrunk < vsync + cap,
+            "shrunk={}",
+            shrunk - vsync
+        );
+
+        // Heavy CPU frame (2.9 ms CPU): cannot afford any wait -> returns now (0 wait).
+        pacer.frame_queued_timed(3, vsync, vsync, vsync + 2_900_000, true, dl, ep, period);
+        pacer.frame_gpu_completed(3, vsync + 5_000_000, dl, ep, period);
+        assert_eq!(
+            pacer.input_batch_deadline_ns(vsync, vsync + 400_000, cap, dl, ep, period),
+            vsync + 400_000
+        );
+
+        // Fast CPU (1.0 ms) but heavy GPU (9.5 ms total): GPU deadline trims wait to 0.
+        let mut gpu_heavy = LatchPacer::default();
+        gpu_heavy.frame_queued_timed(1, vsync, vsync, vsync + 1_000_000, true, dl, ep, period);
+        gpu_heavy.frame_gpu_completed(1, vsync + 9_500_000, dl, ep, period);
+        assert_eq!(
+            gpu_heavy.input_batch_deadline_ns(vsync, vsync + 400_000, cap, dl, ep, period),
+            vsync + 400_000
+        );
+    }
+
+    #[test]
+    fn active_unsignaled_gpu_stall_updates_pacer_before_fence_signals() {
+        let period = 6_944_444;
+        let tick = 1_000_000_000;
+        let deadline = tick + 4_500_000;
+        let expected_present = tick + 2 * period;
+        let mut pacer = LatchPacer::default();
+
+        // Prime fast baseline (CPU 1.5 ms, GPU +2.5 ms = 4.0 ms total).
+        pacer.frame_queued_timed(
+            1,
+            tick,
+            tick,
+            tick + 1_500_000,
+            true,
+            deadline,
+            expected_present,
+            period,
+        );
+        pacer.frame_gpu_completed(1, tick + 4_000_000, deadline, expected_present, period);
+
+        // Frame 2 submits fast, but its GPU fence is still unsignaled 8 ms later.
+        let t2 = tick + period;
+        let dl2 = t2 + 4_500_000;
+        let ep2 = t2 + 2 * period;
+        pacer.frame_queued_timed(2, t2, t2, t2 + 1_500_000, true, dl2, ep2, period);
+        // At tick 3 + 1 ms, frame 2 is STILL pending on GPU (now = t2 + 11.5 ms):
+        // frame 2 cannot hit ep2, so frame 3 must defer rather than pile up.
+        let t3 = tick + 2 * period;
+        let dl3 = t3 + 4_500_000;
+        let ep3 = t3 + 2 * period;
+        pacer.note_gpu_pending(2, t2 + 11_500_000, dl3, ep3, period);
+        assert!(pacer.should_defer_for_timeline(t3, dl3, ep3, period));
+    }
+
+    #[test]
+    fn one_late_present_does_not_stop_the_pacer_from_draining() {
+        // Pad 3 at 144 Hz: frames queue 1.5 ms after the vsync with their GPU
+        // work done at +3.8 ms, and present 13.735 ms after the vsync. From
+        // frame 10 SurfaceFlinger shows every frame a vsync late (it missed
+        // one and the queue now holds an extra frame). The pacer must keep
+        // judging normal frames on time and defer one start to drain it.
+        let period = 6_945_000;
+        let t = |i: u64| 1_000_000_000 + i * period;
+        let mut pacer = LatchPacer::default();
+        let mut slipped = false;
+        let mut drained_at = None;
+        for i in 0..40u64 {
+            let (dl, ep) = (t(i) + 10_333_000, t(i) + 20_680_000);
+            let now = t(i) + 400_000;
+            if slipped && pacer.should_defer_for_timeline(now, dl, ep, period) {
+                drained_at = Some(i);
+                break;
+            }
+            assert!(
+                pacer.expects_on_time_for_timeline(now, dl, ep, period),
+                "frame {i} looked late"
+            );
+            let seq = i + 1;
+            pacer.frame_queued_timed(
+                seq,
+                now,
+                now + 100_000,
+                t(i) + 1_500_000,
+                true,
+                dl,
+                ep,
+                period,
+            );
+            pacer.frame_gpu_completed(seq, t(i) + 3_800_000, dl, ep, period);
+            if i >= 1 {
+                // The previous frame's release fence reports its present.
+                let mut present = t(i - 1) + 13_735_000;
+                if i - 1 >= 10 {
+                    present += period;
+                    slipped = true;
+                }
+                pacer.frame_presented(seq - 1, present, dl, ep, period);
+            }
+        }
+        let at = drained_at.expect("the backlog was never drained");
+        assert!(at <= 13, "drained at frame {at}");
+    }
+
+    #[test]
+    fn actual_presentation_timestamp_reconciles_late_surfaceflinger_present() {
+        let period = 6_944_444;
+        let tick = 1_000_000_000;
+        let deadline = tick + 4_500_000;
+        let expected_present = tick + 2 * period;
+        let mut pacer = LatchPacer::default();
+
+        // Frame 1 finishes CPU+GPU on time for expected_present...
+        pacer.frame_queued_timed(
+            1,
+            tick,
+            tick,
+            tick + 1_500_000,
+            true,
+            deadline,
+            expected_present,
+            period,
+        );
+        pacer.frame_gpu_completed(1, tick + 4_000_000, deadline, expected_present, period);
+        // ...but SurfaceFlinger actually presented it one vsync late!
+        pacer.frame_presented(
+            1,
+            expected_present + period,
+            deadline,
+            expected_present,
+            period,
+        );
+        assert_eq!(pacer.present_slips(), 1);
+        // Next tick would collide with frame 1's actual late slot -> defer once.
+        let t2 = tick + period;
+        assert!(pacer.should_defer_for_timeline(t2, t2 + 4_500_000, t2 + 2 * period, period,));
     }
 
     #[test]

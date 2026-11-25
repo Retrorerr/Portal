@@ -107,6 +107,51 @@ static PAD_ENGAGED: AtomicBool = AtomicBool::new(false);
 /// `enter_fallback` and `note_desktop_session_ended`). Static because the
 /// guest session can end with no surface and no one holding this session.
 static DAMAGE_LIVE: AtomicBool = AtomicBool::new(false);
+/// Latched when UBWC allocation or producer import fails on this device, so
+/// subsequent surface configures/rebinds stay on the linear fallback.
+static UBWC_FALLBACK_LINEAR: AtomicBool = AtomicBool::new(false);
+
+fn want_ubwc(software_gl: bool) -> bool {
+    if software_gl || UBWC_FALLBACK_LINEAR.load(Ordering::Acquire) {
+        return false;
+    }
+    // Opt-in until the published Mesa KGSL layer imports UBWC dma-bufs: the
+    // current one rejects them, which cost every cold start ~3 s of skipped
+    // frames before the linear fallback.
+    tuning_value("ubwc").is_some_and(|v| v != 0)
+}
+
+/// `GRALLOC_USAGE_SW_READ_OFTEN | SW_WRITE_OFTEN`: the usage the CPU connect
+/// ritual (`ANativeWindow_lock`) leaves on the window, which linear buffers
+/// have always been allocated with.
+const USAGE_CPU_RITUAL: u64 = 0x33;
+
+/// Set once UBWC usage was put on a window in this process, so a linear
+/// window afterwards gets its original usage back.
+static UBWC_EVER_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Request UBWC allocation for the window's buffers. Returns whether the
+/// platform accepted the usage. A linear window keeps the usage it has unless
+/// UBWC was requested before, which is undone.
+fn request_buffer_usage(anw: &AnwApi, window: *mut c_void, use_ubwc: bool, what: &str) -> bool {
+    if !use_ubwc {
+        if UBWC_EVER_REQUESTED.load(Ordering::Acquire) {
+            let usage_res = unsafe { anw.set_usage(window, USAGE_CPU_RITUAL) };
+            log::info!(
+                "anland.usage {what} linear usage=0x{USAGE_CPU_RITUAL:x} result={usage_res:?}"
+            );
+        }
+        return false;
+    }
+    UBWC_EVER_REQUESTED.store(true, Ordering::Release);
+    let usage_res = unsafe { anw.set_usage(window, anw::USAGE_GPU_UBWC) };
+    let requested = matches!(usage_res, Some(0));
+    log::info!(
+        "anland.usage {what} requested_ubwc={requested} usage=0x{:x} result={usage_res:?}",
+        anw::USAGE_GPU_UBWC
+    );
+    requested
+}
 
 /// The guest session is gone, with its KWin, possibly while the surface was
 /// suspended and no connection could notice.
@@ -141,8 +186,6 @@ const INPUT_BATCH_WAIT_NS: u64 = 1_500_000;
 /// `sys::current_vsync`): the hardware vsync that releases a slot comes about
 /// 0.15 ms before the pump's tick on the OnePlus Pad 3.
 const VSYNC_DUE_NS: u64 = 1_000_000;
-/// `refresh_done`: KWin rendered nothing into the selected slot.
-const FRAME_SKIPPED: i32 = -3;
 /// One input event on the data channel: `DataMsg` header plus `InputEvent`.
 const INPUT_WIRE_LEN: usize = 8 + 20;
 
@@ -287,6 +330,9 @@ struct Inner {
     /// sent for this generation: anything earlier would land in the data
     /// channel ahead of BUFS_READY and desync the producer's handshake.
     connected_gen: Mutex<Option<u64>>,
+    /// Monotonic timestamp (ns) when `connected_gen` was set, for initial UBWC
+    /// import-failure detection.
+    connected_ns: AtomicU64,
     // Proof counters.
     frames_queued: AtomicU64,
     /// KWin damage hints received (content repaints), for the fps line.
@@ -304,6 +350,9 @@ struct Inner {
     /// Software: bare frames prove liveness honestly; the first frame gets
     /// a long cold budget (llvmpipe + cold shader cache need minutes).
     software_gl: bool,
+    /// True when the current surface generation's buffers were verified and
+    /// published as Qualcomm UBWC (`DRM_FORMAT_MOD_QCOM_COMPRESSED`).
+    ubwc_active: AtomicBool,
     /// GUI-client CPU sampler state: (total watched jiffies, sample ns,
     /// consecutive busy windows). Updated only by the event thread.
     client_prev: Mutex<(u64, u64, u32)>,
@@ -435,6 +484,14 @@ fn dup_owned(fd: &OwnedFd) -> std::io::Result<OwnedFd> {
     unsafe { Ok(OwnedFd::from_raw_fd(dup)) }
 }
 
+fn dup_raw_fd(fd: i32) -> Option<OwnedFd> {
+    if fd < 0 {
+        return None;
+    }
+    let dup = unsafe { libc::dup(fd) };
+    (dup >= 0).then(|| unsafe { OwnedFd::from_raw_fd(dup) })
+}
+
 fn close_silently(fd: i32) {
     if fd >= 0 {
         unsafe { libc::close(fd) };
@@ -557,7 +614,8 @@ fn configure_window(
     window: *mut c_void,
     anw: &AnwApi,
     cfg: &AnlandConfig,
-) -> Result<(u32, u32, usize, u32), String> {
+    use_ubwc: bool,
+) -> Result<(u32, u32, usize, u32, bool), String> {
     unsafe { anw::acquire(window, anw) };
     let result = (|| {
         // Connect to the CPU API via the lock/unlock ritual (see anw.rs):
@@ -580,6 +638,7 @@ fn configure_window(
             cfg.height
         );
         let transform = set_window_geometry(window, anw, w, h, None)?;
+        let requested_ubwc = request_buffer_usage(anw, window, use_ubwc, "configure");
         let min_undequeued = unsafe { anw.query_min_undequeued(window) }?;
         let total = window_buffer_count(min_undequeued, cfg.external_display);
         let r = unsafe { anw.set_buffer_count(window, total) };
@@ -590,7 +649,7 @@ fn configure_window(
             let r = unsafe { anw.set_swap_interval(window, interval as i32) };
             log::info!("anland.tuning swap_interval={interval} result={r:?}");
         }
-        Ok((w, h, total, transform))
+        Ok((w, h, total, transform, requested_ubwc))
     })();
     if result.is_err() {
         unsafe { anw::release(window, anw) };
@@ -650,7 +709,9 @@ impl AnlandSession {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create anland socket dir: {e}"))?;
         }
-        let (w, h, total, transform) = configure_window(window, &anw, cfg)?;
+        let software_gl = super::software_gl_fallback_requested();
+        let (w, h, total, transform, requested_ubwc) =
+            configure_window(window, &anw, cfg, want_ubwc(software_gl))?;
         let screen = ScreenInfo {
             width: w,
             height: h,
@@ -709,13 +770,15 @@ impl AnlandSession {
             rebind_request: Mutex::new(None),
             transition_lock: Mutex::new(()),
             connected_gen: Mutex::new(None),
+            connected_ns: AtomicU64::new(0),
             frames_queued: AtomicU64::new(0),
             damage_hints: AtomicU64::new(0),
             frames_fenced: AtomicU64::new(0),
             frames_bare: AtomicU64::new(0),
             fallback_count: AtomicU64::new(0),
             ready_surface_gen: Mutex::new(None),
-            software_gl: super::software_gl_fallback_requested(),
+            software_gl,
+            ubwc_active: AtomicBool::new(false),
             client_prev: Mutex::new((0, 0, 0)),
             client_cache: Mutex::new((Vec::new(), 0)),
             client_active: AtomicBool::new(false),
@@ -739,7 +802,7 @@ impl AnlandSession {
             motion_logged_gen: Mutex::new(0),
         });
         // Collect window slots (dup dma-buf fds, hold one spare back).
-        if let Err(error) = collect_buffers(&inner, total, w, h) {
+        if let Err(error) = collect_buffers(&inner, total, w, h, requested_ubwc) {
             cleanup_failed_session(&inner);
             return Err(error);
         }
@@ -842,7 +905,8 @@ impl AnlandSession {
             return Err("Anland surface is already attached".into());
         }
         self.ensure_broker_thread()?;
-        let (w, h, total, transform) = configure_window(window, &inner.anw, cfg)?;
+        let (w, h, total, transform, requested_ubwc) =
+            configure_window(window, &inner.anw, cfg, want_ubwc(inner.software_gl))?;
         inner.buffer_transform.store(transform, Ordering::Release);
         inner.transform_mismatches.store(0, Ordering::Release);
         if let Err(error) = install_window(&inner, window) {
@@ -888,7 +952,7 @@ impl AnlandSession {
         // fds make it enter its normal fallback; this fresh set lets its
         // existing try_exit_fallback/reconnect path recover onto the new
         // BufferQueue without another launch() call.
-        if let Err(error) = collect_buffers(&inner, total, w, h) {
+        if let Err(error) = collect_buffers(&inner, total, w, h, requested_ubwc) {
             self.suspend_surface();
             return Err(format!(
                 "collect buffers after Android surface resume: {error}"
@@ -1502,6 +1566,8 @@ impl AnlandSession {
         )?;
         inner.buffer_transform.store(transform, Ordering::Release);
         inner.transform_mismatches.store(0, Ordering::Release);
+        let requested_ubwc =
+            request_buffer_usage(&inner.anw, window, want_ubwc(inner.software_gl), "rebind");
         let min_undequeued = unsafe { inner.anw.query_min_undequeued(window) }
             .map_err(|e| format!("ANativeWindow query min-undequeued after resize: {e}"))?;
         let total = window_buffer_count(
@@ -1515,7 +1581,7 @@ impl AnlandSession {
         // Fresh slots for the new geometry (old handles are all returned
         // above; a failed collect leaves the failure pending so the next
         // event retries with the producer waiting in fallback).
-        collect_buffers(inner, total, w, h)
+        collect_buffers(inner, total, w, h, requested_ubwc)
             .map_err(|e| format!("collect after resize to {w}x{h}: {e}"))?;
         *inner.screen.lock().unwrap() = (w, h);
         *inner.surface_gen.lock().unwrap() = gen;
@@ -1599,23 +1665,19 @@ fn join_surface_thread(handle: JoinHandle<()>, what: &str) {
     }
 }
 
-/// Dequeue/rotate all window slots, dup their dma-buf fds, and hold one
-/// spare dequeued (in our hands, never queued) for stop-time unblocking.
-fn collect_buffers(
+/// One pass of rotating through the window slots to collect producer dma-bufs.
+/// Returns `(slots, ubwc_verified)`. When `requested_ubwc` is true and any
+/// slot fails Qualcomm UBWC verification, returns `(Vec::new(), false)` after
+/// returning every dequeued slot so the caller can cleanly switch the queue to
+/// linear allocation without mixing UBWC and linear slots.
+fn collect_window_slots(
     inner: &Arc<Inner>,
+    window: *mut c_void,
     total: usize,
     width: u32,
     height: u32,
-) -> Result<(), String> {
-    let Some(window) = current_window(inner) else {
-        return Err("cannot collect buffers without an Android surface".into());
-    };
-    // The window's size; its buffers may be a quarter turn from it.
-    let (width, height) = pre_rotated_size(
-        width,
-        height,
-        inner.buffer_transform.load(Ordering::Acquire),
-    );
+    requested_ubwc: bool,
+) -> Result<(Vec<SlotInfo>, bool), String> {
     let need_producer = total.saturating_sub(1).max(2);
     let mut found: Vec<SlotInfo> = Vec::new();
     for attempt in 0..total * 4 + 2 {
@@ -1625,7 +1687,8 @@ fn collect_buffers(
         let (anb, fence) = unsafe { inner.anw.dequeue(window) }
             .map_err(|r| format!("collect dequeueBuffer failed on attempt {attempt}: {r}"))?;
         close_silently(fence); // enumeration only; no wait needed
-        let Some((dma_fd, stride_px, bw, bh)) = (unsafe { AnwApi::buffer_dma_info(anb) }) else {
+        let Some((dma_fd, stride_px, bw, bh, usage)) = (unsafe { AnwApi::buffer_dma_info(anb) })
+        else {
             unsafe { inner.anw.cancel(window, anb, -1) };
             continue;
         };
@@ -1640,8 +1703,24 @@ fn collect_buffers(
             unsafe { inner.anw.queue(window, anb, -1) };
             continue;
         }
+        let fd_size = sys::dmabuf_size(dma_fd);
+        let modifier = classify_rgba8888_buffer_modifier(
+            bw as u32,
+            bh as u32,
+            stride_px as u32,
+            fd_size,
+            usage,
+            requested_ubwc,
+        );
         // Post back so the next dequeue rotates to another slot.
         unsafe { inner.anw.queue(window, anb, -1) };
+        if requested_ubwc && modifier != DRM_FORMAT_MOD_QCOM_COMPRESSED {
+            log::warn!(
+                "anland.ubwc slot verification failed ({bw}x{bh} stride_px={stride_px} fd_size={fd_size:?} expected={:?} usage=0x{usage:x}); falling back to linear",
+                ubwc_rgba8888_expected_size(bw as u32, bh as u32, stride_px as u32)
+            );
+            return Ok((Vec::new(), false));
+        }
         let dup = unsafe { libc::dup(dma_fd) };
         if dup < 0 {
             continue;
@@ -1653,16 +1732,19 @@ fn collect_buffers(
             width: bw as u32,
             height: bh as u32,
             format: PIXEL_FORMAT_RGBA_8888,
-            modifier: 0,
+            modifier,
             offset: 0,
         };
         log::info!(
-            "anland.collect buf[{}]: {}x{} stride_px={} fd={}",
+            "anland.collect buf[{}]: {}x{} stride_px={} fd={} fd_size={:?} usage=0x{:x} mod=0x{:x}",
             found.len(),
             bw,
             bh,
             stride_px,
-            fd.as_raw_fd()
+            fd.as_raw_fd(),
+            fd_size,
+            usage,
+            modifier
         );
         found.push(SlotInfo { anb, fd, info });
     }
@@ -1674,6 +1756,51 @@ fn collect_buffers(
             need_producer
         ));
     }
+    Ok((found, requested_ubwc))
+}
+
+/// Dequeue/rotate all window slots, dup their dma-buf fds, and hold one
+/// spare dequeued (in our hands, never queued) for stop-time unblocking.
+fn collect_buffers(
+    inner: &Arc<Inner>,
+    total: usize,
+    width: u32,
+    height: u32,
+    requested_ubwc: bool,
+) -> Result<(), String> {
+    let Some(window) = current_window(inner) else {
+        return Err("cannot collect buffers without an Android surface".into());
+    };
+    // The window's size; its buffers may be a quarter turn from it.
+    let (width, height) = pre_rotated_size(
+        width,
+        height,
+        inner.buffer_transform.load(Ordering::Acquire),
+    );
+    let (found, ubwc_active) =
+        match collect_window_slots(inner, window, total, width, height, requested_ubwc)? {
+            (slots, true) => (slots, true),
+            (slots, false) if !requested_ubwc => (slots, false),
+            (_, false) => {
+                UBWC_FALLBACK_LINEAR.store(true, Ordering::Release);
+                request_buffer_usage(&inner.anw, window, false, "fallback");
+                let r = unsafe { inner.anw.set_buffer_count(window, total) };
+                if r != 0 {
+                    return Err(format!(
+                        "ANativeWindow_setBufferCount({total}) linear fallback failed: {r}"
+                    ));
+                }
+                let (slots, _) = collect_window_slots(inner, window, total, width, height, false)?;
+                (slots, false)
+            }
+        };
+    inner.ubwc_active.store(ubwc_active, Ordering::Release);
+    log::info!(
+        "anland.ubwc active={ubwc_active} bufs={} size={}x{}",
+        found.len(),
+        width,
+        height
+    );
     // Hold one extra slot dequeued as the stop-time spare: with it in our
     // hands, stop() can always cancelBuffer to unblock a stuck dequeue.
     // The spare never reaches the producer and is never queued mid-run; if
@@ -1799,6 +1926,14 @@ fn enter_fallback(inner: &Arc<Inner>, expected: u64, reason: &str) {
     if inner.gen.lock().unwrap().as_ref().map(|g| g.id) != Some(expected) {
         return; // An old failed operation cannot tear down its replacement.
     }
+    let was_connected = *inner.connected_gen.lock().unwrap() == Some(expected)
+        || reason.contains("BUFS_READY")
+        || reason.contains("display transform");
+    let never_presented = inner.ready_surface_gen.lock().unwrap().is_none();
+    let fallback_ubwc = was_connected
+        && never_presented
+        && inner.ubwc_active.load(Ordering::Acquire)
+        && !UBWC_FALLBACK_LINEAR.swap(true, Ordering::AcqRel);
     inner.fallback_count.fetch_add(1, Ordering::Relaxed);
     if producer_expected() {
         log::warn!("anland.fallback reason={reason}");
@@ -1812,6 +1947,21 @@ fn enter_fallback(inner: &Arc<Inner>, expected: u64, reason: &str) {
     // none, and a busy client must not then hold full rate.
     DAMAGE_LIVE.store(false, Ordering::Release);
     if inner.running.load(Ordering::Acquire) && inner.window_live.load(Ordering::Acquire) {
+        if fallback_ubwc {
+            log::warn!(
+                "anland.ubwc producer rejected UBWC buffers ({reason}); rebinding to linear fallback"
+            );
+            let (w, h) = *inner.screen.lock().unwrap();
+            let sgen = *inner.surface_gen.lock().unwrap();
+            let mut request = inner.rebind_request.lock().unwrap();
+            if request.is_none() {
+                inner.rebind_active.store(true, Ordering::Release);
+                *request = Some((w, h, sgen));
+            }
+            drop(request);
+            kick(inner, CONNECT_BURST_MS);
+            return;
+        }
         if let Err(e) = deposit_generation(inner) {
             log::error!("anland.fallback re-deposit failed: {e}");
         }
@@ -1891,6 +2041,7 @@ fn handshake_waiter(inner: Arc<Inner>, generation: u64, attach_rx: mpsc::Receive
         return;
     }
     *inner.connected_gen.lock().unwrap() = Some(generation);
+    inner.connected_ns.store(sys::now_ns(), Ordering::Release);
     // Connect burst: the producer's first frames (window mapping) present at
     // full rate even before any input arrives.
     kick(&inner, CONNECT_BURST_MS);
@@ -2158,12 +2309,29 @@ fn render_loop(inner: Arc<Inner>) {
     // One frame per SurfaceFlinger latch (`latch_pacing=0` turns it off).
     let pace_latches = tuning_value("latch_pacing").is_none_or(|v| v != 0);
     let mut pacer = sys::LatchPacer::default();
+    let mut frame_seq: u64 = 0;
+    // Bounded ring of dup'd GPU render fences so LatchPacer observes exact GPU
+    // completion timestamps via SYNC_IOC_FILE_INFO without blocking.
+    let mut inflight_fences: std::collections::VecDeque<(u64, u64, OwnedFd)> =
+        std::collections::VecDeque::with_capacity(8);
+    // Maps ANativeWindowBuffer* address -> frame_seq last queued into that slot,
+    // so when SurfaceFlinger releases the slot we learn the actual presentation
+    // timestamp of the superseding frame (prev_seq + 1).
+    let mut slot_last_seq: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+    // Slots cancelled back to BufferQueue with an explicit GPU write fence
+    // (skipped frame with accumulated damage); their next dequeue carries that
+    // render fence rather than a SurfaceFlinger release fence, so backlogged()
+    // must ignore their fence age.
+    let mut slot_cancelled: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // A frame start put off to the next tick, and how many were.
     let mut deferred = false;
     let mut defers: u64 = 0;
     // Backlogs drained, and frames queued since the last one.
     let mut drains: u64 = 0;
     let mut frames_since_drain: u32 = 0;
+    // Consecutive skips before any UBWC frame has rendered for this surface gen
+    // (KWin keeps the channel open with m_bufCount == 0 when importBuffers fails).
+    let mut ubwc_pre_ready_skips: u32 = 0;
     // Demand + instrumentation state.
     let mut last_select_ns: u64 = 0;
     // Start and latest rendered frame of the current animation.
@@ -2172,6 +2340,9 @@ fn render_loop(inner: Arc<Inner>) {
     let mut win_frames: u64 = 0;
     let mut win_comp_us: u64 = 0;
     let mut win_comp_max_us: u64 = 0;
+    let mut win_gpu_us: u64 = 0;
+    let mut win_gpu_max_us: u64 = 0;
+    let mut win_gpu_count: u64 = 0;
     let mut win_skips: u64 = 0;
     let mut win_stalls: u64 = 0;
     let mut win_acq_us: u64 = 0;
@@ -2196,6 +2367,11 @@ fn render_loop(inner: Arc<Inner>) {
         // Resize only between frames: this thread owns all live queue slots.
         let request = inner.rebind_request.lock().unwrap().take();
         if let Some((w, h, sgen)) = request {
+            inflight_fences.clear();
+            slot_last_seq.clear();
+            slot_cancelled.clear();
+            pacer.reset();
+            ubwc_pre_ready_skips = 0;
             let result = {
                 let _transition = inner.transition_lock.lock().unwrap();
                 AnlandSession::rebind_surface_inner(&inner, w, h, sgen)
@@ -2229,6 +2405,11 @@ fn render_loop(inner: Arc<Inner>) {
                 cur_gen = gen_id;
                 cur_fence = gen.as_ref().map(|g| Arc::clone(&g.fence_read));
                 idle_logged = false;
+                inflight_fences.clear();
+                slot_last_seq.clear();
+                slot_cancelled.clear();
+                pacer.reset();
+                ubwc_pre_ready_skips = 0;
             }
         }
         // Demand gate: select on every display-vsync tick while the user is
@@ -2278,8 +2459,26 @@ fn render_loop(inner: Arc<Inner>) {
         // kick selects at once and re-arms the ticks for the next frame.
         vsync_gate.set_armed(demanding || deferred);
         follow_refresh_target(&inner, &vsync_gate, external_display);
-        let period_ns =
+        let nominal_period_ns =
             1_000_000_000_000 / u64::from(inner.refresh_mhz.load(Ordering::Acquire).max(1));
+        let period_ns = if external_display {
+            nominal_period_ns
+        } else {
+            vsync_gate.live_period_ns(nominal_period_ns)
+        };
+        let deadline_ns = vsync_gate.deadline_ns();
+        let expected_present_ns = vsync_gate.expected_present_ns();
+        reap_inflight_gpu_fences(
+            &mut inflight_fences,
+            &mut pacer,
+            now,
+            deadline_ns,
+            expected_present_ns,
+            period_ns,
+            &mut win_gpu_us,
+            &mut win_gpu_max_us,
+            &mut win_gpu_count,
+        );
         follow_transform_hint(&inner, sys::now_ns());
         // Window-level display-mode request follows interactive demand (plus
         // a short hold so bursty input does not flap Android's mode choice).
@@ -2335,6 +2534,10 @@ fn render_loop(inner: Arc<Inner>) {
                 &mut win_frames,
                 &mut win_comp_us,
                 &mut win_comp_max_us,
+                &mut win_gpu_us,
+                &mut win_gpu_max_us,
+                &mut win_gpu_count,
+                pacer.present_slips(),
                 &mut win_skips,
                 &mut win_stalls,
                 &mut win_acq_us,
@@ -2359,6 +2562,10 @@ fn render_loop(inner: Arc<Inner>) {
                 &mut win_frames,
                 &mut win_comp_us,
                 &mut win_comp_max_us,
+                &mut win_gpu_us,
+                &mut win_gpu_max_us,
+                &mut win_gpu_count,
+                pacer.present_slips(),
                 &mut win_skips,
                 &mut win_stalls,
                 &mut win_acq_us,
@@ -2370,14 +2577,14 @@ fn render_loop(inner: Arc<Inner>) {
         if inner.rebind_active.load(Ordering::Acquire) {
             continue;
         }
-        // A frame started now that would finish for the latch the previous
-        // frame already takes only queues behind it, and so would every
-        // frame after: start it at the next tick instead (see `LatchPacer`).
+        // A frame started now that would finish for the presentation slot the
+        // previous frame already takes only queues behind it, and so would
+        // every frame after: start it at the next tick instead (`LatchPacer`).
         // Never twice in a row, so a wrong estimate costs one tick.
         if pace_latches
             && cur_gen != 0
             && !deferred
-            && pacer.should_defer(now, vsync_gate.deadline_ns(), period_ns)
+            && pacer.should_defer_for_timeline(now, deadline_ns, expected_present_ns, period_ns)
         {
             deferred = true;
             defers += 1;
@@ -2417,58 +2624,108 @@ fn render_loop(inner: Arc<Inner>) {
         let acquire_ready = acquire
             .as_ref()
             .is_none_or(|fence| matches!(sys::poll_readable(fence, 0), Ok(true)));
+        let mut acquire_signal_ns = if acquire_ready {
+            acquire
+                .as_ref()
+                .and_then(|fence| sys::fence_signal_ns(fence.as_raw_fd()))
+        } else {
+            None
+        };
+        // A signalled release fence on a previously queued slot reports the
+        // hardware presentation time of the frame that replaced it on screen
+        // (`prev_seq + 1`). Reconcile LatchPacer against that timestamp.
+        if let (Some(release_ns), Some(&prev_seq)) =
+            (acquire_signal_ns, slot_last_seq.get(&(anb as usize)))
+        {
+            if prev_seq > 0 {
+                pacer.frame_presented(
+                    prev_seq + 1,
+                    release_ns,
+                    deadline_ns,
+                    expected_present_ns,
+                    period_ns,
+                );
+            }
+        }
+        let was_cancelled = slot_cancelled.remove(&(anb as usize));
         // SurfaceFlinger holding a frame more than it shows: skip this start
         // so it catches up (see `sys::backlogged`). Only at a tick, where the
         // buffer ages are known; only while frames are expected to make
         // their latch, because a load that cannot is a frame behind by
         // design; and not again until every slot has been round once.
+        let release_age_ns = acquire.as_ref().and_then(|_| {
+            if acquire_ready {
+                acquire_signal_ns.map(|at| t_acquire_ns.saturating_sub(at))
+            } else {
+                Some(0)
+            }
+        });
+        let on_time = pacer.expects_on_time_for_timeline(
+            t_acquire_ns,
+            deadline_ns,
+            expected_present_ns,
+            period_ns,
+        );
+        let trace_age_us = release_age_ns.map_or(-1, |a| (a / 1000) as i64);
         if pace_latches
             && tick_ready
             && !wake_ready
+            && !was_cancelled
             && cur_gen != 0
             && frames_since_drain >= 2 * FREE_RUNNING_SLOTS as u32
             && inner.buffers.lock().unwrap().len() >= FREE_RUNNING_SLOTS
-            && pacer.expects_on_time(t_acquire_ns, vsync_gate.deadline_ns(), period_ns)
+            && on_time
+            && sys::backlogged(release_age_ns, period_ns)
         {
-            let release_age_ns = acquire.as_ref().and_then(|fence| {
-                if acquire_ready {
-                    sys::fence_signal_ns(fence.as_raw_fd())
-                        .map(|at| t_acquire_ns.saturating_sub(at))
-                } else {
-                    Some(0)
-                }
-            });
-            if sys::backlogged(release_age_ns, period_ns) {
-                let fence = acquire.map_or(-1, IntoRawFd::into_raw_fd);
-                unsafe { inner.anw.cancel(window, anb, fence) };
-                deferred = true;
-                drains += 1;
-                frames_since_drain = 0;
-                if trace_frames {
-                    log::info!(
-                        "anland.trace drain age={:?} at={}",
-                        release_age_ns.map(|a| a / 1000),
-                        (t_acquire_ns as i64 - vsync_gate.vsync_ns() as i64) / 1000
-                    );
-                }
-                continue;
+            let fence = acquire.map_or(-1, IntoRawFd::into_raw_fd);
+            slot_last_seq.remove(&(anb as usize));
+            unsafe { inner.anw.cancel(window, anb, fence) };
+            deferred = true;
+            drains += 1;
+            frames_since_drain = 0;
+            if trace_frames {
+                log::info!(
+                    "anland.trace drain age={:?} at={}",
+                    release_age_ns.map(|a| a / 1000),
+                    (t_acquire_ns as i64 - vsync_gate.vsync_ns() as i64) / 1000
+                );
             }
+            continue;
         }
         if let Some(fence) = acquire {
             // Blocking acquire wait (see ACQUIRE_WAIT_MS). Never queue-back:
             // presenting a buffer SF hasn't released invites KWin to render
             // into scanout-active memory (GPU hang, proven). Cancel instead.
-            if !acquire_ready && sys::wait_fence(&fence, ACQUIRE_WAIT_MS).is_err() {
-                win_stalls += 1;
-                let now = sys::now_ns();
-                if now.wrapping_sub(log_stall_ns) >= 1_000_000_000 {
-                    log::warn!("anland.sink acquire-stall (SF release pending >1s); cancelling");
-                    log_stall_ns = now;
+            if !acquire_ready {
+                if sys::wait_fence(&fence, ACQUIRE_WAIT_MS).is_err() {
+                    win_stalls += 1;
+                    let now = sys::now_ns();
+                    if now.wrapping_sub(log_stall_ns) >= 1_000_000_000 {
+                        log::warn!(
+                            "anland.sink acquire-stall (SF release pending >1s); cancelling"
+                        );
+                        log_stall_ns = now;
+                    }
+                    // SurfaceFlinger must still wait on the fence when it reuses
+                    // the cancelled slot.
+                    slot_last_seq.remove(&(anb as usize));
+                    unsafe { inner.anw.cancel(window, anb, fence.into_raw_fd()) };
+                    continue;
                 }
-                // SurfaceFlinger must still wait on the fence when it reuses
-                // the cancelled slot.
-                unsafe { inner.anw.cancel(window, anb, fence.into_raw_fd()) };
-                continue;
+                acquire_signal_ns = sys::fence_signal_ns(fence.as_raw_fd());
+                if let (Some(release_ns), Some(&prev_seq)) =
+                    (acquire_signal_ns, slot_last_seq.get(&(anb as usize)))
+                {
+                    if prev_seq > 0 {
+                        pacer.frame_presented(
+                            prev_seq + 1,
+                            release_ns,
+                            deadline_ns,
+                            expected_present_ns,
+                            period_ns,
+                        );
+                    }
+                }
             }
         }
         let t_acq_done_ns = sys::now_ns();
@@ -2516,7 +2773,16 @@ fn render_loop(inner: Arc<Inner>) {
         };
         {
             let _section = sys::trace::section(c"anland.waitInput");
-            wait_for_input_batch(&inner, &input_flush, vsync_gate.vsync_ns(), input_wait_ns);
+            wait_for_input_batch(
+                &inner,
+                &input_flush,
+                vsync_gate.vsync_ns(),
+                deadline_ns,
+                expected_present_ns,
+                period_ns,
+                &pacer,
+                input_wait_ns,
+            );
         }
         // select_dmabuf: shm write + eventfd signal under io_lock.
         // t_select spans signal -> render fence: KWin's composite latency.
@@ -2556,31 +2822,76 @@ fn render_loop(inner: Arc<Inner>) {
             }
         }
         // refresh_done: poll the retained socket, then non-blocking recvmsg.
-        let rfence = refresh_done(&inner, fence, cur_gen);
+        let done = refresh_done(&inner, fence, cur_gen);
         drop(composite);
-        if rfence == FRAME_SKIPPED {
-            // KWin had nothing to repaint, so the slot still holds an older
-            // frame: presenting it would step the screen back in time.
-            unsafe { inner.anw.cancel(window, anb, -1) };
-            inner.frames_skipped.fetch_add(1, Ordering::Relaxed);
-            last_select_ns = t_select_ns;
-            continue;
-        }
-        if rfence == FENCE_LOST {
-            if producer_expected() {
-                log::warn!(
-                    "anland.render fence lost (generation died); buffer cancelled, not presented"
-                );
-            } else {
-                log::info!("anland.render fence lost with no desktop session; buffer cancelled");
+        let rfence = match done {
+            RefreshDone::Skipped(skip_fence) => {
+                // KWin had no new scene damage to present, so the slot must not
+                // be queued. If accumulated damage owed by this buffer still
+                // generated GPU writes, pass the completion fence to
+                // cancelBuffer so BufferQueue keeps the slot fenced until those
+                // writes finish.
+                slot_last_seq.remove(&(anb as usize));
+                if skip_fence >= 0 {
+                    slot_cancelled.insert(anb as usize);
+                }
+                // cancelBuffer owns the fence fd even when it fails.
+                unsafe { inner.anw.cancel(window, anb, skip_fence) };
+                inner.frames_skipped.fetch_add(1, Ordering::Relaxed);
+                last_select_ns = t_select_ns;
+                // KWin leaves the connection open with m_bufCount == 0 when
+                // importBuffers() rejects DRM_FORMAT_MOD_QCOM_COMPRESSED, replying
+                // REFRESH_DONE_SKIPPED to every select. Detect sustained pre-ready
+                // skips on an active UBWC surface and rebind cleanly to linear.
+                if inner.ubwc_active.load(Ordering::Acquire)
+                    && inner.ready_surface_gen.lock().unwrap().is_none()
+                {
+                    ubwc_pre_ready_skips = ubwc_pre_ready_skips.saturating_add(1);
+                    let connected_at = inner.connected_ns.load(Ordering::Acquire);
+                    let since_connect = sys::now_ns().saturating_sub(connected_at);
+                    if ubwc_pre_ready_skips >= 12
+                        && connected_at != 0
+                        && since_connect >= 3_000_000_000
+                        && !UBWC_FALLBACK_LINEAR.swap(true, Ordering::AcqRel)
+                    {
+                        log::warn!(
+                            "anland.ubwc producer skipped {ubwc_pre_ready_skips} initial UBWC frames over {} ms; rebinding to linear fallback",
+                            since_connect / 1_000_000
+                        );
+                        let (w, h) = *inner.screen.lock().unwrap();
+                        let sgen = *inner.surface_gen.lock().unwrap();
+                        let mut req = inner.rebind_request.lock().unwrap();
+                        if req.is_none() {
+                            inner.rebind_active.store(true, Ordering::Release);
+                            *req = Some((w, h, sgen));
+                        }
+                        drop(req);
+                        kick(&inner, CONNECT_BURST_MS);
+                    }
+                }
+                continue;
             }
-            unsafe { inner.anw.cancel(window, anb, -1) };
-            continue;
-        }
+            RefreshDone::Lost => {
+                if producer_expected() {
+                    log::warn!(
+                        "anland.render fence lost (generation died); buffer cancelled, not presented"
+                    );
+                } else {
+                    log::info!(
+                        "anland.render fence lost with no desktop session; buffer cancelled"
+                    );
+                }
+                slot_last_seq.remove(&(anb as usize));
+                unsafe { inner.anw.cancel(window, anb, -1) };
+                continue;
+            }
+            RefreshDone::Rendered(fd) => fd,
+        };
         if !inner.window_live.load(Ordering::Acquire) {
             // A surface suspend may land while a bare/software frame was
             // selected. Return the slot, never queue or mark readiness after
             // the lifecycle has retired this surface generation.
+            slot_last_seq.remove(&(anb as usize));
             unsafe { inner.anw.cancel(window, anb, rfence) };
             break;
         }
@@ -2595,16 +2906,20 @@ fn render_loop(inner: Arc<Inner>) {
             log::info!(
                 "anland.render stale-generation cancel-back frame_sgen={frame_sgen} sgen={cur_sgen}"
             );
+            slot_last_seq.remove(&(anb as usize));
             unsafe { inner.anw.cancel(window, anb, rfence) };
             continue;
         }
         let t_done_ns = sys::now_ns();
+        // Retain a dup of the GPU render fence before queueBuffer consumes it,
+        // so LatchPacer observes the actual GPU completion timestamp.
+        let gpu_fence_dup = dup_raw_fd(rfence);
         let q = unsafe { inner.anw.queue(window, anb, rfence) };
         if trace_frames {
             let vs = vsync_gate.vsync_ns();
             let rel = |t: u64| (t as i64 - vs as i64) / 1000;
             log::info!(
-                "anland.trace tick={tick_ready} wake={wake_ready} wake={} deq={} acq={} sel={} done={} q={} flush={} dl={} vs={vs}",
+                "anland.trace tick={tick_ready} wake={wake_ready} wake={} deq={} acq={} sel={} done={} q={} flush={} dl={} ep={} age={trace_age_us} ot={} sd={frames_since_drain} slips={} vs={vs}",
                 rel(t_wake_ns),
                 rel(t_acquire_ns),
                 rel(t_acq_done_ns),
@@ -2612,24 +2927,41 @@ fn render_loop(inner: Arc<Inner>) {
                 rel(t_done_ns),
                 rel(sys::now_ns()),
                 rel(inner.input_flush_ns.load(Ordering::Acquire)),
-                rel(vsync_gate.deadline_ns()),
+                rel(deadline_ns),
+                rel(expected_present_ns),
+                u8::from(on_time),
+                pacer.present_slips(),
             );
         }
         if q != 0 {
             log::warn!("anland.render queueBuffer failed: {q}");
+            drop(gpu_fence_dup);
             close_silently(rfence);
         } else {
             inner.frames_queued.fetch_add(1, Ordering::Relaxed);
             crate::android::utils::desktop_frames::rendered_on(window);
-            note_rendered_frame(&inner, &mut frame_streak, sys::now_ns());
+            let queued_ns = sys::now_ns();
+            note_rendered_frame(&inner, &mut frame_streak, queued_ns);
             frames_since_drain = frames_since_drain.saturating_add(1);
-            pacer.frame_queued(
+            frame_seq = frame_seq.saturating_add(1);
+            slot_last_seq.insert(anb as usize, frame_seq);
+            let has_gpu_fence = gpu_fence_dup.is_some();
+            pacer.frame_queued_timed(
+                frame_seq,
                 t_wake_ns,
                 t_acq_done_ns,
-                sys::now_ns(),
-                vsync_gate.deadline_ns(),
+                queued_ns,
+                has_gpu_fence,
+                deadline_ns,
+                expected_present_ns,
                 period_ns,
             );
+            if let Some(dup_fd) = gpu_fence_dup {
+                if inflight_fences.len() >= 8 {
+                    inflight_fences.pop_front();
+                }
+                inflight_fences.push_back((frame_seq, queued_ns, dup_fd));
+            }
             // Readiness contract (mirrors the Smithay path's first-frame
             // marker): the producer connected, rendered into our dma-buf,
             // and we queued it to SurfaceFlinger. Evidence is labeled
@@ -2721,6 +3053,10 @@ fn render_loop(inner: Arc<Inner>) {
                 &mut win_frames,
                 &mut win_comp_us,
                 &mut win_comp_max_us,
+                &mut win_gpu_us,
+                &mut win_gpu_max_us,
+                &mut win_gpu_count,
+                pacer.present_slips(),
                 &mut win_skips,
                 &mut win_stalls,
                 &mut win_acq_us,
@@ -2732,6 +3068,50 @@ fn render_loop(inner: Arc<Inner>) {
     log::info!("anland.render thread stopped");
 }
 
+/// Non-blockingly poll dup'd GPU render fences and report actual GPU
+/// completion timestamps (or active pending lower bounds) to `LatchPacer`.
+#[allow(clippy::too_many_arguments)]
+fn reap_inflight_gpu_fences(
+    inflight: &mut std::collections::VecDeque<(u64, u64, OwnedFd)>,
+    pacer: &mut sys::LatchPacer,
+    now_ns: u64,
+    deadline_ns: u64,
+    expected_present_ns: u64,
+    period_ns: u64,
+    win_gpu_us: &mut u64,
+    win_gpu_max_us: &mut u64,
+    win_gpu_count: &mut u64,
+) {
+    let count = inflight.len();
+    for _ in 0..count {
+        let Some((seq, queued_ns, fd)) = inflight.pop_front() else {
+            break;
+        };
+        if let Some(gpu_done_ns) = sys::fence_signal_ns(fd.as_raw_fd()) {
+            pacer.frame_gpu_completed(
+                seq,
+                gpu_done_ns,
+                deadline_ns,
+                expected_present_ns,
+                period_ns,
+            );
+            let gpu_us = gpu_done_ns.saturating_sub(queued_ns) / 1000;
+            *win_gpu_us += gpu_us;
+            *win_gpu_max_us = (*win_gpu_max_us).max(gpu_us);
+            *win_gpu_count += 1;
+        } else if matches!(sys::poll_readable(&fd, 0), Ok(true)) {
+            pacer.frame_gpu_completed(seq, now_ns, deadline_ns, expected_present_ns, period_ns);
+            let gpu_us = now_ns.saturating_sub(queued_ns) / 1000;
+            *win_gpu_us += gpu_us;
+            *win_gpu_max_us = (*win_gpu_max_us).max(gpu_us);
+            *win_gpu_count += 1;
+        } else if now_ns.saturating_sub(queued_ns) < 500_000_000 {
+            pacer.note_gpu_pending(seq, now_ns, deadline_ns, expected_present_ns, period_ns);
+            inflight.push_back((seq, queued_ns, fd));
+        }
+    }
+}
+
 /// Drain an eventfd counter after poll signalled it. A single read clears
 /// accumulated ticks; errors are harmless (next poll re-arms).
 fn drain_fd(fd: &OwnedFd) {
@@ -2739,29 +3119,48 @@ fn drain_fd(fd: &OwnedFd) {
 }
 
 /// Hold a frame's select until its vsync's Android input batch is with KWin,
-/// at most `cap_ns` past the vsync. During a gesture Android delivers one
-/// batch per vsync just after it; KWin composites as soon as it is selected,
-/// so a select that overtakes the batch renders the previous position, and
-/// an order that varies between frames shows as judder (0, then 2 steps).
-/// `latest_vsync_ns` is the pump's latest tick.
-fn wait_for_input_batch(inner: &Inner, flush: &OwnedFd, latest_vsync_ns: u64, cap_ns: u64) {
-    let period_ns = 1_000_000_000_000 / u64::from(inner.refresh_mhz.load(Ordering::Acquire).max(1));
-    let Some(vsync_ns) =
-        sys::current_vsync(latest_vsync_ns, sys::now_ns(), period_ns, VSYNC_DUE_NS)
-    else {
+/// at most `cap_ns` past the vsync AND trimmed so the frame still meets its
+/// latch and GPU presentation deadlines (`LatchPacer::input_batch_deadline_ns`).
+/// During a gesture Android delivers one batch per vsync just after it; KWin
+/// composites as soon as it is selected, so a select that overtakes the batch
+/// renders the previous position, while waiting past the frame budget pushes
+/// completion into the next refresh.
+#[allow(clippy::too_many_arguments)]
+fn wait_for_input_batch(
+    inner: &Inner,
+    flush: &OwnedFd,
+    latest_vsync_ns: u64,
+    latch_deadline_ns: u64,
+    expected_present_ns: u64,
+    period_ns: u64,
+    pacer: &sys::LatchPacer,
+    cap_ns: u64,
+) {
+    let now = sys::now_ns();
+    let Some(vsync_ns) = sys::current_vsync(latest_vsync_ns, now, period_ns, VSYNC_DUE_NS) else {
         return;
     };
-    let deadline_ns = vsync_ns.saturating_add(cap_ns);
+    let wait_deadline_ns = pacer.input_batch_deadline_ns(
+        vsync_ns,
+        now,
+        cap_ns,
+        latch_deadline_ns,
+        expected_present_ns,
+        period_ns,
+    );
+    if now >= wait_deadline_ns {
+        return;
+    }
     loop {
         let flushed_ns = inner.input_flush_ns.load(Ordering::Acquire);
         if !sys::awaiting_input_batch(flushed_ns, vsync_ns, period_ns) {
             return;
         }
         let now = sys::now_ns();
-        if now >= deadline_ns {
+        if now >= wait_deadline_ns {
             return;
         }
-        match sys::poll_readable_ns(flush, deadline_ns - now) {
+        match sys::poll_readable_ns(flush, wait_deadline_ns - now) {
             Ok(true) => drain_fd(flush),
             _ => return,
         }
@@ -2777,6 +3176,10 @@ fn log_fps_window(
     win_frames: &mut u64,
     win_comp_us: &mut u64,
     win_comp_max_us: &mut u64,
+    win_gpu_us: &mut u64,
+    win_gpu_max_us: &mut u64,
+    win_gpu_count: &mut u64,
+    present_slips: u64,
     win_skips: &mut u64,
     win_stalls: &mut u64,
     win_acq_us: &mut u64,
@@ -2792,6 +3195,7 @@ fn log_fps_window(
     let skips = *win_skips;
     let hz = frames as f64 * 1_000_000_000.0 / elapsed_ns as f64;
     let avg_us = win_comp_us.checked_div(frames).unwrap_or(0);
+    let gpu_avg_us = win_gpu_us.checked_div(*win_gpu_count).unwrap_or(0);
     let acq_avg_us = win_acq_us.checked_div(frames).unwrap_or(0);
     let acq_ready_pct = *win_acq_ready * 100 / frames.max(1);
     let skip_pct = skips * 100 / (frames + skips).max(1);
@@ -2800,8 +3204,9 @@ fn log_fps_window(
     let hint_hz =
         inner.damage_hints.swap(0, Ordering::Relaxed) as f64 * 1_000_000_000.0 / elapsed_ns as f64;
     log::info!(
-        "anland.fps hz={hz:.1} hint_hz={hint_hz:.1} comp_avg_us={avg_us} comp_max_us={} acq_avg_us={acq_avg_us} acq_max_us={} acq_ready_pct={acq_ready_pct} skip_pct={skip_pct} acquire_stalls={} demanding={demanding}",
+        "anland.fps hz={hz:.1} hint_hz={hint_hz:.1} comp_avg_us={avg_us} comp_max_us={} gpu_avg_us={gpu_avg_us} gpu_max_us={} slips={present_slips} acq_avg_us={acq_avg_us} acq_max_us={} acq_ready_pct={acq_ready_pct} skip_pct={skip_pct} acquire_stalls={} demanding={demanding}",
         *win_comp_max_us,
+        *win_gpu_max_us,
         *win_acq_max_us,
         *win_stalls,
     );
@@ -2809,6 +3214,9 @@ fn log_fps_window(
     *win_frames = 0;
     *win_comp_us = 0;
     *win_comp_max_us = 0;
+    *win_gpu_us = 0;
+    *win_gpu_max_us = 0;
+    *win_gpu_count = 0;
     *win_skips = 0;
     *win_stalls = 0;
     *win_acq_us = 0;
@@ -2816,12 +3224,21 @@ fn log_fps_window(
     *win_acq_ready = 0;
 }
 
-const FENCE_LOST: i32 = -2;
+enum RefreshDone {
+    /// KWin rendered a new frame into the selected slot (optional GPU fence fd, `-1` = none).
+    Rendered(i32),
+    /// KWin had no new scene damage and skipped presenting the slot. Carries an
+    /// optional GPU fence fd (`-1` = none) when accumulated damage still emitted
+    /// GPU writes into the slot.
+    Skipped(i32),
+    /// Producer connection died or timed out.
+    Lost,
+}
 
-/// Wait for the producer's render-done message; return its fence fd (>=0),
-/// -1 for ready-now, FRAME_SKIPPED when KWin rendered nothing, or
-/// FENCE_LOST when the generation died.
-fn refresh_done(inner: &Arc<Inner>, fence: &OwnedFd, generation: u64) -> i32 {
+/// Wait for the producer's render-done message; return whether KWin rendered
+/// or skipped the slot (along with any attached GPU completion fence fd), or
+/// `RefreshDone::Lost` when the generation died.
+fn refresh_done(inner: &Arc<Inner>, fence: &OwnedFd, generation: u64) -> RefreshDone {
     // Emergency software fallback only: cold sessions (nothing ever queued)
     // get a long interruptible budget, because tearing down the generation
     // mid-render rips the producer connection while llvmpipe is still
@@ -2845,10 +3262,10 @@ fn refresh_done(inner: &Arc<Inner>, fence: &OwnedFd, generation: u64) -> i32 {
                 if !inner.running.load(Ordering::Acquire)
                     || !inner.window_live.load(Ordering::Acquire)
                 {
-                    return FENCE_LOST;
+                    return RefreshDone::Lost;
                 }
                 enter_fallback(inner, generation, "fence channel hangup (producer gone)");
-                return FENCE_LOST;
+                return RefreshDone::Lost;
             }
             Ok(false) => {
                 waited_ms += quantum_ms as i64;
@@ -2858,11 +3275,11 @@ fn refresh_done(inner: &Arc<Inner>, fence: &OwnedFd, generation: u64) -> i32 {
                     // Session or surface is stopping: bail without fallback
                     // churn so the render thread can be joined before the
                     // native window is released.
-                    return FENCE_LOST;
+                    return RefreshDone::Lost;
                 }
                 if waited_ms >= budget_ms {
                     enter_fallback(inner, generation, "refresh_done timeout (producer stalled)");
-                    return FENCE_LOST;
+                    return RefreshDone::Lost;
                 }
             }
         }
@@ -2872,21 +3289,27 @@ fn refresh_done(inner: &Arc<Inner>, fence: &OwnedFd, generation: u64) -> i32 {
     let mut fds = [-1i32; 1];
     loop {
         return match sys::recv_fds(fence, &mut byte, &mut fds, libc::MSG_DONTWAIT) {
-            // KWin's skip notice is the byte alone; a rendered frame may come
-            // with or without a fence (-1 means already signalled).
-            Ok(got) if got.fds == 0 && byte[0] == REFRESH_DONE_SKIPPED => FRAME_SKIPPED,
-            Ok(got) if got.fds > 0 => fds[0],
-            Ok(_) => -1,
+            // Check the status byte regardless of attached fds: a skipped frame
+            // may still carry a GPU fence when accumulated damage emitted GPU
+            // writes into the selected slot.
+            Ok(got) => {
+                let fd = if got.fds > 0 { fds[0] } else { -1 };
+                if byte[0] == REFRESH_DONE_SKIPPED {
+                    RefreshDone::Skipped(fd)
+                } else {
+                    RefreshDone::Rendered(fd)
+                }
+            }
             // A signal is not a dead producer.
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                 enter_fallback(inner, generation, "fence channel EOF (producer gone)");
-                FENCE_LOST
+                RefreshDone::Lost
             }
             Err(_) => {
                 // EAGAIN after POLLIN (fd swapped under us) or error: treat as lost.
                 enter_fallback(inner, generation, "fence channel recv failed");
-                FENCE_LOST
+                RefreshDone::Lost
             }
         };
     }

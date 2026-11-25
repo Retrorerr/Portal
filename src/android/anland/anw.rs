@@ -15,6 +15,13 @@ pub const QUERY_MIN_UNDEQUEUED_BUFFERS: c_int = 3;
 const QUERY_TRANSFORM_HINT: c_int = 8;
 pub const FORMAT_RGBA_8888: c_int = 1; // == AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM
 
+/// `AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | GPU_FRAMEBUFFER | COMPOSER_OVERLAY`.
+pub const USAGE_GPU_LINEAR: u64 = (1 << 8) | (1 << 9) | (1 << 11);
+/// Qualcomm Adreno gralloc private UBWC allocation flag (`GRALLOC_USAGE_PRIVATE_ALLOC_UBWC`).
+pub const GRALLOC_USAGE_PRIVATE_ALLOC_UBWC: u64 = 1 << 28;
+/// GPU + HWC scanout with Qualcomm UBWC compression requested.
+pub const USAGE_GPU_UBWC: u64 = USAGE_GPU_LINEAR | GRALLOC_USAGE_PRIVATE_ALLOC_UBWC;
+
 const ANW_API_CONNECT: c_int = 13;
 const ANW_API_DISCONNECT: c_int = 14;
 
@@ -174,6 +181,8 @@ pub struct AnwApi {
     /// Platform `ANativeWindow_setSwapInterval` (API 30+); optional.
     set_swap_interval:
         Option<libloading::Symbol<'static, unsafe extern "C" fn(*mut c_void, c_int) -> c_int>>,
+    /// Platform `ANativeWindow_setUsage` (hidden libnativewindow symbol); optional.
+    set_usage: Option<libloading::Symbol<'static, unsafe extern "C" fn(*mut c_void, u64) -> c_int>>,
 }
 
 unsafe impl Send for AnwApi {}
@@ -215,6 +224,7 @@ impl AnwApi {
                 cancel_buffer: sym!(b"ANativeWindow_cancelBuffer"),
                 set_buffers_transform: leaked.get(b"ANativeWindow_setBuffersTransform").ok(),
                 set_swap_interval: leaked.get(b"ANativeWindow_setSwapInterval").ok(),
+                set_usage: leaked.get(b"ANativeWindow_setUsage").ok(),
             })
         }
     }
@@ -328,6 +338,16 @@ impl AnwApi {
         unsafe { self.set_swap_interval.as_ref().map(|f| f(window, interval)) }
     }
 
+    /// Configure gralloc allocation usage flags for subsequent buffers.
+    /// Returns `None` when the platform does not export `ANativeWindow_setUsage`.
+    ///
+    /// # Safety
+    ///
+    /// `window` must be a live `ANativeWindow*` that this session owns.
+    pub unsafe fn set_usage(&self, window: *mut c_void, usage: u64) -> Option<c_int> {
+        unsafe { self.set_usage.as_ref().map(|f| f(window, usage)) }
+    }
+
     /// # Safety
     ///
     /// `window` must be a live `ANativeWindow*` that this session owns.
@@ -435,13 +455,16 @@ impl AnwApi {
         unsafe { (self.cancel_buffer)(window, buf, fence) }
     }
 
-    /// Read the dma-buf fd + stride out of a dequeued buffer.
-    /// Returns (dup-able fd value, stride in pixels, w, h).
+    /// Read the dma-buf fd, stride, dimensions, and gralloc usage flags out of
+    /// a dequeued buffer.
+    /// Returns `(dup-able fd value, stride in pixels, w, h, usage)`.
     ///
     /// # Safety
     ///
     /// `buf` must point to a live `ANativeWindowBuffer` dequeued by this session.
-    pub unsafe fn buffer_dma_info(buf: *mut ANativeWindowBuffer) -> Option<(c_int, i32, i32, i32)> {
+    pub unsafe fn buffer_dma_info(
+        buf: *mut ANativeWindowBuffer,
+    ) -> Option<(c_int, i32, i32, i32, u64)> {
         unsafe {
             let b = &*buf;
             if b.handle.is_null() {
@@ -452,7 +475,7 @@ impl AnwApi {
                 return None;
             }
             let fd = *(h.data_ptr());
-            Some((fd, b.stride, b.width, b.height))
+            Some((fd, b.stride, b.width, b.height, b.usage))
         }
     }
 }
