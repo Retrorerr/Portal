@@ -37,6 +37,9 @@
  *      dependencies on optional exported key variables.
  *  10. Decoder backpressure waits track output progress; stalled or cancelled
  *      sessions wake both workers before releasing MediaCodec and SHM.
+ *  11. Portal: SHM decode sessions render into an AImageReader, and clients
+ *      that opt in receive the decoder's buffers as dma-bufs instead of
+ *      copies (TVA_CLIENT_CAP_DMABUF in common/tva_protocol.h).
  *
  * Everything else - the DMD v3 wire protocol, the MediaCodec session
  * lifecycle, the memfd/SCM_RIGHTS shared-memory handoff, the drain
@@ -519,6 +522,21 @@ typedef struct {
     int              img_crop_known;   /* display crop from the output format */
     int              img_crop_l, img_crop_t, img_crop_r, img_crop_b;
 
+    /* dma-buf frames (TVA_CLIENT_CAP_DMABUF): the decoder's own buffer is
+     * lent to the client instead of copied into a slot.  held[] keeps each
+     * lent image acquired until the client resets the slot's state word.
+     * Only the output thread touches these after the handshake. */
+    int              client_dmabuf;
+    AImage          *held[SHM_SLOTS];
+    int              held_count;
+    struct {
+        uint64_t     ino;              /* dma-buf inode, 0 = free entry */
+        int          ok;               /* 0 = layout not usable, copy instead */
+        uint32_t     y_off, slice, size, stride;
+    } dmabuf_known[32];
+    int              dmabuf_known_next;
+    long             dmabuf_frames, dmabuf_copies;
+
     /* shared-memory transport */
     XferMode         xfer;
     int              shm_fd;           /* memfd, -1 = not established */
@@ -665,6 +683,7 @@ static ssize_t decoder_input_buffer(Session *s)
 
 /* Pool setup/teardown are defined later; the handshake path needs them. */
 static int  shm_prepare(Session *s, int w, int h);
+static int  dmabuf_output_wanted(void);
 static int  shm_handoff(Session *s);
 static void shm_teardown(Session *s);
 
@@ -1214,14 +1233,44 @@ static int shm_handoff(Session *s)
         close(cs);
         return -1;
     }
+    /* Portal extension: a client that takes dma-buf frames answers with
+     * [TVA_HANDOFF_CAPS_MAGIC][caps] before closing.  An older client closes
+     * right away, which reads as EOF; the wait is bounded either way. */
+    s->client_dmabuf = 0;
+    {
+        uint32_t caps[2];
+        size_t got = 0;
+        int64_t deadline = monotonic_ms() + 1000;
+        while (got < sizeof(caps)) {
+            int left = (int)(deadline - monotonic_ms());
+            if (left <= 0)
+                break;
+            struct pollfd pf = { .fd = cs, .events = POLLIN };
+            int pr = poll(&pf, 1, left);
+            if (pr < 0 && errno == EINTR)
+                continue;
+            if (pr <= 0)
+                break;
+            ssize_t n = recv(cs, (char *)caps + got, sizeof(caps) - got, 0);
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n <= 0)
+                break;
+            got += (size_t)n;
+        }
+        if (got == sizeof(caps) && ntohl(caps[0]) == TVA_HANDOFF_CAPS_MAGIC &&
+            (ntohl(caps[1]) & TVA_CLIENT_CAP_DMABUF) && dmabuf_output_wanted())
+            s->client_dmabuf = 1;
+    }
     close(cs);
 
     /* handoff complete; the listener is no longer needed */
     close(s->shm_listen);
     s->shm_listen = -1;
 
-    dlog(1, "[%d] SHM handed over: %d slots x %zu bytes (total %zu)",
-         s->id, SHM_SLOTS, s->shm_slot, s->shm_total);
+    dlog(1, "[%d] SHM handed over: %d slots x %zu bytes (total %zu)%s",
+         s->id, SHM_SLOTS, s->shm_slot, s->shm_total,
+         s->client_dmabuf ? ", client takes dma-buf frames" : "");
     return 0;
 }
 
@@ -1276,6 +1325,13 @@ static int shm_claim_slot(Session *s)
         dlog(1, "[%d] no free slot after %d ms (client stuck), ending session",
              s->id, SHM_SLOT_WAIT_MS);
         return -1;
+    }
+    /* A dma-buf frame the client has returned: give the buffer back to the
+     * decoder before the slot is reused. */
+    if (s->held[slot]) {
+        AImage_delete(s->held[slot]);
+        s->held[slot] = NULL;
+        s->held_count--;
     }
 
     return slot;
@@ -1563,6 +1619,287 @@ static int send_frame_shm_i420(Session *s, const uint8_t *data, size_t len,
 #define IMAGE_WAIT_MS 2000
 #define QCOM_NV12_VENUS 0x7fa30c04   /* HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS */
 
+/* ------------------------------------------------------- dma-buf frames */
+/*
+ * Lend the decoder's output buffer to the client instead of copying it into
+ * an SHM slot (TVA_CLIENT_CAP_DMABUF).  The client maps the dma-buf and
+ * copies straight into its surface, so the frame crosses the CPU once
+ * instead of twice, and the daemon skips the gralloc lock, cache
+ * maintenance and copy on every frame.
+ *
+ * The NDK has no call that exports an AHardwareBuffer as a dma-buf, so the
+ * pixel fd comes from the buffer's native handle (LL-NDK
+ * AHardwareBuffer_getNativeHandle, resolved at run time), and its layout is
+ * proven once per buffer: lock the buffer through gralloc, find the locked
+ * addresses in /proc/self/maps, and require the mapping's inode to be one
+ * of the handle's fds.  That gives the exact byte offsets of both planes in
+ * that fd without assuming a vendor handle layout.  A buffer that does not
+ * check out keeps the SHM copy.
+ *
+ * TERMUX_VA_DMABUF=0 turns the path off (A/B and fallback).
+ */
+#define DMABUF_KNOWN_MAX 32
+/* Reader depth for dma-buf sessions: lent frames plus the one in flight. */
+#define DMABUF_READER_IMAGES 6
+
+typedef struct {
+    int version;
+    int numFds;
+    int numInts;
+    int data[];
+} tva_native_handle;
+
+typedef const tva_native_handle *(*get_native_handle_fn)(const AHardwareBuffer *);
+static get_native_handle_fn g_get_native_handle;
+static pthread_once_t g_native_handle_once = PTHREAD_ONCE_INIT;
+
+/* Both ends tell buffers apart by the dma-buf's inode.  Kernels before
+ * 5.3 gave every dma-buf the same anonymous inode; there, two buffers would
+ * look like one and the client would show the wrong picture.  Probe once
+ * with two buffers of our own and lend nothing unless their inodes differ. */
+static int g_dmabuf_inodes_unique;
+
+static uint64_t dmabuf_probe_ino(AHardwareBuffer *hb)
+{
+    const tva_native_handle *nh = g_get_native_handle(hb);
+    struct stat st;
+    if (!nh || nh->numFds <= 0 || fstat(nh->data[0], &st) < 0)
+        return 0;
+    return (uint64_t)st.st_ino;
+}
+
+static void dmabuf_resolve(void)
+{
+    void *lib = dlopen("libnativewindow.so", RTLD_NOW | RTLD_LOCAL);
+    if (lib)
+        g_get_native_handle =
+            (get_native_handle_fn)dlsym(lib, "AHardwareBuffer_getNativeHandle");
+    if (!g_get_native_handle) {
+        dlog(1, "AHardwareBuffer_getNativeHandle unavailable; frames are copied");
+        return;
+    }
+    AHardwareBuffer_Desc pd = {
+        .width = 64, .height = 64, .layers = 1,
+        .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+        .usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+    };
+    AHardwareBuffer *a = NULL, *b = NULL;
+    if (AHardwareBuffer_allocate(&pd, &a) == 0 && AHardwareBuffer_allocate(&pd, &b) == 0) {
+        uint64_t ia = dmabuf_probe_ino(a), ib = dmabuf_probe_ino(b);
+        g_dmabuf_inodes_unique = ia && ib && ia != ib;
+    }
+    if (a) AHardwareBuffer_release(a);
+    if (b) AHardwareBuffer_release(b);
+    if (!g_dmabuf_inodes_unique)
+        dlog(1, "dma-buf inodes are not unique per buffer; frames are copied");
+}
+
+static int dmabuf_output_wanted(void)
+{
+    const char *e = getenv("TERMUX_VA_DMABUF");
+    if (e && strcmp(e, "0") == 0)
+        return 0;
+    pthread_once(&g_native_handle_once, dmabuf_resolve);
+    return g_get_native_handle != NULL && g_dmabuf_inodes_unique;
+}
+
+/* Find the mapping that holds `addr` in /proc/self/maps: its inode and the
+ * file offset of `addr`. */
+static int dmabuf_map_lookup(uintptr_t addr, uint64_t *ino, uint64_t *off)
+{
+    FILE *f = fopen("/proc/self/maps", "re");
+    if (!f)
+        return -1;
+    char line[512];
+    int found = -1;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long long start, end, pgoff, inode;
+        unsigned int dmaj, dmin;
+        char perms[8];
+        if (sscanf(line, "%llx-%llx %7s %llx %x:%x %llu", &start, &end, perms,
+                   &pgoff, &dmaj, &dmin, &inode) != 7)
+            continue;
+        if (addr < start || addr >= end)
+            continue;
+        if (inode) {
+            *ino = inode;
+            *off = pgoff + (addr - start);
+            found = 0;
+        }
+        break;
+    }
+    fclose(f);
+    return found;
+}
+
+/* Work out, once per buffer, where the NV12 planes of `hb` sit in which of
+ * its native handle's fds.  Returns the dmabuf_known index, or -1 when this
+ * buffer has to be copied.  *fd_out is borrowed from the native handle. */
+static int dmabuf_entry_for(Session *s, AHardwareBuffer *hb, const AHardwareBuffer_Desc *d,
+                            int *fd_out)
+{
+    const tva_native_handle *nh = g_get_native_handle ? g_get_native_handle(hb) : NULL;
+    if (!nh || nh->numFds <= 0 || nh->numFds > 8)
+        return -1;
+    uint64_t inos[8];
+    for (int i = 0; i < nh->numFds; i++) {
+        struct stat st;
+        inos[i] = fstat(nh->data[i], &st) == 0 ? (uint64_t)st.st_ino : 0;
+        for (int k = 0; inos[i] && k < DMABUF_KNOWN_MAX; k++) {
+            if (s->dmabuf_known[k].ino == inos[i]) {
+                *fd_out = nh->data[i];
+                return s->dmabuf_known[k].ok ? k : -1;
+            }
+        }
+    }
+
+    /* First sight of this buffer: prove its layout through a gralloc lock. */
+    int ok = 0, fd_index = -1;
+    uint64_t y_ino = 0, y_off = 0, uv_ino = 0, uv_off = 0;
+    uint32_t stride = 0;
+    AHardwareBuffer_Planes planes;
+    void *base = NULL;
+    const uint8_t *y = NULL, *uv = NULL;
+    int locked = 0;
+    if (AHardwareBuffer_lockPlanes(hb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL,
+                                   &planes) == 0) {
+        locked = 1;
+        if (planes.planeCount >= 3 && planes.planes[0].pixelStride == 1 &&
+            planes.planes[1].pixelStride == 2 && planes.planes[2].pixelStride == 2 &&
+            (const uint8_t *)planes.planes[2].data == (const uint8_t *)planes.planes[1].data + 1 &&
+            planes.planes[0].rowStride == planes.planes[1].rowStride) {
+            y = planes.planes[0].data;
+            uv = planes.planes[1].data;
+            stride = planes.planes[0].rowStride;
+        } else {
+            dlog(2, "[%d] lockPlanes: %u planes, pixel strides %u/%u row strides %u/%u",
+                 s->id, planes.planeCount, planes.planes[0].pixelStride,
+                 planes.planeCount > 1 ? planes.planes[1].pixelStride : 0,
+                 planes.planes[0].rowStride,
+                 planes.planeCount > 1 ? planes.planes[1].rowStride : 0);
+            AHardwareBuffer_unlock(hb, NULL);
+            locked = 0;
+        }
+    }
+    if (!locked && d->format == QCOM_NV12_VENUS &&
+               AHardwareBuffer_lock(hb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL,
+                                    &base) == 0 && base) {
+        /* Same fixed Venus layout image_send_frame copies from. */
+        locked = 1;
+        y = base;
+        uv = y + (size_t)d->stride * ((d->height + 31) & ~31u);
+        stride = d->stride;
+    }
+    if (y && uv && dmabuf_map_lookup((uintptr_t)y, &y_ino, &y_off) == 0 &&
+        dmabuf_map_lookup((uintptr_t)uv, &uv_ino, &uv_off) == 0 && y_ino == uv_ino) {
+        for (int i = 0; i < nh->numFds; i++)
+            if (inos[i] == y_ino) { fd_index = i; break; }
+    }
+    if (locked)
+        AHardwareBuffer_unlock(hb, NULL);
+
+    uint64_t size = 0;
+    uint32_t slice = 0;
+    if (fd_index >= 0 && stride > 0 && uv_off > y_off && (uv_off - y_off) % stride == 0) {
+        off_t end = lseek(nh->data[fd_index], 0, SEEK_END);
+        slice = (uint32_t)((uv_off - y_off) / stride);
+        size = end > 0 ? (uint64_t)end : 0;
+        uint64_t need = y_off + (uint64_t)stride * slice +
+                        (uint64_t)stride * ((d->height + 1) / 2);
+        ok = slice >= d->height && stride >= d->width && size >= need &&
+             size <= UINT32_MAX;
+    }
+
+    int k = s->dmabuf_known_next;
+    s->dmabuf_known_next = (k + 1) % DMABUF_KNOWN_MAX;
+    s->dmabuf_known[k].ino = fd_index >= 0 ? inos[fd_index] : (inos[0] ? inos[0] : 1);
+    s->dmabuf_known[k].ok = ok;
+    s->dmabuf_known[k].y_off = (uint32_t)y_off;
+    s->dmabuf_known[k].slice = slice;
+    s->dmabuf_known[k].size = (uint32_t)size;
+    s->dmabuf_known[k].stride = stride;
+    dlog(ok ? 2 : 1, "[%d] output buffer ino=%llu format=0x%x %ux%u: %s (fd %d of %d, y=%llu uv=%llu stride=%u slice=%u size=%llu)",
+         s->id, (unsigned long long)s->dmabuf_known[k].ino, d->format, d->width, d->height,
+         ok ? "lent as dma-buf" : "copied", fd_index, nh->numFds,
+         (unsigned long long)y_off, (unsigned long long)uv_off, stride, slice,
+         (unsigned long long)size);
+    if (!ok)
+        return -1;
+    *fd_out = nh->data[fd_index];
+    return k;
+}
+
+/* Give back every lent buffer the client has finished with. */
+static void dmabuf_reap(Session *s)
+{
+    for (int i = 0; i < SHM_SLOTS && s->held_count > 0; i++) {
+        if (s->held[i] && __atomic_load_n(shm_slot_state(s, i), __ATOMIC_ACQUIRE) == 0) {
+            AImage_delete(s->held[i]);
+            s->held[i] = NULL;
+            s->held_count--;
+        }
+    }
+}
+
+static void dmabuf_release_all(Session *s)
+{
+    for (int i = 0; i < SHM_SLOTS; i++) {
+        if (s->held[i]) {
+            AImage_delete(s->held[i]);
+            s->held[i] = NULL;
+        }
+    }
+    s->held_count = 0;
+}
+
+/* Send one lent frame: [w][h][sentinel][slot][len][pts][offset][size] with
+ * the fd attached.  The image stays acquired until the slot is returned.
+ * On failure the image is still the caller's. */
+static int dmabuf_publish(Session *s, int slot, AImage *img, int fd, uint32_t off,
+                          uint32_t len, uint32_t size, uint32_t pts)
+{
+    __atomic_store_n(shm_slot_state(s, slot), 1u, __ATOMIC_RELEASE);
+
+    uint32_t msg[8] = {
+        htonl((uint32_t)s->w), htonl((uint32_t)s->h),
+        htonl(DMABUF_FRAME_SENTINEL),
+        htonl((uint32_t)slot), htonl(len), htonl(pts),
+        htonl(off), htonl(size)
+    };
+    struct iovec io = { msg, sizeof(msg) };
+    char cbuf[CMSG_SPACE(sizeof(int))];
+    memset(cbuf, 0, sizeof(cbuf));
+    struct msghdr mh;
+    memset(&mh, 0, sizeof(mh));
+    mh.msg_iov = &io; mh.msg_iovlen = 1;
+    mh.msg_control = cbuf; mh.msg_controllen = sizeof(cbuf);
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+    cm->cmsg_level = SOL_SOCKET;
+    cm->cmsg_type  = SCM_RIGHTS;
+    cm->cmsg_len   = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cm), &fd, sizeof(int));
+
+    ssize_t n;
+    do {
+        n = sendmsg(s->fd, &mh, MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0) {
+        /* nothing reached the client: the slot is free again */
+        __atomic_store_n(shm_slot_state(s, slot), 0u, __ATOMIC_RELEASE);
+        if (errno == EPIPE || errno == ECONNRESET)
+            return SEND_PEER_GONE;
+        dlog(1, "[%d] dma-buf frame send failed: %s", s->id, strerror(errno));
+        return -1;
+    }
+    /* The client has the fd from here on; the image is lent. */
+    s->held[slot] = img;
+    s->held_count++;
+    s->shm_next = (slot + 1) % SHM_SLOTS;
+    if ((size_t)n < sizeof(msg))
+        return send_all(s->fd, (const char *)msg + n, sizeof(msg) - (size_t)n);
+    return 0;
+}
+
 static void image_available(void *ctx, AImageReader *reader)
 {
     (void)reader;
@@ -1582,9 +1919,11 @@ static int image_output_wanted(void)
 static ANativeWindow *image_reader_open(Session *s)
 {
     AImageReader *r = NULL;
+    /* Lent dma-buf frames stay acquired until the client returns them. */
     media_status_t st = AImageReader_newWithUsage(
         s->w, s->h, AIMAGE_FORMAT_YUV_420_888,
-        AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, 3, &r);
+        AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+        s->client_dmabuf ? DMABUF_READER_IMAGES : 3, &r);
     if (st != AMEDIA_OK || !r) {
         dlog(1, "[%d] AImageReader unavailable (%d), using ByteBuffer output", s->id, st);
         return NULL;
@@ -1606,6 +1945,10 @@ static void image_reader_close(Session *s)
 {
     if (!s->reader)
         return;
+    dmabuf_release_all(s);
+    if (s->dmabuf_frames || s->dmabuf_copies)
+        dlog(1, "[%d] dma-buf frames: %ld lent, %ld copied", s->id,
+             s->dmabuf_frames, s->dmabuf_copies);
     AImageReader_delete(s->reader);
     s->reader = NULL;
     pthread_cond_destroy(&s->img_cv);
@@ -1622,6 +1965,55 @@ static void image_reader_discard(Session *s)
     }
 }
 
+/* Lend the acquired image's buffer to the client (dma-buf frame).  Consumes
+ * `img`: it is either held until the client returns the slot or deleted. */
+static int image_lend_frame(Session *s, AImage *img, const AHardwareBuffer_Desc *d, int k,
+                            int fd, const AMediaCodecBufferInfo *info, uint32_t pts)
+{
+    int64_t its = 0;
+    AImage_getTimestamp(img, &its);
+    if (its != info->presentationTimeUs * 1000 && s->img_ts_mismatch++ < 8)
+        dlog(1, "[%d] image timestamp %lld != output %lld us", s->id,
+             (long long)its, (long long)info->presentationTimeUs);
+
+    const int32_t w = (int32_t)d->width, h = (int32_t)d->height;
+    const int stride = (int)s->dmabuf_known[k].stride;
+    const int slice = (int)s->dmabuf_known[k].slice;
+    int cl = 0, ct = 0, cr = w - 1, cb = h - 1;
+    if (s->img_crop_known) {
+        cl = s->img_crop_l; ct = s->img_crop_t;
+        cr = s->img_crop_r < w ? s->img_crop_r : w - 1;
+        cb = s->img_crop_b < h ? s->img_crop_b : h - 1;
+    }
+    if (s->stride != stride || s->slice_height != slice || s->crop_l != cl ||
+        s->crop_t != ct || s->crop_r != cr || s->crop_b != cb || !s->fmt_sent) {
+        s->stride = stride; s->slice_height = slice;
+        s->crop_l = cl; s->crop_t = ct; s->crop_r = cr; s->crop_b = cb;
+        if (!s->frames_out || s->fmt_changes > 1)
+            dlog(1, "[%d] dma-buf output %dx%d (buffer 0x%x stride %d slice %d) crop=(%d,%d)-(%d,%d)",
+                 s->id, w, h, d->format, stride, slice, cl, ct, cr, cb);
+        if (send_format_desc(s) < 0) {
+            AImage_delete(img);
+            return -1;
+        }
+    }
+
+    const uint32_t len = (uint32_t)stride * (uint32_t)slice +
+                         (uint32_t)stride * (uint32_t)((h + 1) / 2);
+    int slot = shm_claim_slot(s);
+    if (slot < 0) {
+        AImage_delete(img);
+        return slot;
+    }
+    int rc = dmabuf_publish(s, slot, img, fd, s->dmabuf_known[k].y_off, len,
+                            s->dmabuf_known[k].size, pts);
+    if (s->held[slot] != img)
+        AImage_delete(img);    /* never reached the client */
+    else
+        s->dmabuf_frames++;
+    return rc;
+}
+
 /* Render output buffer `oi` into the reader, take the image and copy it into
  * an SHM slot as NV12.  Strictly serialized - one image in flight - so a
  * queued buffer is never replaced before it is acquired.  Returns 0, a
@@ -1629,6 +2021,25 @@ static void image_reader_discard(Session *s)
 static int image_send_frame(Session *s, ssize_t oi, const AMediaCodecBufferInfo *info,
                             uint32_t pts)
 {
+    /* Keep one reader image free for this frame: wait for the client to
+     * return lent buffers (normal backpressure, bounded like a slot wait). */
+    if (s->client_dmabuf) {
+        dmabuf_reap(s);
+        for (int spin = 0; s->held_count >= DMABUF_READER_IMAGES - 1; spin++) {
+            if (!running || s->stop) {
+                AMediaCodec_releaseOutputBuffer(s->codec, oi, false);
+                return SEND_PEER_GONE;
+            }
+            if (spin >= SHM_SLOT_WAIT_MS) {
+                dlog(1, "[%d] client kept %d dma-buf frames for %d ms, ending session",
+                     s->id, s->held_count, SHM_SLOT_WAIT_MS);
+                AMediaCodec_releaseOutputBuffer(s->codec, oi, false);
+                return -1;
+            }
+            usleep(1000);
+            dmabuf_reap(s);
+        }
+    }
     if (AMediaCodec_releaseOutputBuffer(s->codec, oi, true) != AMEDIA_OK)
         return -3;
 
@@ -1665,6 +2076,14 @@ static int image_send_frame(Session *s, ssize_t oi, const AMediaCodecBufferInfo 
     AHardwareBuffer_Desc d = {0};
     if (AImage_getHardwareBuffer(img, &hb) == AMEDIA_OK && hb)
         AHardwareBuffer_describe(hb, &d);
+
+    if (s->client_dmabuf && hb) {
+        int dfd = -1;
+        int k = dmabuf_entry_for(s, hb, &d, &dfd);
+        if (k >= 0)
+            return image_lend_frame(s, img, &d, k, dfd, info, pts);
+        s->dmabuf_copies++;
+    }
 
     if (d.format == QCOM_NV12_VENUS) {
         /* Qualcomm's linear NV12: gralloc locks it as a single plane, the

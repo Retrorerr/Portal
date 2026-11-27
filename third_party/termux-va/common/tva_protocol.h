@@ -171,6 +171,31 @@ typedef enum {
  * a 4th field = input unit index (round-tripped through MediaCodec PTS). */
 #define CAP_FRAME_PTS 0x00000001u
 
+/* ------------------------------------------------------ dma-buf frames */
+
+/*
+ * Portal extension: decoded frames handed over as the decoder's own
+ * dma-buf instead of a copy in an SHM slot.
+ *
+ * Opt-in: after receiving the memfd on the SHM handoff socket, a client
+ * that can take dma-buf frames writes two big-endian words on that socket,
+ * [TVA_HANDOFF_CAPS_MAGIC][TVA_CLIENT_CAP_*], before closing it.  Older
+ * clients close the socket without writing, older daemons close it without
+ * reading, so either side being old keeps plain SHM delivery.
+ *
+ * A dma-buf frame is one control message of eight big-endian words,
+ *   [w][h][DMABUF_FRAME_SENTINEL][slot][length][unit index][offset][size]
+ * sent with the buffer's fd in SCM_RIGHTS.  The frame bytes (NV12 laid out
+ * as the latest format block describes) start at `offset` in a dma-buf of
+ * `size` bytes.  The slot's state word in the SHM control area holds the
+ * buffer for the client exactly like an SHM slot: the daemon does not let
+ * the decoder reuse the buffer until the client resets the word to 0.  The
+ * daemon may mix SHM and dma-buf frames in one session.
+ */
+#define DMABUF_FRAME_SENTINEL  0xFFFFFFFDu
+#define TVA_HANDOFF_CAPS_MAGIC 0x54564143u   /* "TVAC" */
+#define TVA_CLIENT_CAP_DMABUF  0x00000001u
+
 /*
  * Input unit index -> presentationTimeUs multiplier.
  *
