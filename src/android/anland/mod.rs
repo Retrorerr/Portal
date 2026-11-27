@@ -271,7 +271,20 @@ pub fn guest_mesa_env() -> Vec<(String, String)> {
         // "wayland:ibus" crashes GTK 3 on X11 (verified on device).
         ("ANLAND_SOCKET".into(), guest_socket_path().into()),
         ("ANLAND".into(), "1".into()),
-        ("ANLAND_SKIP_IMPLICIT_SYNC_WAIT".into(), "1".into()),
+        // KWin applies a client's dma-buf commit at once instead of polling
+        // the buffer until the client's GPU is done (KWin patch 0013): EGL
+        // implicit sync makes the composite wait for that rendering on the
+        // GPU, and the consumer hears of the damage a client frame earlier.
+        // `kwin_sync_wait=1` in anland-tuning restores the wait.
+        (
+            "ANLAND_SKIP_IMPLICIT_SYNC_WAIT".into(),
+            if consumer::tuning_value("kwin_sync_wait").is_some_and(|v| v != 0) {
+                "0"
+            } else {
+                "1"
+            }
+            .into(),
+        ),
         // The audio engine has no host counterpart yet; skip it entirely.
         ("ANLAND_DISABLE_AUDIO".into(), "1".into()),
         // The Portal Stylus is a tablet tool; KWin gives it to clients
@@ -354,8 +367,7 @@ pub fn validate_launch_contract() -> anyhow::Result<()> {
 /// and watchdog policy match the actual renderer. Absent (or anything else)
 /// means hardware: genuine fenced evidence is required as usual.
 pub fn kwin_glmode_flag_path() -> std::path::PathBuf {
-    crate::core::config::rootfs()
-        .join("var/lib/localdesktop/kwin-glmode")
+    crate::core::config::rootfs().join("var/lib/localdesktop/kwin-glmode")
 }
 
 /// True only when the explicit emergency software fallback is requested.

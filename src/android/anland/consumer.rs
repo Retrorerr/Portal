@@ -83,6 +83,15 @@ const FRAME_STREAK_HIGH_REFRESH_NS: u64 = 100_000_000;
 /// request held past that kept the panel at its peak rate on an idle desktop
 /// until the next touch. A touch raises the rate again at once.
 const HIGH_REFRESH_HOLD_NS: u64 = 300_000_000;
+/// Rendered frames for this long without a break are content playing by
+/// itself (video, an animation, a page's own motion), which asks for the
+/// content display mode: an even cadence for 24/30/60 fps (see
+/// `display_mode_request::Refresh::Content`). The idle 50-60 Hz panel dropped
+/// or doubled frames of a 60 fps stream.
+const FRAME_STREAK_CONTENT_NS: u64 = 400_000_000;
+/// How long the content mode outlasts the latest frame of such a streak:
+/// a stream that stalls for a moment keeps its rate.
+const CONTENT_REFRESH_HOLD_NS: u64 = 500_000_000;
 /// How long after the user's last touch, pointer, key, text or gamepad input
 /// presentation stays interactive (full panel rate for damage, and sustained
 /// damage may request the high-refresh mode). Outlasts `INPUT_BURST_MS` so
@@ -242,7 +251,7 @@ fn window_buffer_count(min_undequeued: i32, external_display: bool) -> usize {
 /// Optional presentation overrides for on-device tuning, read from
 /// `<files>/anland-tuning` (`key=value` lines) when a surface is configured.
 /// Absent file or key: the built-in policy applies.
-fn tuning_value(key: &str) -> Option<i64> {
+pub(crate) fn tuning_value(key: &str) -> Option<i64> {
     let path = std::path::Path::new(crate::core::config::APP_FILES_ROOT).join("anland-tuning");
     let text = std::fs::read_to_string(path).ok()?;
     text.lines().find_map(|line| {
@@ -376,6 +385,9 @@ struct Inner {
     /// animation), so an isolated repaint such as a blinking text cursor
     /// renders promptly without pinning the panel at its peak refresh.
     high_refresh_until_ns: AtomicU64,
+    /// Until when content playing by itself keeps the content display mode
+    /// (see `FRAME_STREAK_CONTENT_NS`).
+    content_refresh_until_ns: AtomicU64,
     /// Deadline of explicit full-rate presentation (input, connect and start
     /// bursts): every vsync selects. Past it, damage-only demand selects one
     /// frame per hint.
@@ -435,6 +447,11 @@ fn note_rendered_frame(inner: &Inner, streak: &mut (u64, u64), now: u64) {
         inner
             .high_refresh_until_ns
             .fetch_max(now.wrapping_add(FRAME_STREAK_GAP_NS), Ordering::AcqRel);
+    }
+    if now.wrapping_sub(streak.0) >= FRAME_STREAK_CONTENT_NS {
+        inner
+            .content_refresh_until_ns
+            .fetch_max(now.wrapping_add(CONTENT_REFRESH_HOLD_NS), Ordering::AcqRel);
     }
 }
 
@@ -785,6 +802,7 @@ impl AnlandSession {
             wake,
             demand_until_ns: AtomicU64::new(0),
             high_refresh_until_ns: AtomicU64::new(0),
+            content_refresh_until_ns: AtomicU64::new(0),
             full_rate_until_ns: AtomicU64::new(0),
             damage_pending: AtomicBool::new(false),
             user_input_ns: AtomicU64::new(0),
@@ -926,6 +944,7 @@ impl AnlandSession {
         inner.rebind_active.store(false, Ordering::Release);
         inner.demand_until_ns.store(0, Ordering::Release);
         inner.high_refresh_until_ns.store(0, Ordering::Release);
+        inner.content_refresh_until_ns.store(0, Ordering::Release);
         inner.full_rate_until_ns.store(0, Ordering::Release);
         *inner.screen.lock().unwrap() = (w, h);
         inner.refresh_mhz.store(cfg.refresh_mhz, Ordering::Release);
@@ -1020,6 +1039,9 @@ impl AnlandSession {
         self.inner.rebind_request.lock().unwrap().take();
         self.inner.demand_until_ns.store(0, Ordering::Release);
         self.inner.high_refresh_until_ns.store(0, Ordering::Release);
+        self.inner
+            .content_refresh_until_ns
+            .store(0, Ordering::Release);
         self.inner.full_rate_until_ns.store(0, Ordering::Release);
         let _ = sys::eventfd_write(&self.inner.wake, 1);
 
@@ -2304,6 +2326,13 @@ fn render_loop(inner: Arc<Inner>) {
     };
     let input_wait_ns =
         tuning_value("input_wait_us").map_or(INPUT_BATCH_WAIT_NS, |us| us.max(0) as u64 * 1000);
+    // `idle_select_us` in anland-tuning overrides `IDLE_SELECT_INTERVAL_NS`;
+    // re-read once a second so an A/B needs no restart.
+    let idle_select_ns = || {
+        tuning_value("idle_select_us").map_or(IDLE_SELECT_INTERVAL_NS, |us| us.max(0) as u64 * 1000)
+    };
+    let mut idle_select_interval_ns = idle_select_ns();
+    let mut tuning_read_ns = sys::now_ns();
     // `trace=1` in anland-tuning logs each frame's timeline.
     let trace_frames = tuning_value("trace").is_some_and(|v| v != 0);
     // One frame per SurfaceFlinger latch (`latch_pacing=0` turns it off).
@@ -2481,16 +2510,33 @@ fn render_loop(inner: Arc<Inner>) {
         );
         follow_transform_hint(&inner, sys::now_ns());
         // Window-level display-mode request follows interactive demand (plus
-        // a short hold so bursty input does not flap Android's mode choice).
-        crate::android::utils::display_mode_request::request(if external_display {
-            demanding
-        } else {
-            inner
-                .high_refresh_until_ns
-                .load(Ordering::Acquire)
-                .saturating_add(HIGH_REFRESH_HOLD_NS)
-                > now
-        });
+        // a short hold so bursty input does not flap Android's mode choice),
+        // then content that keeps playing by itself.
+        {
+            use crate::android::utils::display_mode_request::{request, Refresh};
+            let peak = if external_display {
+                demanding
+            } else {
+                inner
+                    .high_refresh_until_ns
+                    .load(Ordering::Acquire)
+                    .saturating_add(HIGH_REFRESH_HOLD_NS)
+                    > now
+            };
+            let content =
+                !external_display && inner.content_refresh_until_ns.load(Ordering::Acquire) > now;
+            request(if peak {
+                Refresh::Peak
+            } else if content {
+                Refresh::Content
+            } else {
+                Refresh::Released
+            });
+        }
+        if now.wrapping_sub(tuning_read_ns) >= 1_000_000_000 {
+            tuning_read_ns = now;
+            idle_select_interval_ns = idle_select_ns();
+        }
         let since_last = now.wrapping_sub(last_select_ns);
         // Explicit bursts present every tick. Damage-only demand presents
         // one frame per hint (a 24 fps player got ~89 identical frames/s at
@@ -2499,7 +2545,7 @@ fn render_loop(inner: Arc<Inner>) {
         let paced = inner.full_rate_until_ns.load(Ordering::Acquire) > now
             || (inner.damage_pending.load(Ordering::Acquire)
                 && (external_display
-                    || since_last >= IDLE_SELECT_INTERVAL_NS
+                    || since_last >= idle_select_interval_ns
                     || interactive(&inner, now)));
         // A deferred start runs at the next tick, or when none comes.
         let want = wake_ready

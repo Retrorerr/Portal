@@ -51,6 +51,9 @@ pub fn preferred_frame_rate_hz(android_app: &AndroidApp) -> f32 {
 /// `ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT` — no inherent restriction.
 /// Correct for games/UIs; preserves VRR and power-saving.
 const COMPATIBILITY_DEFAULT: i8 = 0;
+/// `ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE` — content at a fixed
+/// rate (video): pick a refresh rate it divides evenly.
+const COMPATIBILITY_FIXED_SOURCE: i8 = 1;
 /// Public `Surface.FRAME_RATE_COMPATIBILITY_AT_LEAST` added in API 36.
 /// The native window implementation consumes the same compatibility enum.
 const COMPATIBILITY_AT_LEAST: i8 = 2;
@@ -69,6 +72,18 @@ const CHANGE_ONLY_IF_SEAMLESS: i8 = 0;
 /// decisions can be correlated with `dumpsys display` / SurfaceFlinger
 /// evidence. Never panics, never modifies global state.
 pub fn ensure_high_refresh_rate_hz(android_app: &AndroidApp, rate_hz: f32) {
+    set_frame_rate_hz(android_app, rate_hz, false);
+}
+
+/// Vote for content that plays at its own rate (video, an animation nobody
+/// drives): `FIXED_SOURCE` asks for a mode the rate divides evenly, where an
+/// `AT_LEAST` vote for 120 Hz lets SurfaceFlinger pick 144 Hz, on which a
+/// 60 fps stream alternates two and three refreshes per frame.
+pub fn ensure_content_frame_rate_hz(android_app: &AndroidApp, rate_hz: f32) {
+    set_frame_rate_hz(android_app, rate_hz, true);
+}
+
+fn set_frame_rate_hz(android_app: &AndroidApp, rate_hz: f32, fixed_source: bool) {
     let rate_hz = if rate_hz.is_finite() && rate_hz > 0.0 {
         rate_hz
     } else {
@@ -79,15 +94,17 @@ pub fn ensure_high_refresh_rate_hz(android_app: &AndroidApp, rate_hz: f32) {
         return;
     };
     let raw_window = native_window.ptr().as_ptr().cast::<std::ffi::c_void>();
-    let compatibility = if device_api_level() >= 36 {
+    let compatibility = if fixed_source {
+        COMPATIBILITY_FIXED_SOURCE
+    } else if device_api_level() >= 36 {
         COMPATIBILITY_AT_LEAST
     } else {
         COMPATIBILITY_DEFAULT
     };
-    let compatibility_name = if compatibility == COMPATIBILITY_AT_LEAST {
-        "at-least"
-    } else {
-        "default"
+    let compatibility_name = match compatibility {
+        COMPATIBILITY_AT_LEAST => "at-least",
+        COMPATIBILITY_FIXED_SOURCE => "fixed-source",
+        _ => "default",
     };
 
     // SAFETY: `dlopen`/`dlsym`/`dlclose` with NUL-terminated literals; the

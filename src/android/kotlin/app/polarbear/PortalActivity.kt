@@ -499,7 +499,7 @@ open class PortalActivity : GameActivity() {
         }
         presentation = shown
         holdingPhoneSurface = fromHere
-        desktopHighRefresh = false
+        desktopRefreshLevel = REFRESH_RELEASED
         if (previous != null) {
             presentedPad?.let { overlayHost().removeView(it) }
             dismissPresentation(previous)
@@ -581,11 +581,14 @@ open class PortalActivity : GameActivity() {
 
     /**
      * Native (any thread): refresh rate in millihertz to advertise for the
-     * desktop's output; see [highRefreshTargetMillihz].
+     * desktop's output at a [setDesktopRefreshLevel] level; see
+     * [highRefreshTargetMillihz].
      */
-    fun desktopRefreshTargetMillihz(): Int {
+    fun desktopRefreshTargetMillihz(level: Int): Int {
         val output = desktopDisplay()
-        if (output == null || output.displayId == Display.DEFAULT_DISPLAY) return highRefreshTargetMillihz()
+        if (output == null || output.displayId == Display.DEFAULT_DISPLAY) {
+            return if (level == REFRESH_CONTENT) contentRefreshTargetMillihz() else highRefreshTargetMillihz()
+        }
         val rate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) output.mode.refreshRate else output.refreshRate
         return Math.round(rate * 1000f)
     }
@@ -744,12 +747,22 @@ open class PortalActivity : GameActivity() {
      * user's peak-refresh setting still caps it. Releasing it when idle
      * returns the panel to the system's normal low-rate policy.
      */
-    fun setHighRefreshPreferred(enable: Boolean) {
+    fun setHighRefreshPreferred(enable: Boolean) = setDesktopRefreshLevel(if (enable) REFRESH_PEAK else REFRESH_RELEASED)
+
+    /**
+     * Native (any thread): the desktop's display-mode request. [REFRESH_PEAK]
+     * while the user drives the desktop; [REFRESH_CONTENT] while it plays
+     * something by itself (video, an animation): the fastest mode that shows
+     * 24, 30 and 60 fps at an even cadence (120 Hz rather than 144, where
+     * 60 fps alternates 2 and 3 refreshes per frame, or the idle 50-60 Hz,
+     * which drops frames or judders); [REFRESH_RELEASED] when idle.
+     */
+    fun setDesktopRefreshLevel(level: Int) {
         // A Presentation has its own window and display mode vote.
         if (presentation != null) return
         runOnUiThread {
-            if (presentation != null || desktopHighRefresh == enable) return@runOnUiThread
-            desktopHighRefresh = enable
+            if (presentation != null || desktopRefreshLevel == level) return@runOnUiThread
+            desktopRefreshLevel = level
             applyHighRefresh()
         }
     }
@@ -769,7 +782,7 @@ open class PortalActivity : GameActivity() {
         applyHighRefresh()
     }
     private var utilityHighRefresh = false
-    private var desktopHighRefresh = false
+    private var desktopRefreshLevel = REFRESH_RELEASED
     private var overlayHighRefresh = false
 
     @Suppress("DEPRECATION")
@@ -794,9 +807,16 @@ open class PortalActivity : GameActivity() {
 
     private fun applyHighRefresh() {
         // A desktop presented on a monitor doesn't draw on this screen.
-        val enable = desktopHighRefresh && presentation == null || overlayHighRefresh || utilityHighRefresh
+        val desktopLevel = if (presentation == null) desktopRefreshLevel else REFRESH_RELEASED
+        val level = if (overlayHighRefresh || utilityHighRefresh) REFRESH_PEAK else desktopLevel
+        val enable = level != REFRESH_RELEASED
         refreshHandler.removeCallbacks(idleRefreshCheck)
-        requestDisplayMode(if (enable) highRefreshModeId() else 0, "enable=$enable")
+        val modeId = when (level) {
+            REFRESH_PEAK -> highRefreshModeId()
+            REFRESH_CONTENT -> contentRefreshMode()?.modeId ?: highRefreshModeId()
+            else -> 0
+        }
+        requestDisplayMode(modeId, "level=$level")
         if (!enable) {
             refreshHandler.postDelayed(idleRefreshCheck, IDLE_REFRESH_CHECK_MS)
         }
@@ -825,7 +845,7 @@ open class PortalActivity : GameActivity() {
      * explicitly; the next interaction replaces it with the peak mode.
      */
     private val idleRefreshCheck = Runnable {
-        if (desktopHighRefresh && presentation == null || overlayHighRefresh || utilityHighRefresh) return@Runnable
+        if (desktopRefreshLevel != REFRESH_RELEASED && presentation == null || overlayHighRefresh || utilityHighRefresh) return@Runnable
         try {
             val modeId = idleRefreshModeId()
             if (modeId != 0) requestDisplayMode(modeId, "idle panel still fast")
@@ -882,6 +902,28 @@ open class PortalActivity : GameActivity() {
 
     private fun highRefreshModeId(): Int = highRefreshMode()?.modeId ?: 0
 
+    private fun contentRefreshTargetMillihz(): Int = try {
+        (contentRefreshMode() ?: highRefreshMode())?.let { Math.round(it.refreshRate * 1000f) } ?: 0
+    } catch (e: Exception) {
+        0
+    }
+
+    /**
+     * The fastest mode [highRefreshMode] could also pick whose rate is a
+     * multiple of 120 Hz, else of 60 Hz: every 24, 30 and 60 fps frame then
+     * lasts the same number of refreshes. Null when there is none.
+     */
+    private fun contentRefreshMode(): Display.Mode? {
+        val peak = highRefreshMode() ?: return null
+        val candidates = refreshModeCandidates().filter { it.refreshRate <= peak.refreshRate + 0.5f }
+        fun multipleOf(rate: Float, base: Float): Boolean {
+            val ratio = rate / base
+            return ratio >= 0.99f && abs(ratio - Math.round(ratio)) < 0.01f
+        }
+        return candidates.filter { multipleOf(it.refreshRate, 120f) }.maxByOrNull { it.refreshRate }
+            ?: candidates.filter { multipleOf(it.refreshRate, 60f) }.maxByOrNull { it.refreshRate }
+    }
+
     /**
      * Same physical size as the active mode, highest refresh within the
      * user's peak-refresh setting (absent/unreadable = no cap). On API 31+
@@ -890,8 +932,10 @@ open class PortalActivity : GameActivity() {
      * the surface's ONLY_IF_SEAMLESS hint, so a non-seamless mode would blank
      * the panel each time it toggles.
      */
-    private fun highRefreshMode(): Display.Mode? {
-        val display = currentDisplay() ?: return null
+    private fun highRefreshMode(): Display.Mode? = refreshModeCandidates().maxByOrNull { it.refreshRate }
+
+    private fun refreshModeCandidates(): List<Display.Mode> {
+        val display = currentDisplay() ?: return emptyList()
         val active = display.mode
         val peak = try {
             Settings.System.getFloat(contentResolver, "peak_refresh_rate", Float.POSITIVE_INFINITY)
@@ -914,7 +958,6 @@ open class PortalActivity : GameActivity() {
                             seamless.any { rate -> abs(rate - it.refreshRate) < 0.5f }
                         )
             }
-            .maxByOrNull { it.refreshRate }
     }
 
     private fun applyImmersive(reason: String) {
@@ -950,6 +993,9 @@ open class PortalActivity : GameActivity() {
         private const val EXTRA_DEBUG_DISPLAY_SLOW = "portal_display_slow"
         private const val EXTRA_DEBUG_DISPLAY_SETUP = "portal_display_setup"
         private const val IDLE_REFRESH_CHECK_MS = 1000L
+        const val REFRESH_RELEASED = 0
+        const val REFRESH_CONTENT = 1
+        const val REFRESH_PEAK = 2
         private const val IDLE_REFRESH_HZ = 60f
         private val processHostsActivity = AtomicBoolean(false)
 

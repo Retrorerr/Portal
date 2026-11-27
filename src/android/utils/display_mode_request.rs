@@ -6,7 +6,10 @@
 //! supported override is the window's `preferredDisplayModeId`
 //! (`PortalActivity.setHighRefreshPreferred`), still capped by the user's
 //! peak-refresh setting. Holding it permanently would pin the panel at its
-//! peak on an idle desktop, so it follows presentation demand instead.
+//! peak on an idle desktop, so it follows presentation demand instead:
+//! [`Refresh::Peak`] while the user drives the desktop, [`Refresh::Content`]
+//! (120 Hz on a 144 Hz panel, an even cadence for 24/30/60 fps) while it
+//! plays video or animates by itself, released when idle.
 //!
 //! Callers are latency-sensitive (the Anland render thread), so requests are
 //! deduplicated here and the JNI call runs on a dedicated worker thread.
@@ -24,6 +27,45 @@ use winit::platform::android::activity::AndroidApp;
 const UNKNOWN: u8 = 0;
 const LOW: u8 = 1;
 const HIGH: u8 = 2;
+const CONTENT: u8 = 3;
+
+/// The display mode the desktop asks for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Refresh {
+    /// No request: the system's idle policy.
+    Released,
+    /// The fastest rate that shows 24, 30 and 60 fps evenly.
+    Content,
+    /// The panel's peak rate.
+    Peak,
+}
+
+impl Refresh {
+    fn state(self) -> u8 {
+        match self {
+            Refresh::Released => LOW,
+            Refresh::Content => CONTENT,
+            Refresh::Peak => HIGH,
+        }
+    }
+
+    fn from_state(state: u8) -> Self {
+        match state {
+            HIGH => Refresh::Peak,
+            CONTENT => Refresh::Content,
+            _ => Refresh::Released,
+        }
+    }
+
+    /// `PortalActivity.REFRESH_*`.
+    fn level(self) -> i32 {
+        match self {
+            Refresh::Released => 0,
+            Refresh::Content => 1,
+            Refresh::Peak => 2,
+        }
+    }
+}
 
 /// Last state handed to the worker (dedupe for per-frame callers).
 static REQUESTED: AtomicU8 = AtomicU8::new(UNKNOWN);
@@ -63,20 +105,20 @@ fn app_slot() -> &'static Mutex<Option<AndroidApp>> {
     &APP
 }
 
-fn worker() -> Option<&'static Mutex<mpsc::Sender<bool>>> {
-    static WORKER: OnceLock<Option<Mutex<mpsc::Sender<bool>>>> = OnceLock::new();
+fn worker() -> Option<&'static Mutex<mpsc::Sender<Refresh>>> {
+    static WORKER: OnceLock<Option<Mutex<mpsc::Sender<Refresh>>>> = OnceLock::new();
     WORKER
         .get_or_init(|| {
-            let (tx, rx) = mpsc::channel::<bool>();
+            let (tx, rx) = mpsc::channel::<Refresh>();
             std::thread::Builder::new()
                 .name("portal-refresh".into())
                 .spawn(move || {
-                    while let Ok(mut enable) = rx.recv() {
+                    while let Ok(mut refresh) = rx.recv() {
                         // Only the newest request matters.
                         while let Ok(next) = rx.try_recv() {
-                            enable = next;
+                            refresh = next;
                         }
-                        apply(enable);
+                        apply(refresh);
                     }
                 })
                 .map_err(|error| log::warn!("display-mode request worker unavailable: {error}"))
@@ -97,14 +139,14 @@ pub fn attach(android_app: &AndroidApp) {
     TARGET_MILLIHZ.store(0, Ordering::Release);
 }
 
-/// Request (or release) the high-refresh display mode. Cheap and
-/// non-blocking; repeated identical requests are dropped, except that a held
-/// high-refresh request is re-resolved every `RESOLVE_INTERVAL_MS`.
-pub fn request(enable: bool) {
-    let state = if enable { HIGH } else { LOW };
+/// Request a display mode for the desktop. Cheap and non-blocking; repeated
+/// identical requests are dropped, except that a held request is re-resolved
+/// every `RESOLVE_INTERVAL_MS`.
+pub fn request(refresh: Refresh) {
+    let state = refresh.state();
     let now_ms = epoch().elapsed().as_millis() as u64;
     if REQUESTED.swap(state, Ordering::AcqRel) == state
-        && (!enable
+        && (refresh == Refresh::Released
             || now_ms.saturating_sub(RESOLVED_MS.load(Ordering::Acquire)) < RESOLVE_INTERVAL_MS)
     {
         return;
@@ -112,23 +154,29 @@ pub fn request(enable: bool) {
     RESOLVED_MS.store(now_ms, Ordering::Release);
     let sent = worker()
         .and_then(|tx| tx.lock().ok())
-        .is_some_and(|tx| tx.send(enable).is_ok());
+        .is_some_and(|tx| tx.send(refresh).is_ok());
     if !sent {
         REQUESTED.store(UNKNOWN, Ordering::Release);
     }
 }
 
-fn apply(enable: bool) {
+fn apply(refresh: Refresh) {
     let Some(app) = app_slot().lock().ok().and_then(|slot| slot.clone()) else {
         return;
     };
+    let enable = refresh != Refresh::Released;
     super::ndk::run_in_jvm(
         |env, app| {
             let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
             let mut changed = !enable;
             if enable {
                 match env
-                    .call_method(&activity, "desktopRefreshTargetMillihz", "()I", &[])
+                    .call_method(
+                        &activity,
+                        "desktopRefreshTargetMillihz",
+                        "(I)I",
+                        &[JValue::Int(refresh.level())],
+                    )
                     .and_then(|value| value.i())
                 {
                     Ok(millihz) if millihz > 0 => {
@@ -144,30 +192,37 @@ fn apply(enable: bool) {
             }
             if let Err(error) = env.call_method(
                 activity,
-                "setHighRefreshPreferred",
-                "(Z)V",
-                &[JValue::Bool(enable.into())],
+                "setDesktopRefreshLevel",
+                "(I)V",
+                &[JValue::Int(refresh.level())],
             ) {
-                log::warn!("display-mode request (enable={enable}) failed: {error}");
+                log::warn!("display-mode request ({refresh:?}) failed: {error}");
                 let _ = env.exception_clear();
                 REQUESTED.store(UNKNOWN, Ordering::Release);
             } else if changed {
-                log::info!("anland.refresh window high-refresh request enable={enable}");
+                log::info!(
+                    "anland.refresh window display-mode request {refresh:?} target={} mHz",
+                    TARGET_MILLIHZ.load(Ordering::Acquire)
+                );
             }
         },
         app.clone(),
     );
     // The surface's AT_LEAST vote follows the same demand: held while idle it
     // keeps the panel at peak refresh even with the window request released.
-    let state = if enable { HIGH } else { LOW };
-    let transition = SURFACE_VOTE.swap(state, Ordering::AcqRel) != state;
+    let state = refresh.state();
+    let transition = Refresh::from_state(SURFACE_VOTE.swap(state, Ordering::AcqRel)) != refresh;
     let retarget = changed_target();
     if transition || (enable && retarget) {
         if enable {
             let rate_hz = target_millihz()
                 .map(|millihz| millihz as f32 / 1000.0)
                 .unwrap_or_else(|| super::frame_rate::preferred_frame_rate_hz(&app));
-            super::frame_rate::ensure_high_refresh_rate_hz(&app, rate_hz);
+            if refresh == Refresh::Content {
+                super::frame_rate::ensure_content_frame_rate_hz(&app, rate_hz);
+            } else {
+                super::frame_rate::ensure_high_refresh_rate_hz(&app, rate_hz);
+            }
         } else {
             super::frame_rate::clear_frame_rate(&app);
         }
