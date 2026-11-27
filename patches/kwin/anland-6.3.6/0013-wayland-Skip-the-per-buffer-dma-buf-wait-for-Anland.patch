@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Portal <116828772+Retrorerr@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 22:00:00 +0000
+Subject: [PATCH] wayland: Skip the per-buffer dma-buf wait for Anland
+
+Backport of lfdevs/kwin 4:6.3.6-96 (upstream Anland a6c4291).
+
+A commit with a dma-buf was held back until the client's GPU finished
+writing the buffer, polled on the dma-buf, before KWin applied it and
+scheduled a repaint. Anland composites client buffers through EGL, whose
+implicit synchronization already makes the composite wait for that
+rendering on the GPU. With ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1 the commit
+applies at once: the consumer hears about the damage a client GPU frame
+earlier, and the composite overlaps the client's rendering instead of
+starting after it. Explicit-sync timelines are unaffected.
+
+Damage that is already pending for a surface is not propagated again: a
+mailbox client replacing a fully damaged buffer before the next composite
+asked for the same repaint each time.
+---
+diff --git a/src/scene/surfaceitem.cpp b/src/scene/surfaceitem.cpp
+index 521766e..4559475 100644
+--- a/src/scene/surfaceitem.cpp
++++ b/src/scene/surfaceitem.cpp
+@@ -112,6 +112,13 @@ void SurfaceItem::addDamage(const QRegion &region)
+         m_frameTimeEstimation = std::accumulate(m_lastDamageTimeDiffs.begin(), m_lastDamageTimeDiffs.end(), 0ns) / m_lastDamageTimeDiffs.size();
+     }
+     m_lastDamage = std::chrono::steady_clock::now();
++    // Mailbox clients commonly replace a fully damaged buffer repeatedly before
++    // the next composite. The latest buffer is installed through bufferChanged,
++    // so repeating damage propagation is redundant.
++    const bool damageAlreadyPending = !region.isEmpty() && m_damage.contains(region.boundingRect());
++    if (damageAlreadyPending) {
++        return;
++    }
+     m_damage += region;
+ 
+     const QRectF sourceBox = m_bufferToSurfaceTransform.map(m_bufferSourceBox, m_bufferSize);
+diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
+index fd53284..d0bd6eb 100644
+--- a/src/wayland/transaction.cpp
++++ b/src/wayland/transaction.cpp
+@@ -17,6 +17,14 @@ namespace KWin
+ 
+ TransactionDmaBufLocker *TransactionDmaBufLocker::get(GraphicsBuffer *buffer)
+ {
++    // The Anland backend composites client buffers through EGL, whose implicit
++    // synchronization waits before sampling the imported texture. Skip the
++    // duplicate per-buffer wait when explicitly requested for Anland sessions.
++    // Explicit sync timelines remain unaffected.
++    if (qEnvironmentVariableIntValue("ANLAND_SKIP_IMPLICIT_SYNC_WAIT") == 1) {
++        return nullptr;
++    }
++
+     static QHash<GraphicsBuffer *, TransactionDmaBufLocker *> lockers;
+     if (auto it = lockers.find(buffer); it != lockers.end()) {
+         return *it;

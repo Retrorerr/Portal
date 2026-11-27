@@ -11,7 +11,7 @@ directory inside Debian 13 (trixie) on a native ARM64 runner.
 | --- | --- |
 | Debian KWin 6.3.6 | `kwin_6.3.6.orig.tar.xz`, SHA-256 `27f2205f06d58f1d1f480d2a94ae24022c2f95b9c1fdc5a549f8e143713fce12` |
 | lfdevs Debian packaging with the Anland backend | [lfdevs/kwin](https://github.com/lfdevs/kwin) tag `anland-5.13-debian-4_6.3.6-95`, commit `beea4c3d22f08100b1b3acda1bd502e87bb1a347` |
-| Portal patches | `0001-*.patch` to `0012-*.patch` here, appended to the lfdevs quilt series |
+| Portal patches | `0001-*.patch` to `0013-*.patch` here, appended to the lfdevs quilt series |
 
 The lfdevs tag is the source of the `kwin` 4:6.3.6-95 packages installed in
 Portal's guest (lfdevs/anland-termux release 5.13.3, pinned in
@@ -74,6 +74,13 @@ Portal's guest (lfdevs/anland-termux release 5.13.3, pinned in
   Android's display controller scans them out instead of SurfaceFlinger
   rotating every frame on the GPU. The transform arrives right after a
   buffer set and is applied with the buffer size as one output change.
+* `0013` applies a client's dma-buf commit at once when
+  `ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1` (Portal sets it) instead of polling the
+  buffer until the client's GPU finishes: EGL implicit sync already makes the
+  composite wait for that rendering on the GPU, so the consumer hears of the
+  damage a client frame earlier. Damage already pending for a surface is not
+  propagated again. Backport of lfdevs/kwin 4:6.3.6-96 (upstream Anland
+  a6c4291).
 
 The library is linked without `-Bsymbolic`, as Debian builds it, which
 `assets/guest-arm64/anland-damage.c` relies on to interpose KWin's repaint
