@@ -45,8 +45,15 @@ frontend. `portal-va-r1.patch` adds:
   signaled; each such stream (common on X and Twitch) took one of Firefox's
   four decoder threads for good, and with all four gone no video loaded on any
   site. The PPS defaults learned from slices make the hold unnecessary.
+- HEVC: release the pictures held while the SPS short-term RPS table is
+  learned as soon as a client waits on one of them. Streams whose SPS lists
+  many RPS sets (Twitch's HEVC broadcasts) never completed the table before
+  Firefox waited on its first output, so the session timed out with no input
+  sent and Firefox decoded in software. Held pictures' own sets are already
+  known; the rest stay placeholders and the SPS is re-sent as later pictures
+  fill them.
 - Give up on a VA wait that cannot finish: 3 s on a picture still queued for
-  submission (HEVC can still hold one), 15 s with no decoder output. The session
+  submission, 15 s with no decoder output. The session
   fails and the client takes its software path. Counted in wait timeouts,
   so a frozen process doesn't trip them.
 - Gate the per-call `tva-va:` traces behind `DMD_VA_LOG=1`; they wrote
