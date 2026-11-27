@@ -72,6 +72,18 @@ frontend. `portal-va-r1.patch` adds:
   creates the decoder at the first picture, so a missing daemon used to
   surface mid-decode (2 of 120 frames, then errors) and clients never took
   their software path.
+- Take decoded frames as the daemon's dma-bufs (`TVA_CLIENT_CAP_DMABUF`,
+  see `third_party/termux-va`). The client offers the capability on the SHM
+  handoff socket, receives each buffer's fd with its control message, maps
+  each buffer once, and brackets reads with `DMA_BUF_IOCTL_SYNC`. The bridge
+  copies from that mapping straight into the surface, so the daemon's copy
+  into the slot is gone. An older daemon never answers the offer and frames
+  keep coming through SHM. `DMD_VA_DMABUF=0` declines the offer.
+- Map each contiguous NV12 surface once when it is allocated and copy frames
+  through that mapping. The reader thread used to export, mmap, fault in and
+  unmap both planes for every frame. The mapping goes away with the video
+  buffer (its destroy hook is wrapped), and a copy in flight holds a
+  reference. `DMD_VA_MAP_CACHE=0` restores the per-frame mapping.
 - Meson: link freedreno into the standalone VA target and pull in
   xcb-xfixes when GLX is off.
 - `TVA_DUMP_UNITS=<file>`: append every unit sent to the daemon (u32 length +

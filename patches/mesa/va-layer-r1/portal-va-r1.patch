@@ -1085,7 +1085,7 @@ index c55dc811..b5ec201e 100644
                expected_fourcc, (void *)prime_desc, (void *)memory_attribute,
                modifiers_count, templat.bind);
 diff --git a/src/gallium/frontends/va/tva_bridge.c b/src/gallium/frontends/va/tva_bridge.c
-index 31b3aade..b7180c5b 100644
+index 31b3aade..ebdc4851 100644
 --- a/src/gallium/frontends/va/tva_bridge.c
 +++ b/src/gallium/frontends/va/tva_bridge.c
 @@ -57,6 +57,8 @@
@@ -1097,7 +1097,15 @@ index 31b3aade..b7180c5b 100644
  #include <va/va.h>
  #include <va/va_dec_av1.h>
  #ifndef _WIN32
-@@ -130,11 +132,39 @@ bool tva_bridge_active(void)
+@@ -87,6 +89,7 @@
+ #include "util/format/u_format.h"
+ #include "util/os_misc.h"
+ #include "util/os_time.h"
++#include "util/simple_mtx.h"
+ #include "util/timespec.h"
+ #include "util/u_debug.h"
+ #include "util/u_memory.h"
+@@ -130,11 +133,39 @@ bool tva_bridge_active(void)
      return def && stat(def, &st) == 0 && S_ISSOCK(st.st_mode);
  }
  
@@ -1139,7 +1147,7 @@ index 31b3aade..b7180c5b 100644
  }
  
  static int tva_dbg_seq;
-@@ -220,6 +250,8 @@ tva_encode_profile_supported(enum pipe_video_profile profile)
+@@ -220,6 +251,8 @@ tva_encode_profile_supported(enum pipe_video_profile profile)
      }
  }
  
@@ -1148,7 +1156,7 @@ index 31b3aade..b7180c5b 100644
  static int
  tva_codec_id(enum pipe_video_profile profile)
  {
-@@ -304,6 +336,12 @@ tva_screen_get_video_param(struct pipe_screen *screen,
+@@ -304,6 +337,12 @@ tva_screen_get_video_param(struct pipe_screen *screen,
          (profile == PIPE_VIDEO_PROFILE_UNKNOWN || tva_profile_supported(profile)))
          return 1;
  
@@ -1161,7 +1169,7 @@ index 31b3aade..b7180c5b 100644
      if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE &&
          tva_encode_profile_supported(profile)) {
          switch (param) {
-@@ -358,9 +396,11 @@ tva_screen_get_video_param(struct pipe_screen *screen,
+@@ -358,9 +397,11 @@ tva_screen_get_video_param(struct pipe_screen *screen,
               * written by the first frame copy */
              return 1;
          case PIPE_VIDEO_CAP_SUPPORTS_CONTIGUOUS_PLANES_MAP:
@@ -1176,7 +1184,7 @@ index 31b3aade..b7180c5b 100644
          default:
              return 0;
          }
-@@ -468,6 +508,12 @@ struct tva_fence {
+@@ -468,6 +509,12 @@ struct tva_fence {
  #define TVA_HEVC_MAX_RPS 64
  #define TVA_HEVC_BOOTSTRAP_MAX_UNITS 32
  #define TVA_H264_BOOTSTRAP_MAX_UNITS 8
@@ -1189,7 +1197,7 @@ index 31b3aade..b7180c5b 100644
  
  struct tva_h265_rps {
      bool valid;
-@@ -493,7 +539,20 @@ struct tva_av1_picture {
+@@ -493,7 +540,20 @@ struct tva_av1_picture {
      size_t tile_bytes;
      unsigned tile_count;
      uint8_t refresh_frame_flags;
@@ -1210,7 +1218,7 @@ index 31b3aade..b7180c5b 100644
  
  struct tva_av1_frame {
      bool valid;
-@@ -543,6 +602,9 @@ struct tva_codec {
+@@ -543,6 +603,9 @@ struct tva_codec {
      bool h264_pps_defaults_valid;
      unsigned h264_pps_l0_default;
      unsigned h264_pps_l1_default;
@@ -1220,7 +1228,7 @@ index 31b3aade..b7180c5b 100644
      /* The VA HEVC picture descriptor omits max_sub_layers_minus1.  Keep the
       * largest temporal id observed in the access units so synthesized VPS/SPS
       * parameter sets accept streams which use temporal scalability. */
-@@ -551,17 +613,28 @@ struct tva_codec {
+@@ -551,17 +614,28 @@ struct tva_codec {
      struct tva_bootstrap_unit hevc_bootstrap[TVA_HEVC_BOOTSTRAP_MAX_UNITS];
      unsigned hevc_bootstrap_count;
      bool hevc_bootstrap_done;
@@ -1249,7 +1257,7 @@ index 31b3aade..b7180c5b 100644
  
      bool broken;                  /* session error, further decodes fail */
  
-@@ -624,6 +697,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
+@@ -624,6 +698,18 @@ tva_send_unit(struct tva_codec *c, const void *data, size_t len)
     if (!c || !c->sess)
        return TVA_ERR_STATE;
     mtx_lock(&c->io_mutex);
@@ -1268,7 +1276,7 @@ index 31b3aade..b7180c5b 100644
     ret = tva_session_send_unit(c->sess, data, len);
     mtx_unlock(&c->io_mutex);
     return ret;
-@@ -1029,6 +1114,60 @@ tva_hevc_bootstrap_flush(struct tva_codec *c)
+@@ -1029,6 +1115,60 @@ tva_hevc_bootstrap_flush(struct tva_codec *c)
      return 0;
  }
  
@@ -1329,7 +1337,7 @@ index 31b3aade..b7180c5b 100644
  static int
  tva_h264_bootstrap_queue(struct tva_codec *c,
                           struct pipe_video_buffer *target,
-@@ -1104,6 +1243,146 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
+@@ -1104,6 +1244,146 @@ tva_h264_bootstrap_flush(struct tva_codec *c)
      return 0;
  }
  
@@ -1476,7 +1484,7 @@ index 31b3aade..b7180c5b 100644
  /* AV1 show_existing_frame packets do not enter the VA decode callbacks.  A
   * hidden reference picture therefore has no consumer-visible callback even
   * though its surface must still contain decoded pixels before a later
-@@ -1256,8 +1535,8 @@ tva_drm_render_node_present(void)
+@@ -1256,8 +1536,8 @@ tva_drm_render_node_present(void)
  /* Chromium's Vulkan importer currently expects all NV12 planes to refer to
   * one dma-buf object.  The normal Gallium video-buffer allocator creates one
   * object per plane, which is valid for VA-API but cannot be consumed by that
@@ -1487,7 +1495,7 @@ index 31b3aade..b7180c5b 100644
  static bool
  tva_contiguous_dmabuf_enabled(void)
  {
-@@ -1268,14 +1547,15 @@ tva_contiguous_dmabuf_enabled(void)
+@@ -1268,14 +1548,15 @@ tva_contiguous_dmabuf_enabled(void)
          return !strcmp(e, "1") || !strcmp(e, "true") || !strcmp(e, "on");
  
  #if defined(__linux__)
@@ -1508,7 +1516,198 @@ index 31b3aade..b7180c5b 100644
          return true;
  #endif
  
-@@ -2065,6 +2345,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
+@@ -1309,6 +1590,166 @@ tva_alloc_dmabuf(size_t size)
+    return (int)alloc.fd;
+ }
+ 
++/* CPU mappings of the contiguous NV12 surfaces, made once when the surface
++ * is allocated.  The reader thread used to export, mmap, fault in and unmap
++ * both planes of the target on every frame; with the mapping kept, a frame
++ * costs the copy and two cache-maintenance ioctls.  Entries go away with
++ * the video buffer (its destroy hook is wrapped); a copy in flight holds a
++ * reference, so the mapping outlives a concurrent destroy. */
++struct tva_surface_map {
++   struct pipe_video_buffer *buffer;
++   void (*destroy)(struct pipe_video_buffer *buffer);
++   struct pipe_resource *res[2];
++   int fd;
++   uint8_t *map;
++   size_t size;
++   size_t uv_offset;
++   unsigned stride;
++   unsigned refs;
++   bool dead;
++   struct tva_surface_map *next;
++};
++
++static simple_mtx_t tva_maps_mutex = SIMPLE_MTX_INITIALIZER;
++static struct tva_surface_map *tva_maps;
++
++static void
++tva_surface_map_unref_locked(struct tva_surface_map *m)
++{
++   if (--m->refs)
++      return;
++   for (struct tva_surface_map **pp = &tva_maps; *pp; pp = &(*pp)->next) {
++      if (*pp == m) {
++         *pp = m->next;
++         break;
++      }
++   }
++   munmap(m->map, m->size);
++   close(m->fd);
++   FREE(m);
++}
++
++static struct tva_surface_map *
++tva_surface_map_acquire(struct pipe_resource *y, struct pipe_resource *uv)
++{
++   struct tva_surface_map *found = NULL;
++   simple_mtx_lock(&tva_maps_mutex);
++   for (struct tva_surface_map *m = tva_maps; m; m = m->next) {
++      if (!m->dead && m->res[0] == y && m->res[1] == uv) {
++         m->refs++;
++         found = m;
++         break;
++      }
++   }
++   simple_mtx_unlock(&tva_maps_mutex);
++   return found;
++}
++
++static void
++tva_surface_map_release(struct tva_surface_map *m)
++{
++   simple_mtx_lock(&tva_maps_mutex);
++   tva_surface_map_unref_locked(m);
++   simple_mtx_unlock(&tva_maps_mutex);
++}
++
++static void
++tva_surface_map_destroy_buffer(struct pipe_video_buffer *buffer)
++{
++   void (*destroy)(struct pipe_video_buffer *) = NULL;
++   simple_mtx_lock(&tva_maps_mutex);
++   for (struct tva_surface_map *m = tva_maps; m; m = m->next) {
++      if (m->buffer == buffer && !m->dead) {
++         destroy = m->destroy;
++         m->dead = true;
++         tva_surface_map_unref_locked(m);
++         break;
++      }
++   }
++   simple_mtx_unlock(&tva_maps_mutex);
++   if (destroy)
++      destroy(buffer);
++}
++
++/* Takes ownership of `fd` on success. */
++static bool
++tva_surface_map_register(struct pipe_video_buffer *buffer,
++                         struct pipe_resource *const res[2], int fd,
++                         size_t size, size_t uv_offset, unsigned stride)
++{
++   const char *e = getenv("DMD_VA_MAP_CACHE");
++   if ((e && !strcmp(e, "0")) || !buffer->destroy)
++      return false;
++   uint8_t *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++   if (map == MAP_FAILED)
++      return false;
++   struct tva_surface_map *m = CALLOC_STRUCT(tva_surface_map);
++   if (!m) {
++      munmap(map, size);
++      return false;
++   }
++   m->buffer = buffer;
++   m->destroy = buffer->destroy;
++   m->res[0] = res[0];
++   m->res[1] = res[1];
++   m->fd = fd;
++   m->map = map;
++   m->size = size;
++   m->uv_offset = uv_offset;
++   m->stride = stride;
++   m->refs = 1;
++   simple_mtx_lock(&tva_maps_mutex);
++   m->next = tva_maps;
++   tva_maps = m;
++   simple_mtx_unlock(&tva_maps_mutex);
++   buffer->destroy = tva_surface_map_destroy_buffer;
++   return true;
++}
++
++static void
++tva_copy_rows(uint8_t *dst, size_t dst_stride, const uint8_t *src,
++              size_t src_stride, size_t row_bytes, unsigned rows)
++{
++   if (dst_stride == src_stride && dst_stride == row_bytes) {
++      memcpy(dst, src, row_bytes * rows);
++      return;
++   }
++   for (unsigned y = 0; y < rows; y++)
++      memcpy(dst + (size_t)y * dst_stride, src + (size_t)y * src_stride,
++             row_bytes);
++}
++
++/* Copy both planes through the surface's kept mapping.  False when the
++ * target has none (other allocators, DMD_VA_MAP_CACHE=0) or the geometry
++ * does not fit; the caller then takes the per-frame mapping path. */
++static bool
++tva_copy_frame_mapped(struct pipe_resource *const res[2],
++                      const uint8_t *y_src, unsigned w, unsigned h,
++                      const uint8_t *uv_src, unsigned uv_row_bytes,
++                      unsigned uv_h, unsigned src_stride)
++{
++   struct tva_surface_map *m = tva_surface_map_acquire(res[0], res[1]);
++   if (!m)
++      return false;
++   const size_t y_row_bytes = w;   /* R8 */
++   bool ok = m->stride >= y_row_bytes && m->stride >= uv_row_bytes && h &&
++             uv_h && (size_t)(h - 1) * m->stride + y_row_bytes <= m->uv_offset &&
++             m->uv_offset + (size_t)(uv_h - 1) * m->stride + uv_row_bytes <= m->size;
++   if (ok) {
++      struct dma_buf_sync sync = { DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE };
++      const bool synced = ioctl(m->fd, DMA_BUF_IOCTL_SYNC, &sync) == 0;
++      tva_copy_rows(m->map, m->stride, y_src, src_stride, y_row_bytes, h);
++      tva_copy_rows(m->map + m->uv_offset, m->stride, uv_src, src_stride,
++                    uv_row_bytes, uv_h);
++      if (synced) {
++         sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
++         ioctl(m->fd, DMA_BUF_IOCTL_SYNC, &sync);
++      }
++   }
++   tva_surface_map_release(m);
++   return ok;
++}
++
+ /* Allocate a linear NV12 buffer backed by one dma-buf and import each plane
+  * as a separate Gallium resource with an explicit offset.  The resources
+  * intentionally have independent KGSL BO wrappers, but their exported FDs
+@@ -1407,7 +1848,9 @@ tva_create_contiguous_video_buffer(struct pipe_context *context,
+    if (!result)
+       goto fail;
+    result->contiguous_planes = true;
+-   close(dmabuf);
++   if (!tva_surface_map_register(result, resources, dmabuf, total_size,
++                                 uv_offset, y_stride))
++      close(dmabuf);
+    if (getenv("DMD_VA_LOG"))
+       fprintf(stderr, "tva: contiguous NV12 dmabuf=%d size=%zu y=%ux%u "
+               "stride=%u uv_offset=%zu\n", dmabuf, total_size,
+@@ -1639,6 +2082,12 @@ tva_copy_frame_direct(struct tva_codec *c, struct tva_pending *p,
+    if (y_end > src_size || uv_end > src_size)
+       return false;
+ 
++   if (y_blocksize == 1 &&
++       tva_copy_frame_mapped(p->resources, src + y_offset, w, h,
++                             src + uv_offset, uv_w * uv_blocksize, uv_h,
++                             (unsigned)p->stride))
++      return true;
++
+    struct pipe_screen *screen = c->pipe->screen;
+    if (!tva_direct_copy_plane(screen, p->resources[0], src + y_offset,
+                                w, h, (unsigned)p->stride))
+@@ -2065,6 +2514,108 @@ tva_h264_high_profile(enum pipe_video_profile profile)
             profile == PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444;
  }
  
@@ -1617,7 +1816,7 @@ index 31b3aade..b7180c5b 100644
  /*
   * Build the SPS NALU (with NAL header + emulation prevention) from the
   * frontend-parsed struct.  Returns the RBSP size; the NAL header byte is
-@@ -3286,6 +3668,15 @@ tva_av1_to_va_picture(const struct pipe_av1_picture_desc *src,
+@@ -3286,6 +3837,15 @@ tva_av1_to_va_picture(const struct pipe_av1_picture_desc *src,
      dst->loop_restoration_fields.bits.lr_uv_shift =
          p->loop_restoration_fields.lr_uv_shift;
  
@@ -1633,7 +1832,7 @@ index 31b3aade..b7180c5b 100644
      return true;
  }
  
-@@ -3311,7 +3702,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
+@@ -3311,7 +3871,7 @@ tva_av1_normalize_picture(struct tva_codec *c,
          return;
      }
  
@@ -1642,7 +1841,7 @@ index 31b3aade..b7180c5b 100644
          p->pic_info_fields.bits.frame_type != 0 &&
          !p->pic_info_fields.bits.show_frame &&
          p->mode_control_fields.bits.tx_mode == 2 &&
-@@ -3412,6 +3803,8 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3412,6 +3972,8 @@ tva_av1_send_pending(struct tva_codec *c)
                                      (int)pic->tile_count,
                                      pic->refresh_frame_flags,
                                      c->av1_enable_restoration,
@@ -1651,7 +1850,7 @@ index 31b3aade..b7180c5b 100644
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3546,24 +3939,16 @@ tva_av1_send_pending(struct tva_codec *c)
+@@ -3546,24 +4108,16 @@ tva_av1_send_pending(struct tva_codec *c)
              }
  
              VADecPictureParameterBufferAV1 picture = pic->picture;
@@ -1681,7 +1880,7 @@ index 31b3aade..b7180c5b 100644
                                      unit + unit_len, unit_cap - unit_len);
              if (!n) {
                  free(unit);
-@@ -3649,6 +4034,8 @@ too_large:
+@@ -3649,6 +4203,8 @@ too_large:
                                  (int)pic->tile_count,
                                  pic->refresh_frame_flags,
                                  c->av1_enable_restoration,
@@ -1690,7 +1889,7 @@ index 31b3aade..b7180c5b 100644
                                  unit + unit_len, unit_cap - unit_len);
          if (!n)
              goto failed;
-@@ -3776,15 +4163,99 @@ tva_av1_flush_pending(struct tva_codec *c, bool terminal)
+@@ -3776,15 +4332,99 @@ tva_av1_flush_pending(struct tva_codec *c, bool terminal)
      return ret;
  }
  
@@ -1793,7 +1992,7 @@ index 31b3aade..b7180c5b 100644
  {
      struct tva_codec *c = tva_codec(codec);
  
-@@ -3817,19 +4288,12 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
+@@ -3817,19 +4457,12 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
              struct pipe_h264_picture_desc *h264 =
                  (struct pipe_h264_picture_desc *)picture;
              if (h264 && h264->pps && h264->pps->sps) {
@@ -1819,7 +2018,7 @@ index 31b3aade..b7180c5b 100644
                  if (h264_hold)
                      goto h264_csd_done;
                  uint8_t *sps_rbsp = NULL, *pps_rbsp = NULL;
-@@ -3857,7 +4321,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
+@@ -3857,7 +4490,23 @@ tva_codec_end_frame(struct pipe_video_codec *codec,
                   * with a two-reference PPS default unchanged while allowing
                   * the five-reference vertical AVC stream to select its
                   * five-entry default before subsequent no-override slices. */
@@ -1844,7 +2043,7 @@ index 31b3aade..b7180c5b 100644
                      h264->num_ref_idx_l0_active_minus1 >=
                      c->base.max_references - 1 &&
                      c->h264_pps_l0_default < c->base.max_references - 1) {
-@@ -3978,9 +4458,6 @@ h264_csd_done:
+@@ -3978,9 +4627,6 @@ h264_csd_done:
                      hevc_hold = false;
                  }
  
@@ -1854,7 +2053,7 @@ index 31b3aade..b7180c5b 100644
                  size_t vps_nalu_len =
                      tva_build_h265_vps(sps, c->base.profile,
                                         c->hevc_max_sub_layers, &vps_nalu);
-@@ -4018,34 +4495,22 @@ h264_csd_done:
+@@ -4018,34 +4664,22 @@ h264_csd_done:
                  memcpy(csd + vps_len + sps_len + 4,
                         pps_nalu, pps_nalu_len);
  
@@ -1900,7 +2099,7 @@ index 31b3aade..b7180c5b 100644
              if (tva_codec_is_broken(c))
                  return -1;
          }
-@@ -4228,6 +4693,10 @@ hevc_csd_done:
+@@ -4228,6 +4862,10 @@ hevc_csd_done:
          bool boundary = frame->valid && frame->picture_count &&
                          frame->have_show_frame &&
                          !frame->hidden_since_show_frame;
@@ -1911,7 +2110,7 @@ index 31b3aade..b7180c5b 100644
          if (frame->valid && frame->picture_count) {
              struct tva_av1_picture *previous =
                  &frame->pictures[frame->picture_count - 1];
-@@ -4249,15 +4718,18 @@ hevc_csd_done:
+@@ -4249,15 +4887,18 @@ hevc_csd_done:
           * no restoration themselves while later frames in the same sequence
           * still do. */
          const char *restoration = getenv("DMD_AV1_ENABLE_RESTORATION");
@@ -1934,7 +2133,7 @@ index 31b3aade..b7180c5b 100644
          }
          if (frame->picture_count >= TVA_AV1_GROUP_MAX_FRAMES) {
              debug_printf("tva: AV1 temporal unit has too many frames (%u)\n",
-@@ -4287,6 +4759,9 @@ hevc_csd_done:
+@@ -4287,6 +4928,9 @@ hevc_csd_done:
          current->target = target;
          tva_av1_normalize_picture(c, &va_pic);
          current->picture = va_pic;
@@ -1944,7 +2143,7 @@ index 31b3aade..b7180c5b 100644
          current->tile_data = tile_data;
          current->tile_bytes = tile_bytes;
          current->tile_count = tile_count;
-@@ -4389,6 +4864,13 @@ hevc_csd_done:
+@@ -4389,6 +5033,13 @@ hevc_csd_done:
              tva_av1_inline_show_existing())
              last_vcl = pending && pending->unit_seq ? pending->unit_seq :
                         (uint32_t)(c->next_unit + 1);
@@ -1958,7 +2157,7 @@ index 31b3aade..b7180c5b 100644
      } else {
          /* Chromium splits VP9 superframes into individual pictures.  Hidden
           * reference pictures must reach MediaCodec, but they do not produce
-@@ -4456,6 +4938,20 @@ hevc_csd_done:
+@@ -4456,6 +5107,20 @@ hevc_csd_done:
      return 0;
  }
  
@@ -1979,7 +2178,7 @@ index 31b3aade..b7180c5b 100644
  static void
  tva_codec_flush(struct pipe_video_codec *codec)
  {
-@@ -4463,7 +4959,9 @@ tva_codec_flush(struct pipe_video_codec *codec)
+@@ -4463,7 +5128,9 @@ tva_codec_flush(struct pipe_video_codec *codec)
      if (!c->av1_pending.valid || tva_codec_is_broken(c))
          return;
  
@@ -1990,7 +2189,7 @@ index 31b3aade..b7180c5b 100644
  }
  
  /*
-@@ -4497,8 +4995,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4497,8 +5164,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
      const bool av1 = u_reduce_video_profile(c->base.profile) ==
                       PIPE_VIDEO_FORMAT_AV1;
  
@@ -2009,7 +2208,7 @@ index 31b3aade..b7180c5b 100644
          if (!infinite && timeout == 0) {
              mtx_unlock(&c->pend_mutex);
              return 0;
-@@ -4512,7 +5020,14 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4512,7 +5189,14 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
                             MIN2(deadline_ns, now + 200000000ull);
          struct timespec ts;
          timespec_from_nsec(&ts, wake_ns);
@@ -2025,7 +2224,7 @@ index 31b3aade..b7180c5b 100644
      }
      if (fence->queued) {
          fence->failed = true;
-@@ -4529,36 +5044,22 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4529,36 +5213,22 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
          return 1;
      }
      p->waiters++;
@@ -2072,7 +2271,7 @@ index 31b3aade..b7180c5b 100644
                  c->broken = true;
                  p->ready = true;
                  p->failed = true;
-@@ -4566,8 +5067,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4566,8 +5236,18 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
                  ret = 0;
                  break;
              }
@@ -2091,7 +2290,7 @@ index 31b3aade..b7180c5b 100644
  
          /* Qualcomm's AV1 decoder may hold the terminal showable picture until
           * input EOS.  VA-API does not expose an explicit decoder flush, and
-@@ -4646,11 +5157,27 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
+@@ -4646,11 +5326,27 @@ tva_codec_fence_wait(struct pipe_video_codec *codec,
                  break;
              }
          }
@@ -2120,7 +2319,7 @@ index 31b3aade..b7180c5b 100644
      }
  
      TVA_TRACE("fence unit=%u ready=%d failed=%d copied=%d staging=%p",
-@@ -4785,6 +5312,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
+@@ -4785,6 +5481,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
      }
      c->h264_bootstrap_count = 0;
      tva_av1_pending_clear(&c->av1_pending);
@@ -2128,7 +2327,7 @@ index 31b3aade..b7180c5b 100644
      mtx_destroy(&c->io_mutex);
      mtx_destroy(&c->av1_mutex);
      mtx_destroy(&c->pend_mutex);
-@@ -4793,6 +5321,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
+@@ -4793,6 +5490,7 @@ tva_codec_destroy(struct pipe_video_codec *codec)
      tva_session_destroy(c->sess);
      free(c->encode_packet);
      free(c->csd);
@@ -2136,7 +2335,7 @@ index 31b3aade..b7180c5b 100644
      free(c->acc);
      FREE(c);
  }
-@@ -4844,7 +5373,7 @@ static struct pipe_video_buffer *
+@@ -4844,7 +5542,7 @@ static struct pipe_video_buffer *
  tva_pipe_create_video_buffer(struct pipe_context *context,
                               const struct pipe_video_buffer *templat)
  {
@@ -2145,7 +2344,7 @@ index 31b3aade..b7180c5b 100644
              templat ? templat->buffer_format : -1,
              templat ? templat->width : 0, templat ? templat->height : 0,
              templat ? templat->bind : 0);
-@@ -4854,7 +5383,7 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
+@@ -4854,7 +5552,7 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
              tva_create_contiguous_video_buffer(context, templat);
          if (buffer)
          {
@@ -2154,7 +2353,7 @@ index 31b3aade..b7180c5b 100644
              return buffer;
          }
          fprintf(stderr, "tva: contiguous video buffer failed\n");
-@@ -4876,7 +5405,10 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
+@@ -4876,7 +5574,10 @@ tva_pipe_create_video_buffer(struct pipe_context *context,
          bridge_templ.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR;
      struct pipe_video_buffer *buffer =
          vl_video_buffer_create(context, &bridge_templ);
@@ -2166,7 +2365,7 @@ index 31b3aade..b7180c5b 100644
      return buffer;
  }
  
-@@ -4895,7 +5427,7 @@ static struct pipe_video_codec *
+@@ -4895,7 +5596,7 @@ static struct pipe_video_codec *
  tva_pipe_create_video_codec(struct pipe_context *context,
                              const struct pipe_video_codec *templat)
  {
@@ -2175,7 +2374,7 @@ index 31b3aade..b7180c5b 100644
              templat ? templat->profile : -1,
              templat ? templat->entrypoint : -1,
              templat ? templat->width : 0, templat ? templat->height : 0);
-@@ -4976,7 +5508,7 @@ tva_pipe_create_video_codec(struct pipe_context *context,
+@@ -4976,7 +5677,7 @@ tva_pipe_create_video_codec(struct pipe_context *context,
      c->strict_pending = codec_id == CODEC_AV1 && tva_av1_strict_pending();
  
      mtx_init(&c->io_mutex, mtx_plain);
@@ -2196,6 +2395,355 @@ index c62f6185..8f7d36e4 100644
  
  /* Complete AVC/HEVC decoder output before VA context teardown releases its
   * codec reference. Called on the application thread with drv->mutex held. */
+diff --git a/src/gallium/frontends/va/tva_client.c b/src/gallium/frontends/va/tva_client.c
+index e1c0da9b..01c86c8c 100644
+--- a/src/gallium/frontends/va/tva_client.c
++++ b/src/gallium/frontends/va/tva_client.c
+@@ -64,11 +64,25 @@
+ #include <fcntl.h>
+ #include <sys/mman.h>
+ #include <sys/socket.h>
++#include <sys/ioctl.h>
+ #include <sys/stat.h>
+ #include <sys/un.h>
+ 
++#include "drm-uapi/dma-buf.h"
+ #include "util/os_misc.h"
+ 
++/* Mappings of the daemon's dma-buf frames, kept per buffer: the decoder
++ * cycles through a small pool, so each buffer is mapped once. */
++#define TVA_DMABUF_MAPS 32
++
++struct tva_dmabuf_map {
++    uint64_t dev, ino;      /* 0 = free */
++    int      fd;
++    uint8_t *map;
++    size_t   size;
++    uint64_t last_use;
++};
++
+ struct tva_session {
+     int fd;                 /* daemon connection, non-blocking */
+     int log;                /* log flag, from DMD_VA_LOG */
+@@ -99,12 +113,20 @@ struct tva_session {
+     int      shm_slots;
+     int      shm_held;      /* outstanding slot count, diagnostics */
+ 
++    /* dma-buf frames (TVA_CLIENT_CAP_DMABUF) */
++    int      want_dmabuf;   /* offered on the SHM handoff socket */
++    int      pending_fd;    /* fd received with the current message, -1 = none */
++    struct tva_dmabuf_map dmabuf_maps[TVA_DMABUF_MAPS];
++    uint64_t dmabuf_use;
++
+     uint64_t units_sent;
+     uint64_t frames_recv;
+     uint32_t caps;          /* daemon capability bits from the format block */
+     uint32_t last_pts;      /* unit index of the latest frame, 0 = none */
+ };
+ 
++static void dmabuf_maps_drop(struct tva_session *s);
++
+ /* ------------------------------------------------------------ logging */
+ /*
+  * Silent by default; DMD_VA_LOG=1 enables it.  stderr only.
+@@ -214,12 +236,34 @@ static int recv_exact(struct tva_session *s, void *buf, size_t len,
+             return sess_err(s, TVA_ERR_TIMEOUT, "receive timed out mid-message", 0);
+         }
+ 
+-        ssize_t n = recv(s->fd, p + got, len - got, 0);
++        /* recvmsg: a dma-buf frame carries its fd with the first byte of
++         * the message, and plain recv() would discard it. */
++        struct iovec io = { p + got, len - got };
++        char cbuf[CMSG_SPACE(4 * sizeof(int))];
++        struct msghdr mh;
++        memset(&mh, 0, sizeof(mh));
++        mh.msg_iov = &io;
++        mh.msg_iovlen = 1;
++        mh.msg_control = cbuf;
++        mh.msg_controllen = sizeof(cbuf);
++        ssize_t n = recvmsg(s->fd, &mh, MSG_CMSG_CLOEXEC);
+         if (n < 0) {
+             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+                 continue;
+             return sess_err(s, TVA_ERR_IO, "recv failed", 1);
+         }
++        for (struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); cm; cm = CMSG_NXTHDR(&mh, cm)) {
++            if (cm->cmsg_level != SOL_SOCKET || cm->cmsg_type != SCM_RIGHTS)
++                continue;
++            size_t nfd = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(int);
++            for (size_t i = 0; i < nfd; i++) {
++                int rfd;
++                memcpy(&rfd, CMSG_DATA(cm) + i * sizeof(int), sizeof(int));
++                if (s->pending_fd >= 0)
++                    close(s->pending_fd);   /* only one fd per message */
++                s->pending_fd = rfd;
++            }
++        }
+         if (n == 0) {
+             if (got == 0) {
+                 s->eos = 1;
+@@ -352,6 +396,17 @@ static int shm_attach(struct tva_session *s, const char *name)
+         break;
+     }
+ 
++    /* Offer to take frames as the decoder's dma-bufs.  A daemon that does
++     * not know the extension has already closed its end; the write then
++     * fails harmlessly (MSG_NOSIGNAL) and frames keep coming through SHM. */
++    if (n == (ssize_t)sizeof(meta) && s->want_dmabuf) {
++        uint32_t caps[2] = { htonl(TVA_HANDOFF_CAPS_MAGIC),
++                             htonl(TVA_CLIENT_CAP_DMABUF) };
++        if (send(sock, caps, sizeof(caps), MSG_NOSIGNAL | MSG_DONTWAIT) !=
++            (ssize_t)sizeof(caps))
++            tva_c_log(s, "dma-buf frame offer not sent: %s", strerror(errno));
++    }
++
+     if (n != (ssize_t)sizeof(meta)) {
+         tva_c_log(s, "failed to receive shared memory parameters: n=%zd (%s)", n,
+                   n < 0 ? strerror(errno) : "length mismatch");
+@@ -733,8 +788,14 @@ struct tva_session *tva_session_create(const struct tva_session_config *cfg,
+         return NULL;
+     }
+     s->fd = -1;
++    s->pending_fd = -1;
+     s->log = tva_log_wanted();
+     s->codec = cfg->codec;
++    {
++        /* DMD_VA_DMABUF=0 keeps every frame in SHM slots (A/B, fallback). */
++        const char *e = getenv("DMD_VA_DMABUF");
++        s->want_dmabuf = !(e && !strcmp(e, "0"));
++    }
+     s->io_timeout_ms = cfg->io_timeout_ms > 0 ? cfg->io_timeout_ms : TVA_DEF_IO_MS;
+     s->xfer = XFER_INLINE;
+ 
+@@ -823,6 +884,9 @@ void tva_session_destroy(struct tva_session *s)
+         close(s->fd);
+         s->fd = -1;
+     }
++    if (s->pending_fd >= 0)
++        close(s->pending_fd);
++    dmabuf_maps_drop(s);
+     free(s->rbuf);
+     s->rbuf = NULL;
+     free(s);
+@@ -976,6 +1040,61 @@ static void frame_apply_format(const struct tva_session *s, struct tva_frame *f)
+     f->crop_bottom  = s->fmt.crop_bottom;
+ }
+ 
++static void dmabuf_maps_drop(struct tva_session *s)
++{
++    for (int i = 0; i < TVA_DMABUF_MAPS; i++) {
++        struct tva_dmabuf_map *m = &s->dmabuf_maps[i];
++        if (m->map)
++            munmap(m->map, m->size);
++        if (m->ino)
++            close(m->fd);
++        memset(m, 0, sizeof(*m));
++    }
++}
++
++/* Map a dma-buf frame's buffer, reusing the mapping of a buffer seen
++ * before.  Takes ownership of `fd`. */
++static struct tva_dmabuf_map *dmabuf_map_get(struct tva_session *s, int fd,
++                                             uint32_t size)
++{
++    struct stat st;
++    if (fstat(fd, &st) < 0 || !st.st_ino) {
++        close(fd);
++        return NULL;
++    }
++    struct tva_dmabuf_map *victim = &s->dmabuf_maps[0];
++    for (int i = 0; i < TVA_DMABUF_MAPS; i++) {
++        struct tva_dmabuf_map *m = &s->dmabuf_maps[i];
++        if (m->ino == (uint64_t)st.st_ino && m->dev == (uint64_t)st.st_dev &&
++            m->size >= size) {
++            close(fd);
++            m->last_use = ++s->dmabuf_use;
++            return m;
++        }
++        if (!m->ino || (victim->ino && m->last_use < victim->last_use))
++            victim = m;
++    }
++    void *map = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
++    if (map == MAP_FAILED) {
++        tva_c_log(s, "dma-buf frame mmap failed: %s", strerror(errno));
++        close(fd);
++        return NULL;
++    }
++    if (victim->map)
++        munmap(victim->map, victim->size);
++    if (victim->ino)
++        close(victim->fd);
++    victim->dev = (uint64_t)st.st_dev;
++    victim->ino = (uint64_t)st.st_ino;
++    victim->fd = fd;
++    victim->map = map;
++    victim->size = size;
++    victim->last_use = ++s->dmabuf_use;
++    tva_c_log(s, "dma-buf frame buffer mapped: ino=%llu size=%u",
++              (unsigned long long)st.st_ino, size);
++    return victim;
++}
++
+ int tva_session_next_frame(struct tva_session *s, struct tva_frame *out,
+                            int timeout_ms)
+ {
+@@ -1032,6 +1151,11 @@ int tva_session_next_frame(struct tva_session *s, struct tva_frame *out,
+             s->fmt.crop_bottom  = (int)ntohl(fw[7]);
+             s->fmt.valid = 1;
+             s->fmt.changes++;
++            /* A new format usually means a new buffer pool: let the old
++             * pool's mappings go rather than pinning them for the rest of
++             * the session.  Only when no frame is outstanding. */
++            if (!s->shm_held)
++                dmabuf_maps_drop(s);
+             tva_c_log(s, "format block #%d: buffer %dx%d stride=%d slice=%d display %dx%d",
+                       s->fmt.changes, s->fmt.buf_width, s->fmt.buf_height,
+                       s->fmt.stride, s->fmt.slice_height,
+@@ -1043,6 +1167,55 @@ int tva_session_next_frame(struct tva_session *s, struct tva_frame *out,
+             continue;
+         }
+ 
++        if (sz == DMABUF_FRAME_SENTINEL) {
++            /* [slot][length][unit index][offset][size] + the fd */
++            uint32_t di[5];
++            r = recv_exact(s, di, sizeof(di), rest_to, rest_to);
++            if (r == TVA_EOS)
++                return sess_err(s, TVA_ERR_PROTOCOL, "dma-buf frame message truncated", 0);
++            if (r != TVA_OK)
++                return r;
++            int fd = s->pending_fd;
++            s->pending_fd = -1;
++            int slot = (int)ntohl(di[0]);
++            uint32_t dlen = ntohl(di[1]);
++            uint32_t off = ntohl(di[3]);
++            uint32_t size = ntohl(di[4]);
++            s->last_pts = ntohl(di[2]);
++            if (fd < 0)
++                return sess_err(s, TVA_ERR_PROTOCOL, "dma-buf frame without an fd", 0);
++            if (!s->shm_base || slot < 0 || slot >= s->shm_slots ||
++                !dlen || off > size || dlen > size - off) {
++                close(fd);
++                return sess_err(s, TVA_ERR_PROTOCOL, "dma-buf frame out of range", 0);
++            }
++            struct tva_dmabuf_map *m = dmabuf_map_get(s, fd, size);
++            if (!m) {
++                /* Never leave the daemon's buffer lent: give the slot back
++                 * and report the error. */
++                __atomic_store_n(shm_state_word(s, slot), 0u, __ATOMIC_RELEASE);
++                return sess_err(s, TVA_ERR_IO, "cannot map a dma-buf frame", 1);
++            }
++            struct dma_buf_sync sync = { DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ };
++            while (ioctl(m->fd, DMA_BUF_IOCTL_SYNC, &sync) < 0 && errno == EINTR)
++                ;
++
++            memset(out, 0, sizeof(*out));
++            out->data = m->map + off;
++            out->size = dlen;
++            out->width = w;
++            out->height = h;
++            out->unit_seq = s->last_pts;
++            out->shm_slot = slot;
++            out->dmabuf_fd = m->fd;
++            out->dmabuf_offset = off;
++            out->seq = s->frames_recv;
++            frame_apply_format(s, out);
++            s->frames_recv++;
++            s->shm_held++;
++            return TVA_OK;
++        }
++
+         if (sz == SHMFRAME_SENTINEL) {
+             /* SHM control message: [slot][length] follow the 12-byte head,
+              * plus the unit-index word when the daemon announced PTS */
+@@ -1084,6 +1257,7 @@ int tva_session_next_frame(struct tva_session *s, struct tva_frame *out,
+             out->height = h;
+             out->unit_seq = s->last_pts;
+             out->shm_slot = slot;
++            out->dmabuf_fd = -1;
+             out->seq = s->frames_recv;
+             frame_apply_format(s, out);
+             s->frames_recv++;
+@@ -1126,6 +1300,7 @@ int tva_session_next_frame(struct tva_session *s, struct tva_frame *out,
+         out->width = w;
+         out->height = h;
+         out->shm_slot = -1;
++        out->dmabuf_fd = -1;
+         out->seq = s->frames_recv;
+         frame_apply_format(s, out);
+         s->frames_recv++;
+@@ -1165,6 +1340,12 @@ int tva_session_release_frame(struct tva_session *s, struct tva_frame *f)
+     if (f->shm_slot >= 0) {
+         if (!s->shm_base || f->shm_slot >= s->shm_slots)
+             return sess_err(s, TVA_ERR_INVAL, "invalid slot in release", 0);
++        if (f->dmabuf_fd >= 0) {
++            struct dma_buf_sync sync = { DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ };
++            while (ioctl(f->dmabuf_fd, DMA_BUF_IOCTL_SYNC, &sync) < 0 &&
++                   errno == EINTR)
++                ;
++        }
+         /* release ordering: all reads of the frame data happen before the
+          * daemon sees the state word reset and overwrites the slot */
+         __atomic_store_n(shm_state_word(s, f->shm_slot), 0u, __ATOMIC_RELEASE);
+@@ -1177,6 +1358,7 @@ int tva_session_release_frame(struct tva_session *s, struct tva_frame *f)
+     f->data = NULL;
+     f->size = 0;
+     f->shm_slot = -1;
++    f->dmabuf_fd = -1;
+     return TVA_OK;
+ }
+ 
+diff --git a/src/gallium/frontends/va/tva_client.h b/src/gallium/frontends/va/tva_client.h
+index 9904d303..3611d653 100644
+--- a/src/gallium/frontends/va/tva_client.h
++++ b/src/gallium/frontends/va/tva_client.h
+@@ -193,6 +193,11 @@ struct tva_frame {
+     int crop_bottom;
+ 
+     int      shm_slot;   /* >=0 = SHM slot; -1 = inline receive buffer */
++    /* dma-buf frame (TVA_CLIENT_CAP_DMABUF): the decoder's buffer, mapped
++     * at data - dmabuf_offset; -1 for SHM and inline frames.  Owned by the
++     * session and valid until the frame is released. */
++    int      dmabuf_fd;
++    uint32_t dmabuf_offset;
+     uint64_t seq;        /* session frame counter, starting at 0 */
+ };
+ 
+diff --git a/src/gallium/frontends/va/tva_protocol.h b/src/gallium/frontends/va/tva_protocol.h
+index 24ecb887..7a01f98c 100644
+--- a/src/gallium/frontends/va/tva_protocol.h
++++ b/src/gallium/frontends/va/tva_protocol.h
+@@ -171,6 +171,31 @@ typedef enum {
+  * a 4th field = input unit index (round-tripped through MediaCodec PTS). */
+ #define CAP_FRAME_PTS 0x00000001u
+ 
++/* ------------------------------------------------------ dma-buf frames */
++
++/*
++ * Portal extension: decoded frames handed over as the decoder's own
++ * dma-buf instead of a copy in an SHM slot.
++ *
++ * Opt-in: after receiving the memfd on the SHM handoff socket, a client
++ * that can take dma-buf frames writes two big-endian words on that socket,
++ * [TVA_HANDOFF_CAPS_MAGIC][TVA_CLIENT_CAP_*], before closing it.  Older
++ * clients close the socket without writing, older daemons close it without
++ * reading, so either side being old keeps plain SHM delivery.
++ *
++ * A dma-buf frame is one control message of eight big-endian words,
++ *   [w][h][DMABUF_FRAME_SENTINEL][slot][length][unit index][offset][size]
++ * sent with the buffer's fd in SCM_RIGHTS.  The frame bytes (NV12 laid out
++ * as the latest format block describes) start at `offset` in a dma-buf of
++ * `size` bytes.  The slot's state word in the SHM control area holds the
++ * buffer for the client exactly like an SHM slot: the daemon does not let
++ * the decoder reuse the buffer until the client resets the word to 0.  The
++ * daemon may mix SHM and dma-buf frames in one session.
++ */
++#define DMABUF_FRAME_SENTINEL  0xFFFFFFFDu
++#define TVA_HANDOFF_CAPS_MAGIC 0x54564143u   /* "TVAC" */
++#define TVA_CLIENT_CAP_DMABUF  0x00000001u
++
+ /*
+  * Input unit index -> presentationTimeUs multiplier.
+  *
 diff --git a/src/gallium/frontends/va/va_private.h b/src/gallium/frontends/va/va_private.h
 index 9ebb94aa..97edcda8 100644
 --- a/src/gallium/frontends/va/va_private.h
