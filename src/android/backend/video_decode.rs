@@ -36,10 +36,10 @@ const DRIVER_FILE: &str = "termuxva_drv_video.so";
 /// The driver this APK ships with: `patches/mesa/va-layer-r1` built by
 /// `.github/workflows/va-layer-arm64.yml`, gzip-compressed. Every byte is
 /// pinned; any mismatch fails closed and retries on a later launch.
-pub const LAYER_VERSION: &str = "r1-20261105";
-const LAYER_URL: &str = "https://github.com/Retrorerr/Portal/releases/download/va-layer-r1-20261105/termuxva_drv_video.so.gz";
-const LAYER_COMPRESSED_BYTES: u64 = 3_009_595;
-const LAYER_SHA256: &str = "0a4d6fe0b4d1b525182ffbc0de64098018c1f00160c70e18b93ed4ca7399f7cc";
+pub const LAYER_VERSION: &str = "r1-20261127";
+const LAYER_URL: &str = "https://github.com/Retrorerr/Portal/releases/download/va-layer-r1-20261127/termuxva_drv_video.so.gz";
+const LAYER_COMPRESSED_BYTES: u64 = 3_011_068;
+const LAYER_SHA256: &str = "4388f057fec7965f0734201496a95a14ab1ac121aac6a97466df625655bc4dbe";
 /// Upper bound for the decompressed driver.
 const LAYER_MAX_BYTES: u64 = 64 << 20;
 /// `<version> <sha256>` of the installed driver, beside the layer directory.
