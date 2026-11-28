@@ -813,8 +813,26 @@ long tawcroot_proc_status_open(const char *path)
 	return memfd;
 }
 
+/* Portal binds its own /proc/stat, /proc/uptime and /proc/loadavg,
+ * kept live from the counters Android lets it read; the synthesizers
+ * only know the clock. Open the bind's file on every route the
+ * classifier accepts (absolute, /proc dirfd, /oldroot/proc). */
+static long open_bound(const char *rel)
+{
+	for (size_t i = 0; rel && i < tawcroot_n_binds; ++i) {
+		const struct tawcroot_bind *b = &tawcroot_binds[i];
+		if (b->active && b->leaf[0] && tawc_streq(b->dst, rel))
+			return tawc_openat(b->src_fd, b->leaf, O_RDONLY | O_CLOEXEC, 0);
+	}
+	return TAWC_ENOENT;
+}
+
 long tawcroot_proc_shadow_open(int kind)
 {
+	long bound = open_bound(kind == TAWCROOT_PROC_SHADOW_STAT ? "proc/stat"
+			      : kind == TAWCROOT_PROC_SHADOW_UPTIME ? "proc/uptime"
+			      : kind == TAWCROOT_PROC_SHADOW_LOADAVG ? "proc/loadavg" : 0);
+	if (bound >= 0) return bound;
 	switch (kind) {
 	case TAWCROOT_PROC_SHADOW_TCP: return tawcroot_tcp_open(0);
 	case TAWCROOT_PROC_SHADOW_TCP6: return tawcroot_tcp_open(1);

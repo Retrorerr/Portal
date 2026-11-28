@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::core::guest_procfs::{self as procfs, CpuAccount, ProcessSample};
+use crate::core::guest_procfs::{self as procfs, CpuAccount, HostCpuAccount, IdleSample, ProcessSample};
 use crate::core::runtime::BindMount;
 use crate::core::steam_processes::SteamScan;
 
 static ACCOUNT: Mutex<Option<CpuAccount>> = Mutex::new(None);
+/// Device-wide per-CPU time from cpuidle; locked after ACCOUNT.
+static HOST: Mutex<Option<HostCpuAccount>> = Mutex::new(None);
 /// Steam detection from the latest pass, for the touch controls.
 static STEAM: Mutex<Option<SteamScan>> = Mutex::new(None);
 static NETWORK_ROUTES: Mutex<()> = Mutex::new(());
@@ -30,6 +32,9 @@ pub fn session_binds() -> Vec<BindMount> {
     }
     if let Ok(mut account) = ACCOUNT.lock() {
         *account = Some(CpuAccount::default());
+    }
+    if let Ok(mut host) = HOST.lock() {
+        *host = None;
     }
     write(&dir, "cap_last_cap", procfs::CAP_LAST_CAP);
     write(&dir, "vmstat", procfs::VMSTAT);
@@ -75,37 +80,91 @@ pub fn sync_network_routes(routes: &[procfs::NetworkRoute]) {
 /// expensive part (the kernel walks every task on the device), so the Steam
 /// detection shares this walk instead of making its own.
 pub fn refresh() {
-    let Some(uptime) = boot_clock_secs() else {
+    let Some(uptime) = clock_secs(libc::CLOCK_BOOTTIME) else {
         return;
     };
-    let (samples, steam) = sample_processes();
+    let (samples, threads, steam) = sample_processes();
     if let Ok(mut slot) = STEAM.lock() {
         *slot = Some(steam);
     }
     let last_pid = samples.iter().map(|sample| sample.pid).max().unwrap_or(1);
-    let cpus = std::thread::available_parallelism().map_or(1, |count| count.get());
-    let ticks = clock_ticks();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |elapsed| elapsed.as_secs_f64());
-    let boot_time = (now - uptime).max(0.0) as u64;
     let Ok(mut guard) = ACCOUNT.lock() else {
         return;
     };
     let account = guard.get_or_insert_with(CpuAccount::default);
     account.update(uptime, &samples);
-    let dir = directory();
-    write(
-        &dir,
-        "uptime",
-        &procfs::render_uptime(uptime, cpus, account, ticks),
-    );
-    write(
-        &dir,
-        "stat",
-        &procfs::render_stat(uptime, cpus, boot_time, account, ticks),
-    );
-    write(&dir, "loadavg", &procfs::render_loadavg(account, last_pid));
+    account.update_threads(&threads);
+    write_cpu(account, Some(&account.cpu_secs(clock_ticks())));
+    rewrite("loadavg", &procfs::render_loadavg(account, last_pid));
+}
+
+/// Rewrite `/proc/stat` and `/proc/uptime` from fresh cpuidle readings
+/// between the walks: htop samples every 1.5 s and draws an interval with
+/// no time in it as empty meters.
+pub fn refresh_cpu() {
+    if let Ok(mut guard) = ACCOUNT.lock() {
+        write_cpu(guard.get_or_insert_with(CpuAccount::default), None);
+    }
+}
+
+fn write_cpu(account: &CpuAccount, guest_cpu_secs: Option<&[f64]>) {
+    let (Some(uptime), Some(now), Ok(mut host)) = (
+        clock_secs(libc::CLOCK_BOOTTIME),
+        clock_secs(libc::CLOCK_MONOTONIC),
+        HOST.lock(),
+    ) else {
+        return;
+    };
+    let host = host.get_or_insert_with(HostCpuAccount::default);
+    host.update(now, &sample_idle());
+    if let Some(guest) = guest_cpu_secs {
+        host.presume(now, guest);
+    }
+    let cpus = std::thread::available_parallelism().map_or(1, |count| count.get());
+    let ticks = clock_ticks();
+    let wall = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |elapsed| elapsed.as_secs_f64());
+    let boot_time = (wall - uptime).max(0.0) as u64;
+    rewrite("uptime", &procfs::render_uptime(uptime, cpus, account, host, ticks));
+    rewrite("stat", &procfs::render_stat(uptime, cpus, boot_time, account, host, ticks));
+}
+
+/// cpuidle totals of the online CPUs; none where the kernel has no cpuidle
+/// driver or the sandbox hides it, and `/proc/stat` falls back.
+fn sample_idle() -> Vec<IdleSample> {
+    const CPU: &str = "/sys/devices/system/cpu";
+    let read = |path: PathBuf| fs::read_to_string(path).ok()?.trim().parse::<u64>().ok();
+    let online = fs::read_to_string(format!("{CPU}/online")).unwrap_or_default();
+    let sample = |cpu| {
+        let (mut sample, mut states) = (IdleSample { cpu, idle_us: 0, entries: 0 }, 0);
+        for state in fs::read_dir(format!("{CPU}/cpu{cpu}/cpuidle")).ok()?.flatten() {
+            if state.file_name().to_string_lossy().starts_with("state") {
+                sample.idle_us += read(state.path().join("time"))?;
+                sample.entries += read(state.path().join("usage"))?;
+                states += 1;
+            }
+        }
+        (states > 0).then_some(sample)
+    };
+    procfs::parse_cpu_list(&online).into_iter().filter_map(sample).collect()
+}
+
+/// Update a live file in place: procps (`top`, `vmstat`) opens `/proc/stat`
+/// once and rewinds it for each sample, so a file replaced by rename would
+/// leave it reading the first sample forever.
+fn rewrite(name: &str, contents: &str) {
+    use std::os::unix::fs::FileExt;
+    let result = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory().join(name))
+        .and_then(|file| {
+            file.write_all_at(contents.as_bytes(), 0)?;
+            file.set_len(contents.len() as u64)
+        });
+    if let Err(error) = result {
+        log::debug!("fake /proc/{name} could not be updated: {error}");
+    }
 }
 
 fn write(dir: &Path, name: &str, contents: &str) {
@@ -118,11 +177,12 @@ fn write(dir: &Path, name: &str, contents: &str) {
     }
 }
 
-fn sample_processes() -> (Vec<ProcessSample>, SteamScan) {
-    let mut samples = Vec::new();
+/// Portal's processes, their threads, and the Steam scan.
+fn sample_processes() -> (Vec<ProcessSample>, Vec<ProcessSample>, SteamScan) {
+    let (mut samples, mut threads) = (Vec::new(), Vec::new());
     let mut steam = SteamScan::default();
     let Ok(entries) = fs::read_dir("/proc") else {
-        return (samples, steam);
+        return (samples, threads, steam);
     };
     let mut path = String::with_capacity(32);
     let mut text = String::with_capacity(512);
@@ -150,6 +210,15 @@ fn sample_processes() -> (Vec<ProcessSample>, SteamScan) {
             samples.push(sample);
         }
         path.truncate(base);
+        for task in fs::read_dir(format!("{path}/task")).into_iter().flatten().flatten() {
+            let Some(tid) = task.file_name().to_str().and_then(|tid| tid.parse().ok()) else {
+                continue;
+            };
+            text.clear();
+            if File::open(task.path().join("stat")).and_then(|mut file| file.read_to_string(&mut text)).is_ok() {
+                threads.extend(procfs::parse_process_stat(tid, &text));
+            }
+        }
         path.push_str("/cmdline");
         cmdline.clear();
         if File::open(&path)
@@ -159,7 +228,7 @@ fn sample_processes() -> (Vec<ProcessSample>, SteamScan) {
             steam.add(&cmdline);
         }
     }
-    (samples, steam)
+    (samples, threads, steam)
 }
 
 /// What the latest pass found; nothing while no session runs.
@@ -178,12 +247,12 @@ pub fn forget_steam() {
     }
 }
 
-fn boot_clock_secs() -> Option<f64> {
+fn clock_secs(clock: libc::clockid_t) -> Option<f64> {
     let mut now = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    (unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) } == 0)
+    (unsafe { libc::clock_gettime(clock, &mut now) } == 0)
         .then(|| now.tv_sec as f64 + now.tv_nsec as f64 / 1e9)
 }
 

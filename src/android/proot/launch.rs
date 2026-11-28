@@ -164,6 +164,7 @@ fn spawn_failure_monitor(cancel: Arc<AtomicBool>) -> JoinHandle<()> {
         }
         let mut last_net_sync = Instant::now();
         let mut last_procfs = Instant::now();
+        let mut last_cpu = Instant::now();
         while !cancel.load(Ordering::Acquire) {
             for name in ["plasma-failed", "kwin-crash"] {
                 let path = state_dir.join(name);
@@ -178,6 +179,9 @@ fn spawn_failure_monitor(cancel: Arc<AtomicBool>) -> JoinHandle<()> {
             if last_procfs.elapsed() >= Duration::from_secs(2) {
                 last_procfs = Instant::now();
                 crate::android::guest_procfs::refresh();
+            } else if last_cpu.elapsed() >= Duration::from_millis(500) {
+                last_cpu = Instant::now();
+                crate::android::guest_procfs::refresh_cpu();
             }
             // Markers only need noticing promptly, not within 100 ms; stay
             // well under STOP_JOIN_BUDGET so a stop still joins cleanly.
